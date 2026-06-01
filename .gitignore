@@ -60,3 +60,4 @@ id_ed25519*
 # External ROS2 dependencies managed by vica.repos
 src/realsense-ros/
 src/ydlidar_ros2_driver/
+AGENTS.md
