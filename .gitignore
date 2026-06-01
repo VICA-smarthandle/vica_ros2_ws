@@ -1,0 +1,58 @@
+# ROS2 build outputs
+build/
+install/
+log/
+
+# Runtime generated TF trees
+tf_trees/
+frames.pdf
+frames.gv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Colcon / test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ROS bags / large runtime data
+*.db3
+*.mcap
+*.bag
+*.bag.active
+
+# AI / model / TensorRT large files
+*.onnx
+*.engine
+*.plan
+*.pt
+*.pth
+*.gguf
+*.safetensors
+
+# Temporary files
+*.tmp
+*.bak
+*.old
+
+# Secrets
+.env
+*.key
+*.pem
+id_rsa*
+id_ed25519*
