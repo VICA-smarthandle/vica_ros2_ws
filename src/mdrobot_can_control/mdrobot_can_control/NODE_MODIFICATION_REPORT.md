@@ -14,8 +14,7 @@
 | --- | --- |
 | `mdrobot_can_keyboard_knob_node.py` | `/cmd_vel`을 CAN 속도 명령으로 변환하고, 드라이버의 knob1 값을 최고속도 제한값으로 사용하는 ROS2 노드 |
 | `knob_scale_drive.py` | ROS2 없이 CAN 노브 입력만으로 모터 RPM을 스케일링해 구동하는 테스트 스크립트 |
-| `launch/mdrobot_can_control.launch.py` | 메인 ROS2 모터 노드 실행 및 파라미터 정리용 launch |
-| `setup.py` | ROS2 console script 및 launch 파일 설치 설정 |
+| `setup.py` | ROS2 console script 등록 설정 |
 
 ## 3. ROS2 메인 노드 수정사항
 
@@ -137,7 +136,7 @@ RET_TYPE_ODOM = 5
 
 현재 테스트 스크립트의 일반 속도 명령은 `ret_type=2`를 사용한다. 메인 ROS2 노드의 오돔용 `RET_TYPE_ODOM=5`와 다르므로, 현재 통합 주행/오돔 검증 기준에서는 사용하지 않는다.
 
-## 5. 실행 방법 및 launch 파라미터
+## 5. 실행 방법
 
 `setup.py`의 `console_scripts`에는 현재 메인 ROS2 노드만 등록되어 있다.
 
@@ -151,18 +150,14 @@ keyboard_knob = mdrobot_can_control.mdrobot_can_keyboard_knob_node:main
 ros2 run mdrobot_can_control keyboard_knob
 ```
 
-통합 테스트에서는 launch 실행을 우선 사용한다.
+현재 개발 단계에서는 launch 파일을 고정하지 않고 직접 실행으로 수동 테스트한다. 모터/엔코더/안전 노드 구성이 안정된 뒤 launch 파일로 통합한다.
 
-```bash
-ros2 launch mdrobot_can_control mdrobot_can_control.launch.py
-```
-
-launch에서 조정할 수 있는 주요 파라미터는 `can_iface`, `driver_id`, `wheel_radius_m`, `wheel_base_m`, `max_linear_mps`, `max_angular_radps`, `max_rpm`, `send_hz`, `resend_interval_sec`, `deadzone_pct`, `knob_timeout_sec`, `cmd_timeout_sec`, `invert_mot1`, `invert_mot2`, `min_rpm_when_moving`이다.
+조정할 수 있는 주요 파라미터는 `can_iface`, `driver_id`, `wheel_radius_m`, `wheel_base_m`, `max_linear_mps`, `max_angular_radps`, `max_rpm`, `send_hz`, `resend_interval_sec`, `deadzone_pct`, `knob_timeout_sec`, `cmd_timeout_sec`, `invert_mot1`, `invert_mot2`, `min_rpm_when_moving`이다.
 
 예시:
 
 ```bash
-ros2 launch mdrobot_can_control mdrobot_can_control.launch.py max_rpm:=200 max_linear_mps:=0.3 max_angular_radps:=0.8
+ros2 run mdrobot_can_control keyboard_knob --ros-args -p max_rpm:=200 -p max_linear_mps:=0.3 -p max_angular_radps:=0.8
 ```
 
 `knob_scale_drive.py`는 현재 `console_scripts`에 등록되어 있지 않으므로 ROS2 실행 명령으로 바로 실행되는 노드는 아니다.
@@ -191,4 +186,4 @@ ros2 launch mdrobot_can_control mdrobot_can_control.launch.py max_rpm:=200 max_l
 
 오돔 미생성 문제의 직접 원인은 오돔용 `return_type=5`를 모터 ACK용 값과 혼동하여 `0`으로 변경한 것이며, 현재 메인 노드의 주행 명령부는 `ret_type=5`로 복구되어 있다.
 
-현재 통합 주행 기준은 `mdrobot_can_control.launch.py`로 메인 모터 노드를 실행하고, `encoder_feedback`은 기본 수신 전용 모드로 함께 실행하는 것이다. 실제 바닥 주행 전에는 바퀴를 띄운 상태에서 `/odom`, `odom -> base_link`, CAN 프레임 반환을 먼저 확인한다.
+현재 통합 주행 기준은 메인 모터 노드를 직접 실행하고, `encoder_feedback`은 기본 수신 전용 모드로 함께 실행하는 것이다. 실제 바닥 주행 전에는 바퀴를 띄운 상태에서 `/odom`, `odom -> base_link`, CAN 프레임 반환을 먼저 확인한다.
