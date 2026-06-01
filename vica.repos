@@ -1,0 +1,10 @@
+repositories:
+  src/realsense-ros:
+    type: git
+    url: https://github.com/IntelRealSense/realsense-ros.git
+    version: 3957be72f210851c7edcc332e068dcaf55bf87a0
+
+  src/ydlidar_ros2_driver:
+    type: git
+    url: https://github.com/YDLIDAR/ydlidar_ros2_driver.git
+    version: 4ef70d3f32a85704ade0be54b214f3763b1ab3e8
