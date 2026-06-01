@@ -63,6 +63,9 @@ class EncoderFeedbackNode(Node):
         self.declare_parameter("base_frame", "base_link")
 
         self.declare_parameter("publish_tf", True)
+        # 주행 통합 중에는 모터 노드가 CAN 명령을 담당하므로 encoder_feedback은
+        # 기본적으로 수신만 수행하고, 단독 테스트 때만 요청 프레임을 켭니다.
+        self.declare_parameter("request_position_feedback", False)
         # 인코더 CAN 요청 부하를 줄이기 위해 피드백 요청 빈도를 낮춥니다.
         # 30Hz는 이 시스템에 과도했습니다. odom에는 10Hz 정도면 충분합니다.
         self.declare_parameter("request_hz", 20.0)
@@ -80,6 +83,9 @@ class EncoderFeedbackNode(Node):
         self.odom_frame = self.get_parameter("odom_frame").value
         self.base_frame = self.get_parameter("base_frame").value
         self.publish_tf = bool(self.get_parameter("publish_tf").value)
+        self.request_position_feedback = bool(
+            self.get_parameter("request_position_feedback").value
+        )
         self.request_hz = float(self.get_parameter("request_hz").value)
 
         # =========================
@@ -114,6 +120,8 @@ class EncoderFeedbackNode(Node):
             f"wheel_radius={self.wheel_radius_m}, "
             f"wheel_base={self.wheel_base_m}"
         )
+        mode = "request+read" if self.request_position_feedback else "read-only"
+        self.get_logger().info(f"position feedback mode: {mode}")
 
         # =========================
         # ROS 퍼블리셔
@@ -121,7 +129,7 @@ class EncoderFeedbackNode(Node):
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        # 타이머 주기가 CAN으로 인코더 피드백 요청을 보내는 빈도를 결정합니다.
+        # 타이머 주기가 오도메트리 갱신 루프 빈도를 결정합니다.
         self.timer = self.create_timer(
             1.0 / self.request_hz,
             self.loop
@@ -192,8 +200,10 @@ class EncoderFeedbackNode(Node):
     def loop(self):
         now = self.get_clock().now()
 
-        self.send_position_request()
-        time.sleep(0.001)
+        if self.request_position_feedback:
+            self.send_position_request()
+            time.sleep(0.001)
+
         self.read_can_frames()
 
         if self.right_pos is None or self.left_pos is None:

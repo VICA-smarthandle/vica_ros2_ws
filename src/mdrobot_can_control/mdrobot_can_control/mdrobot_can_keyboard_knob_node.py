@@ -30,6 +30,9 @@ PID_PNT_VEL_CMD    = 0xCF  # 207
 PID_COMMAND        = 0x0A  # 10
 CMD_PNT_IO_MON_ON  = 0x55  # 85
 
+RET_TYPE_NONE = 0
+RET_TYPE_ODOM = 5
+
 
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
@@ -182,7 +185,7 @@ class MdrobotCanKeyboardKnobNode(Node):
         )
         self.bus.send(msg)
 
-    def send_vel_cmd(self, rpm1: int, rpm2: int, ret_type: int = 0): # ret_type 2-> 0
+    def send_vel_cmd(self, rpm1: int, rpm2: int, ret_type: int = RET_TYPE_NONE):
         """
         rpm1 = MOT1 = 오른쪽 바퀴
         rpm2 = MOT2 = 왼쪽 바퀴
@@ -342,7 +345,7 @@ class MdrobotCanKeyboardKnobNode(Node):
             self.prev_rpm_mot2 != rpm_mot2 or
             (now - self.last_send_time) >= self.resend_interval_sec
         ):
-            self.send_vel_cmd(rpm_mot1, rpm_mot2, ret_type=5)
+            self.send_vel_cmd(rpm_mot1, rpm_mot2, ret_type=RET_TYPE_ODOM)
             self.prev_rpm_mot1 = rpm_mot1
             self.prev_rpm_mot2 = rpm_mot2
             self.last_send_time = now
@@ -378,9 +381,9 @@ class MdrobotCanKeyboardKnobNode(Node):
 
     def stop_motors(self):
         try:
-            self.send_vel_cmd(0, 0, ret_type=0)
+            self.send_vel_cmd(0, 0, ret_type=RET_TYPE_NONE)
             time.sleep(0.02)
-            self.send_vel_cmd(0, 0, ret_type=0)
+            self.send_vel_cmd(0, 0, ret_type=RET_TYPE_NONE)
         except Exception as e:
             self.get_logger().warn(f"stop_motors failed: {e}")
 

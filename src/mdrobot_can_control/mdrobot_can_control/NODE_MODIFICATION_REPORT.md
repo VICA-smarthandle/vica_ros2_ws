@@ -1,6 +1,6 @@
 # mdrobot_can_control 노드 코드 수정사항 보고서
 
-작성일: 2026-05-29
+작성일: 2026-06-01
 
 ## 1. 개요
 
@@ -14,7 +14,8 @@
 | --- | --- |
 | `mdrobot_can_keyboard_knob_node.py` | `/cmd_vel`을 CAN 속도 명령으로 변환하고, 드라이버의 knob1 값을 최고속도 제한값으로 사용하는 ROS2 노드 |
 | `knob_scale_drive.py` | ROS2 없이 CAN 노브 입력만으로 모터 RPM을 스케일링해 구동하는 테스트 스크립트 |
-| `setup.py` | ROS2 console script 등록 설정 |
+| `launch/mdrobot_can_control.launch.py` | 메인 ROS2 모터 노드 실행 및 파라미터 정리용 launch |
+| `setup.py` | ROS2 console script 및 launch 파일 설치 설정 |
 
 ## 3. ROS2 메인 노드 수정사항
 
@@ -98,14 +99,14 @@ CAN 버스 부하를 줄이기 위해 송신 타이머와 실제 재전송 조�
 
 이전에 오돔이 생성되지 않았던 원인은 오돔용 `return_type` 값을 모터 ACK용 리턴값과 혼동하여 `5`에서 `0`으로 변경했기 때문이다. 현재 메인 제어 루프에서는 다시 `ret_type=5`로 송신하도록 되어 있으므로 엔코더 기반 오돔 수신 조건이 복구된 상태이다.
 
-단, `send_vel_cmd()` 함수의 기본값은 `ret_type=0`이고, 함수 옆 주석에 `ret_type 2->0`이 남아 있다. 실제 주행 호출부에서는 명시적으로 `ret_type=5`를 넘기므로 동작에는 문제가 없지만, 향후 혼동 방지를 위해 상수화하는 것이 좋다.
-
-예시:
+코드에서는 혼동을 줄이기 위해 `ret_type` 값을 다음 상수로 분리한다.
 
 ```python
 RET_TYPE_NONE = 0
 RET_TYPE_ODOM = 5
 ```
+
+주행 중 속도 명령은 `RET_TYPE_ODOM`을 사용하므로, `encoder_feedback` 노드가 기본 수신 전용 모드여도 모터 드라이버가 위치 피드백 프레임을 반환할 수 있다. 종료/정지 명령은 `RET_TYPE_NONE`을 사용한다.
 
 ### 3.7 종료 시 모터 정지 처리
 
@@ -118,7 +119,7 @@ RET_TYPE_ODOM = 5
 
 ## 4. `knob_scale_drive.py` 테스트 스크립트 상태
 
-`knob_scale_drive.py`는 ROS2 토픽을 사용하지 않고 CAN과 knob monitor 패킷만으로 모터를 직접 구동하는 테스트용 스크립트이다.
+`knob_scale_drive.py`는 ROS2 토픽을 사용하지 않고 CAN과 knob monitor 패킷만으로 모터를 직접 구동하는 초기 단독 테스트용 스크립트이다.
 
 주요 설정은 다음과 같다.
 
@@ -134,9 +135,9 @@ RET_TYPE_ODOM = 5
 
 이 스크립트는 `knob1`, `knob2`를 각각 `rpm1`, `rpm2`로 직접 스케일링하여 송신한다.
 
-현재 테스트 스크립트의 일반 속도 명령은 `ret_type=2`를 사용한다. 메인 ROS2 노드의 오돔용 `ret_type=5`와 다르므로, 오돔/엔코더 리턴 검증에는 메인 노드 기준 설정을 우선 확인해야 한다.
+현재 테스트 스크립트의 일반 속도 명령은 `ret_type=2`를 사용한다. 메인 ROS2 노드의 오돔용 `RET_TYPE_ODOM=5`와 다르므로, 현재 통합 주행/오돔 검증 기준에서는 사용하지 않는다.
 
-## 5. `setup.py` 실행 노드 등록 상태
+## 5. 실행 방법 및 launch 파라미터
 
 `setup.py`의 `console_scripts`에는 현재 메인 ROS2 노드만 등록되어 있다.
 
@@ -144,10 +145,24 @@ RET_TYPE_ODOM = 5
 keyboard_knob = mdrobot_can_control.mdrobot_can_keyboard_knob_node:main
 ```
 
-따라서 빌드 후 실행 명령은 다음 형태가 된다.
+직접 실행 명령은 다음 형태가 된다.
 
 ```bash
 ros2 run mdrobot_can_control keyboard_knob
+```
+
+통합 테스트에서는 launch 실행을 우선 사용한다.
+
+```bash
+ros2 launch mdrobot_can_control mdrobot_can_control.launch.py
+```
+
+launch에서 조정할 수 있는 주요 파라미터는 `can_iface`, `driver_id`, `wheel_radius_m`, `wheel_base_m`, `max_linear_mps`, `max_angular_radps`, `max_rpm`, `send_hz`, `resend_interval_sec`, `deadzone_pct`, `knob_timeout_sec`, `cmd_timeout_sec`, `invert_mot1`, `invert_mot2`, `min_rpm_when_moving`이다.
+
+예시:
+
+```bash
+ros2 launch mdrobot_can_control mdrobot_can_control.launch.py max_rpm:=200 max_linear_mps:=0.3 max_angular_radps:=0.8
 ```
 
 `knob_scale_drive.py`는 현재 `console_scripts`에 등록되어 있지 않으므로 ROS2 실행 명령으로 바로 실행되는 노드는 아니다.
@@ -176,4 +191,4 @@ ros2 run mdrobot_can_control keyboard_knob
 
 오돔 미생성 문제의 직접 원인은 오돔용 `return_type=5`를 모터 ACK용 값과 혼동하여 `0`으로 변경한 것이며, 현재 메인 노드의 주행 명령부는 `ret_type=5`로 복구되어 있다.
 
-향후 유지보수 시에는 `ret_type` 값을 숫자로 직접 쓰기보다 `RET_TYPE_NONE`, `RET_TYPE_ODOM` 같은 상수로 분리하면 같은 혼동을 줄일 수 있다.
+현재 통합 주행 기준은 `mdrobot_can_control.launch.py`로 메인 모터 노드를 실행하고, `encoder_feedback`은 기본 수신 전용 모드로 함께 실행하는 것이다. 실제 바닥 주행 전에는 바퀴를 띄운 상태에서 `/odom`, `odom -> base_link`, CAN 프레임 반환을 먼저 확인한다.
