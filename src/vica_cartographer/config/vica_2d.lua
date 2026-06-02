@@ -98,7 +98,7 @@ options = {
   --
   -- 맵이 계속 번지면 가장 먼저 use_odometry = false로 바꿔서
   --   LiDAR-only 기준 테스트를 해봐야 한다.
-  use_odometry = false,
+  use_odometry = true,
 
   -- 실내 로봇이므로 GPS는 사용하지 않는다.
   use_nav_sat = false,

@@ -52,7 +52,8 @@ class EncoderFeedbackNode(Node):
         self.declare_parameter("can_iface", "can1")
         self.declare_parameter("driver_id", 0x001)
 
-        self.declare_parameter("encoder_ppr", 4096)
+        # CAN C5 위치값 기준 바퀴 1회전당 tick 수.
+        self.declare_parameter("ticks_per_rev", 55)
         self.declare_parameter("wheel_radius_m", 0.065)
         self.declare_parameter("wheel_base_m", 0.37)
 
@@ -65,7 +66,7 @@ class EncoderFeedbackNode(Node):
         self.declare_parameter("publish_tf", True)
         # 주행 통합 중에는 모터 노드가 CAN 명령을 담당하므로 encoder_feedback은
         # 기본적으로 수신만 수행하고, 단독 테스트 때만 요청 프레임을 켭니다.
-        self.declare_parameter("request_position_feedback", False)
+        self.declare_parameter("request_position_feedback", False) #default False
         # 인코더 CAN 요청 부하를 줄이기 위해 피드백 요청 빈도를 낮춥니다.
         # 30Hz는 이 시스템에 과도했습니다. odom에는 10Hz 정도면 충분합니다.
         self.declare_parameter("request_hz", 20.0)
@@ -73,7 +74,7 @@ class EncoderFeedbackNode(Node):
         self.can_iface = self.get_parameter("can_iface").value
         self.driver_id = int(self.get_parameter("driver_id").value)
 
-        self.encoder_ppr = float(self.get_parameter("encoder_ppr").value)
+        self.ticks_per_rev = float(self.get_parameter("ticks_per_rev").value)
         self.wheel_radius_m = float(self.get_parameter("wheel_radius_m").value)
         self.wheel_base_m = float(self.get_parameter("wheel_base_m").value)
 
@@ -116,7 +117,7 @@ class EncoderFeedbackNode(Node):
         self.get_logger().info(f"CAN opened: {self.can_iface}")
         self.get_logger().info(f"driver_id: 0x{self.driver_id:03X}")
         self.get_logger().info(
-            f"encoder_ppr={self.encoder_ppr}, "
+            f"ticks_per_rev={self.ticks_per_rev}, "
             f"wheel_radius={self.wheel_radius_m}, "
             f"wheel_base={self.wheel_base_m}"
         )
@@ -233,11 +234,11 @@ class EncoderFeedbackNode(Node):
         self.last_odom_time = now
 
         right_dist = (
-            delta_right_count / self.encoder_ppr
+            delta_right_count / self.ticks_per_rev
         ) * self.wheel_circumference
 
         left_dist = (
-            delta_left_count / self.encoder_ppr
+            delta_left_count / self.ticks_per_rev
         ) * self.wheel_circumference
 
         d_center = (right_dist + left_dist) / 2.0
