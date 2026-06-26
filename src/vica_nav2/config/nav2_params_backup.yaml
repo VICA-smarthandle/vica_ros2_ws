@@ -1,0 +1,761 @@
+# amcl:
+#   ros__parameters:
+#     use_sim_time: false
+#     alpha1: 0.2
+#     alpha2: 0.2
+#     alpha3: 0.2
+#     alpha4: 0.2
+#     alpha5: 0.2
+#     base_frame_id: "base_link"
+#     global_frame_id: "map"
+#     odom_frame_id: "odom"
+#     scan_topic: "/scan"
+#     robot_model_type: "nav2_amcl::DifferentialMotionModel"
+#     tf_broadcast: true
+#     transform_tolerance: 1.0
+#     min_particles: 500
+#     max_particles: 2000
+#     max_beams: 60
+#     laser_model_type: "likelihood_field"
+#     laser_likelihood_max_dist: 2.0
+#     laser_max_range: 12.0
+#     laser_min_range: 0.05
+#     update_min_d: 0.10
+#     update_min_a: 0.10
+#     resample_interval: 1
+#     pf_err: 0.05
+#     pf_z: 0.99
+#     z_hit: 0.5
+#     z_short: 0.05
+#     z_max: 0.05
+#     z_rand: 0.5
+#     sigma_hit: 0.2
+#     lambda_short: 0.1
+#     do_beamskip: false
+#     beam_skip_distance: 0.5
+#     beam_skip_threshold: 0.3
+#     beam_skip_error_threshold: 0.9
+#     recovery_alpha_fast: 0.0
+#     recovery_alpha_slow: 0.0
+#     save_pose_rate: 0.5
+
+# bt_navigator:
+#   ros__parameters:
+#     use_sim_time: false
+#     global_frame: map
+#     robot_base_frame: base_link
+#     odom_topic: /odom
+#     bt_loop_duration: 10
+#     default_server_timeout: 20
+#     wait_for_service_timeout: 1000
+#     plugin_lib_names:
+#       - nav2_compute_path_to_pose_action_bt_node
+#       - nav2_compute_path_through_poses_action_bt_node
+#       - nav2_smooth_path_action_bt_node
+#       - nav2_follow_path_action_bt_node
+#       - nav2_spin_action_bt_node
+#       - nav2_wait_action_bt_node
+#       - nav2_assisted_teleop_action_bt_node
+#       - nav2_back_up_action_bt_node
+#       - nav2_drive_on_heading_bt_node
+#       - nav2_clear_costmap_service_bt_node
+#       - nav2_is_stuck_condition_bt_node
+#       - nav2_goal_reached_condition_bt_node
+#       - nav2_goal_updated_condition_bt_node
+#       - nav2_globally_updated_goal_condition_bt_node
+#       - nav2_is_path_valid_condition_bt_node
+#       - nav2_initial_pose_received_condition_bt_node
+#       - nav2_reinitialize_global_localization_service_bt_node
+#       - nav2_rate_controller_bt_node
+#       - nav2_distance_controller_bt_node
+#       - nav2_speed_controller_bt_node
+#       - nav2_truncate_path_action_bt_node
+#       - nav2_truncate_path_local_action_bt_node
+#       - nav2_goal_updater_node_bt_node
+#       - nav2_recovery_node_bt_node
+#       - nav2_pipeline_sequence_bt_node
+#       - nav2_round_robin_node_bt_node
+#       - nav2_transform_available_condition_bt_node
+#       - nav2_time_expired_condition_bt_node
+#       - nav2_path_expiring_timer_condition
+#       - nav2_distance_traveled_condition_bt_node
+#       - nav2_single_trigger_bt_node
+#       - nav2_goal_updated_controller_bt_node
+#       - nav2_is_battery_low_condition_bt_node
+#       - nav2_navigate_through_poses_action_bt_node
+#       - nav2_navigate_to_pose_action_bt_node
+#       - nav2_remove_passed_goals_action_bt_node
+#       - nav2_planner_selector_bt_node
+#       - nav2_controller_selector_bt_node
+#       - nav2_goal_checker_selector_bt_node
+#       - nav2_controller_cancel_bt_node
+#       - nav2_path_longer_on_approach_bt_node
+#       - nav2_wait_cancel_bt_node
+#       - nav2_spin_cancel_bt_node
+#       - nav2_back_up_cancel_bt_node
+#       - nav2_assisted_teleop_cancel_bt_node
+#       - nav2_drive_on_heading_cancel_bt_node
+#       - nav2_is_battery_charging_condition_bt_node
+
+# bt_navigator_navigate_through_poses_rclcpp_node:
+#   ros__parameters:
+#     use_sim_time: false
+
+# bt_navigator_navigate_to_pose_rclcpp_node:
+#   ros__parameters:
+#     use_sim_time: false
+
+# controller_server:
+#   ros__parameters:
+#     use_sim_time: false
+#     # 1초에 몇 번 속도 명령을 계산할지 결정 
+#     controller_frequency: 10.0
+#     min_x_velocity_threshold: 0.001
+#     min_y_velocity_threshold: 0.5
+#     min_theta_velocity_threshold: 0.001
+#     failure_tolerance: 0.3
+#     progress_checker_plugin: "progress_checker"
+#     goal_checker_plugins: ["general_goal_checker"]
+#     controller_plugins: ["FollowPath"]
+#     progress_checker:
+#       plugin: "nav2_controller::SimpleProgressChecker"
+#       required_movement_radius: 0.3
+#       movement_time_allowance: 15.0
+#     general_goal_checker:
+#       stateful: true
+#       plugin: "nav2_controller::SimpleGoalChecker"
+#       # [m] 목표점 허용 위치 오차
+#       xy_goal_tolerance: 0.15
+#       # [rad] 목표 방향 허용 오차
+#       yaw_goal_tolerance: 0.20
+#     FollowPath:
+#       plugin: "dwb_core::DWBLocalPlanner"
+#       debug_trajectory_details: true
+#       min_vel_x: 0.0
+#       min_vel_y: 0.0
+#       # 1차 주행 안정화 값. 최종 속도는 모터 노드 knob1이 다시 제한.
+#       max_vel_x: 0.45
+#       max_vel_y: 0.0
+#       # 직진 중 좌우 비틀거림을 줄이기 위해 회전 상한을 낮춤.
+#       max_vel_theta: 0.80
+#       min_speed_xy: 0.0
+#       max_speed_xy: 0.45
+#       min_speed_theta: 0.0
+#       # 가속
+#       acc_lim_x: 0.35
+#       acc_lim_y: 0.0
+#       acc_lim_theta: 0.80
+#       # 감속
+#       decel_lim_x: -0.60
+#       decel_lim_y: 0.0
+#       decel_lim_theta: -1.20
+#       vx_samples: 10
+#       vy_samples: 1
+#       vtheta_samples: 20
+#       sim_time: 1.7
+#       linear_granularity: 0.05
+#       angular_granularity: 0.025
+#       transform_tolerance: 0.2
+#       xy_goal_tolerance: 0.15
+#       trans_stopped_velocity: 0.03
+#       short_circuit_trajectory_evaluation: true
+#       stateful: true
+#       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+#       BaseObstacle.scale: 0.08
+#       # 경로방향 정렬
+#       PathAlign.scale: 16.0
+#       # 경로 정렬 탐색 거리
+#       PathAlign.forward_point_distance: 0.1
+#       # 목표 방향 정렬
+#       GoalAlign.scale: 12.0
+#       # 목표 방향 정렬 탐색 거리
+#       GoalAlign.forward_point_distance: 0.1
+#       PathDist.scale: 32.0
+#       GoalDist.scale: 24.0
+#       RotateToGoal.scale: 32.0
+#       RotateToGoal.slowing_factor: 5.0
+#       RotateToGoal.lookahead_time: -1.0
+
+# # 로봇 주변의 실시간 장애물 지도를 생성하는 local_costmap
+# local_costmap:
+#   local_costmap:
+#     ros__parameters:
+#       use_sim_time: false
+#       update_frequency: 5.0
+#       publish_frequency: 2.0
+#       global_frame: odom
+#       robot_base_frame: base_link
+#       rolling_window: true
+#       # 로봇 주변 몆미터까지 볼지
+#       width: 4
+#       height: 4
+#       resolution: 0.05
+#       robot_radius: 0.28
+#       plugins: ["obstacle_layer", "inflation_layer"]
+#       obstacle_layer:
+#         plugin: "nav2_costmap_2d::ObstacleLayer"
+#         enabled: true
+#         observation_sources: scan
+#         scan:
+#           topic: /scan
+#           data_type: "LaserScan"
+#           clearing: true
+#           marking: true
+#           obstacle_max_range: 3.0
+#           obstacle_min_range: 0.0
+#           raytrace_max_range: 3.5
+#           raytrace_min_range: 0.0
+#       inflation_layer:
+#         plugin: "nav2_costmap_2d::InflationLayer"
+#         # 위험구역 범위 설정. 작으면 장애물에 가까이 붙어서 지나감
+#         inflation_radius: 0.65
+#         cost_scaling_factor: 3.0
+#       always_send_full_costmap: true
+
+# # 로봇 주변과 전체 맵의 장애물 지도를 생성하는 global_costmap
+# global_costmap:
+#   global_costmap:
+#     ros__parameters:
+#       use_sim_time: false
+#       update_frequency: 1.0
+#       publish_frequency: 1.0
+#       global_frame: map
+#       robot_base_frame: base_link
+#       resolution: 0.05
+#       robot_radius: 0.28
+#       track_unknown_space: true
+#       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+#       static_layer:
+#         plugin: "nav2_costmap_2d::StaticLayer"
+#         map_subscribe_transient_local: true
+#       obstacle_layer:
+#         plugin: "nav2_costmap_2d::ObstacleLayer"
+#         enabled: true
+#         observation_sources: scan
+#         scan:
+#           topic: /scan
+#           data_type: "LaserScan"
+#           clearing: true
+#           marking: true
+#           obstacle_max_range: 3.0
+#           obstacle_min_range: 0.0
+#           raytrace_max_range: 3.5
+#           raytrace_min_range: 0.0
+#       inflation_layer:
+#         plugin: "nav2_costmap_2d::InflationLayer"
+#         # 위험구역 범위 설정
+#         inflation_radius: 0.65
+#         cost_scaling_factor: 3.0
+#       always_send_full_costmap: true
+
+# map_server:
+#   ros__parameters:
+#     use_sim_time: false
+#     yaml_filename: ""
+
+# map_saver:
+#   ros__parameters:
+#     use_sim_time: false
+#     save_map_timeout: 5.0
+#     free_thresh_default: 0.25
+#     occupied_thresh_default: 0.65
+#     map_subscribe_transient_local: true
+
+# planner_server:
+#   ros__parameters:
+#     use_sim_time: false
+#     expected_planner_frequency: 10.0
+#     planner_plugins: ["GridBased"]
+#     GridBased:
+#       plugin: "nav2_navfn_planner/NavfnPlanner"
+#       tolerance: 0.5
+#       use_astar: false
+#       allow_unknown: true
+
+# smoother_server:
+#   ros__parameters:
+#     use_sim_time: false
+#     smoother_plugins: ["simple_smoother"]
+#     simple_smoother:
+#       plugin: "nav2_smoother::SimpleSmoother"
+#       tolerance: 1.0e-10
+#       max_its: 1000
+#       do_refinement: true
+
+# behavior_server:
+#   ros__parameters:
+#     use_sim_time: false
+#     costmap_topic: local_costmap/costmap_raw
+#     footprint_topic: local_costmap/published_footprint
+#     cycle_frequency: 10.0
+#     global_frame: odom
+#     robot_base_frame: base_link
+#     transform_tolerance: 0.1
+#     simulate_ahead_time: 2.0
+#     max_rotational_vel: 0.35
+#     min_rotational_vel: 0.10
+#     rotational_acc_lim: 0.50
+#     behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+#     spin:
+#       plugin: "nav2_behaviors/Spin"
+#     backup:
+#       plugin: "nav2_behaviors/BackUp"
+#     drive_on_heading:
+#       plugin: "nav2_behaviors/DriveOnHeading"
+#     assisted_teleop:
+#       plugin: "nav2_behaviors/AssistedTeleop"
+#     wait:
+#       plugin: "nav2_behaviors/Wait"
+
+# waypoint_follower:
+#   ros__parameters:
+#     use_sim_time: false
+#     loop_rate: 20
+#     stop_on_failure: false
+#     waypoint_task_executor_plugin: "wait_at_waypoint"
+#     wait_at_waypoint:
+#       plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+#       enabled: true
+#       waypoint_pause_duration: 200
+
+# # velocity_smoother가 속도를 제한 중 
+# velocity_smoother:
+#   ros__parameters:
+#     use_sim_time: false
+#     smoothing_frequency: 20.0
+#     scale_velocities: false
+#     feedback: "OPEN_LOOP"
+#     # 1차 주행 안정화 값. 최종 속도는 모터 노드 knob1이 다시 제한.
+#     max_velocity: [0.45, 0.0, 0.80]
+#     min_velocity: [-0.20, 0.0, -0.80]
+#     max_accel: [0.35, 0.0, 0.80] 
+#     max_decel: [-0.60, 0.0, -1.20]
+#     odom_topic: "odom"
+#     odom_duration: 0.1
+#     deadband_velocity: [0.0, 0.0, 0.0]
+#     velocity_timeout: 1.0
+
+####################################################
+
+# ============================================================
+# VICA nav2_params.yaml — 직진 안정화 수정본
+#
+# 목적:
+#   teleop 수동 주행은 안정적인데 Nav2 주행에서 직진 중 좌우로 비틀거리는 현상 완화
+#
+# 핵심 수정:
+#   - 최대 속도 계열은 변경하지 않음
+#     max_vel_x, max_vel_theta, max_speed_xy,
+#     acc_lim_x, decel_lim_x, velocity_smoother 속도 한계값 유지
+#
+#   - RotateToGoal 제거
+#     도착 지점 근처에서 강한 제자리 회전을 유발할 수 있으므로 일단 제거
+#
+#   - BaseObstacle 유지
+#     장애물 회피 노드를 따로 만들지 않았더라도 Nav2의 local_costmap + DWB는
+#     /scan 기반 장애물 비용을 보고 속도 후보를 평가해야 하므로 유지
+#
+#   - PathAlign / GoalAlign을 과하게 올리지 않고 중간값 적용
+#     16.0처럼 강하게 올리면 odom/AMCL 흔들림에 과민하게 반응할 수 있으므로
+#     PathAlign=10.0, GoalAlign=8.0부터 테스트
+#
+#   - vtheta_samples 감소
+#     20 → 10, 회전 후보 과탐색 완화
+#
+#   - sim_time 소폭 증가
+#     1.7 → 2.0, 너무 순간적인 후보보다 조금 더 앞을 보게 함
+#
+#   - yaw_goal_tolerance 완화
+#     0.20 → 0.35 rad, 도착 후 제자리 회전 완화
+#
+# [추가 수정] /plan 전역 경로가 너무 크게 선회하는 문제 완화
+#   - global_costmap inflation_radius : 0.65 → 0.45
+#   - global_costmap cost_scaling_factor : 3.0 → 4.0
+#   - planner tolerance : 0.5 → 0.2
+#   - use_astar : false → true
+#   - allow_unknown : true → false
+#   ※ local_costmap은 실제 장애물 회피 안전 여유와 관련되므로 0.65 유지
+# ============================================================
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: "base_link"
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    scan_topic: "/scan"
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    tf_broadcast: true
+    transform_tolerance: 2.0 # costmap과 시간 맞춤
+    min_particles: 500
+    max_particles: 2000
+    max_beams: 60
+    laser_model_type: "likelihood_field"
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 12.0
+    laser_min_range: 0.05
+    update_min_d: 0.10
+    update_min_a: 0.10
+    resample_interval: 1
+    pf_err: 0.05
+    pf_z: 0.99
+    z_hit: 0.5
+    z_short: 0.05
+    z_max: 0.05
+    z_rand: 0.5
+    sigma_hit: 0.2
+    lambda_short: 0.1
+    do_beamskip: false
+    beam_skip_distance: 0.5
+    beam_skip_threshold: 0.3
+    beam_skip_error_threshold: 0.9
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    save_pose_rate: 0.5
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+bt_navigator_navigate_through_poses_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false
+
+bt_navigator_navigate_to_pose_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.3
+      movement_time_allowance: 15.0
+
+    # 목표 도달 여부 판단. 도착 지점에서 제자리 회전이 과도하게 발생하는 문제 완화 위해 yaw_goal_tolerance 완화
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.18
+      # [rad] 목표 방향 허용 오차 완화, 도착 후 제자리 회전 완화
+      yaw_goal_tolerance: 0.22 #0.25 -> 0.35
+
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: true
+
+      min_vel_x: 0.0
+      min_vel_y: 0.0
+      max_vel_x: 0.45
+      max_vel_y: 0.0
+      max_vel_theta: 0.50
+
+      min_speed_xy: 0.0
+      max_speed_xy: 0.35
+      min_speed_theta: 0.05 # 0.0 -> 0.05, 너무 느린 회전 명령이 제자리 회전을 유발할 수 있어 최소 회전 속도 추가
+
+      acc_lim_x: 0.25
+      acc_lim_y: 0.0
+      acc_lim_theta: 0.80
+
+      decel_lim_x: -0.45
+      decel_lim_y: 0.0
+      decel_lim_theta: -1.20
+
+      vx_samples: 10
+      vy_samples: 1
+      vtheta_samples: 20 # 10->20
+
+      sim_time: 1.5 # 2.0->1.5 
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.2
+
+      xy_goal_tolerance: 0.18
+      trans_stopped_velocity: 0.05
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+
+      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist", "RotateToGoal"]
+
+      #장애물을 인지하는 인지하고 회피하는 정도. 높으면 비틀
+      BaseObstacle.scale: 0.30
+
+      # 가는 길 중 경로 방향 정렬 # 낮춤
+      PathAlign.scale: 5.0
+      PathAlign.forward_point_distance: 0.30
+
+      # 도착 전 목표 방향 정렬 # 낮춤
+      GoalAlign.scale: 5.0
+      GoalAlign.forward_point_distance: 0.35
+
+      PathDist.scale: 24.0
+      GoalDist.scale: 24.0
+
+      # 도착 후 제자리 회전 완화 위해 RotateToGoal 제거 대신 scale과 slowing_factor 낮춤
+      RotateToGoal.scale: 32.0 #10->5.0
+      RotateToGoal.slowing_factor: 4.0 # 5.0->2.0
+      RotateToGoal.lookahead_time: -1.0 # 0.3->0.5
+
+      
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      # TF 지연으로 /scan obstacle marking이 누락되는지 확인하기 위한 허용 시간
+      transform_tolerance: 2.0 #0.5->1.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      
+      # robot_radius: 0.28
+      # plugins: ["obstacle_layer", "inflation_layer"]
+      footprint: "[[0.15, 0.1875], [0.15, -0.1875], [-0.60, -0.1875], [-0.60, 0.1875]]"
+      footprint_padding: 0.03
+      plugins: ["obstacle_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        # 장애물 높이 설정 추가
+        min_obstacle_height: -1.0
+        max_obstacle_height: 3.0
+        observation_sources: scan
+        # Humble 환경에서 적용 여부 확인 필요: ros2 param get /local_costmap/local_costmap obstacle_layer.tf_filter_tolerance
+        tf_filter_tolerance: 1.0 # 0.1->0.5
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          obstacle_min_range: 0.05
+          obstacle_max_range: 3.0
+          raytrace_min_range: 0.05
+          raytrace_max_range: 3.5
+          # scan/TF 타이밍 흔들림이 있어도 장애물이 바로 사라지지 않도록 테스트
+          observation_persistence: 0.5 # 0.2 -> 0.5
+          expected_update_rate: 0.0
+          inf_is_valid: true
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.65
+        cost_scaling_factor: 3.0
+
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      transform_tolerance: 2.0 # 추가 됨
+      global_frame: map
+      robot_base_frame: base_link
+
+      # resolution: 0.05
+      # robot_radius: 0.28
+      footprint: "[[0.15, 0.1875], [0.15, -0.1875], [-0.60, -0.1875], [-0.60, 0.1875]]"
+      footprint_padding: 0.03
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        # 장애물 높이 설정 추가
+        min_obstacle_height: -1.0
+        max_obstacle_height: 3.0
+        observation_sources: scan
+        tf_filter_tolerance: 0.5 # 0.3-> 0.5 /TF 여유 설정 추가
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.05
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.05
+          observation_persistence: 1.0 # 추가 됨
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.45
+        cost_scaling_factor: 4.0
+
+      always_send_full_costmap: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    use_sim_time: false
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 10.0
+    planner_plugins: ["GridBased"]
+
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.2
+      use_astar: true
+      allow_unknown: false
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    smoother_plugins: ["simple_smoother"]
+
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.35
+    min_rotational_vel: 0.10
+    rotational_acc_lim: 0.50
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+
+    spin:
+      plugin: "nav2_behaviors/Spin"
+
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+
+    assisted_teleop:
+      plugin: "nav2_behaviors/AssistedTeleop"
+
+    wait:
+      plugin: "nav2_behaviors/Wait"
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 200
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+
+    max_velocity: [0.35, 0.0, 0.50]
+    min_velocity: [-0.20, 0.0, -0.50]
+    max_accel: [0.25, 0.0, 0.80]
+    max_decel: [-0.45, 0.0, -1.20]
+
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
