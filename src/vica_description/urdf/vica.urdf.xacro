@@ -1,0 +1,245 @@
+<?xml version="1.0" ?>
+<robot name="VICA" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find vica_description)/urdf/materials.xacro" />
+<xacro:property name="wheel_radius" value="0.065" />
+<xacro:property name="laser_x" value="0.00995" />
+<xacro:property name="laser_y" value="0.0" />
+<xacro:property name="laser_z" value="0.319" />
+<xacro:property name="camera_x" value="0.105" />
+<xacro:property name="camera_y" value="0.0" />
+<xacro:property name="camera_z" value="0.265" />
+
+<link name="base_footprint"/>
+
+<joint name="base_footprint_joint" type="fixed">
+  <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
+  <parent link="base_footprint"/>
+  <child link="base_link"/>
+</joint>
+
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.30817684998290357 0.0 0.2398462811293035" rpy="0 0 0"/>
+    <mass value="100.3733798045696"/>
+    <inertia ixx="2.797826" iyy="4.141308" izz="4.614014" ixy="-0.0" iyz="0.0" ixz="0.369915"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="body_blue"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_wheel_1">
+  <inertial>
+    <origin xyz="2.1094237467877974e-15 0.035687655502016025 1.3877787807814457e-17" rpy="0 0 0"/>
+    <mass value="0.5663250710944822"/>
+    <inertia ixx="0.000634" iyy="0.001025" izz="0.000634" ixy="0.0" iyz="-0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.459 -0.1465 -0.065" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/left_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.459 -0.1465 -0.065" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/left_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_wheel_1">
+  <inertial>
+    <origin xyz="-3.447242491461111e-14 -0.03568765550201608 0.0" rpy="0 0 0"/>
+    <mass value="0.5663250710944814"/>
+    <inertia ixx="0.000634" iyy="0.001025" izz="0.000634" ixy="-0.0" iyz="-0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.459 0.1465 -0.065" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/right_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.459 0.1465 -0.065" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/right_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="front_left_caster_wheel_1">
+  <inertial>
+    <origin xyz="-1.6792123247455493e-15 0.01574568542726719 2.7755575615628914e-17" rpy="0 0 0"/>
+    <mass value="0.11451893837110633"/>
+    <inertia ixx="4.7e-05" iyy="7.8e-05" izz="4.7e-05" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.053 -0.0695 -0.042" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_left_caster_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.053 -0.0695 -0.042" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_left_caster_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="front_right_caster_wheel_1">
+  <inertial>
+    <origin xyz="5.169475958410885e-15 -0.015745685427267203 1.3877787807814457e-17" rpy="0 0 0"/>
+    <mass value="0.11451893837110629"/>
+    <inertia ixx="4.7e-05" iyy="7.8e-05" izz="4.7e-05" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.053 0.0695 -0.042" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_right_caster_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.053 0.0695 -0.042" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_right_caster_wheel_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="front_right_caster_steer_1">
+  <inertial>
+    <origin xyz="-0.00408089404459451 0.0037449849629774684 -0.01766662210223026" rpy="0 0 0"/>
+    <mass value="0.9536308497491053"/>
+    <inertia ixx="0.000637" iyy="0.000626" izz="0.000908" ixy="4e-05" iyz="8.5e-05" ixz="-8.2e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.083 0.0845 -0.1075" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_right_caster_steer_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.083 0.0845 -0.1075" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_right_caster_steer_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="front_left_caster_steer_1">
+  <inertial>
+    <origin xyz="-0.00408089404459451 -0.003744984962977496 -0.01766662210223026" rpy="0 0 0"/>
+    <mass value="0.9536308497491053"/>
+    <inertia ixx="0.000637" iyy="0.000626" izz="0.000908" ixy="-4e-05" iyz="-8.5e-05" ixz="-8.2e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.083 -0.0845 -0.1075" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_left_caster_steer_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.083 -0.0845 -0.1075" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/front_left_caster_steer_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="laser_frame">
+  <inertial>
+    <origin xyz="0.0 0.0 0.010868727234877307" rpy="0 0 0"/>
+    <mass value="0.16353480730457975"/>
+    <inertia ixx="5.9e-05" iyy="5.9e-05" izz="0.000105" ixy="0.0" iyz="-0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-${laser_x} -${laser_y} -${laser_z}" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/lidar_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-${laser_x} -${laser_y} -${laser_z}" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://vica_description/meshes/lidar_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="camera_link"/>
+
+<joint name="left_wheel_joint" type="continuous">
+  <origin xyz="0.459 0.1465 0.065" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="left_wheel_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+</joint>
+
+<joint name="right_wheel_joint" type="continuous">
+  <origin xyz="0.459 -0.1465 0.065" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="right_wheel_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+</joint>
+
+<joint name="front_left_caster_wheel_joint" type="continuous">
+  <origin xyz="-0.03 -0.015 -0.0655" rpy="0 0 0"/>
+  <parent link="front_left_caster_steer_1"/>
+  <child link="front_left_caster_wheel_1"/>
+  <axis xyz="0.0 -1.0 0.0"/>
+</joint>
+
+<joint name="front_right_caster_wheel_joint" type="continuous">
+  <origin xyz="-0.03 0.015 -0.0655" rpy="0 0 0"/>
+  <parent link="front_right_caster_steer_1"/>
+  <child link="front_right_caster_wheel_1"/>
+  <axis xyz="0.0 -1.0 0.0"/>
+</joint>
+
+<joint name="front_right_caster_steer_joint" type="continuous">
+  <origin xyz="0.083 -0.0845 0.1075" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="front_right_caster_steer_1"/>
+  <axis xyz="0.0 0.0 -1.0"/>
+</joint>
+
+<joint name="front_left_caster_steer_joint" type="continuous">
+  <origin xyz="0.083 0.0845 0.1075" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="front_left_caster_steer_1"/>
+  <axis xyz="0.0 0.0 -1.0"/>
+</joint>
+
+<joint name="laser_joint" type="fixed">
+  <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="laser_frame"/>
+</joint>
+
+<joint name="camera_joint" type="fixed">
+  <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="camera_link"/>
+</joint>
+
+</robot>
