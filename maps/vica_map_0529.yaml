@@ -1,4 +1,4 @@
-image: vica_cartographer_map_20260529_165249.pgm
+image: vica_map_0529.pgm
 mode: trinary
 resolution: 0.05
 origin: [-10.3, -10.1, 0]

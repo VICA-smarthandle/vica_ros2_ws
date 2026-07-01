@@ -13,14 +13,14 @@ echo "[TF VICA] base_link -> camera_link"
 
 # base_link -> laser_frame
 ros2 run tf2_ros static_transform_publisher \
-  0.007 0.0 0.346 0 0 0 \
+  0.00995 0.0 0.319 0 0 0 \
   base_link laser_frame &
 
 PID_LASER=$!
 
 # base_link -> camera_link
 ros2 run tf2_ros static_transform_publisher \
-  0.079 0.0 0.288 0 0 0 \
+  0.105 0.0 0.265 0 0 0 \
   base_link camera_link &
 
 PID_CAMERA=$!

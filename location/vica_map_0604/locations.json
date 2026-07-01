@@ -1,0 +1,52 @@
+[
+  {
+    "location_id": "52e53f22-c7f0-425e-afb4-6284ddcaa3a9",
+    "map_id": "vica_map_0604",
+    "name": "room1",
+    "category": "방",
+    "x": 2.7898551167502514,
+    "y": 4.3065673177019494,
+    "yaw": 0.0,
+    "memo": ""
+  },
+  {
+    "location_id": "608e3181-6e91-42f4-8ecc-dc2660d8d719",
+    "map_id": "vica_map_0604",
+    "name": "toilet",
+    "category": "화장실",
+    "x": 3.022117056228703,
+    "y": 8.81579690633233,
+    "yaw": 0.0,
+    "memo": ""
+  },
+  {
+    "location_id": "0ed17407-8a20-40ee-a501-4c3106ec5275",
+    "map_id": "vica_map_0604",
+    "name": "room_2",
+    "category": "방",
+    "x": 1.1961605031651619,
+    "y": 9.520170412515117,
+    "yaw": 0.0,
+    "memo": ""
+  },
+  {
+    "location_id": "51517370-86b4-4f5a-805b-5135a74b9203",
+    "map_id": "vica_map_0604",
+    "name": "room_3",
+    "category": "방",
+    "x": -2.1635644354209838,
+    "y": 10.078211572597084,
+    "yaw": 180.0,
+    "memo": ""
+  },
+  {
+    "location_id": "16fde010-431d-4347-86b7-4fba7607e143",
+    "map_id": "vica_map_0604",
+    "name": "entrance",
+    "category": "입출구",
+    "x": 2.53254443002351,
+    "y": 0.06594276887214612,
+    "yaw": 90.0,
+    "memo": ""
+  }
+]

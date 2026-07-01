@@ -195,11 +195,13 @@ local_costmap:
       # robot_radius: 0.22
       footprint: "[[0.15, 0.1875], [0.15, -0.1875], [-0.60, -0.1875], [-0.60, 0.1875]]"
       footprint_padding: 0.03
-      plugins: ["voxel_layer", "inflation_layer"]
-      inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.55
+      plugins: ["voxel_layer", "inflation_layer"] #nvblox_layer 뺐음
+      nvblox_layer:
+        plugin: "nvblox::nav2::NvbloxCostmapLayer"
+        enabled: False # 변경함
+        nav2_costmap_global_frame: odom
+        nvblox_map_slice_topic: /nvblox_node/static_map_slice
+        convert_to_binary_costmap: True
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -208,22 +210,31 @@ local_costmap:
         z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 2.0
-        mark_threshold: 0
+        mark_threshold: 1
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_nav2
           max_obstacle_height: 2.0
           clearing: True
           marking: True
           data_type: "LaserScan"
-          raytrace_max_range: 9.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 8.0
-          obstacle_min_range: 0.0
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.05
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.12
+          # 잔상 없애기
+          observation_persistence: 0.0
+          expected_update_rate: 0.2
+          inf_is_valid: true
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
       always_send_full_costmap: True
+      inflation_layer:
+
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
 
 global_costmap:
   global_costmap:
@@ -244,15 +255,15 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_nav2
           max_obstacle_height: 2.0
           clearing: True
           marking: True
           data_type: "LaserScan"
-          raytrace_max_range: 9.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 8.0
-          obstacle_min_range: 0.0
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.05
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.12
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True

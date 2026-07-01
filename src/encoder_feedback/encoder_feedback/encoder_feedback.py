@@ -53,7 +53,7 @@ class EncoderFeedbackNode(Node):
         self.declare_parameter("driver_id", 0x001)
 
         # CAN C5 위치값 기준 바퀴 1회전당 tick 수.
-        self.declare_parameter("ticks_per_rev", 55)
+        self.declare_parameter("ticks_per_rev", 61.2) #default:55
         self.declare_parameter("wheel_radius_m", 0.065)
         self.declare_parameter("wheel_base_m", 0.37)
 
@@ -63,7 +63,7 @@ class EncoderFeedbackNode(Node):
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
 
-        self.declare_parameter("publish_tf", True)
+        self.declare_parameter("publish_tf", False)
         # 주행 통합 중에는 모터 노드가 CAN 명령을 담당하므로 encoder_feedback은
         # 기본적으로 수신만 수행하고, 단독 테스트 때만 요청 프레임을 켭니다.
         self.declare_parameter("request_position_feedback", False) #default False
@@ -274,6 +274,23 @@ class EncoderFeedbackNode(Node):
 
         odom_msg.twist.twist.linear.x = vx
         odom_msg.twist.twist.angular.z = vth
+
+        odom_msg.pose.covariance = [
+            0.04, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.04, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 1000.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1000.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 1000.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.03,
+        ]
+        odom_msg.twist.covariance = [
+            0.0025, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0001, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 1000.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1000.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 1000.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0025,
+        ]
 
         self.odom_pub.publish(odom_msg)
 
