@@ -9,7 +9,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory("vica_description")
-    default_model = os.path.join(pkg_share, "urdf", "vica.urdf.xacro")
+    default_model = os.path.join(pkg_share, "urdf", "VICA.xacro")
     default_rviz_config = os.path.join(pkg_share, "rviz", "urdf.rviz")
 
     model = LaunchConfiguration("model")

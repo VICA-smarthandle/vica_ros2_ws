@@ -4,7 +4,11 @@ project(vica_description)
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY launch meshes rviz urdf
+  DIRECTORY
+    launch
+    urdf
+    meshes
+    rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
