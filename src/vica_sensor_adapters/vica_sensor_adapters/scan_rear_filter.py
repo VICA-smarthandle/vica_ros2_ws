@@ -16,9 +16,9 @@ class ScanRearFilter(Node):
         self.declare_parameter("output_topic", "/scan_nav2")
 
         # base_link 기준 후방 자기 구조물 제거 영역.
-        self.declare_parameter("rear_x_min", -2.0)
+        self.declare_parameter("rear_x_min", -1.5)
         self.declare_parameter("rear_x_max", 0.05)
-        self.declare_parameter("rear_y_abs", 0.4)
+        self.declare_parameter("rear_y_abs", 0.3)
 
         # tf_vica 기준 base_link -> laser_frame translation.
         self.declare_parameter("laser_x_in_base", 0.00995)
@@ -42,7 +42,7 @@ class ScanRearFilter(Node):
         self.get_logger().info(
             f"{input_topic} -> {output_topic}, "
             "rear box filter: "
-            "x=[-2.0, 0.05], y=[-0.4, 0.4]"
+            "x=[-1.5, 0.05], y=[-0.3, 0.3]"
         )
 
     def scan_callback(self, msg: LaserScan):

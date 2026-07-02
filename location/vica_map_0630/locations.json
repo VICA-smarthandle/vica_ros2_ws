@@ -1,0 +1,72 @@
+[
+  {
+    "location_id": "7e8ed044-f12f-4a35-b77d-9d28d70253d2",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "입구",
+    "category": "입출구",
+    "x": -5.844858201682479,
+    "y": -0.15854878425205854,
+    "yaw": 90.0,
+    "memo": ""
+  },
+  {
+    "location_id": "57bbcc1c-4c3c-4987-ae67-77caacd84753",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "방1",
+    "category": "방",
+    "x": -0.24088937673515254,
+    "y": 0.8466938146420038,
+    "yaw": 0.0,
+    "memo": ""
+  },
+  {
+    "location_id": "932924a7-a84c-46cd-ae00-925321279aa7",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "방2",
+    "category": "방",
+    "x": 3.8833636730131555,
+    "y": 0.9990958635505667,
+    "yaw": 0.0,
+    "memo": ""
+  },
+  {
+    "location_id": "a824932f-e66d-427f-bdbb-e016effb73e2",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "휴게실",
+    "category": "방",
+    "x": 0.4609739513896596,
+    "y": 3.533767873093737,
+    "yaw": 180.0,
+    "memo": ""
+  },
+  {
+    "location_id": "cfc9ff85-7bc1-4ea6-b7da-b311ed6e14ea",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "안내소",
+    "category": "안내소",
+    "x": -5.264786603998028,
+    "y": 3.2173590737072786,
+    "yaw": 0.0,
+    "memo": ""
+  },
+  {
+    "location_id": "d8f7828f-23fb-4b2b-8e08-2d243c976873",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "화장실",
+    "category": "화장실",
+    "x": 3.691046777951067,
+    "y": 5.416997202853194,
+    "yaw": 180.0,
+    "memo": ""
+  },
+  {
+    "location_id": "43a105d8-212f-4c26-a120-dcfed0f5d694",
+    "map_id": "vica_cartographer_map_20260630_152744",
+    "name": "출구",
+    "category": "입출구",
+    "x": 4.92726046614497,
+    "y": 0.15510958299010547,
+    "yaw": 270.0,
+    "memo": ""
+  }
+]
