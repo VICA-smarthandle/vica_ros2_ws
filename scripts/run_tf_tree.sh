@@ -41,8 +41,8 @@ echo "[5] TF echo test: camera_link -> camera_depth_optical_frame"
 timeout 8 ros2 run tf2_ros tf2_echo camera_link camera_depth_optical_frame || true
 
 echo ""
-echo "[6] Remove old frames files..."
-rm -f "$OUT_DIR"/frames*.pdf "$OUT_DIR"/frames*.gv "$OUT_DIR"/frames*.yaml 2>/dev/null || true
+echo "[6] Keep old frames files..."
+echo "[TF TREE - HOST] Existing frames*.pdf/gv/yaml files will not be removed."
 
 echo ""
 echo "[7] Run view_frames..."

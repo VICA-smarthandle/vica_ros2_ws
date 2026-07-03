@@ -61,7 +61,7 @@ class EncoderFeedbackNode(Node):
         self.declare_parameter("left_sign", 1.0)
 
         self.declare_parameter("odom_frame", "odom")
-        self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("base_frame", "base_footprint")
 
         self.declare_parameter("publish_tf", False)
         # 주행 통합 중에는 모터 노드가 CAN 명령을 담당하므로 encoder_feedback은

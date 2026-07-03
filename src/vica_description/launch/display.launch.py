@@ -5,6 +5,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
+# robot_description 값을 문자열(str)로 명시하지 않아서 파싱 실패.그래서 아래 import 추가
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -15,13 +17,24 @@ def generate_launch_description():
     model = LaunchConfiguration("model")
     rviz_config = LaunchConfiguration("rviz_config")
 
+    # robot_description = {
+    #     "robot_description": Command([
+    #         FindExecutable(name="xacro"),
+    #         " ",
+    #         model,
+    #     ])
+    # }
+    # robot_description 값을 문자열(str)로 명시하지 않아서 파싱 실패.그래서 아래와 같이 수정
     robot_description = {
-        "robot_description": Command([
+    "robot_description": ParameterValue(
+        Command([
             FindExecutable(name="xacro"),
             " ",
             model,
-        ])
-    }
+        ]),
+        value_type=str,
+    )
+}
 
     return LaunchDescription([
         DeclareLaunchArgument("model", default_value=default_model),
