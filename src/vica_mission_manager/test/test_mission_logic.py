@@ -306,6 +306,28 @@ class TestEmergency:
         logic.on_tick(10.0, NavStatus.NONE)
         assert logic.state == State.ESTOPPED
 
+    def test_estop_say_has_emergency_priority(self):
+        # TTS 큐에서 긴급 멘트가 내레이션/응답을 앞지르는 계약 (tts_queue.py)
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_emergency("멈춰", 5.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and all(s.priority == "emergency" for s in says)
+
+    def test_reject_say_has_response_priority(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
+                                  make_dest(id="restroom"), BOUNDS, True, 1.0)
+        assert actions[0].priority == "response"
+
+    def test_start_and_arrival_say_are_narration(self):
+        logic = MissionLogic()
+        actions = start_navigation(logic)
+        assert all(s.priority == "narration" for s in actions if isinstance(s, Say))
+        actions = logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        assert all(s.priority == "narration" for s in actions if isinstance(s, Say))
+
     def test_estop_latch_spam_says_once(self):
         # 20Hz 주기 발행 — 같은 상태 반복 수신 시 멘트 중복 금지
         logic = MissionLogic()

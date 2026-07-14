@@ -102,6 +102,9 @@ class IntentData:
 @dataclass(frozen=True)
 class Say:
     text: str
+    # ros_tts_node 큐 우선순위 (긴급 > 내레이션 > 응답).
+    # 노드가 "{priority}:{text}" 접두어로 /vica/tts_request 에 발행한다.
+    priority: str = "narration"  # emergency / narration / response
 
 
 @dataclass(frozen=True)
@@ -246,11 +249,11 @@ class MissionLogic:
             return []
 
         if self.state == State.ESTOPPED:
-            return [Say(MSG_ESTOP_REJECT)]
+            return [Say(MSG_ESTOP_REJECT, priority="response")]
 
         if self.state == State.NAVIGATING:
             # v1 정책: 주행 중 새 목적지는 거부 (소프트 취소는 v2, TODOS.md #4)
-            return [Say(MSG_BUSY)]
+            return [Say(MSG_BUSY, priority="response")]
 
         if intent.need_confirm:
             # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
@@ -268,13 +271,13 @@ class MissionLogic:
         ):
             # 오래된/엇갈린 confirm 방어 (request_id 없는 v1 의 임시 방어)
             self._to_idle()
-            return [Say(MSG_STALE_CONFIRM)]
+            return [Say(MSG_STALE_CONFIRM, priority="response")]
 
         reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
         if reason != GateReason.OK:
             self._to_idle()
             msg = _REJECT_MESSAGES.get(reason)
-            return [Say(msg)] if msg else []
+            return [Say(msg, priority="response")] if msg else []
 
         assert dest is not None  # check_gate 가 보장
         self.state = State.NAVIGATING
@@ -298,7 +301,7 @@ class MissionLogic:
         already_estopped = self.state == State.ESTOPPED
         self._enter_estopped(now)
         if not already_estopped:
-            actions.append(Say(MSG_ESTOPPED))
+            actions.append(Say(MSG_ESTOPPED, priority="emergency"))
         return actions
 
     def on_estop(self, active: bool, now: float) -> list:
@@ -311,7 +314,7 @@ class MissionLogic:
                 if self.state == State.NAVIGATING:
                     actions.append(CancelNav())
                 self._enter_estopped(now)
-                actions.append(Say(MSG_ESTOPPED))
+                actions.append(Say(MSG_ESTOPPED, priority="emergency"))
                 return actions
         else:
             if self.state == State.ESTOPPED and self._estop_clear_since is None:

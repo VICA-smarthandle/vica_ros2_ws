@@ -169,9 +169,10 @@ class MissionManagerNode(Node):
         for action in actions:
             if isinstance(action, Say):
                 out = String()
-                out.data = action.text
+                # ros_tts_node 큐 우선순위 접두어 (vica-voice-llm src/tts_queue.py 계약)
+                out.data = f"{action.priority}:{action.text}"
                 self.pub_tts.publish(out)
-                self.get_logger().info(f"TTS: {action.text}")
+                self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
             elif isinstance(action, CancelNav):
                 self._cancel_nav()
             elif isinstance(action, Navigate):
