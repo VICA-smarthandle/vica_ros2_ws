@@ -1,3 +1,6 @@
+import os
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'mdrobot_can_control'
@@ -10,6 +13,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,7 +27,11 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': ['keyboard_knob = mdrobot_can_control.mdrobot_can_keyboard_knob_node:main',
+        'console_scripts': [
+            'keyboard_knob = mdrobot_can_control.mdrobot_can_keyboard_knob_node:main',
+            'emergency_stop_node = mdrobot_can_control.emergency_stop_node:main',
+            'safety_supervisor_node = mdrobot_can_control.safety_supervisor_node:main',
+            'app_emergency_node = mdrobot_can_control.app_emergency_node:main',
         ],
     },
 )
