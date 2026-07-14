@@ -28,6 +28,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("estop_release_grace_sec", default_value="2.0"),
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
+            DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -46,6 +47,15 @@ def generate_launch_description() -> LaunchDescription:
                         "current_building": LaunchConfiguration("current_building"),
                     }
                 ],
+            ),
+            # 진행순서 ③: 긴급어 → E-stop 래치 체인 배선.
+            # 정지의 권위는 emergency_stop_node→keyboard_knob 래치 체인이고
+            # (safety_bringup.launch.py 로 별도 기동), 이 브리지는 방아쇠만 당긴다.
+            Node(
+                package="vica_mission_manager",
+                executable="emergency_estop_bridge",
+                output="screen",
+                parameters=[{"pulse_sec": LaunchConfiguration("estop_pulse_sec")}],
             ),
         ]
     )

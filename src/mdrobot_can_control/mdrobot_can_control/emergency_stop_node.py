@@ -95,6 +95,21 @@ class EmergencyStopNode(Node):
             10,
         )
 
+        # /voice_emergency_stop:
+        #   음성 긴급어 경로 입력 (통합 진행순서 ③).
+        #   vica_mission_manager 의 emergency_estop_bridge 가 하드 긴급어
+        #   ("멈춰" 등) 감지 시 펄스(수 초 true 후 false)로 발행한다.
+        #   펄스인 이유: keyboard_knob 의 /estop_reset 은 /emergency_stop 이
+        #   아직 true 면 해제를 거부하므로, 입력이 눌러붙으면 해제가 막힌다.
+        #   래치 유지는 keyboard_knob 몫이고 이 입력은 방아쇠다.
+        self.voice_estop_active = False
+        self.sub_voice_estop = self.create_subscription(
+            Bool,
+            "/voice_emergency_stop",
+            self.voice_estop_callback,
+            10,
+        )
+
         # /emergency_stop_input:
         #   현재 단계의 테스트용 입력 토픽.
         #   나중에 Jetson GPIO, Arduino serial, 또는 MDROBOT F1 I/O monitor 입력을
@@ -121,6 +136,7 @@ class EmergencyStopNode(Node):
         )
         self.get_logger().info(f"input_mode={self.input_mode}")
         self.get_logger().info("Subscribed: /app_emergency_stop")
+        self.get_logger().info("Subscribed: /voice_emergency_stop")
         self.get_logger().info("Subscribed: /emergency_stop_input for test mode")
         self.get_logger().info("Publishing: /emergency_stop")
 
@@ -151,6 +167,11 @@ class EmergencyStopNode(Node):
     def app_estop_callback(self, msg: Bool):
         self.app_estop_active = bool(msg.data)
 
+    def voice_estop_callback(self, msg: Bool):
+        if bool(msg.data) and not self.voice_estop_active:
+            self.get_logger().warn("음성 긴급어 E-stop 입력 수신")
+        self.voice_estop_active = bool(msg.data)
+
     def publish_loop(self):
         if self.input_mode == "can_f1":
             self.drain_can_f1_frames()
@@ -159,7 +180,7 @@ class EmergencyStopNode(Node):
         # 상태가 바뀔 때만 발행하지 않고 주기 발행한다.
         # safety_supervisor_node는 이 주기 발행이 끊기면 안전하게 fault/stop으로 전환한다.
         msg = Bool()
-        msg.data = self.estop_active or self.app_estop_active
+        msg.data = self.estop_active or self.app_estop_active or self.voice_estop_active
         self.pub_estop.publish(msg)
 
     def drain_can_f1_frames(self):

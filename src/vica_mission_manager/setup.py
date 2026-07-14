@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "mission_manager = vica_mission_manager.mission_manager_node:main",
+            "emergency_estop_bridge = vica_mission_manager.emergency_estop_bridge:main",
         ],
     },
 )
