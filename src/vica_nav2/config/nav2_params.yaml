@@ -145,15 +145,15 @@ controller_server:
       min_vel_y: 0.0
       max_vel_x: 0.26
       max_vel_y: 0.0
-      max_vel_theta: 1.0
+      max_vel_theta: 0.4 # 1.0 회전 속도 줄임
       min_speed_xy: 0.0
       max_speed_xy: 0.26
       min_speed_theta: 0.0
       # Add high threshold velocity for turtlebot 3 issue.
       # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
-      acc_lim_x: 2.5
+      acc_lim_x: 2.0 # 2.5 주행 시작 시 너무 튀어나가서 줄임
       acc_lim_y: 0.0
-      acc_lim_theta: 3.2
+      acc_lim_theta: 2.0 # 3.2 회전 시작 속도 줄임
       decel_lim_x: -2.5
       decel_lim_y: 0.0
       decel_lim_theta: -3.2

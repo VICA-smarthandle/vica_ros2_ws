@@ -20,16 +20,6 @@
     "memo": ""
   },
   {
-    "location_id": "0ed17407-8a20-40ee-a501-4c3106ec5275",
-    "map_id": "vica_map_0604",
-    "name": "room_2",
-    "category": "방",
-    "x": 1.1961605031651619,
-    "y": 9.520170412515117,
-    "yaw": 0.0,
-    "memo": ""
-  },
-  {
     "location_id": "51517370-86b4-4f5a-805b-5135a74b9203",
     "map_id": "vica_map_0604",
     "name": "room_3",

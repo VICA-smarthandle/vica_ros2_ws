@@ -2,38 +2,37 @@
 <robot name="VICA" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
 <xacro:include filename="$(find vica_description)/urdf/materials.xacro" />
-<xacro:property name="body_center_z" value="0.0675" />
-<xacro:property name="base_link_height" value="0.2165" />
-<xacro:property name="laser_x" value="0.185" />
+<xacro:property name="wheel_radius" value="0.065" />
+<xacro:property name="laser_x" value="0.00995" />
 <xacro:property name="laser_y" value="0.0" />
-<xacro:property name="laser_z" value="0.1685" />
-<xacro:property name="camera_x" value="0.28683" />
+<xacro:property name="laser_z" value="0.319" />
+<xacro:property name="camera_x" value="0.105" />
 <xacro:property name="camera_y" value="0.0" />
-<xacro:property name="camera_z" value="0.1084" />
+<xacro:property name="camera_z" value="0.265" />
 
 <link name="base_footprint"/>
 
 <joint name="base_footprint_joint" type="fixed">
-  <origin xyz="0 0 ${base_link_height}" rpy="0 0 0"/>
+  <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
   <parent link="base_footprint"/>
   <child link="base_link"/>
 </joint>
 
 <link name="base_link">
   <inertial>
-    <origin xyz="0.004031215194176557 3.002726997808124e-17 0.00856562657816282" rpy="0 0 0"/>
+    <origin xyz="0.004031215194176557 3.002726997808124e-17 0.07606562657816282" rpy="0 0 0"/>
     <mass value="90.84709962539795"/>
     <inertia ixx="2.402108" iyy="3.622523" izz="4.166828" ixy="0.0" iyz="-0.0" ixz="0.343284"/>
   </inertial>
   <visual>
-    <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://vica_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="body_blue"/>
   </visual>
   <collision>
-    <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://vica_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
@@ -190,14 +189,14 @@
 <link name="camera_link"/>
 
 <joint name="left_wheel_joint" type="continuous">
-  <origin xyz="0.154 0.1465 -0.1515" rpy="0 0 0"/>
+  <origin xyz="0.154 0.1465 -0.084" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="left_wheel_1"/>
   <axis xyz="0.0 1.0 0.0"/>
 </joint>
 
 <joint name="right_wheel_joint" type="continuous">
-  <origin xyz="0.154 -0.1465 -0.1515" rpy="0 0 0"/>
+  <origin xyz="0.154 -0.1465 -0.084" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="right_wheel_1"/>
   <axis xyz="0.0 1.0 0.0"/>
@@ -218,22 +217,22 @@
 </joint>
 
 <joint name="front_right_caster_steer_joint" type="continuous">
-  <origin xyz="-0.222 -0.0845 -0.109" rpy="0 0 0"/>
+  <origin xyz="-0.222 -0.0845 -0.0415" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="front_right_caster_steer_1"/>
   <axis xyz="0.0 0.0 -1.0"/>
 </joint>
 
 <joint name="front_left_caster_steer_joint" type="continuous">
-  <origin xyz="-0.222 0.0845 -0.109" rpy="0 0 0"/>
+  <origin xyz="-0.222 0.0845 -0.0415" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="front_left_caster_steer_1"/>
   <axis xyz="0.0 0.0 -1.0"/>
 </joint>
 
-<!-- Sensor positions are expressed relative to the body-centered base_link. -->
+# 이 부분이 라이다의 위치를 나타내는 부분입니다. 필요에 따라 xyz 값을 조정하여 라이다의 위치를 변경할 수 있습니다.
 <joint name="laser_joint" type="fixed">
-  <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
+  <origin xyz="0.185 0.0 0.236" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
 </joint>
