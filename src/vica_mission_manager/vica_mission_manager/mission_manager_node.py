@@ -9,7 +9,11 @@ mission_logic.py(순수 함수/상태 머신)에 있고, 이 파일은 ROS 배�
 - LLM/음성 파트는 /cmd_vel·Nav2 goal 을 직접 발행하지 않는다 — 여기가 유일한 관문.
 - 모터 정지의 권위는 /emergency_stop 래치 체인. 여기서의 goal 취소는 보조 경로.
 
-구독: /vica/intent, /vica/emergency(전용 callback group), /emergency_stop
+구독: /vica/intent, /vica/emergency(전용 callback group), /emergency_stop, /estop_state
+
+estop 판정은 /emergency_stop(입력 요구 OR)과 /estop_state(keyboard_knob 래치
+실상태)의 OR. /emergency_stop만 보면 음성 펄스 만료 시 모터가 아직 래치인데
+"해제되었습니다" 멘트가 나가는 불일치가 생긴다(2026-07-16 실기에서 발견).
 발행: /vica/tts_request(std_msgs/String), /vica/robot_state(1Hz)
 """
 from __future__ import annotations
@@ -45,7 +49,14 @@ except ImportError:  # nav2 미설치 환경(예: CI)에서도 import 에러로 
 
 
 class MissionManagerNode(Node):
+    """LLM intent를 안전 게이트로 심사하고 승인된 Nav2 작업만 실행한다.
+
+    판단은 테스트하기 쉬운 :class:`MissionLogic`에 맡기고, 이 클래스는 ROS2
+    메시지 변환·토픽 연결·Nav2 commander 호출 같은 배선만 담당한다.
+    """
+
     def __init__(self) -> None:
+        """설정과 목적지를 읽고 intent·긴급정지·Nav2·TTS 토픽을 연결한다."""
         super().__init__("vica_mission_manager")
 
         # 목적지/지도 파일 경로는 launch 의 ROS parameter(절대경로)로 받는다.
@@ -105,10 +116,19 @@ class MissionManagerNode(Node):
             reliable_qos,
             callback_group=self._emergency_group,
         )
+        self._estop_input = False    # /emergency_stop (입력 요구 OR)
+        self._estop_latched = False  # /estop_state (모터 래치 실상태)
         self.create_subscription(
             Bool,
             "/emergency_stop",
-            self._on_estop,
+            self._on_estop_input,
+            10,
+            callback_group=self._emergency_group,
+        )
+        self.create_subscription(
+            Bool,
+            "/estop_state",
+            self._on_estop_state,
             10,
             callback_group=self._emergency_group,
         )
@@ -146,10 +166,22 @@ class MissionManagerNode(Node):
         actions = self.logic.on_emergency(msg.keyword, self._now())
         self._run_actions(actions)
 
-    def _on_estop(self, msg: Bool) -> None:
-        actions = self.logic.on_estop(bool(msg.data), self._now())
+    def _on_estop_input(self, msg: Bool) -> None:
+        self._estop_input = bool(msg.data)
+        self._update_estop()
+
+    def _on_estop_state(self, msg: Bool) -> None:
+        self._estop_latched = bool(msg.data)
+        self._update_estop()
+
+    def _update_estop(self) -> None:
+        active = self._estop_input or self._estop_latched
+        actions = self.logic.on_estop(active, self._now())
         if actions:
-            self.get_logger().warn(f"/emergency_stop={msg.data} -> state={self.logic.state.value}")
+            self.get_logger().warn(
+                f"estop 판정={active} (입력={self._estop_input}, "
+                f"래치={self._estop_latched}) -> state={self.logic.state.value}"
+            )
         self._run_actions(actions)
 
     def _tick(self) -> None:
@@ -240,6 +272,7 @@ class MissionManagerNode(Node):
 
 
 def main(args=None) -> None:
+    """긴급 콜백이 일반 처리에 막히지 않도록 다중 스레드 executor로 실행한다."""
     rclpy.init(args=args)
     node = MissionManagerNode()
     executor = MultiThreadedExecutor(num_threads=4)
