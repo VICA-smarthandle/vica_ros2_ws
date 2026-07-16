@@ -16,7 +16,8 @@ from launch_ros.actions import Node
 # 현재 실기 기준 기본 경로 (~/tony 통합 워크스페이스).
 # destinations.yaml 의 단일 소스는 음성 저장소다 (함정 3번).
 DEFAULT_DESTINATIONS = "/home/ji_w/tony/vica-voice-llm/config/destinations.yaml"
-DEFAULT_MAP = "/home/ji_w/tony/vica_ros2_ws/maps/vica_map_0604.yaml"
+# 데모 지도 = vica_map_0630 (2026-07-16 팀 확인). destinations.yaml 좌표도 이 지도 기준.
+DEFAULT_MAP = "/home/ji_w/tony/vica_ros2_ws/maps/vica_map_0630.yaml"
 
 
 def generate_launch_description() -> LaunchDescription:
