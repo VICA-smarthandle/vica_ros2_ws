@@ -187,7 +187,16 @@
   </collision>
 </link>
 
-<link name="camera_link"/>
+<link name="camera_link">
+  <!-- D455 visual placeholder: 26 x 124 x 29 mm -->
+  <visual name="d455_body">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <box size="0.026 0.124 0.029"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+</link>
 
 <joint name="left_wheel_joint" type="continuous">
   <origin xyz="0.154 0.1465 -0.1515" rpy="0 0 0"/>
