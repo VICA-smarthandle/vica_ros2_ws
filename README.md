@@ -47,6 +47,8 @@ VICA의 주요 기능은 다음과 같습니다.
 
 * `realsense-ros`
 * `ydlidar_ros2_driver`
+* `robot_localization`
+* `python3-can`
 
 외부 드라이버에 임시로 적용했던 로컬 수정사항은 `docs/patches/`에 patch 파일로 보관합니다.
 
@@ -75,20 +77,18 @@ VICA의 주요 기능은 다음과 같습니다.
 
 ```bash
 sudo apt update
-sudo apt install -y python3-vcstool
+sudo apt install -y python3-vcstool ros-humble-robot-localization python3-can
 
-cd ~/ros2_ws
+# vica_ros2_ws/ 루트에서 실행
 vcs import < vica.repos
 ```
 
 필요 시 외부 드라이버 로컬 수정 patch를 적용합니다.
 
 ```bash
-cd ~/ros2_ws/src/realsense-ros
-git apply ../../docs/patches/realsense_ros_local_changes.patch
-
-cd ~/ros2_ws/src/ydlidar_ros2_driver
-git apply ../../docs/patches/ydlidar_ros2_driver_local_changes.patch
+# vica_ros2_ws/ 루트에서 실행
+git -C src/realsense-ros apply ../../docs/patches/realsense_ros_local_changes.patch
+git -C src/ydlidar_ros2_driver apply ../../docs/patches/ydlidar_ros2_driver_local_changes.patch
 ```
 
 장기적으로는 외부 드라이버를 직접 수정하지 않고, VICA 전용 launch/config를 별도 패키지에서 관리하는 것을 목표로 합니다.
@@ -98,8 +98,7 @@ git apply ../../docs/patches/ydlidar_ros2_driver_local_changes.patch
 ## 6. Build
 
 ```bash
-cd ~/ros2_ws
-
+# vica_ros2_ws/ 루트에서 실행
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
@@ -126,6 +125,8 @@ ros2 topic hz /scan
 Odometry 확인:
 
 ```bash
+ros2 topic hz /wheel/odom
+ros2 topic hz /imu/base_link
 ros2 topic hz /odom
 ros2 topic echo /odom --once
 ```
@@ -133,7 +134,8 @@ ros2 topic echo /odom --once
 TF 확인:
 
 ```bash
-ros2 run tf2_ros tf2_echo odom base_link
+ros2 run tf2_ros tf2_echo odom base_footprint
+ros2 run tf2_ros tf2_echo base_footprint base_link
 ros2 run tf2_ros tf2_echo base_link laser_frame
 ros2 run tf2_ros tf2_echo base_link camera_link
 ros2 run tf2_tools view_frames
@@ -153,6 +155,9 @@ candump can1
 * 2D SLAM은 Cartographer 2D 중심으로 구성합니다.
 * Visual SLAM과 nvblox는 Isaac ROS Docker에서 분리 운영합니다.
 * Nav2는 지도 기반 목적지 자율주행에 사용합니다.
+* wheel odometry와 IMU의 EKF 설정·bringup 정본은 `src/vica_localization/`입니다.
+* 표준 계약은 `/wheel/odom + /imu/base_link → EKF → /odom`입니다.
+* D455 launch는 이 저장소가 아닌 별도 Docker/Isaac ROS 환경에서 관리합니다.
 
 ---
 
@@ -160,14 +165,16 @@ candump can1
 
 VICA는 실제 바퀴가 움직이는 AMR이므로 안전 구조를 우선합니다.
 
-목표 주행 명령 흐름은 다음과 같습니다.
+현재 코드와 목표 안전 연결을 함께 표시한 주행 명령 흐름은 다음과 같습니다.
 
 ```text
-/cmd_vel_requested
+Nav2 controller /cmd_vel_nav
+→ velocity_smoother_node
+→ /cmd_vel
+→ [GAP: /cmd_vel_req 연결 필요]
 → safety_supervisor_node
 → /cmd_vel_safe
-→ velocity_smoother_node
-→ mdrobot_can_motor_node
+→ mdrobot_can_keyboard_knob_node
 → CAN frame
 → MDROBOT driver
 ```
@@ -177,4 +184,6 @@ VICA는 실제 바퀴가 움직이는 AMR이므로 안전 구조를 우선합니
 * `/cmd_vel`을 모터 CAN 명령으로 직접 연결하지 않습니다.
 * LLM이 직접 주행 명령을 내리지 않습니다.
 * 실행 중인 `can1`을 임의로 down/up 하지 않습니다.
-* 비상정지, 장애물 감속, timeout 정지는 Safety Layer에서 처리합니다.
+* 비상정지와 명령 timeout은 Safety Supervisor가 정지로 처리합니다.
+* 장애물 회피·감속은 Nav2 계층의 책임이며 Safety Supervisor나 물리 E-stop을 대체하지 않습니다.
+* 중앙 E-stop 래치와 관리자 앱 단일 reset은 아직 구현·종단 검증이 필요한 `[TARGET]`입니다.
