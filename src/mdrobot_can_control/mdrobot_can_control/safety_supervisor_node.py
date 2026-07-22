@@ -21,7 +21,7 @@ class SafetyState(Enum):
 
     # ESTOP_ACTIVE:
     #   /emergency_stop == true 이거나 E-stop 활성 상태로 판단된 상태.
-    #   이 상태에서는 어떤 /cmd_vel_requested가 들어와도 /cmd_vel_safe는 0이다.
+    #   이 상태에서는 어떤 /cmd_vel_req가 들어와도 /cmd_vel_safe는 0이다.
     ESTOP_ACTIVE = "ESTOP_ACTIVE"
 
     # ESTOP_RELEASED_WAIT_RESET:
@@ -60,7 +60,7 @@ class SafetySupervisorNode(Node):
     """
     VICA 주행 명령 보조 안전 계층.
 
-    /cmd_vel_requested를 직접 모터로 보내지 않고, E-stop 상태를 확인한 뒤
+    /cmd_vel_req를 직접 모터로 보내지 않고, E-stop 상태를 확인한 뒤
     /cmd_vel_safe로만 전달한다. 이 노드는 하드웨어 E-stop을 대체하지 않는다.
     """
 
@@ -72,7 +72,7 @@ class SafetySupervisorNode(Node):
         #   motor node는 이 토픽이 끊기면 자체 timeout으로 0rpm을 송신한다.
         #
         # cmd_timeout_sec:
-        #   /cmd_vel_requested가 이 시간 이상 안 들어오면 명령이 끊긴 것으로 보고 0을 발행한다.
+        #   /cmd_vel_req가 이 시간 이상 안 들어오면 명령이 끊긴 것으로 보고 0을 발행한다.
         #
         # estop_timeout_sec:
         #   /emergency_stop 상태 토픽이 이 시간 이상 안 들어오면 안전 입력 상실로 판단한다.
@@ -112,12 +112,12 @@ class SafetySupervisorNode(Node):
         #   디버깅과 운영 UI 표시용 상태 문자열.
         self.pub_state = self.create_publisher(String, "/safety_state", 10)
 
-        # /cmd_vel_requested:
+        # /cmd_vel_req:
         #   teleop, Nav2, app 등이 보내는 원본 주행 명령.
         #   이 토픽은 모터 노드에 직접 연결하지 않는다.
         self.sub_cmd_requested = self.create_subscription(
             Twist,
-            "/cmd_vel_requested",
+            "/cmd_vel_req",
             self.cmd_requested_callback,
             10,
         )
@@ -133,7 +133,7 @@ class SafetySupervisorNode(Node):
 
         # /safety_reset:
         #   E-stop 해제 후 자동 재출발을 막기 위한 수동 reset 서비스.
-        #   reset 시점에 /cmd_vel_requested가 0이 아니면 거부한다.
+        #   reset 시점에 /cmd_vel_req가 0이 아니면 거부한다.
         self.srv_reset = self.create_service(
             Trigger,
             "/safety_reset",
@@ -145,7 +145,7 @@ class SafetySupervisorNode(Node):
             "Safety supervisor is a software guard only. "
             "Use a hardware E-stop for final motor torque removal."
         )
-        self.get_logger().info("Subscribed: /cmd_vel_requested, /emergency_stop")
+        self.get_logger().info("Subscribed: /cmd_vel_req, /emergency_stop")
         self.get_logger().info("Publishing: /cmd_vel_safe, /safety_state")
         self.get_logger().info("Service: /safety_reset")
 
@@ -180,7 +180,7 @@ class SafetySupervisorNode(Node):
         # 그래서 reset은 반드시 원본 명령이 0인 상태에서만 허용한다.
         if not self.current_requested_cmd_is_zero():
             response.success = False
-            response.message = "reset rejected: /cmd_vel_requested is not zero"
+            response.message = "reset rejected: /cmd_vel_req is not zero"
             return response
 
         self.reset_armed = True
