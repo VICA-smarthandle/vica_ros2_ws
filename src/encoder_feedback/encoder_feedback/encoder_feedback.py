@@ -42,6 +42,16 @@ def int32_le(byte_list):
     return struct.unpack("<i", bytes(byte_list))[0]
 
 
+def int32_delta(current: int, previous: int) -> int:
+    """Return a signed delta across an int32 counter rollover."""
+    delta = int(current) - int(previous)
+    if delta > 0x7FFFFFFF:
+        delta -= 0x100000000
+    elif delta < -0x80000000:
+        delta += 0x100000000
+    return delta
+
+
 class EncoderFeedbackNode(Node):
     def __init__(self):
         super().__init__("encoder_feedback")
@@ -51,6 +61,7 @@ class EncoderFeedbackNode(Node):
         # =========================
         self.declare_parameter("can_iface", "can1")
         self.declare_parameter("driver_id", 0x001)
+        self.declare_parameter("driver_response_id", 0x701)
 
         # CAN C5 위치값 기준 바퀴 1회전당 tick 수.
         self.declare_parameter("ticks_per_rev", 61.2) #default:55
@@ -62,6 +73,7 @@ class EncoderFeedbackNode(Node):
 
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_footprint")
+        self.declare_parameter("odom_topic", "/wheel/odom")
 
         self.declare_parameter("publish_tf", False)
         # 주행 통합 중에는 모터 노드가 CAN 명령을 담당하므로 encoder_feedback은
@@ -73,6 +85,9 @@ class EncoderFeedbackNode(Node):
 
         self.can_iface = self.get_parameter("can_iface").value
         self.driver_id = int(self.get_parameter("driver_id").value)
+        self.driver_response_id = int(
+            self.get_parameter("driver_response_id").value
+        )
 
         self.ticks_per_rev = float(self.get_parameter("ticks_per_rev").value)
         self.wheel_radius_m = float(self.get_parameter("wheel_radius_m").value)
@@ -83,17 +98,29 @@ class EncoderFeedbackNode(Node):
 
         self.odom_frame = self.get_parameter("odom_frame").value
         self.base_frame = self.get_parameter("base_frame").value
+        self.odom_topic = self.get_parameter("odom_topic").value
         self.publish_tf = bool(self.get_parameter("publish_tf").value)
         self.request_position_feedback = bool(
             self.get_parameter("request_position_feedback").value
         )
         self.request_hz = float(self.get_parameter("request_hz").value)
 
+        if self.ticks_per_rev <= 0.0:
+            raise ValueError("ticks_per_rev must be greater than zero")
+        if self.wheel_radius_m <= 0.0:
+            raise ValueError("wheel_radius_m must be greater than zero")
+        if self.wheel_base_m <= 0.0:
+            raise ValueError("wheel_base_m must be greater than zero")
+        if self.request_hz <= 0.0:
+            raise ValueError("request_hz must be greater than zero")
+
         # =========================
         # 런타임 상태
         # =========================
         self.right_pos = None
         self.left_pos = None
+        self.right_updated = False
+        self.left_updated = False
 
         self.prev_right_pos = None
         self.prev_left_pos = None
@@ -117,6 +144,9 @@ class EncoderFeedbackNode(Node):
         self.get_logger().info(f"CAN opened: {self.can_iface}")
         self.get_logger().info(f"driver_id: 0x{self.driver_id:03X}")
         self.get_logger().info(
+            f"driver_response_id: 0x{self.driver_response_id:03X}"
+        )
+        self.get_logger().info(
             f"ticks_per_rev={self.ticks_per_rev}, "
             f"wheel_radius={self.wheel_radius_m}, "
             f"wheel_base={self.wheel_base_m}"
@@ -127,8 +157,14 @@ class EncoderFeedbackNode(Node):
         # =========================
         # ROS 퍼블리셔
         # =========================
-        self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
-        self.tf_broadcaster = TransformBroadcaster(self)
+        self.odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
+        self.tf_broadcaster = (
+            TransformBroadcaster(self) if self.publish_tf else None
+        )
+        self.get_logger().info(
+            f"Publishing raw wheel odometry: {self.odom_topic} "
+            f"(publish_tf={self.publish_tf})"
+        )
 
         # 타이머 주기가 오도메트리 갱신 루프 빈도를 결정합니다.
         self.timer = self.create_timer(
@@ -169,12 +205,13 @@ class EncoderFeedbackNode(Node):
           701#C500........ -> MOT1 / 오른쪽 바퀴
           701#C501........ -> MOT2 / 왼쪽 바퀴
         """
-        got_position = False
-
         for _ in range(100):
             msg = self.bus.recv(timeout=0.0)
             if msg is None:
                 break
+
+            if msg.arbitration_id != self.driver_response_id:
+                continue
 
             data = list(msg.data)
 
@@ -191,12 +228,12 @@ class EncoderFeedbackNode(Node):
 
             if motor_index == 0:
                 self.right_pos = pos
-                got_position = True
+                self.right_updated = True
             elif motor_index == 1:
                 self.left_pos = pos
-                got_position = True
+                self.left_updated = True
 
-        return got_position
+        return self.right_updated and self.left_updated
 
     def loop(self):
         now = self.get_clock().now()
@@ -205,10 +242,13 @@ class EncoderFeedbackNode(Node):
             self.send_position_request()
             time.sleep(0.001)
 
-        self.read_can_frames()
-
-        if self.right_pos is None or self.left_pos is None:
+        if not self.read_can_frames():
             return
+
+        # 새 좌우 위치값 한 쌍을 한 번만 소비합니다. 다음 C5 프레임이
+        # 들어오기 전에는 이전 값을 재사용해 odometry를 발행하지 않습니다.
+        self.right_updated = False
+        self.left_updated = False
 
         if self.prev_right_pos is None or self.prev_left_pos is None:
             self.prev_right_pos = self.right_pos
@@ -226,8 +266,14 @@ class EncoderFeedbackNode(Node):
         if dt <= 0.0:
             dt = 1.0 / self.request_hz
 
-        delta_right_count = (self.right_pos - self.prev_right_pos) * self.right_sign
-        delta_left_count = (self.left_pos - self.prev_left_pos) * self.left_sign
+        delta_right_count = int32_delta(
+            self.right_pos,
+            self.prev_right_pos,
+        ) * self.right_sign
+        delta_left_count = int32_delta(
+            self.left_pos,
+            self.prev_left_pos,
+        ) * self.left_sign
 
         self.prev_right_pos = self.right_pos
         self.prev_left_pos = self.left_pos
@@ -294,7 +340,7 @@ class EncoderFeedbackNode(Node):
 
         self.odom_pub.publish(odom_msg)
 
-        if self.publish_tf:
+        if self.tf_broadcaster is not None:
             t = TransformStamped()
             t.header.stamp = stamp.to_msg()
             t.header.frame_id = self.odom_frame

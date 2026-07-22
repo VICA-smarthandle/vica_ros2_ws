@@ -27,6 +27,7 @@ def generate_launch_description():
     use_sim_time_arg = LaunchConfiguration('use_sim_time')
     resolution_arg = LaunchConfiguration('resolution')
     publish_period_arg = LaunchConfiguration('publish_period_sec')
+    odom_topic_arg = LaunchConfiguration('odom_topic')
 
     return LaunchDescription([
         # ROS2 로그를 버퍼링해서 출력 안정화
@@ -48,6 +49,12 @@ def generate_launch_description():
             'publish_period_sec',
             default_value='1.0',
             description='2D Occupancy Grid 지도를 /map으로 발행하는 주기입니다.'
+        ),
+
+        DeclareLaunchArgument(
+            'odom_topic',
+            default_value='/odom',
+            description='Cartographer가 사용할 표준 EKF odometry 토픽입니다.'
         ),
 
         # =========================================================================
@@ -74,8 +81,8 @@ def generate_launch_description():
                 # YDLIDAR G2가 발행하는 스캔 토픽
                 ('scan', '/scan'),
 
-                # MDROBOT 구동부 또는 odometry 노드가 발행하는 오도메트리 토픽
-                ('odom', '/odom'),
+                # vica_localization EKF가 발행하는 표준 오도메트리 토픽
+                ('odom', odom_topic_arg),
             ],
         ),
 

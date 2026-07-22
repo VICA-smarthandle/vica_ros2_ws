@@ -1,0 +1,21 @@
+encoder_feedback:
+  ros__parameters:
+    can_iface: can1
+    driver_id: 1
+    driver_response_id: 1793  # 0x701
+    ticks_per_rev: 61.2
+    wheel_radius_m: 0.065
+    wheel_base_m: 0.37
+    right_sign: 1.0
+    left_sign: 1.0
+    odom_frame: odom
+    base_frame: base_footprint
+    odom_topic: /wheel/odom
+
+    # EKF is the only odom -> base_footprint TF publisher.
+    publish_tf: false
+
+    # During driving, the motor node requests C5 feedback with RET_TYPE_ODOM=5.
+    # Enabling this option sends a separate zero-RPM request and is bench-only.
+    request_position_feedback: false
+    request_hz: 20.0

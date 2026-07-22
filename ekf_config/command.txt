@@ -1,5 +1,5 @@
-cd ~/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
-ros2 run robot_localization ekf_node --ros-args --params-file ~/ros2_ws/ekf_config/ekf.yaml
+# Canonical launch. It remaps odometry/filtered to /odom and keeps encoder TF off.
+ros2 launch vica_localization wheel_ekf.launch.py
