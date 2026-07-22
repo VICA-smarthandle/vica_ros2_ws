@@ -26,7 +26,6 @@ setup(
         "console_scripts": [
             "vslam_covariance_adapter = vica_sensor_adapters.vslam_covariance_adapter:main",
             "imu_base_link_adapter = vica_sensor_adapters.imu_base_link_adapter:main",
-            "scan_rear_filter = vica_sensor_adapters.scan_rear_filter:main",
         ],
     },
 )
