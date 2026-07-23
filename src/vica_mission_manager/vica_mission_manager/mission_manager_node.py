@@ -185,7 +185,11 @@ class MissionManagerNode(Node):
         self._run_actions(actions)
 
     def _tick(self) -> None:
-        actions = self.logic.on_tick(self._now(), self._poll_nav_status())
+        status = self._poll_nav_status()
+        distance = (
+            self._nav_distance_remaining() if status == NavStatus.RUNNING else None
+        )
+        actions = self.logic.on_tick(self._now(), status, distance)
         self._run_actions(actions)
 
     def _publish_robot_state(self) -> None:
@@ -256,6 +260,19 @@ class MissionManagerNode(Node):
         if result == TaskResult.CANCELED:
             return NavStatus.CANCELED
         return NavStatus.FAILED
+
+    def _nav_distance_remaining(self):
+        """Nav2 feedback 의 남은 거리(m). 아직 없으면 None.
+
+        Nav2 는 경로를 계산하기 전에 0.0 을 주기도 해서 양수만 신뢰한다.
+        """
+        with self._nav_lock:
+            feedback = self.navigator.getFeedback()
+        distance = getattr(feedback, "distance_remaining", None)
+        if distance is None:
+            return None
+        distance = float(distance)
+        return distance if distance > 0.0 else None
 
     # -- 유틸 --------------------------------------------------------------------
 

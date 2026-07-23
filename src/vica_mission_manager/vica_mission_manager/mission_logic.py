@@ -140,6 +140,12 @@ MSG_STALE_CONFIRM = "요청이 확인되지 않았습니다. 다시 말씀해 �
 MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도해 주세요."
 MSG_ESTOPPED = "안전을 위해 멈추겠습니다."
 MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
+MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
+
+# 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
+# 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
+# 각 지점은 목적지 하나당 한 번만 안내한다.
+DISTANCE_MILESTONES_M = (10.0, 3.0)
 
 _REJECT_MESSAGES = {
     GateReason.BUSY_NAVIGATING: MSG_BUSY,
@@ -238,6 +244,7 @@ class MissionLogic:
         self._dwell_until: Optional[float] = None
         self._estop_entered_at: Optional[float] = None
         self._estop_clear_since: Optional[float] = None
+        self._announced_milestones: set = set()  # 이번 목적지에서 안내한 거리 지점
 
     # -- 입력 이벤트 -----------------------------------------------------------
 
@@ -289,6 +296,7 @@ class MissionLogic:
         self.active_destination = dest
         self._confirming_dest_id = None
         self._confirm_deadline = None
+        self._announced_milestones = set()
         return [Say(MSG_START.format(name=dest.name)), Navigate(dest)]
 
     def on_emergency(self, keyword: str, now: float) -> list:
@@ -326,7 +334,13 @@ class MissionLogic:
                 self._estop_clear_since = now
         return []
 
-    def on_tick(self, now: float, nav_status: NavStatus) -> list:
+    def on_tick(
+        self,
+        now: float,
+        nav_status: NavStatus,
+        distance_remaining: Optional[float] = None,
+    ) -> list:
+        """주기 처리. distance_remaining 은 Nav2 feedback 의 남은 거리(m)다."""
         actions: list = []
 
         if self.state == State.CONFIRMING:
@@ -345,6 +359,12 @@ class MissionLogic:
                 self.state = State.ARRIVED
                 self._dwell_until = now + self.dwell_sec
                 actions.append(Say(text))
+            elif nav_status == NavStatus.RUNNING:
+                milestone = self._crossed_milestone(distance_remaining)
+                if milestone is not None:
+                    actions.append(
+                        Say(MSG_DISTANCE_REMAINING.format(meters=int(milestone)))
+                    )
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
                 # estop 경로의 취소는 이미 ESTOPPED 로 빠져나갔으므로,
                 # 여기 도달한 취소/실패는 주행 실패로 취급한다.
@@ -373,6 +393,28 @@ class MissionLogic:
 
     # -- 내부 ------------------------------------------------------------------
 
+    def _crossed_milestone(self, distance_remaining: Optional[float]) -> Optional[float]:
+        """이번 tick 에 새로 지난 안내 지점을 돌려준다 (없으면 None).
+
+        Nav2 는 초기에 0.0 이나 None 을 주기도 해서 양수만 신뢰한다.
+        여러 지점을 한꺼번에 지났으면(예: 2m 앞에서 출발) 실제 거리에 가장 가까운
+        지점만 말하고 나머지는 지난 것으로 처리한다 — 2m 남았는데 "10미터 남았다"고
+        하면 안 되기 때문이다.
+        """
+        if distance_remaining is None or distance_remaining <= 0.0:
+            return None
+
+        crossed = [
+            m
+            for m in DISTANCE_MILESTONES_M
+            if distance_remaining <= m and m not in self._announced_milestones
+        ]
+        if not crossed:
+            return None
+
+        self._announced_milestones.update(crossed)
+        return min(crossed)
+
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
         self.active_destination = None
@@ -380,6 +422,7 @@ class MissionLogic:
         self._confirm_deadline = None
         self._estop_entered_at = now
         self._estop_clear_since = None
+        self._announced_milestones = set()
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -389,3 +432,4 @@ class MissionLogic:
         self._dwell_until = None
         self._estop_entered_at = None
         self._estop_clear_since = None
+        self._announced_milestones = set()
