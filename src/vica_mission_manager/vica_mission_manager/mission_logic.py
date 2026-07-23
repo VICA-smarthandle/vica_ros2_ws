@@ -121,20 +121,25 @@ Action = Union[Say, Navigate, CancelNav]
 
 
 # ---- 멘트 (v1 임시 카피 — 시각장애인 관점 감수는 미결 사항 #4) ----------------
+#
+# 주의: 이 멘트에 HARD_EMERGENCY_KEYWORDS 가 들어가면 안 된다. 상시 긴급어 감시가
+# 스피커로 나간 로봇 자기 목소리를 다시 긴급어로 인식해 E-stop 을 거는 자가 트리거가
+# 생긴다 (/vica/emergency → emergency_estop_bridge → /voice_emergency_stop).
+# test/test_spoken_text.py 가 이를 강제한다.
 
 MSG_START = "{name}(으)로 안내를 시작합니다."
 MSG_ARRIVED_FALLBACK = "{name}에 도착했습니다."
-MSG_BUSY = "지금 이동 중입니다. 먼저 현재 안내를 멈춰 주세요."
+MSG_BUSY = "지금 이동 중입니다. 먼저 현재 안내를 취소해 주세요."
 MSG_UNKNOWN_DEST = "아직 안내할 수 없는 곳입니다."
 MSG_NOT_APPROACHABLE = "죄송합니다. 지금은 안내할 수 없는 곳입니다."
 MSG_POSE_INVALID = "아직 안내할 수 없는 곳입니다. 위치 등록이 필요합니다."
 MSG_NAV_NOT_READY = "아직 준비 중입니다. 잠시 후 다시 말씀해 주세요."
-MSG_ESTOP_REJECT = "지금은 비상 정지 상태입니다. 해제 후 다시 말씀해 주세요."
+MSG_ESTOP_REJECT = "지금은 비상 멈춤 상태입니다. 해제 후 다시 말씀해 주세요."
 MSG_CONFIRM_TIMEOUT = "안내 요청이 취소되었습니다."
 MSG_STALE_CONFIRM = "요청이 확인되지 않았습니다. 다시 말씀해 주세요."
 MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도해 주세요."
-MSG_ESTOPPED = "비상 정지합니다."
-MSG_ESTOP_RELEASED = "비상 정지가 해제되었습니다. 새로운 목적지를 말씀해 주세요."
+MSG_ESTOPPED = "안전을 위해 멈추겠습니다."
+MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
 
 _REJECT_MESSAGES = {
     GateReason.BUSY_NAVIGATING: MSG_BUSY,
