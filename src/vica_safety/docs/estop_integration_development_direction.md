@@ -29,16 +29,20 @@ motor node는 E-stop 래치, `/estop_reset`, reset 오케스트레이션을 소�
 `/app_estop_reset`과 유지보수 `/safety_reset`은 같은 callback을 사용한다.
 
 1. 앱 E-stop source를 false로 내린다.
-2. Nav2 action server가 실행 중이면 fresh status를 확인한다. accepted/executing/canceling
-   Goal이 있으면 전체 취소 후 terminal 상태를 기다리고, 활성 Goal이 없으면 cancel 호출을
-   생략한다. status 수신 이력과 action server가 모두 없으면 Nav2 미실행으로 판정한다.
+2. Nav2 action status의 마지막 상태값을 확인한다. accepted/executing/canceling Goal이
+   있으면 전체 취소 후 취소 요청보다 새로운 terminal 상태를 기다리고, 마지막 상태가
+   terminal이면 cancel 호출을 생략한다. status 수신 이력이 없으면 Goal이 한 번도
+   생성되지 않은 정상 상태로 판정해 Goal 검사를 생략한다. action server도 없으면 Nav2
+   미실행으로 구분한다.
 3. 중앙 E-stop latch 내부 reset을 호출한다.
 4. fresh `/emergency_stop=false`를 확인한다.
 5. Supervisor 내부 reset을 호출한다.
 6. `/safety_state=READY_TO_GO`를 확인한다.
 
-Nav2 action server가 있는데 status가 미수신이거나, 이전 status가 stale이면 reset을
-거부한다. 처음부터 Nav2가 미실행이면 Goal 검사를 생략하지만 Supervisor의
+Nav2 status를 한 번도 수신하지 않았다면 action server 존재 여부와 관계없이 Goal 검사를
+생략한다. action status는 주기 heartbeat가 아니라 상태 변경 이벤트이므로 메시지 나이를
+reset 조건으로 사용하지 않는다. 마지막 상태가 활성 상태이면 수신 시각과 관계없이
+취소하고 새 terminal 상태를 확인한다. Goal 검사를 생략하더라도 Supervisor의
 `/cmd_vel_req=0` 또는 stale 확인은 생략하지 않는다. 어느 단계든 실패하면 이후 단계로
 진행하지 않으며 이전 Goal은 자동 재개하지 않는다.
 관리자 인증은 아직 구현되지 않았고 `/safety_reset`도 호출자를 식별하지 못하는 `[GAP]`이다.

@@ -74,7 +74,6 @@ class AppEmergencyNode(Node):
         self.declare_parameter("state_publish_hz", 1.0)
         self.declare_parameter("call_timeout_sec", 2.0)
         self.declare_parameter("state_timeout_sec", 2.0)
-        self.declare_parameter("nav_status_timeout_sec", 2.0)
         self.declare_parameter("source_settle_sec", 0.2)
 
         self.activate_service = str(
@@ -108,9 +107,6 @@ class AppEmergencyNode(Node):
         )
         self.state_timeout_sec = float(
             self.get_parameter("state_timeout_sec").value
-        )
-        self.nav_status_timeout_sec = float(
-            self.get_parameter("nav_status_timeout_sec").value
         )
         self.source_settle_sec = float(
             self.get_parameter("source_settle_sec").value
@@ -343,24 +339,16 @@ class AppEmergencyNode(Node):
         return response
 
     def ensure_no_active_nav_goal(self) -> tuple[bool, str]:
-        """Confirm Nav2 is idle, canceling only when a fresh goal is active."""
-        now = time.time()
+        """Use the latest Nav2 state, requiring a new terminal state after cancel."""
         with self.state_condition:
             nav_status_seen = self.last_nav_status_time > 0.0
-            nav_status_fresh = (
-                nav_status_seen
-                and now - self.last_nav_status_time
-                <= self.nav_status_timeout_sec
-            )
             nav_statuses = tuple(self.nav_statuses)
 
         if not nav_status_seen:
             nav2_running = self.cancel_client.wait_for_service(timeout_sec=0.0)
             if not nav2_running:
                 return True, "Nav2 is not running; goal check skipped"
-            return False, "Nav2 status is missing or stale"
-        if not nav_status_fresh:
-            return False, "Nav2 status is missing or stale"
+            return True, "Nav2 has no goal status history; goal check skipped"
         if not has_active_navigation_goals(nav_statuses):
             return True, "no active Nav2 goal"
 
@@ -372,6 +360,8 @@ class AppEmergencyNode(Node):
             return False, "Nav2 cancel response timed out"
         if result.return_code != CancelGoal.Response.ERROR_NONE:
             return False, f"Nav2 cancel return_code={result.return_code}"
+        if not result.goals_canceling:
+            return True, "no active Nav2 goal at cancel time"
 
         confirmed = self.wait_for_condition(
             lambda: (
