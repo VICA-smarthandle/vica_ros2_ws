@@ -47,6 +47,7 @@ class GateReason(str, Enum):
     ESTOP_ACTIVE = "estop_active"
     BUSY_NAVIGATING = "busy_navigating"
     UNKNOWN_DESTINATION = "unknown_destination"
+    PRIVATE_DESTINATION = "private_destination"
     NOT_APPROACHABLE = "not_approachable"
     POSE_INVALID = "pose_invalid"
     NAV_NOT_READY = "nav_not_ready"
@@ -65,6 +66,7 @@ class Destination:
     id: str
     name: str
     pose: Pose2D
+    authorization: str = "public"
     is_approachable: bool = True
     unavailable_reason: str = ""
     # destinations.yaml 에 calibrated 필드가 없으면 None →
@@ -114,7 +116,7 @@ class Navigate:
 
 @dataclass(frozen=True)
 class CancelNav:
-    pass
+    destination: Optional[Destination] = None
 
 
 Action = Union[Say, Navigate, CancelNav]
@@ -131,6 +133,7 @@ MSG_START = "{name}(으)로 안내를 시작합니다."
 MSG_ARRIVED_FALLBACK = "{name}에 도착했습니다."
 MSG_BUSY = "지금 이동 중입니다. 먼저 현재 안내를 취소해 주세요."
 MSG_UNKNOWN_DEST = "아직 안내할 수 없는 곳입니다."
+MSG_PRIVATE_DEST = "비공개 목적지는 안내할 수 없습니다."
 MSG_NOT_APPROACHABLE = "죄송합니다. 지금은 안내할 수 없는 곳입니다."
 MSG_POSE_INVALID = "아직 안내할 수 없는 곳입니다. 위치 등록이 필요합니다."
 MSG_NAV_NOT_READY = "아직 준비 중입니다. 잠시 후 다시 말씀해 주세요."
@@ -150,6 +153,7 @@ DISTANCE_MILESTONES_M = (10.0, 3.0)
 _REJECT_MESSAGES = {
     GateReason.BUSY_NAVIGATING: MSG_BUSY,
     GateReason.UNKNOWN_DESTINATION: MSG_UNKNOWN_DEST,
+    GateReason.PRIVATE_DESTINATION: MSG_PRIVATE_DEST,
     GateReason.NOT_APPROACHABLE: MSG_NOT_APPROACHABLE,
     GateReason.POSE_INVALID: MSG_POSE_INVALID,
     GateReason.NAV_NOT_READY: MSG_NAV_NOT_READY,
@@ -199,6 +203,8 @@ def check_gate(
         return GateReason.ESTOP_ACTIVE
     if dest is None:
         return GateReason.UNKNOWN_DESTINATION
+    if dest.authorization != "public":
+        return GateReason.PRIVATE_DESTINATION
     if not dest.is_approachable:
         return GateReason.NOT_APPROACHABLE
     if not pose_valid(dest, bounds):
@@ -310,7 +316,7 @@ class MissionLogic:
 
         actions: list = []
         if self.state == State.NAVIGATING:
-            actions.append(CancelNav())
+            actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
         self._enter_estopped(now)
         if not already_estopped:
@@ -325,7 +331,7 @@ class MissionLogic:
             if self.state != State.ESTOPPED:
                 actions: list = []
                 if self.state == State.NAVIGATING:
-                    actions.append(CancelNav())
+                    actions.append(CancelNav(self.active_destination))
                 self._enter_estopped(now)
                 actions.append(Say(MSG_ESTOPPED, priority="emergency"))
                 return actions

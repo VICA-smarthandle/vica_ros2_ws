@@ -1,0 +1,174 @@
+import threading
+import time
+from types import SimpleNamespace
+
+from action_msgs.msg import GoalStatus
+from action_msgs.srv import CancelGoal
+
+from vica_safety.app_emergency_node import (
+    AppEmergencyNode,
+    build_app_state,
+    has_active_navigation_goals,
+)
+
+
+class UnexpectedCancelClient:
+    """Fail a test if an idle or unknown state reaches the cancel service."""
+
+    def wait_for_service(self, timeout_sec):
+        del timeout_sec
+        raise AssertionError("cancel service must not be called")
+
+
+class NavigationCheckHarness:
+    """Minimal state used to exercise the real navigation check method."""
+
+    def __init__(self, statuses, last_status_time):
+        self.nav_statuses = statuses
+        self.last_nav_status_time = last_status_time
+        self.nav_status_timeout_sec = 2.0
+        self.state_condition = threading.Condition()
+        self.cancel_client = UnexpectedCancelClient()
+
+
+class RecordingCancelClient:
+    """Record whether an active-goal check reached the cancel service."""
+
+    def __init__(self):
+        self.wait_calls = 0
+
+    def wait_for_service(self, timeout_sec):
+        del timeout_sec
+        self.wait_calls += 1
+        return True
+
+
+class AvailabilityCancelClient:
+    """Report whether the Nav2 action cancel service currently exists."""
+
+    def __init__(self, available):
+        self.available = available
+        self.wait_calls = 0
+
+    def wait_for_service(self, timeout_sec):
+        del timeout_sec
+        self.wait_calls += 1
+        return self.available
+
+
+class ActiveNavigationHarness(NavigationCheckHarness):
+    """Simulate an active goal becoming terminal after cancel."""
+
+    def __init__(self):
+        super().__init__([GoalStatus.STATUS_EXECUTING], time.time())
+        self.cancel_client = RecordingCancelClient()
+        self.call_count = 0
+
+    def call_sync(self, client, request):
+        del client, request
+        self.call_count += 1
+        return SimpleNamespace(return_code=CancelGoal.Response.ERROR_NONE)
+
+    def wait_for_condition(self, predicate):
+        self.nav_statuses = [GoalStatus.STATUS_CANCELED]
+        self.last_nav_status_time = time.time()
+        return predicate()
+
+
+def test_active_nav_statuses_include_canceling():
+    for status in (
+        GoalStatus.STATUS_ACCEPTED,
+        GoalStatus.STATUS_EXECUTING,
+        GoalStatus.STATUS_CANCELING,
+    ):
+        assert has_active_navigation_goals([status]) is True
+
+
+def test_terminal_nav_statuses_are_not_active():
+    statuses = [
+        GoalStatus.STATUS_UNKNOWN,
+        GoalStatus.STATUS_SUCCEEDED,
+        GoalStatus.STATUS_CANCELED,
+        GoalStatus.STATUS_ABORTED,
+    ]
+
+    assert has_active_navigation_goals(statuses) is False
+
+
+def test_fresh_idle_nav_status_skips_cancel_service():
+    harness = NavigationCheckHarness([], time.time())
+
+    accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
+
+    assert accepted is True
+    assert message == "no active Nav2 goal"
+
+
+def test_stale_nav_status_rejects_without_cancel_service():
+    harness = NavigationCheckHarness([], time.time() - 3.0)
+
+    accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
+
+    assert accepted is False
+    assert message == "Nav2 status is missing or stale"
+
+
+def test_nav2_never_seen_and_server_absent_skips_goal_check():
+    harness = NavigationCheckHarness([], 0.0)
+    harness.cancel_client = AvailabilityCancelClient(False)
+
+    accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
+
+    assert accepted is True
+    assert message == "Nav2 is not running; goal check skipped"
+    assert harness.cancel_client.wait_calls == 1
+
+
+def test_nav2_server_present_without_status_rejects_reset():
+    harness = NavigationCheckHarness([], 0.0)
+    harness.cancel_client = AvailabilityCancelClient(True)
+
+    accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
+
+    assert accepted is False
+    assert message == "Nav2 status is missing or stale"
+    assert harness.cancel_client.wait_calls == 1
+
+
+def test_active_nav_goal_is_canceled_and_confirmed_terminal():
+    harness = ActiveNavigationHarness()
+
+    accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
+
+    assert accepted is True
+    assert message == "all Nav2 goals canceled"
+    assert harness.cancel_client.wait_calls == 1
+    assert harness.call_count == 1
+
+
+def test_app_state_active_uses_authoritative_emergency_state():
+    payload = build_app_state(
+        app_active=False,
+        emergency_active=True,
+        safety_state="ESTOP_ACTIVE",
+        message="physical estop",
+        timestamp="2026-07-22T00:00:00+00:00",
+    )
+
+    assert payload["active"] is True
+    assert payload["app_active"] is False
+    assert payload["emergency_active"] is True
+    assert payload["safety_state"] == "ESTOP_ACTIVE"
+    assert payload["reset_allowed"] is False
+
+
+def test_app_state_marks_cleared_waiting_supervisor_as_resettable():
+    payload = build_app_state(
+        app_active=False,
+        emergency_active=False,
+        safety_state="ESTOP_RELEASED_WAIT_RESET",
+        message="waiting",
+        timestamp="2026-07-22T00:00:00+00:00",
+    )
+
+    assert payload["reset_allowed"] is True

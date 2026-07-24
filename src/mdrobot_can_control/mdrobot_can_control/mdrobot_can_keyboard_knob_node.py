@@ -7,6 +7,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
+from .can_preflight import require_can_interface_up
+
 
 # ============================================================
 # ROS2 Humble + teleop_twist_keyboard + MDROBOT CAN 통합
@@ -117,6 +119,16 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.min_rpm_when_moving = int(
             self.get_parameter("min_rpm_when_moving").value
+        )
+
+        try:
+            can_flags = require_can_interface_up(self.can_iface)
+        except RuntimeError as exc:
+            self.get_logger().fatal(str(exc))
+            raise
+        self.get_logger().info(
+            f'CAN preflight passed: {self.can_iface} IFF_UP '
+            f'flags=0x{can_flags:X}'
         )
 
         # =========================

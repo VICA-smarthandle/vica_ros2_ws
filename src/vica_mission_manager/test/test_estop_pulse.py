@@ -16,7 +16,7 @@ class TestEstopPulse:
     def test_expires_after_pulse(self):
         p = EstopPulse(3.0)
         p.trigger(10.0)
-        assert p.active(13.0) is False  # keyboard_knob /estop_reset 이 막히지 않게
+        assert p.active(13.0) is False  # 중앙 래치 reset 조건을 막지 않게
 
     def test_retrigger_extends(self):
         p = EstopPulse(3.0)

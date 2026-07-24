@@ -1,0 +1,8 @@
+# 앱·CLI가 Mission Manager에 보내는 목적지 주행 요청.
+# destination_id는 destinations.yaml에 존재하는 UUID여야 한다.
+string request_id
+string map_id
+string destination_id
+---
+bool accepted
+string message

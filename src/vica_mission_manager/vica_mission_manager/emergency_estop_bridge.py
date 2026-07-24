@@ -4,12 +4,12 @@
 /vica/emergency (긴급어, LLM 우회 경로)에서 하드 키워드를 감지하면
 /voice_emergency_stop 에 펄스(기본 3초 true 후 false)를 발행한다.
 
-체인: 긴급어 → [이 브리지] → emergency_stop_node → /emergency_stop
-      → keyboard_knob 래치 (CAN 0rpm/brake). 해제는 /estop_reset 서비스.
+체인: 긴급어 → [이 브리지] → vica_safety/emergency_stop_node 중앙 래치
+      → /emergency_stop → safety_supervisor_node → /cmd_vel_safe=0.
 
-펄스인 이유: keyboard_knob 의 /estop_reset 은 /emergency_stop 이 아직
-true 면 해제를 거부한다. 입력이 눌러붙으면 해제 절차가 영원히 막히므로,
-이 입력은 '방아쇠'로만 쓰고 래치 유지는 keyboard_knob 이 담당한다.
+펄스인 이유: 중앙 래치의 내부 reset은 음성 원인이 아직 true면 해제를
+거부한다. 입력이 눌러붙으면 reset 절차가 영원히 막히므로, 이 입력은
+'방아쇠'로만 쓴다. false는 중앙 래치를 해제하는 reset 권한이 아니다.
 
 mission_manager 의 직접 goal 취소는 이 체인과 별개의 심층 방어 보조 경로다
 (모터 정지의 권위는 어디까지나 래치 체인).

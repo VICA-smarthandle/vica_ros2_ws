@@ -170,8 +170,7 @@ VICA는 실제 바퀴가 움직이는 AMR이므로 안전 구조를 우선합니
 ```text
 Nav2 controller /cmd_vel_nav
 → velocity_smoother_node
-→ /cmd_vel
-→ [GAP: /cmd_vel_req 연결 필요]
+→ /cmd_vel_req
 → safety_supervisor_node
 → /cmd_vel_safe
 → mdrobot_can_keyboard_knob_node
@@ -182,6 +181,7 @@ Nav2 controller /cmd_vel_nav
 안전 원칙:
 
 * `/cmd_vel`을 모터 CAN 명령으로 직접 연결하지 않습니다.
+* `nav2_map_test.launch.py`는 velocity smoother의 최종 출력만 `/cmd_vel_req`로 remap합니다.
 * LLM이 직접 주행 명령을 내리지 않습니다.
 * 실행 중인 `can1`을 임의로 down/up 하지 않습니다.
 * 비상정지와 명령 timeout은 Safety Supervisor가 정지로 처리합니다.

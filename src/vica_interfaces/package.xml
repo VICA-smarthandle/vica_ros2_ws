@@ -3,7 +3,7 @@
 <package format="3">
   <name>vica_interfaces</name>
   <version>0.1.0</version>
-  <description>VICA 음성 파이프라인 커스텀 메시지 (VicaIntent, RobotState)</description>
+  <description>VICA 공용 메시지와 Mission 요청 서비스 인터페이스</description>
   <maintainer email="devlee792458@gmail.com">tony</maintainer>
   <license>Apache-2.0</license>
 

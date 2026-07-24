@@ -1,14 +1,15 @@
 """destinations.yaml / Nav2 지도 yaml 로더 (rclpy 비의존, unit test 대상).
 
-destinations.yaml 의 단일 소스는 음성 저장소(vica-voice-llm/config/)다.
-목적지 데이터 이원화(함정 3번) 때문에 데모 전에는 앱이 찍은 좌표를
-음성 파트 yaml 에 수동 반영하는 절차를 따른다.
+정본은 vica_destination_manager가 관리하는 지도별 destinations.yaml이다.
+기존 locations.json 또는 음성 저장소의 정적 catalog는 이 로더가 읽지 않는다.
 """
 from __future__ import annotations
 
 import os
 import struct
+from pathlib import Path
 from typing import Dict, Optional
+from uuid import UUID
 
 import yaml
 
@@ -16,6 +17,8 @@ from .mission_logic import Destination, MapBounds, Pose2D
 
 
 def load_destinations(path: str) -> Dict[str, Destination]:
+    if not Path(path).exists():
+        return {}
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
@@ -24,7 +27,15 @@ def load_destinations(path: str) -> Dict[str, Destination]:
 
     result: Dict[str, Destination] = {}
     for entry in data["destinations"]:
-        dest_id = str(entry["id"])
+        dest_id = str(entry["id"]).strip().lower()
+        try:
+            parsed_id = UUID(dest_id)
+        except ValueError as exc:
+            raise ValueError(f"목적지 id가 UUID가 아닙니다: {dest_id}") from exc
+        if parsed_id.version != 4 or str(parsed_id) != dest_id:
+            raise ValueError(f"목적지 id가 canonical UUID v4가 아닙니다: {dest_id}")
+        if dest_id in result:
+            raise ValueError(f"중복 목적지 id: {dest_id}")
         pose_raw = entry.get("pose") or {}
         pose = Pose2D(
             x=float(pose_raw.get("x", 0.0)),
@@ -37,6 +48,7 @@ def load_destinations(path: str) -> Dict[str, Destination]:
             id=dest_id,
             name=str(entry.get("name", dest_id)),
             pose=pose,
+            authorization=str(entry.get("authorization", "public")).strip().lower(),
             is_approachable=bool(entry.get("is_approachable", True)),
             unavailable_reason=str(entry.get("unavailable_reason", "") or ""),
             calibrated=None if calibrated is None else bool(calibrated),

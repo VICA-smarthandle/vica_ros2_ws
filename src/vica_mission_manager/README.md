@@ -1,63 +1,50 @@
 # vica_mission_manager
 
-VICA 음성→주행 통합의 유일한 신규 노드 (통합 진행순서 ②).
-`/vica/intent`(LLM의 '제안')를 게이트로 심사해, **통과한 경우에만**
-`nav2_simple_commander`로 NavigateToPose를 보낸다.
+음성 `VicaIntent`와 앱·CLI 목적지 요청을 같은 gate로 검사하고, 통과한 경우에만
+Nav2 `NavigateToPose` Goal을 생성한다.
 
-## 안전 원칙 (불변)
+## 권한 경계
 
-- LLM/음성 파트는 `/cmd_vel`·Nav2 goal을 직접 발행하지 않는다 — 이 노드가 유일한 관문.
-- 모터 정지의 권위는 `/emergency_stop` 래치 체인. 이 노드의 goal 취소는 심층 방어 보조 경로.
-- estopped 해제 후 이전 goal 자동 재개 금지 — 사용자가 다시 요청해야 한다.
+- LLM·앱·`vica_goto_goal.py`는 Nav2 Goal을 직접 발행하지 않는다.
+- 공개 요청 서비스는 `/vica/mission/request_destination`이다.
+- 요청의 `destination_id`는 현재 지도 catalog에 존재하는 UUID v4여야 한다.
+- `authorization != public` 또는 `is_approachable == false`인 목적지는 거부한다.
+- E-stop 해제 뒤 이전 Goal을 자동 재개하지 않는다.
 
-## 게이트 5조건 (전부 AND)
+## 인터페이스
 
-1. `intent == "navigate"`
-2. `matched_destination_id != ""`
-3. `need_confirm == false`
-4. `safety_flag == "normal"`
-5. pose 유효: calibrated + (0,0) 아님 + `frame_id=="map"` + 지도 경계 내
-
-추가 문맥 조건: E-stop 활성 시 거부, 주행 중 새 요청 거부(v1), Nav2 action server 미준비 시 거부.
-
-## 상태 머신
-
-`idle / confirming / navigating / arrived / failed / estopped` —
-전이 다이어그램은 `projectVica/VICA_LLM_로봇_통합_진행순서.md` §4 참조.
-
-## 토픽
-
-| 방향 | 토픽 | 타입 |
+| 방향 | 인터페이스 | 타입 |
 |---|---|---|
-| 구독 | `/vica/intent` | vica_interfaces/VicaIntent |
-| 구독 | `/vica/emergency` | vica_interfaces/EmergencyEvent (reliable, 전용 callback group) |
-| 구독 | `/emergency_stop` | std_msgs/Bool (emergency_stop_node 20Hz 래치 상태) |
-| 발행 | `/vica/tts_request` | std_msgs/String (ros_tts_node가 구독 — 음성 파트 작업) |
-| 발행 | `/vica/robot_state` | vica_interfaces/RobotState (1Hz) |
+| 구독 | `/vica/intent` | `vica_interfaces/msg/VicaIntent` |
+| 구독 | `/vica/emergency` | `vica_interfaces/msg/EmergencyEvent` |
+| 구독 | `/emergency_stop` | `std_msgs/msg/Bool` |
+| 서비스 | `/vica/mission/request_destination` | `vica_interfaces/srv/RequestDestination` |
+| 서비스 | `/vica/mission/reload_destinations` | `std_srvs/srv/Trigger` |
+| 발행 | `/vica_goal_event` | `std_msgs/msg/String` JSON |
+| 발행 | `/vica/tts_request` | `std_msgs/msg/String` |
+| 발행 | `/vica/robot_state` | `vica_interfaces/msg/RobotState` |
+
+목적지 정본은 다음 지도별 파일이다.
+
+```text
+~/vica_data/destinations/<map_id>/destinations.yaml
+```
+
+파일이 아직 없으면 빈 catalog로 시작한다. 기존 `locations.json`이나
+`vica-voice-llm/config/destinations.yaml`은 자동 이관하지 않는다.
 
 ## 실행
 
 ```bash
 source /opt/ros/humble/setup.bash
-source ~/tony/vica_ros2_ws/install/setup.bash
-ros2 launch vica_mission_manager mission_manager.launch.py
-# 경로 변경 시:
-#   destinations_yaml:=/절대/경로/destinations.yaml map_yaml:=/절대/경로/map.yaml
+source vica_ros2_ws/install/setup.bash
+ros2 launch vica_mission_manager mission_manager.launch.py \
+  map_id:=vica_map_0630 \
+  map_yaml:=vica_ros2_ws/maps/vica_map_0630.yaml
 ```
 
-## 구조와 테스트
-
-- `mission_logic.py` — 게이트·상태 전이 **순수 로직 (rclpy 비의존)**. 모든 판단은 여기.
-- `destinations.py` — destinations.yaml / Nav2 지도 yaml 로더 (rclpy 비의존).
-- `mission_manager_node.py` — ROS 배선만. MultiThreadedExecutor, emergency 전용 callback group.
+## 테스트
 
 ```bash
-cd src/vica_mission_manager && python3 -m pytest test/ -q   # 65 tests
+colcon test --packages-select vica_mission_manager
 ```
-
-## 주의 (함정)
-
-- destinations.yaml 대부분의 pose가 (0,0) 플레이스홀더 — 게이트 ⑤가 거부한다.
-  캘리브레이션(진행순서 ①) 후 `calibrated: true`를 yaml에 명시할 것.
-- yaw는 도(deg) 단위 저장, 쿼터니언 변환은 goal 생성 시에만.
-- launch에서 `name=`을 지정하지 말 것 — 프로세스 내 BasicNavigator까지 리매핑되어 이름 충돌.

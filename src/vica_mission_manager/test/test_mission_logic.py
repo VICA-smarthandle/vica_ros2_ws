@@ -81,6 +81,13 @@ class TestGate:
     def test_unknown_destination(self):
         assert check_gate(make_intent(), None, BOUNDS, False, True) == GateReason.UNKNOWN_DESTINATION
 
+    def test_private_destination(self):
+        dest = make_dest(authorization="private")
+        assert (
+            check_gate(make_intent(), dest, BOUNDS, False, True)
+            == GateReason.PRIVATE_DESTINATION
+        )
+
     def test_not_approachable(self):
         dest = make_dest(is_approachable=False)
         assert check_gate(make_intent(), dest, BOUNDS, False, True) == GateReason.NOT_APPROACHABLE

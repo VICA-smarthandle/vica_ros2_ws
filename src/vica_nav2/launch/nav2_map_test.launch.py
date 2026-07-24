@@ -2,10 +2,15 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import SetRemap
 
 
 def generate_launch_description():
@@ -60,16 +65,27 @@ def generate_launch_description():
                 "can_iface": can_iface,
             }.items(),
         ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(bringup_launch),
-            launch_arguments={
-                "slam": "False",
-                "map": map_yaml,
-                "params_file": params_file,
-                "use_sim_time": use_sim_time,
-                "autostart": autostart,
-                "use_composition": use_composition,
-                "use_respawn": "False",
-            }.items(),
+        GroupAction(
+            actions=[
+                # Humble Nav2는 velocity_smoother의 출력을 기본적으로
+                # /cmd_vel로 remap한다. 모든 주행 명령이 VICA Safety Supervisor를
+                # 거치도록 최종 출력만 /cmd_vel_req로 변경한다.
+                SetRemap(
+                    src="cmd_vel_smoothed",
+                    dst="/cmd_vel_req",
+                ),
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(bringup_launch),
+                    launch_arguments={
+                        "slam": "False",
+                        "map": map_yaml,
+                        "params_file": params_file,
+                        "use_sim_time": use_sim_time,
+                        "autostart": autostart,
+                        "use_composition": use_composition,
+                        "use_respawn": "False",
+                    }.items(),
+                ),
+            ],
         ),
     ])

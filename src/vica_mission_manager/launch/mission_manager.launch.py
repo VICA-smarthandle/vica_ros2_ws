@@ -10,21 +10,35 @@
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import (
+    EnvironmentVariable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+)
 from launch_ros.actions import Node
-
-# 현재 실기 기준 기본 경로 (~/tony 통합 워크스페이스).
-# destinations.yaml 의 단일 소스는 음성 저장소다 (함정 3번).
-DEFAULT_DESTINATIONS = "/home/ji_w/tony/vica-voice-llm/config/destinations.yaml"
-# 데모 지도 = vica_map_0630 (2026-07-16 팀 확인). destinations.yaml 좌표도 이 지도 기준.
-DEFAULT_MAP = "/home/ji_w/tony/vica_ros2_ws/maps/vica_map_0630.yaml"
 
 
 def generate_launch_description() -> LaunchDescription:
+    map_id = LaunchConfiguration("map_id")
+    storage_root = LaunchConfiguration("destination_storage_root")
+    default_storage_root = PathJoinSubstitution(
+        [EnvironmentVariable("HOME"), "vica_data", "destinations"]
+    )
+    default_destinations = PathJoinSubstitution(
+        [storage_root, map_id, "destinations.yaml"]
+    )
     return LaunchDescription(
         [
-            DeclareLaunchArgument("destinations_yaml", default_value=DEFAULT_DESTINATIONS),
-            DeclareLaunchArgument("map_yaml", default_value=DEFAULT_MAP),
+            DeclareLaunchArgument("map_id", default_value="vica_map_0630"),
+            DeclareLaunchArgument(
+                "destination_storage_root",
+                default_value=default_storage_root,
+            ),
+            DeclareLaunchArgument(
+                "destinations_yaml",
+                default_value=default_destinations,
+            ),
+            DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="2.0"),
             DeclareLaunchArgument("current_floor", default_value="-1"),
@@ -39,6 +53,7 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "destinations_yaml": LaunchConfiguration("destinations_yaml"),
+                        "map_id": map_id,
                         "map_yaml": LaunchConfiguration("map_yaml"),
                         "confirm_timeout_sec": LaunchConfiguration("confirm_timeout_sec"),
                         "estop_release_grace_sec": LaunchConfiguration(
@@ -50,8 +65,8 @@ def generate_launch_description() -> LaunchDescription:
                 ],
             ),
             # 진행순서 ③: 긴급어 → E-stop 래치 체인 배선.
-            # 정지의 권위는 emergency_stop_node→keyboard_knob 래치 체인이고
-            # (safety_bringup.launch.py 로 별도 기동), 이 브리지는 방아쇠만 당긴다.
+            # 정지의 권위는 vica_safety/emergency_stop_node 중앙 래치이고
+            # (vica_safety safety_bringup으로 별도 기동), 이 브리지는 방아쇠만 당긴다.
             Node(
                 package="vica_mission_manager",
                 executable="emergency_estop_bridge",

@@ -7,18 +7,22 @@ mission_logic.py(순수 함수/상태 머신)에 있고, 이 파일은 ROS 배�
 
 안전 원칙(불변):
 - LLM/음성 파트는 /cmd_vel·Nav2 goal 을 직접 발행하지 않는다 — 여기가 유일한 관문.
-- 모터 정지의 권위는 /emergency_stop 래치 체인. 여기서의 goal 취소는 보조 경로.
+- 모터 정지의 권위는 vica_safety의 /emergency_stop 중앙 래치 체인.
+  여기서의 goal 취소는 심층 방어 보조 경로.
 
-구독: /vica/intent, /vica/emergency(전용 callback group), /emergency_stop, /estop_state
+구독: /vica/intent, /vica/emergency(전용 callback group), /emergency_stop
 
-estop 판정은 /emergency_stop(입력 요구 OR)과 /estop_state(keyboard_knob 래치
-실상태)의 OR. /emergency_stop만 보면 음성 펄스 만료 시 모터가 아직 래치인데
-"해제되었습니다" 멘트가 나가는 불일치가 생긴다(2026-07-16 실기에서 발견).
+`/emergency_stop`은 emergency_stop_node가 물리·앱·음성을 중앙 래치한 권위 상태다.
+입력 펄스가 끝나도 명시적 reset 전까지 true를 유지한다.
 발행: /vica/tts_request(std_msgs/String), /vica/robot_state(1Hz)
 """
 from __future__ import annotations
 
+import json
 import threading
+from datetime import datetime
+from pathlib import Path
+from uuid import UUID
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -27,17 +31,21 @@ from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
+from vica_interfaces.srv import RequestDestination
 
 from .destinations import load_destinations, load_map_bounds
 from .mission_logic import (
     CancelNav,
+    GateReason,
     IntentData,
     MissionLogic,
     Navigate,
     NavStatus,
     Say,
     State,
+    check_gate,
     yaw_deg_to_quaternion,
 )
 
@@ -61,6 +69,7 @@ class MissionManagerNode(Node):
 
         # 목적지/지도 파일 경로는 launch 의 ROS parameter(절대경로)로 받는다.
         self.declare_parameter("destinations_yaml", "")
+        self.declare_parameter("map_id", "")
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("confirm_timeout_sec", 30.0)
         self.declare_parameter("estop_release_grace_sec", 2.0)
@@ -72,8 +81,18 @@ class MissionManagerNode(Node):
         dest_path = str(self.get_parameter("destinations_yaml").value)
         if not dest_path:
             raise RuntimeError("destinations_yaml parameter 가 비어 있습니다 (launch 에서 절대경로 지정)")
-        self.destinations = load_destinations(dest_path)
-        self.get_logger().info(f"목적지 {len(self.destinations)}개 로드: {dest_path}")
+        self._destinations_path = str(Path(dest_path).expanduser())
+        configured_map_id = str(self.get_parameter("map_id").value).strip()
+        self._map_id = configured_map_id or Path(self._destinations_path).parent.name
+        self.destinations = load_destinations(self._destinations_path)
+        if Path(self._destinations_path).exists():
+            self.get_logger().info(
+                f"목적지 {len(self.destinations)}개 로드: {self._destinations_path}"
+            )
+        else:
+            self.get_logger().warn(
+                f"목적지 catalog가 없어 빈 목록으로 시작합니다: {self._destinations_path}"
+            )
 
         map_yaml = str(self.get_parameter("map_yaml").value)
         if map_yaml:
@@ -116,25 +135,30 @@ class MissionManagerNode(Node):
             reliable_qos,
             callback_group=self._emergency_group,
         )
-        self._estop_input = False    # /emergency_stop (입력 요구 OR)
-        self._estop_latched = False  # /estop_state (모터 래치 실상태)
+        self._estop_active = False
         self.create_subscription(
             Bool,
             "/emergency_stop",
-            self._on_estop_input,
-            10,
-            callback_group=self._emergency_group,
-        )
-        self.create_subscription(
-            Bool,
-            "/estop_state",
-            self._on_estop_state,
+            self._on_estop,
             10,
             callback_group=self._emergency_group,
         )
 
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
         self.pub_state = self.create_publisher(RobotState, "/vica/robot_state", 10)
+        self.pub_goal_event = self.create_publisher(String, "/vica_goal_event", 10)
+        self.create_service(
+            RequestDestination,
+            "/vica/mission/request_destination",
+            self._on_destination_request,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            Trigger,
+            "/vica/mission/reload_destinations",
+            self._on_reload_destinations,
+            callback_group=self._main_group,
+        )
 
         tick_hz = float(self.get_parameter("tick_hz").value)
         self.create_timer(1.0 / tick_hz, self._tick, callback_group=self._main_group)
@@ -161,26 +185,120 @@ class MissionManagerNode(Node):
         )
         self._run_actions(actions)
 
+    def _on_destination_request(
+        self,
+        request: RequestDestination.Request,
+        response: RequestDestination.Response,
+    ) -> RequestDestination.Response:
+        """앱·CLI 요청을 UUID로 검증하고 기존 Mission gate를 통과시킨다."""
+        try:
+            request_id = str(UUID(request.request_id))
+            destination_id = str(UUID(request.destination_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id와 destination_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+        parsed_destination = UUID(destination_id)
+        if (
+            parsed_destination.version != 4
+            or destination_id != request.destination_id.lower()
+        ):
+            response.accepted = False
+            response.message = "destination_id는 canonical UUID v4여야 합니다."
+            return response
+        if request.map_id != self._map_id:
+            response.accepted = False
+            response.message = (
+                f"현재 지도와 요청 지도가 다릅니다: "
+                f"current={self._map_id}, requested={request.map_id}"
+            )
+            return response
+        if self.logic.state != State.IDLE:
+            response.accepted = False
+            response.message = (
+                f"Mission이 idle 상태가 아닙니다: state={self.logic.state.value}"
+            )
+            return response
+
+        destination = self.destinations.get(destination_id)
+        intent = IntentData(
+            intent="navigate",
+            matched_destination_id=destination_id,
+            need_confirm=False,
+            safety_flag="normal",
+        )
+        reason = check_gate(
+            intent,
+            destination,
+            self.map_bounds,
+            self.logic.estop_active,
+            self._nav2_ready(),
+        )
+        if reason != GateReason.OK:
+            response.accepted = False
+            response.message = f"목적지 요청 거부: {reason.value}"
+            self.get_logger().warn(
+                f"공개 목적지 요청 거부: map_id={request.map_id} "
+                f"id={destination_id} reason={reason.value}"
+            )
+            return response
+
+        actions = self.logic.on_intent(
+            intent,
+            destination,
+            self.map_bounds,
+            True,
+            self._now(),
+        )
+        self._run_actions(actions)
+        response.accepted = self._nav_active
+        response.message = (
+            f"목적지 요청을 수락했습니다: {destination.name}"
+            if response.accepted and destination is not None
+            else "Nav2가 목적지 요청을 수락하지 않았습니다."
+        )
+        return response
+
+    def _on_reload_destinations(
+        self,
+        _: Trigger.Request,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        """새 catalog 전체를 검증한 뒤에만 현재 메모리 목록을 교체한다."""
+        try:
+            destinations = load_destinations(self._destinations_path)
+        except (OSError, ValueError, TypeError) as exc:
+            response.success = False
+            response.message = f"목적지 reload 실패: {exc}"
+            self.get_logger().error(response.message)
+            return response
+        self.destinations = destinations
+        response.success = True
+        response.message = f"목적지 {len(destinations)}개를 다시 불러왔습니다."
+        self.get_logger().info(response.message)
+        return response
+
     def _on_emergency(self, msg: EmergencyEvent) -> None:
         self.get_logger().warn(f"긴급어 수신: '{msg.keyword}' (원문: {msg.source_text})")
         actions = self.logic.on_emergency(msg.keyword, self._now())
         self._run_actions(actions)
 
-    def _on_estop_input(self, msg: Bool) -> None:
-        self._estop_input = bool(msg.data)
-        self._update_estop()
-
-    def _on_estop_state(self, msg: Bool) -> None:
-        self._estop_latched = bool(msg.data)
-        self._update_estop()
-
-    def _update_estop(self) -> None:
-        active = self._estop_input or self._estop_latched
-        actions = self.logic.on_estop(active, self._now())
+    def _on_estop(self, msg: Bool) -> None:
+        active = bool(msg.data)
+        changed = active != self._estop_active
+        self._estop_active = active
+        actions = self.logic.on_estop(self._estop_active, self._now())
         if actions:
             self.get_logger().warn(
-                f"estop 판정={active} (입력={self._estop_input}, "
-                f"래치={self._estop_latched}) -> state={self.logic.state.value}"
+                f"중앙 estop={self._estop_active} -> state={self.logic.state.value}"
+            )
+        elif changed:
+            self.get_logger().info(
+                f"중앙 estop={self._estop_active} -> state={self.logic.state.value}"
             )
         self._run_actions(actions)
 
@@ -210,7 +328,7 @@ class MissionManagerNode(Node):
                 self.pub_tts.publish(out)
                 self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
             elif isinstance(action, CancelNav):
-                self._cancel_nav()
+                self._cancel_nav(action.destination)
             elif isinstance(action, Navigate):
                 self._start_nav(action)
 
@@ -231,20 +349,29 @@ class MissionManagerNode(Node):
             accepted = self.navigator.goToPose(goal)
             self._nav_active = bool(accepted)
         if accepted:
+            self._publish_goal_event("goal_sent", dest)
+            self._publish_goal_event("goal_accepted", dest)
             self.get_logger().info(
                 f"NavigateToPose 전송: {dest.id} ({dest.pose.x:.2f}, {dest.pose.y:.2f}, "
                 f"{dest.pose.yaw_deg:.1f}deg)"
             )
         else:
+            self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
             # goal 거부 → 다음 tick 에서 FAILED 처리되도록 상태를 만든다.
             self.get_logger().error(f"NavigateToPose goal 거부됨: {dest.id}")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
-    def _cancel_nav(self) -> None:
+    def _cancel_nav(self, destination=None) -> None:
         with self._nav_lock:
             if self._nav_active:
                 self.navigator.cancelTask()
                 self._nav_active = False
+        if destination is not None:
+            self._publish_goal_event(
+                "goal_canceled",
+                destination,
+                "비상정지 또는 Mission 요청으로 목적지가 취소되었습니다.",
+            )
         self.get_logger().warn("Nav2 goal 취소 (보조 경로 — 모터 정지 권위는 래치 체인)")
 
     def _poll_nav_status(self) -> NavStatus:
@@ -256,9 +383,23 @@ class MissionManagerNode(Node):
             self._nav_active = False
             result = self.navigator.getResult()
         if result == TaskResult.SUCCEEDED:
+            if self.logic.active_destination is not None:
+                self._publish_goal_event(
+                    "goal_succeeded", self.logic.active_destination
+                )
             return NavStatus.SUCCEEDED
         if result == TaskResult.CANCELED:
+            if self.logic.active_destination is not None:
+                self._publish_goal_event(
+                    "goal_canceled", self.logic.active_destination
+                )
             return NavStatus.CANCELED
+        if self.logic.active_destination is not None:
+            self._publish_goal_event(
+                "goal_failed",
+                self.logic.active_destination,
+                "Nav2 task failed",
+            )
         return NavStatus.FAILED
 
     def _nav_distance_remaining(self):
@@ -286,6 +427,25 @@ class MissionManagerNode(Node):
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
+
+    def _publish_goal_event(self, event: str, destination, reason: str = "") -> None:
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "event": event,
+                "map_id": self._map_id,
+                "location_id": destination.id,
+                "destination_id": destination.id,
+                "name": destination.name,
+                "x": destination.pose.x,
+                "y": destination.pose.y,
+                "yaw": destination.pose.yaw_deg,
+                "reason": reason,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+        )
+        self.pub_goal_event.publish(msg)
 
 
 def main(args=None) -> None:

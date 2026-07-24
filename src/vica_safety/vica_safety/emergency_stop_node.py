@@ -1,0 +1,301 @@
+"""ROS wiring for the central VICA emergency-stop latch."""
+
+import time
+
+import can
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
+
+from .emergency_latch import EmergencyLatch, LatchSnapshot
+from .logging_utils import log_with_severity
+
+
+PID_PNT_IO_MONITOR = 0xF1
+
+
+def f1_frame_means_estop_active(
+    data: bytes,
+    byte_1: int,
+    byte_2: int,
+    mask: int,
+    active_value: int,
+) -> bool:
+    """Decode the configured active-low bits from an MDROBOT F1 frame."""
+    if not 0 <= byte_1 < len(data) or not 0 <= byte_2 < len(data):
+        raise ValueError("F1 byte index is outside the received frame")
+    return (
+        data[byte_1] & mask == active_value
+        and data[byte_2] & mask == active_value
+    )
+
+
+def describe_latch_transition(old: str, new: str) -> tuple[str, str]:
+    """Map a latch state transition to a ROS log severity and marker."""
+    del old
+    if new == "ESTOP_ACTIVE":
+        return "error", "[ESTOP ACTIVE]"
+    if new == "FAULT":
+        return "error", "[FAULT]"
+    if new == "ESTOP_RELEASED_WAIT_RESET":
+        return "warn", "[WAIT RESET]"
+    return "info", "[ESTOP CLEARED]"
+
+
+class EmergencyStopNode(Node):
+    """Latch physical, app, and voice E-stop sources into one ROS state."""
+
+    def __init__(self) -> None:
+        super().__init__("emergency_stop_node")
+
+        self.declare_parameter("publish_hz", 20.0)
+        self.declare_parameter("input_mode", "can_f1")
+        self.declare_parameter("can_iface", "can1")
+        self.declare_parameter("driver_response_id", 0x701)
+        self.declare_parameter("f1_required_packet_index", 0)
+        self.declare_parameter("f1_check_byte_1", 2)
+        self.declare_parameter("f1_check_byte_2", 3)
+        self.declare_parameter("f1_check_mask", 0x10)
+        self.declare_parameter("f1_active_value", 0x00)
+        self.declare_parameter("f1_timeout_sec", 0.5)
+        self.declare_parameter("log_f1_frames", True)
+
+        self.publish_hz = float(self.get_parameter("publish_hz").value)
+        self.input_mode = str(self.get_parameter("input_mode").value)
+        self.can_iface = str(self.get_parameter("can_iface").value)
+        self.driver_response_id = int(
+            self.get_parameter("driver_response_id").value
+        )
+        self.f1_required_packet_index = int(
+            self.get_parameter("f1_required_packet_index").value
+        )
+        self.f1_check_byte_1 = int(
+            self.get_parameter("f1_check_byte_1").value
+        )
+        self.f1_check_byte_2 = int(
+            self.get_parameter("f1_check_byte_2").value
+        )
+        self.f1_check_mask = int(self.get_parameter("f1_check_mask").value)
+        self.f1_active_value = int(
+            self.get_parameter("f1_active_value").value
+        )
+        self.f1_timeout_sec = float(
+            self.get_parameter("f1_timeout_sec").value
+        )
+        self.log_f1_frames = bool(self.get_parameter("log_f1_frames").value)
+
+        self.latch = EmergencyLatch(
+            f1_timeout_sec=self.f1_timeout_sec,
+            initially_latched=True,
+        )
+        self.bus = None
+        self.last_f1_log_time = 0.0
+        self.last_can_error_log_time = 0.0
+        self.last_latch_state = "IDLE"
+
+        self.pub_estop = self.create_publisher(Bool, "/emergency_stop", 10)
+        self.pub_estop_state = self.create_publisher(Bool, "/estop_state", 10)
+        self.create_subscription(
+            Bool,
+            "/app_emergency_stop",
+            self.app_estop_callback,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            "/voice_emergency_stop",
+            self.voice_estop_callback,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            "/emergency_stop_input",
+            self.test_input_callback,
+            10,
+        )
+        self.create_service(
+            Trigger,
+            "/vica_safety/internal/estop_reset",
+            self.reset_callback,
+        )
+        self.create_timer(1.0 / self.publish_hz, self.publish_loop)
+
+        if self.input_mode == "can_f1":
+            self.open_can_bus()
+        elif self.input_mode != "test_topic":
+            self.get_logger().error(
+                f"[FAULT] unsupported input_mode={self.input_mode}; "
+                "physical input remains stale"
+            )
+
+        self.get_logger().warn(
+            "This software latch does not replace hardware torque removal."
+        )
+        self.get_logger().info(
+            "Publishing central latch: /emergency_stop, /estop_state"
+        )
+        self.get_logger().info(
+            "Internal service: /vica_safety/internal/estop_reset"
+        )
+
+    def open_can_bus(self) -> None:
+        """Open a read-only SocketCAN handle; stale input remains fail-safe."""
+        try:
+            self.bus = can.interface.Bus(
+                channel=self.can_iface,
+                interface="socketcan",
+            )
+        except (can.CanError, OSError) as exc:
+            self.bus = None
+            self.get_logger().error(
+                f"[FAULT] cannot open CAN F1 input iface={self.can_iface}: {exc}"
+            )
+            return
+        self.get_logger().info(
+            "CAN F1 input enabled: "
+            f"iface={self.can_iface} "
+            f"response_id=0x{self.driver_response_id:03X} "
+            f"packet_index={self.f1_required_packet_index}"
+        )
+
+    def app_estop_callback(self, msg: Bool) -> None:
+        """Update the app source without granting reset authority to false."""
+        self.latch.update_source("app", bool(msg.data), time.time())
+
+    def voice_estop_callback(self, msg: Bool) -> None:
+        """Update the voice source without granting reset authority to false."""
+        self.latch.update_source("voice", bool(msg.data), time.time())
+
+    def test_input_callback(self, msg: Bool) -> None:
+        """Use the test topic as the physical source only in explicit test mode."""
+        if self.input_mode == "test_topic":
+            self.latch.mark_physical_seen(bool(msg.data), time.time())
+
+    def reset_callback(self, request, response):
+        """Clear only the central latch after every source is safe and fresh."""
+        del request
+        accepted, message = self.latch.try_reset(time.time())
+        response.success = accepted
+        response.message = message
+        if accepted:
+            self.get_logger().info(
+                "[ESTOP LATCH CLEARED] estop=False; supervisor remains locked"
+            )
+        else:
+            self.get_logger().warn(
+                f"[RESET REJECTED] step=estop_reset reason={message}"
+            )
+        return response
+
+    def publish_loop(self) -> None:
+        """Refresh physical input, evaluate the latch, and publish it."""
+        if self.input_mode == "can_f1":
+            self.drain_can_f1_frames()
+
+        snapshot = self.latch.evaluate(time.time())
+        msg = Bool()
+        msg.data = snapshot.latched
+        self.pub_estop.publish(msg)
+        self.pub_estop_state.publish(msg)
+        self.log_transition_if_needed(snapshot)
+
+    def drain_can_f1_frames(self) -> None:
+        """Drain matching F1 frames without transmitting CAN data."""
+        if self.bus is None:
+            return
+        try:
+            for _ in range(50):
+                msg = self.bus.recv(timeout=0.0)
+                if msg is None:
+                    break
+                if msg.arbitration_id != self.driver_response_id:
+                    continue
+                data = bytes(msg.data)
+                if len(data) != 8 or data[0] != PID_PNT_IO_MONITOR:
+                    continue
+                if data[1] != self.f1_required_packet_index:
+                    continue
+                active = f1_frame_means_estop_active(
+                    data,
+                    self.f1_check_byte_1,
+                    self.f1_check_byte_2,
+                    self.f1_check_mask,
+                    self.f1_active_value,
+                )
+                now = time.time()
+                self.latch.mark_physical_seen(active, now)
+                self.log_f1_frame_if_needed(data, active, now)
+        except (can.CanError, OSError) as exc:
+            self.log_can_error_if_needed(exc)
+
+    def log_f1_frame_if_needed(
+        self,
+        data: bytes,
+        active: bool,
+        now: float,
+    ) -> None:
+        """Throttle raw F1 diagnostics while preserving state transition logs."""
+        if not self.log_f1_frames or now - self.last_f1_log_time < 0.2:
+            return
+        hex_data = " ".join(f"{value:02X}" for value in data)
+        self.get_logger().info(
+            f"F1 data={hex_data} physical_estop={active}"
+        )
+        self.last_f1_log_time = now
+
+    def log_can_error_if_needed(self, exc: Exception) -> None:
+        """Throttle repeated CAN receive failures."""
+        now = time.time()
+        if now - self.last_can_error_log_time < 1.0:
+            return
+        self.get_logger().error(f"[FAULT] CAN F1 receive failed: {exc}")
+        self.last_can_error_log_time = now
+
+    def log_transition_if_needed(self, snapshot: LatchSnapshot) -> None:
+        """Emit a severity-colored log only when the latch state changes."""
+        if "physical_stale" in snapshot.active_sources:
+            state = "FAULT"
+        elif snapshot.active_sources:
+            state = "ESTOP_ACTIVE"
+        elif snapshot.latched:
+            state = "ESTOP_RELEASED_WAIT_RESET"
+        else:
+            state = "CLEARED"
+        if state == self.last_latch_state:
+            return
+
+        severity, marker = describe_latch_transition(
+            self.last_latch_state,
+            state,
+        )
+        sources = ",".join(snapshot.active_sources) or "none"
+        text = (
+            f"{marker} {self.last_latch_state} -> {state} "
+            f"estop={snapshot.latched} source={sources}"
+        )
+        log_with_severity(self.get_logger(), severity, text)
+        self.last_latch_state = state
+
+    def destroy_node(self) -> None:
+        """Close the read-only CAN handle before shutting down ROS."""
+        if self.bus is not None:
+            try:
+                self.bus.shutdown()
+            except (can.CanError, OSError):
+                pass
+        super().destroy_node()
+
+
+def main(args=None) -> None:
+    """Run the central E-stop latch node."""
+    rclpy.init(args=args)
+    node = EmergencyStopNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
