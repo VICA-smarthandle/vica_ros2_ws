@@ -119,7 +119,14 @@ class CancelNav:
     destination: Optional[Destination] = None
 
 
-Action = Union[Say, Navigate, CancelNav]
+@dataclass(frozen=True)
+class SetNavSpeedLimit:
+    """Nav2 controller 최대속도 제한율. 0.0은 제한 해제다."""
+
+    percent: float
+
+
+Action = Union[Say, Navigate, CancelNav, SetNavSpeedLimit]
 
 
 # ---- 멘트 (v1 임시 카피 — 시각장애인 관점 감수는 미결 사항 #4) ----------------
@@ -236,10 +243,20 @@ class MissionLogic:
         confirm_timeout_sec: float = 30.0,
         dwell_sec: float = 2.0,
         estop_release_grace_sec: float = 2.0,
+        approach_slowdown_distance_m: float = 3.0,
+        approach_speed_limit_percent: float = 70.0,
     ) -> None:
+        if approach_slowdown_distance_m <= 0.0:
+            raise ValueError("approach_slowdown_distance_m must be greater than 0")
+        if not 0.0 < approach_speed_limit_percent <= 100.0:
+            raise ValueError(
+                "approach_speed_limit_percent must be in the range (0, 100]"
+            )
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
         self.estop_release_grace_sec = estop_release_grace_sec
+        self.approach_slowdown_distance_m = approach_slowdown_distance_m
+        self.approach_speed_limit_percent = approach_speed_limit_percent
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -251,6 +268,7 @@ class MissionLogic:
         self._estop_entered_at: Optional[float] = None
         self._estop_clear_since: Optional[float] = None
         self._announced_milestones: set = set()  # 이번 목적지에서 안내한 거리 지점
+        self._approach_speed_limited = False
 
     # -- 입력 이벤트 -----------------------------------------------------------
 
@@ -303,7 +321,12 @@ class MissionLogic:
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._announced_milestones = set()
-        return [Say(MSG_START.format(name=dest.name)), Navigate(dest)]
+        self._approach_speed_limited = False
+        return [
+            SetNavSpeedLimit(0.0),
+            Say(MSG_START.format(name=dest.name)),
+            Navigate(dest),
+        ]
 
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
@@ -316,6 +339,7 @@ class MissionLogic:
 
         actions: list = []
         if self.state == State.NAVIGATING:
+            actions.append(SetNavSpeedLimit(0.0))
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
         self._enter_estopped(now)
@@ -331,6 +355,7 @@ class MissionLogic:
             if self.state != State.ESTOPPED:
                 actions: list = []
                 if self.state == State.NAVIGATING:
+                    actions.append(SetNavSpeedLimit(0.0))
                     actions.append(CancelNav(self.active_destination))
                 self._enter_estopped(now)
                 actions.append(Say(MSG_ESTOPPED, priority="emergency"))
@@ -364,8 +389,20 @@ class MissionLogic:
                 )
                 self.state = State.ARRIVED
                 self._dwell_until = now + self.dwell_sec
+                self._approach_speed_limited = False
+                actions.append(SetNavSpeedLimit(0.0))
                 actions.append(Say(text))
             elif nav_status == NavStatus.RUNNING:
+                if (
+                    distance_remaining is not None
+                    and 0.0 < distance_remaining
+                    <= self.approach_slowdown_distance_m
+                    and not self._approach_speed_limited
+                ):
+                    self._approach_speed_limited = True
+                    actions.append(
+                        SetNavSpeedLimit(self.approach_speed_limit_percent)
+                    )
                 milestone = self._crossed_milestone(distance_remaining)
                 if milestone is not None:
                     actions.append(
@@ -376,6 +413,8 @@ class MissionLogic:
                 # 여기 도달한 취소/실패는 주행 실패로 취급한다.
                 self.state = State.FAILED
                 self._dwell_until = now + self.dwell_sec
+                self._approach_speed_limited = False
+                actions.append(SetNavSpeedLimit(0.0))
                 actions.append(Say(MSG_NAV_FAILED))
 
         elif self.state in (State.ARRIVED, State.FAILED):
@@ -429,6 +468,7 @@ class MissionLogic:
         self._estop_entered_at = now
         self._estop_clear_since = None
         self._announced_milestones = set()
+        self._approach_speed_limited = False
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -439,3 +479,4 @@ class MissionLogic:
         self._estop_entered_at = None
         self._estop_clear_since = None
         self._announced_milestones = set()
+        self._approach_speed_limited = False

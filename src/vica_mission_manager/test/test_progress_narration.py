@@ -15,6 +15,7 @@ from vica_mission_manager.mission_logic import (
     NavStatus,
     Pose2D,
     Say,
+    SetNavSpeedLimit,
     State,
 )
 
@@ -52,6 +53,46 @@ def navigating() -> MissionLogic:
 
 def _spoken(actions) -> list:
     return [a.text for a in actions if isinstance(a, Say)]
+
+
+def _speed_limits(actions) -> list:
+    return [
+        action.percent
+        for action in actions
+        if isinstance(action, SetNavSpeedLimit)
+    ]
+
+
+def test_limits_speed_once_when_entering_three_meter_approach_zone(navigating):
+    assert _speed_limits(
+        navigating.on_tick(1.0, NavStatus.RUNNING, 3.1)
+    ) == []
+    assert _speed_limits(
+        navigating.on_tick(2.0, NavStatus.RUNNING, 3.0)
+    ) == [70.0]
+    assert _speed_limits(
+        navigating.on_tick(3.0, NavStatus.RUNNING, 2.0)
+    ) == []
+    # 재계획으로 남은 거리가 늘어도 같은 Goal에서는 제한을 유지한다.
+    assert _speed_limits(
+        navigating.on_tick(4.0, NavStatus.RUNNING, 3.5)
+    ) == []
+
+
+@pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED])
+def test_clears_approach_speed_limit_when_navigation_finishes(
+    navigating,
+    status,
+):
+    navigating.on_tick(1.0, NavStatus.RUNNING, 2.5)
+
+    assert _speed_limits(navigating.on_tick(2.0, status)) == [0.0]
+
+
+def test_clears_approach_speed_limit_when_estop_cancels_goal(navigating):
+    navigating.on_tick(1.0, NavStatus.RUNNING, 2.5)
+
+    assert _speed_limits(navigating.on_estop(True, 2.0)) == [0.0]
 
 
 def test_announces_when_crossing_milestone(navigating):

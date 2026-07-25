@@ -41,6 +41,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="2.0"),
+            DeclareLaunchArgument(
+                "approach_slowdown_distance_m",
+                default_value="3.0",
+            ),
+            DeclareLaunchArgument(
+                "approach_speed_limit_percent",
+                default_value="70.0",
+            ),
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
             DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
@@ -58,6 +66,12 @@ def generate_launch_description() -> LaunchDescription:
                         "confirm_timeout_sec": LaunchConfiguration("confirm_timeout_sec"),
                         "estop_release_grace_sec": LaunchConfiguration(
                             "estop_release_grace_sec"
+                        ),
+                        "approach_slowdown_distance_m": LaunchConfiguration(
+                            "approach_slowdown_distance_m"
+                        ),
+                        "approach_speed_limit_percent": LaunchConfiguration(
+                            "approach_speed_limit_percent"
                         ),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),

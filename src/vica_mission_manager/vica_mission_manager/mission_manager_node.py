@@ -26,6 +26,7 @@ from uuid import UUID
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from nav2_msgs.msg import SpeedLimit
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -44,6 +45,7 @@ from .mission_logic import (
     Navigate,
     NavStatus,
     Say,
+    SetNavSpeedLimit,
     State,
     check_gate,
     yaw_deg_to_quaternion,
@@ -73,6 +75,8 @@ class MissionManagerNode(Node):
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("confirm_timeout_sec", 30.0)
         self.declare_parameter("estop_release_grace_sec", 2.0)
+        self.declare_parameter("approach_slowdown_distance_m", 3.0)
+        self.declare_parameter("approach_speed_limit_percent", 70.0)
         self.declare_parameter("tick_hz", 5.0)
         # RobotState 층/건물 값 소스는 미결 사항 #5 — 일단 파라미터.
         self.declare_parameter("current_floor", -1)
@@ -108,6 +112,12 @@ class MissionManagerNode(Node):
         self.logic = MissionLogic(
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
+            approach_slowdown_distance_m=float(
+                self.get_parameter("approach_slowdown_distance_m").value
+            ),
+            approach_speed_limit_percent=float(
+                self.get_parameter("approach_speed_limit_percent").value
+            ),
         )
 
         # Nav2 커맨더. 별도 노드로 두고 executor 에 넣지 않는다.
@@ -147,6 +157,12 @@ class MissionManagerNode(Node):
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
         self.pub_state = self.create_publisher(RobotState, "/vica/robot_state", 10)
         self.pub_goal_event = self.create_publisher(String, "/vica_goal_event", 10)
+        self.pub_speed_limit = self.create_publisher(
+            SpeedLimit,
+            "/speed_limit",
+            10,
+        )
+        self._publish_nav_speed_limit(0.0)
         self.create_service(
             RequestDestination,
             "/vica/mission/request_destination",
@@ -331,6 +347,18 @@ class MissionManagerNode(Node):
                 self._cancel_nav(action.destination)
             elif isinstance(action, Navigate):
                 self._start_nav(action)
+            elif isinstance(action, SetNavSpeedLimit):
+                self._publish_nav_speed_limit(action.percent)
+
+    def _publish_nav_speed_limit(self, percent: float) -> None:
+        msg = SpeedLimit()
+        msg.percentage = True
+        msg.speed_limit = float(percent)
+        self.pub_speed_limit.publish(msg)
+        if percent == 0.0:
+            self.get_logger().info("Nav2 접근 속도 제한 해제")
+        else:
+            self.get_logger().info(f"Nav2 접근 속도 제한: 최대속도의 {percent:.1f}%")
 
     def _start_nav(self, action: Navigate) -> None:
         dest = action.destination
