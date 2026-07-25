@@ -60,4 +60,14 @@ id_ed25519*
 # External ROS2 dependencies managed by vica.repos
 src/realsense-ros/
 src/ydlidar_ros2_driver/
+
+# nvblox / Isaac ROS 플러그인 소스는 Isaac ROS Docker workspace(isaac_ros-dev)에서
+# symlink로 연결한다(머신 종속 절대경로 → 커밋 금지). Host Nav2가 NvbloxCostmapLayer와
+# DistanceMapSlice를 로드하려면 이 소스가 있어야 한다. 복구:
+#   ln -s ~/workspaces/isaac_ros-dev/src/isaac_ros_nvblox/nvblox_msgs   src/nvblox_msgs
+#   ln -s ~/workspaces/isaac_ros-dev/src/isaac_ros_nvblox/nvblox_nav2   src/nvblox_nav2
+#   ln -s ~/workspaces/isaac_ros-dev/src/isaac_ros_common               src/isaac_ros_common
+src/nvblox_msgs
+src/nvblox_nav2
+src/isaac_ros_common
 AGENTS.md

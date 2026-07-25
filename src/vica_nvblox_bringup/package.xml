@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_nvblox_bringup</name>
+  <version>0.0.0</version>
+  <description>
+    VICA D455 + nvblox bringup. Isaac ROS Docker에서 nvblox_node를 실행하는
+    launch/config를 고정한다(기존 run_nvblox.sh 수동 명령 대체). global_frame,
+    카메라 remap, esdf slice 높이(바닥 제외)를 VICA 구성에 맞춰 관리한다.
+  </description>
+  <maintainer email="2561110043@office.kopo.ac.kr">ji_w</maintainer>
+  <license>TODO: License declaration</license>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <!-- 런타임 의존: Isaac ROS Docker workspace에서만 resolve된다. -->
+  <exec_depend>nvblox_ros</exec_depend>
+  <exec_depend>nvblox_examples_bringup</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
