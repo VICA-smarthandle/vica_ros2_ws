@@ -10,7 +10,7 @@ VICA는 Jetson Orin NX 16GB 기반 ROS2 Humble 실내 안내 AMR 프로젝트입
 
 VICA의 주요 기능은 다음과 같습니다.
 
-* YDLIDAR G2 기반 2D LiDAR SLAM
+* RPLIDAR 기반 2D LiDAR 입력(YDLIDAR G2 수리 중)
 * Cartographer 2D 기반 지도 작성
 * Intel RealSense D455 기반 Visual SLAM
 * Nav2 기반 목적지 자율주행
@@ -31,7 +31,7 @@ VICA의 주요 기능은 다음과 같습니다.
 | JetPack       | R36 / JetPack 6.x                     |
 | ROS2          | Humble                                |
 | Camera        | Intel RealSense D455                  |
-| LiDAR         | YDLIDAR G2                            |
+| LiDAR         | RPLIDAR(현재), YDLIDAR G2(수리 중)   |
 | Motor Driver  | MDROBOT BLDC Driver, CAN              |
 | CAN Interface | can1                                  |
 
@@ -47,6 +47,7 @@ VICA의 주요 기능은 다음과 같습니다.
 
 * `realsense-ros`
 * `ydlidar_ros2_driver`
+* `rplidar_ros`
 * `robot_localization`
 * `python3-can`
 
@@ -153,7 +154,10 @@ candump can1
 ## 8. Current SLAM / Navigation Policy
 
 * 2D SLAM은 Cartographer 2D 중심으로 구성합니다.
-* Visual SLAM과 nvblox는 Isaac ROS Docker에서 분리 운영합니다.
+* D455와 nvblox node는 Isaac ROS Docker에서 실행하고, Nav2는 Host에서 실행합니다.
+* local costmap은 `/scan` voxel layer와
+  `/nvblox_node/static_map_slice` nvblox layer를 함께 사용합니다.
+* Docker 쪽 launch/config 정본은 `src/vica_nvblox_bringup/`입니다.
 * Nav2는 지도 기반 목적지 자율주행에 사용합니다.
 * wheel odometry와 IMU의 EKF 설정·bringup 정본은 `src/vica_localization/`입니다.
 * 표준 계약은 `/wheel/odom + /imu/base_link → EKF → /odom`입니다.
@@ -186,4 +190,7 @@ Nav2 controller /cmd_vel_nav
 * 실행 중인 `can1`을 임의로 down/up 하지 않습니다.
 * 비상정지와 명령 timeout은 Safety Supervisor가 정지로 처리합니다.
 * 장애물 회피·감속은 Nav2 계층의 책임이며 Safety Supervisor나 물리 E-stop을 대체하지 않습니다.
-* 중앙 E-stop 래치와 관리자 앱 단일 reset은 아직 구현·종단 검증이 필요한 `[TARGET]`입니다.
+* 중앙 E-stop 래치, 앱·유지보수 reset 오케스트레이션은
+  `src/vica_safety/`에 구현되어 있습니다.
+* 실제 F1·Nav2·Safety·CAN·motor 종단과 관리자 인증은 아직 검증 또는 구현되지
+  않았으므로 각각 `[미검증]`, `[GAP]`으로 관리합니다.

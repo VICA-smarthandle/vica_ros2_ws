@@ -23,6 +23,12 @@ Nav2 `NavigateToPose` Goal을 생성한다.
 | 발행 | `/vica_goal_event` | `std_msgs/msg/String` JSON |
 | 발행 | `/vica/tts_request` | `std_msgs/msg/String` |
 | 발행 | `/vica/robot_state` | `vica_interfaces/msg/RobotState` |
+| 발행 | `/speed_limit` | `nav2_msgs/msg/SpeedLimit` |
+
+Nav2 feedback의 잔여거리가 기본 3.0 m 이하가 되면 Goal별로 70% 속도 제한을 래치한다.
+성공·실패·취소·E-stop과 새 Goal 시작 시 `speed_limit=0.0`으로 해제한다. 거리와 비율은
+`approach_slowdown_distance_m`, `approach_speed_limit_percent` launch parameter로
+조정할 수 있으며 실제 주행 종단은 `[미검증]`이다.
 
 목적지 정본은 다음 지도별 파일이다.
 
