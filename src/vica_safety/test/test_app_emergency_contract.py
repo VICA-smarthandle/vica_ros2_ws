@@ -1,5 +1,4 @@
 import threading
-import time
 from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus
@@ -10,6 +9,10 @@ from vica_safety.app_emergency_node import (
     build_app_state,
     has_active_navigation_goals,
 )
+
+# 모든 harness 시각은 정수 나노초(steady clock) 기준이다.
+NOW_NS = 1_000_000_000_000
+OLD_NS = NOW_NS - 60_000_000_000  # 60초 전
 
 
 class UnexpectedCancelClient:
@@ -23,11 +26,14 @@ class UnexpectedCancelClient:
 class NavigationCheckHarness:
     """Minimal state used to exercise the real navigation check method."""
 
-    def __init__(self, statuses, last_status_time):
+    def __init__(self, statuses, last_status_ns):
         self.nav_statuses = statuses
-        self.last_nav_status_time = last_status_time
+        self.last_nav_status_ns = last_status_ns
         self.state_condition = threading.Condition()
         self.cancel_client = UnexpectedCancelClient()
+
+    def now_ns(self):
+        return NOW_NS
 
 
 class RecordingCancelClient:
@@ -59,7 +65,7 @@ class ActiveNavigationHarness(NavigationCheckHarness):
     """Simulate an active goal becoming terminal after cancel."""
 
     def __init__(self):
-        super().__init__([GoalStatus.STATUS_EXECUTING], time.time())
+        super().__init__([GoalStatus.STATUS_EXECUTING], NOW_NS)
         self.cancel_client = RecordingCancelClient()
         self.call_count = 0
 
@@ -73,7 +79,8 @@ class ActiveNavigationHarness(NavigationCheckHarness):
 
     def wait_for_condition(self, predicate):
         self.nav_statuses = [GoalStatus.STATUS_CANCELED]
-        self.last_nav_status_time = time.time()
+        # cancel 요청 시각(now_ns) 이후에 도착한 새 terminal 상태를 모사.
+        self.last_nav_status_ns = self.now_ns() + 1
         return predicate()
 
 
@@ -98,7 +105,7 @@ def test_terminal_nav_statuses_are_not_active():
 
 
 def test_fresh_idle_nav_status_skips_cancel_service():
-    harness = NavigationCheckHarness([], time.time())
+    harness = NavigationCheckHarness([], NOW_NS)
 
     accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
 
@@ -109,7 +116,7 @@ def test_fresh_idle_nav_status_skips_cancel_service():
 def test_old_terminal_nav_status_skips_cancel_service():
     harness = NavigationCheckHarness(
         [GoalStatus.STATUS_CANCELED],
-        time.time() - 60.0,
+        OLD_NS,
     )
 
     accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
@@ -119,7 +126,7 @@ def test_old_terminal_nav_status_skips_cancel_service():
 
 
 def test_nav2_never_seen_and_server_absent_skips_goal_check():
-    harness = NavigationCheckHarness([], 0.0)
+    harness = NavigationCheckHarness([], None)
     harness.cancel_client = AvailabilityCancelClient(False)
 
     accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
@@ -130,7 +137,7 @@ def test_nav2_never_seen_and_server_absent_skips_goal_check():
 
 
 def test_nav2_server_present_without_status_skips_goal_check():
-    harness = NavigationCheckHarness([], 0.0)
+    harness = NavigationCheckHarness([], None)
     harness.cancel_client = AvailabilityCancelClient(True)
 
     accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
@@ -153,7 +160,7 @@ def test_active_nav_goal_is_canceled_and_confirmed_terminal():
 
 def test_old_active_nav_goal_is_still_canceled_and_confirmed_terminal():
     harness = ActiveNavigationHarness()
-    harness.last_nav_status_time = time.time() - 60.0
+    harness.last_nav_status_ns = OLD_NS
 
     accepted, message = AppEmergencyNode.ensure_no_active_nav_goal(harness)
 
@@ -165,7 +172,7 @@ def test_old_active_nav_goal_is_still_canceled_and_confirmed_terminal():
 
 def test_old_active_status_accepts_fresh_cancel_response_with_no_goals():
     harness = ActiveNavigationHarness()
-    harness.last_nav_status_time = time.time() - 60.0
+    harness.last_nav_status_ns = OLD_NS
 
     def no_active_goals(client, request):
         del client, request

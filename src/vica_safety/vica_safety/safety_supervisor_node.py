@@ -1,13 +1,13 @@
 """ROS wiring for the VICA drive-command safety gate."""
 
-import time
-
 from geometry_msgs.msg import Twist
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
+from .freshness import is_fresh_ns, sec_to_ns
 from .logging_utils import log_with_severity
 from .safety_gate import SafetyGate, SafetyState
 
@@ -81,11 +81,16 @@ class SafetySupervisorNode(Node):
             self.get_parameter("max_angular_radps").value
         )
 
+        # 모든 watchdog은 단일 STEADY_TIME clock과 정수 나노초를 쓴다.
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.cmd_timeout_ns = sec_to_ns(self.cmd_timeout_sec)
+        self.estop_timeout_ns = sec_to_ns(self.estop_timeout_sec)
+
         self.gate = SafetyGate()
         self.last_cmd = Twist()
-        self.last_cmd_time = 0.0
+        self.last_cmd_ns = None
         self.estop_active = True
-        self.last_estop_time = 0.0
+        self.last_estop_ns = None
         self.last_logged_state = SafetyState.IDLE
 
         self.pub_cmd_safe = self.create_publisher(Twist, "/cmd_vel_safe", 10)
@@ -107,7 +112,11 @@ class SafetySupervisorNode(Node):
             "/vica_safety/internal/supervisor_reset",
             self.reset_callback,
         )
-        self.create_timer(1.0 / self.publish_hz, self.control_loop)
+        self.create_timer(
+            1.0 / self.publish_hz,
+            self.control_loop,
+            clock=self.steady_clock,
+        )
 
         self.get_logger().warn(
             "Safety supervisor is a software guard; hardware E-stop remains final."
@@ -118,20 +127,24 @@ class SafetySupervisorNode(Node):
             "Internal service: /vica_safety/internal/supervisor_reset"
         )
 
+    def now_ns(self) -> int:
+        """Return the current STEADY_TIME instant as integer nanoseconds."""
+        return self.steady_clock.now().nanoseconds
+
     def cmd_requested_callback(self, msg: Twist) -> None:
         """Store the requested command for the periodic safety decision."""
         self.last_cmd = msg
-        self.last_cmd_time = time.time()
+        self.last_cmd_ns = self.now_ns()
 
     def estop_callback(self, msg: Bool) -> None:
         """Refresh the authoritative central E-stop latch input."""
         self.estop_active = bool(msg.data)
-        self.last_estop_time = time.time()
+        self.last_estop_ns = self.now_ns()
 
     def reset_callback(self, request, response):
         """Re-arm drive output only after fresh E-stop and zero command checks."""
         del request
-        now = time.time()
+        now = self.now_ns()
         decision = self.gate.request_reset(
             estop_active=self.estop_active,
             estop_fresh=self.estop_is_fresh(now),
@@ -157,7 +170,7 @@ class SafetySupervisorNode(Node):
 
     def control_loop(self) -> None:
         """Publish zero by default and forward only in the RUNNING state."""
-        now = time.time()
+        now = self.now_ns()
         cmd_alive = self.cmd_is_alive(now)
         state = self.gate.state_for_command(
             estop_active=self.estop_active,
@@ -180,21 +193,23 @@ class SafetySupervisorNode(Node):
         self.pub_state.publish(state_msg)
         self.log_transition_if_needed(state)
 
-    def estop_is_fresh(self, now: float) -> bool:
-        """Reject missing or stale central E-stop input."""
-        return (
-            self.last_estop_time > 0.0
-            and now - self.last_estop_time <= self.estop_timeout_sec
+    def estop_is_fresh(self, now: int) -> bool:
+        """Reject missing, stale, or time-reversed central E-stop input."""
+        return is_fresh_ns(
+            self.last_estop_ns,
+            now_ns=now,
+            timeout_ns=self.estop_timeout_ns,
         )
 
-    def cmd_is_alive(self, now: float) -> bool:
-        """Reject stale drive commands from forwarding."""
-        return (
-            self.last_cmd_time > 0.0
-            and now - self.last_cmd_time <= self.cmd_timeout_sec
+    def cmd_is_alive(self, now: int) -> bool:
+        """Reject stale or time-reversed drive commands from forwarding."""
+        return is_fresh_ns(
+            self.last_cmd_ns,
+            now_ns=now,
+            timeout_ns=self.cmd_timeout_ns,
         )
 
-    def current_requested_cmd_is_zero(self, now: float) -> bool:
+    def current_requested_cmd_is_zero(self, now: int) -> bool:
         """Treat a timed-out command as zero for reset, never for forwarding."""
         return not self.cmd_is_alive(now) or is_zero_twist(self.last_cmd)
 

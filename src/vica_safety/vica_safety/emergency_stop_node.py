@@ -1,14 +1,14 @@
 """ROS wiring for the central VICA emergency-stop latch."""
 
-import time
-
 import can
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
 from .emergency_latch import EmergencyLatch, LatchSnapshot
+from .freshness import sec_to_ns
 from .logging_utils import log_with_severity
 
 
@@ -85,13 +85,17 @@ class EmergencyStopNode(Node):
         )
         self.log_f1_frames = bool(self.get_parameter("log_f1_frames").value)
 
+        # 모든 watchdog·throttle은 단일 STEADY_TIME clock과 정수 나노초를 쓴다.
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.f1_timeout_ns = sec_to_ns(self.f1_timeout_sec)
+
         self.latch = EmergencyLatch(
-            f1_timeout_sec=self.f1_timeout_sec,
+            f1_timeout_ns=self.f1_timeout_ns,
             initially_latched=True,
         )
         self.bus = None
-        self.last_f1_log_time = 0.0
-        self.last_can_error_log_time = 0.0
+        self.last_f1_log_ns = None
+        self.last_can_error_log_ns = None
         self.last_latch_state = "IDLE"
 
         self.pub_estop = self.create_publisher(Bool, "/emergency_stop", 10)
@@ -119,7 +123,11 @@ class EmergencyStopNode(Node):
             "/vica_safety/internal/estop_reset",
             self.reset_callback,
         )
-        self.create_timer(1.0 / self.publish_hz, self.publish_loop)
+        self.create_timer(
+            1.0 / self.publish_hz,
+            self.publish_loop,
+            clock=self.steady_clock,
+        )
 
         if self.input_mode == "can_f1":
             self.open_can_bus()
@@ -159,23 +167,27 @@ class EmergencyStopNode(Node):
             f"packet_index={self.f1_required_packet_index}"
         )
 
+    def now_ns(self) -> int:
+        """Return the current STEADY_TIME instant as integer nanoseconds."""
+        return self.steady_clock.now().nanoseconds
+
     def app_estop_callback(self, msg: Bool) -> None:
         """Update the app source without granting reset authority to false."""
-        self.latch.update_source("app", bool(msg.data), time.time())
+        self.latch.update_source("app", bool(msg.data), self.now_ns())
 
     def voice_estop_callback(self, msg: Bool) -> None:
         """Update the voice source without granting reset authority to false."""
-        self.latch.update_source("voice", bool(msg.data), time.time())
+        self.latch.update_source("voice", bool(msg.data), self.now_ns())
 
     def test_input_callback(self, msg: Bool) -> None:
         """Use the test topic as the physical source only in explicit test mode."""
         if self.input_mode == "test_topic":
-            self.latch.mark_physical_seen(bool(msg.data), time.time())
+            self.latch.mark_physical_seen(bool(msg.data), self.now_ns())
 
     def reset_callback(self, request, response):
         """Clear only the central latch after every source is safe and fresh."""
         del request
-        accepted, message = self.latch.try_reset(time.time())
+        accepted, message = self.latch.try_reset(self.now_ns())
         response.success = accepted
         response.message = message
         if accepted:
@@ -193,7 +205,7 @@ class EmergencyStopNode(Node):
         if self.input_mode == "can_f1":
             self.drain_can_f1_frames()
 
-        snapshot = self.latch.evaluate(time.time())
+        snapshot = self.latch.evaluate(self.now_ns())
         msg = Bool()
         msg.data = snapshot.latched
         self.pub_estop.publish(msg)
@@ -223,7 +235,7 @@ class EmergencyStopNode(Node):
                     self.f1_check_mask,
                     self.f1_active_value,
                 )
-                now = time.time()
+                now = self.now_ns()
                 self.latch.mark_physical_seen(active, now)
                 self.log_f1_frame_if_needed(data, active, now)
         except (can.CanError, OSError) as exc:
@@ -233,24 +245,32 @@ class EmergencyStopNode(Node):
         self,
         data: bytes,
         active: bool,
-        now: float,
+        now: int,
     ) -> None:
         """Throttle raw F1 diagnostics while preserving state transition logs."""
-        if not self.log_f1_frames or now - self.last_f1_log_time < 0.2:
+        if not self.log_f1_frames:
+            return
+        if (
+            self.last_f1_log_ns is not None
+            and 0 <= now - self.last_f1_log_ns < sec_to_ns(0.2)
+        ):
             return
         hex_data = " ".join(f"{value:02X}" for value in data)
         self.get_logger().info(
             f"F1 data={hex_data} physical_estop={active}"
         )
-        self.last_f1_log_time = now
+        self.last_f1_log_ns = now
 
     def log_can_error_if_needed(self, exc: Exception) -> None:
         """Throttle repeated CAN receive failures."""
-        now = time.time()
-        if now - self.last_can_error_log_time < 1.0:
+        now = self.now_ns()
+        if (
+            self.last_can_error_log_ns is not None
+            and 0 <= now - self.last_can_error_log_ns < sec_to_ns(1.0)
+        ):
             return
         self.get_logger().error(f"[FAULT] CAN F1 receive failed: {exc}")
-        self.last_can_error_log_time = now
+        self.last_can_error_log_ns = now
 
     def log_transition_if_needed(self, snapshot: LatchSnapshot) -> None:
         """Emit a severity-colored log only when the latch state changes."""
