@@ -31,6 +31,22 @@ def f1_frame_means_estop_active(
     )
 
 
+def classify_latch_state(snapshot: LatchSnapshot) -> str:
+    """Name the operator-facing latch state for a snapshot.
+
+    입력이 끊긴 원인(`*_stale`)은 FAULT다. 모터 노드가 죽어 `/motor/can_ok`가
+    끊긴 경우를 ESTOP_ACTIVE로 찍으면 아무도 누르지 않은 물리 버튼을 찾게 된다.
+    """
+    stale_sources = ("physical_stale", "motor_can_stale")
+    if any(source in snapshot.active_sources for source in stale_sources):
+        return "FAULT"
+    if snapshot.active_sources:
+        return "ESTOP_ACTIVE"
+    if snapshot.latched:
+        return "ESTOP_RELEASED_WAIT_RESET"
+    return "CLEARED"
+
+
 def describe_latch_transition(old: str, new: str) -> tuple[str, str]:
     """Map a latch state transition to a ROS log severity and marker."""
     del old
@@ -294,14 +310,7 @@ class EmergencyStopNode(Node):
 
     def log_transition_if_needed(self, snapshot: LatchSnapshot) -> None:
         """Emit a severity-colored log only when the latch state changes."""
-        if "physical_stale" in snapshot.active_sources:
-            state = "FAULT"
-        elif snapshot.active_sources:
-            state = "ESTOP_ACTIVE"
-        elif snapshot.latched:
-            state = "ESTOP_RELEASED_WAIT_RESET"
-        else:
-            state = "CLEARED"
+        state = classify_latch_state(snapshot)
         if state == self.last_latch_state:
             return
 
