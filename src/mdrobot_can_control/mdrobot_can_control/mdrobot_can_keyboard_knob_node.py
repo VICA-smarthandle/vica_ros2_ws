@@ -4,10 +4,13 @@ import time
 import can
 
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
 from .can_preflight import require_can_interface_up
+from .freshness import is_fresh_ns, sec_to_ns
+from .motor_watchdog import motor_speed_ratio
 
 
 # ============================================================
@@ -114,6 +117,12 @@ class MdrobotCanKeyboardKnobNode(Node):
         self.knob_timeout_sec = float(self.get_parameter("knob_timeout_sec").value)
         self.cmd_timeout_sec = float(self.get_parameter("cmd_timeout_sec").value)
 
+        # 최종 구동단 watchdog은 단일 STEADY_TIME clock과 정수 나노초를 쓴다.
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.knob_timeout_ns = sec_to_ns(self.knob_timeout_sec)
+        self.cmd_timeout_ns = sec_to_ns(self.cmd_timeout_sec)
+        self.resend_interval_ns = sec_to_ns(self.resend_interval_sec)
+
         self.invert_mot1 = bool(self.get_parameter("invert_mot1").value)
         self.invert_mot2 = bool(self.get_parameter("invert_mot2").value)
 
@@ -136,16 +145,16 @@ class MdrobotCanKeyboardKnobNode(Node):
         # =========================
         self.knob1 = 0
         self.knob2 = 0
-        self.last_knob_time = 0.0
+        self.last_knob_ns = None
 
         self.cmd_linear_x = 0.0
         self.cmd_angular_z = 0.0
-        self.last_cmd_time = 0.0
+        self.last_cmd_ns = None
 
-        self.last_print_time = 0.0
+        self.last_print_ns = None
         self.prev_rpm_mot1 = None
         self.prev_rpm_mot2 = None
-        self.last_send_time = 0.0
+        self.last_send_ns = None
 
         # =========================
         # CAN 초기화
@@ -175,12 +184,17 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.timer = self.create_timer(
             1.0 / self.send_hz,
-            self.control_loop
+            self.control_loop,
+            clock=self.steady_clock
         )
 
         self.get_logger().info("Subscribed: /cmd_vel_safe")
         self.get_logger().info("knob1 = 최고속도 제한기")
         self.get_logger().info("Ready.")
+
+    def now_ns(self) -> int:
+        """Return the current STEADY_TIME instant as integer nanoseconds."""
+        return self.steady_clock.now().nanoseconds
 
     # ============================================================
     # CAN 함수
@@ -227,7 +241,7 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.bus.send(msg)
 
-    def drain_can_rx(self):
+    def drain_can_rx(self, now_ns: int):
         """
         F1 monitor packet에서 knob1, knob2 값 읽기.
 
@@ -236,6 +250,10 @@ class MdrobotCanKeyboardKnobNode(Node):
           d[1] == 0
           d[6] = knob1, 0~100
           d[7] = knob2, 0~100
+
+        stamp는 호출자가 넘긴 사이클 기준 시각(`now_ns`)을 그대로 쓴다. 여기서
+        시각을 다시 조회하면 판정 기준 `now`보다 나중이 되어, 방금 정상 수신한
+        knob이 음수 age(시간 역전)로 stale 판정된다.
         """
         # 버스 혼잡을 줄이기 위해 사이클당 읽는 CAN 프레임 수를 제한합니다.
         for _ in range(50):
@@ -248,7 +266,7 @@ class MdrobotCanKeyboardKnobNode(Node):
                 if d[1] == 0:
                     self.knob1 = clamp(int(d[6]), 0, 100)
                     self.knob2 = clamp(int(d[7]), 0, 100)
-                    self.last_knob_time = time.time()
+                    self.last_knob_ns = now_ns
 
     # ============================================================
     # ROS 콜백
@@ -256,40 +274,38 @@ class MdrobotCanKeyboardKnobNode(Node):
     def cmd_vel_callback(self, msg: Twist):
         self.cmd_linear_x = float(msg.linear.x)
         self.cmd_angular_z = float(msg.angular.z)
-        self.last_cmd_time = time.time()
+        self.last_cmd_ns = self.now_ns()
 
     # ============================================================
     # 메인 루프
     # ============================================================
     def control_loop(self):
-        now = time.time()
+        now = self.now_ns()
 
-        self.drain_can_rx()
+        self.drain_can_rx(now)
 
         # -------------------------
-        # knob 상태 확인
+        # cmd·knob 신선도 판정 (단일 STEADY_TIME clock)
+        # cmd 또는 knob 중 하나라도 stale·시간역전·미수신이면 0.0 → 정지
         # -------------------------
-        knob_alive = (
-            self.last_knob_time > 0.0 and
-            (now - self.last_knob_time) <= self.knob_timeout_sec
+        speed_ratio = motor_speed_ratio(
+            cmd_last_ns=self.last_cmd_ns,
+            knob_last_ns=self.last_knob_ns,
+            knob_pct=int(self.knob1),
+            now_ns=now,
+            cmd_timeout_ns=self.cmd_timeout_ns,
+            knob_timeout_ns=self.knob_timeout_ns,
+            deadzone_pct=self.deadzone_pct,
         )
 
-        if not knob_alive:
-            knob_pct = 0
-        else:
-            knob_pct = int(self.knob1)
-
-        if knob_pct <= self.deadzone_pct:
-            knob_pct = 0
-
-        speed_ratio = knob_pct / 100.0
-
         # -------------------------
-        # /cmd_vel_safe 상태 확인
+        # /cmd_vel_safe 원시 명령 (stale이면 speed_ratio가 이미 0이지만
+        # cmd 신선도를 다시 확인해 원시값도 0으로 강제, 이중 방어)
         # -------------------------
-        cmd_alive = (
-            self.last_cmd_time > 0.0 and
-            (now - self.last_cmd_time) <= self.cmd_timeout_sec
+        cmd_alive = is_fresh_ns(
+            self.last_cmd_ns,
+            now_ns=now,
+            timeout_ns=self.cmd_timeout_ns,
         )
 
         if not cmd_alive:
@@ -351,21 +367,29 @@ class MdrobotCanKeyboardKnobNode(Node):
         rpm_mot2 = self.apply_min_rpm(rpm_mot2)
 
         # 타이머마다 동일한 CAN 속도 명령을 반복 전송하지 않습니다.
-        # 모터 명령이 바뀌었을 때만 전송하고, 최소 `resend_interval_sec`만큼 간격을 둡니다.
+        # 모터 명령이 바뀌었을 때만 전송하고, 최소 `resend_interval_ns`만큼 간격을 둡니다.
+        resend_due = (
+            self.last_send_ns is None or
+            (now - self.last_send_ns) >= self.resend_interval_ns
+        )
         if (
             self.prev_rpm_mot1 != rpm_mot1 or
             self.prev_rpm_mot2 != rpm_mot2 or
-            (now - self.last_send_time) >= self.resend_interval_sec
+            resend_due
         ):
             self.send_vel_cmd(rpm_mot1, rpm_mot2, ret_type=RET_TYPE_ODOM)
             self.prev_rpm_mot1 = rpm_mot1
             self.prev_rpm_mot2 = rpm_mot2
-            self.last_send_time = now
+            self.last_send_ns = now
 
         # -------------------------
         # 디버그 출력
         # -------------------------
-        if now - self.last_print_time > 0.2:
+        print_due = (
+            self.last_print_ns is None or
+            (now - self.last_print_ns) > sec_to_ns(0.2)
+        )
+        if print_due:
             self.get_logger().info(
                 f"knob1={self.knob1:3d}% "
                 f"limit=({allowed_linear:.2f}m/s,{allowed_angular:.2f}rad/s) "
@@ -373,7 +397,7 @@ class MdrobotCanKeyboardKnobNode(Node):
                 f"out=({limited_linear_x:+.2f},{limited_angular_z:+.2f}) "
                 f"rpm MOT1/R={rpm_mot1:+4d}, MOT2/L={rpm_mot2:+4d}"
             )
-            self.last_print_time = now
+            self.last_print_ns = now
 
     def mps_to_rpm(self, v_mps: float) -> float:
         circumference = 2.0 * math.pi * self.wheel_radius_m

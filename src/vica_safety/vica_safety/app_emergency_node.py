@@ -10,12 +10,14 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_action_status_default
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
+from .freshness import sec_to_ns
 from .logging_utils import log_with_severity
 from .reset_sequence import ResetSequence
 
@@ -117,13 +119,18 @@ class AppEmergencyNode(Node):
         self.state_condition = threading.Condition()
         self.sequence = ResetSequence()
 
+        # 수신시각·reset 순서·wait deadline은 단일 STEADY_TIME clock으로 판정한다.
+        # (표시용 timestamp는 publish_state의 UTC wall clock을 유지한다.)
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.state_timeout_ns = sec_to_ns(self.state_timeout_sec)
+
         self.app_active = False
         self.emergency_active = True
-        self.last_emergency_time = 0.0
+        self.last_emergency_ns = None
         self.safety_state = "IDLE"
-        self.last_safety_state_time = 0.0
+        self.last_safety_state_ns = None
         self.nav_statuses = []
-        self.last_nav_status_time = 0.0
+        self.last_nav_status_ns = None
         self.last_message = "Safety 상태 확인 대기 중"
 
         self.app_estop_publisher = self.create_publisher(Bool, app_topic, 10)
@@ -210,25 +217,29 @@ class AppEmergencyNode(Node):
             f"{supervisor_reset_service}"
         )
 
+    def now_ns(self) -> int:
+        """Return the current STEADY_TIME instant as integer nanoseconds."""
+        return self.steady_clock.now().nanoseconds
+
     def emergency_callback(self, msg: Bool) -> None:
         """Track the authoritative central latch for app state and reset waits."""
         with self.state_condition:
             self.emergency_active = bool(msg.data)
-            self.last_emergency_time = time.time()
+            self.last_emergency_ns = self.now_ns()
             self.state_condition.notify_all()
 
     def safety_state_callback(self, msg: String) -> None:
         """Track Safety Supervisor state for the final reset confirmation."""
         with self.state_condition:
             self.safety_state = str(msg.data)
-            self.last_safety_state_time = time.time()
+            self.last_safety_state_ns = self.now_ns()
             self.state_condition.notify_all()
 
     def nav_status_callback(self, msg: GoalStatusArray) -> None:
         """Track active Nav2 action states, including canceling goals."""
         with self.state_condition:
             self.nav_statuses = [item.status for item in msg.status_list]
-            self.last_nav_status_time = time.time()
+            self.last_nav_status_ns = self.now_ns()
             self.state_condition.notify_all()
 
     def handle_activate(self, request, response):
@@ -341,7 +352,7 @@ class AppEmergencyNode(Node):
     def ensure_no_active_nav_goal(self) -> tuple[bool, str]:
         """Use the latest Nav2 state, requiring a new terminal state after cancel."""
         with self.state_condition:
-            nav_status_seen = self.last_nav_status_time > 0.0
+            nav_status_seen = self.last_nav_status_ns is not None
             nav_statuses = tuple(self.nav_statuses)
 
         if not nav_status_seen:
@@ -354,7 +365,7 @@ class AppEmergencyNode(Node):
 
         if not self.cancel_client.wait_for_service(timeout_sec=1.0):
             return False, "Nav2 cancel service is unavailable"
-        request_started = time.time()
+        request_started = self.now_ns()
         result = self.call_sync(self.cancel_client, CancelGoal.Request())
         if result is None:
             return False, "Nav2 cancel response timed out"
@@ -365,7 +376,8 @@ class AppEmergencyNode(Node):
 
         confirmed = self.wait_for_condition(
             lambda: (
-                self.last_nav_status_time >= request_started
+                self.last_nav_status_ns is not None
+                and self.last_nav_status_ns >= request_started
                 and not has_active_navigation_goals(self.nav_statuses)
             )
         )
@@ -396,32 +408,36 @@ class AppEmergencyNode(Node):
             return None
 
     def wait_for_condition(self, predicate) -> bool:
-        """Wait for subscription state with a finite monotonic deadline."""
-        deadline = time.monotonic() + self.state_timeout_sec
+        """Wait for subscription state with a finite STEADY_TIME deadline."""
+        deadline_ns = self.now_ns() + self.state_timeout_ns
         with self.state_condition:
             while not predicate():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
+                remaining_ns = deadline_ns - self.now_ns()
+                if remaining_ns <= 0:
                     return False
-                self.state_condition.wait(timeout=min(remaining, 0.1))
+                self.state_condition.wait(
+                    timeout=min(remaining_ns / 1_000_000_000, 0.1)
+                )
         return True
 
     def wait_for_emergency_clear(self) -> bool:
         """Require a fresh false central latch after its internal reset."""
-        started = time.time()
+        started = self.now_ns()
         return self.wait_for_condition(
             lambda: (
-                self.last_emergency_time >= started
+                self.last_emergency_ns is not None
+                and self.last_emergency_ns >= started
                 and not self.emergency_active
             )
         )
 
     def wait_for_safety_ready(self) -> bool:
         """Require a fresh READY_TO_GO state after Supervisor reset."""
-        started = time.time()
+        started = self.now_ns()
         return self.wait_for_condition(
             lambda: (
-                self.last_safety_state_time >= started
+                self.last_safety_state_ns is not None
+                and self.last_safety_state_ns >= started
                 and self.safety_state == "READY_TO_GO"
             )
         )
