@@ -60,6 +60,7 @@ class EmergencyStopNode(Node):
         self.declare_parameter("f1_active_value", 0x00)
         self.declare_parameter("f1_timeout_sec", 0.5)
         self.declare_parameter("log_f1_frames", True)
+        self.declare_parameter("motor_can_timeout_sec", 0.5)
 
         self.publish_hz = float(self.get_parameter("publish_hz").value)
         self.input_mode = str(self.get_parameter("input_mode").value)
@@ -84,13 +85,18 @@ class EmergencyStopNode(Node):
             self.get_parameter("f1_timeout_sec").value
         )
         self.log_f1_frames = bool(self.get_parameter("log_f1_frames").value)
+        self.motor_can_timeout_sec = float(
+            self.get_parameter("motor_can_timeout_sec").value
+        )
 
         # 모든 watchdog·throttle은 단일 STEADY_TIME clock과 정수 나노초를 쓴다.
         self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self.f1_timeout_ns = sec_to_ns(self.f1_timeout_sec)
+        self.motor_can_timeout_ns = sec_to_ns(self.motor_can_timeout_sec)
 
         self.latch = EmergencyLatch(
             f1_timeout_ns=self.f1_timeout_ns,
+            motor_can_timeout_ns=self.motor_can_timeout_ns,
             initially_latched=True,
         )
         self.bus = None
@@ -118,6 +124,12 @@ class EmergencyStopNode(Node):
             self.test_input_callback,
             10,
         )
+        self.create_subscription(
+            Bool,
+            "/motor/can_ok",
+            self.motor_can_callback,
+            10,
+        )
         self.create_service(
             Trigger,
             "/vica_safety/internal/estop_reset",
@@ -139,6 +151,10 @@ class EmergencyStopNode(Node):
 
         self.get_logger().warn(
             "This software latch does not replace hardware torque removal."
+        )
+        self.get_logger().info(
+            "Subscribed: /app_emergency_stop, /voice_emergency_stop, "
+            "/motor/can_ok"
         )
         self.get_logger().info(
             "Publishing central latch: /emergency_stop, /estop_state"
@@ -183,6 +199,10 @@ class EmergencyStopNode(Node):
         """Use the test topic as the physical source only in explicit test mode."""
         if self.input_mode == "test_topic":
             self.latch.mark_physical_seen(bool(msg.data), self.now_ns())
+
+    def motor_can_callback(self, msg: Bool) -> None:
+        """Feed the motor CAN link report into the central latch."""
+        self.latch.mark_motor_can_seen(bool(msg.data), self.now_ns())
 
     def reset_callback(self, request, response):
         """Clear only the central latch after every source is safe and fresh."""
