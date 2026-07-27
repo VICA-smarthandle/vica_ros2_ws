@@ -191,3 +191,86 @@ knob1 = 48%, 검증 시점 HEAD = `759fad2`(아래 5.4 수정 포함).
   이 변경 이전부터 있던 동작이며 시간 판정과 무관하다. 드라이버 자체 타임아웃이
   있어 폭주로는 이어지지 않으나, 정지 상태 유지·상태 보고 주체가 사라지므로 별도
   이슈로 다룰 것.
+
+---
+
+## 6. motor CAN health 실기 검증 (2026-07-28)
+
+브랜치 `feat/motor-can-health`. §5.5의 **[범위 밖 결함]**(`can1 down` 시 motor
+node 종료)을 해소했는지 확인한다. 환경은 §5와 동일하며 바퀴는 띄운 상태다.
+
+### 6.1 결과 요약
+
+| 항목 | 결과 |
+| --- | --- |
+| `can1 down` 시 motor node 생존 | 통과 |
+| `[CAN FAULT]` 로그 | 통과 |
+| 출력 0 유지 | 통과 |
+| 중앙 걸쇠 체결 | 통과 (52 ms) |
+| CAN 자체 재연결 | 통과 (노드 재기동 없이) |
+| 조건 해소 후 관리자 reset 수락 | 통과 |
+| motor node 강제 종료 → `motor_can_stale` | 통과 (537 ms) |
+
+### 6.2 `can1 down` → 걸쇠 (시험 ②)
+
+`ip link set can1 down` 이후 motor node는 pid를 유지한 채 계속 동작했다. 이
+브랜치 이전에는 `bus.recv`의 `CanOperationError` 미처리로 여기서 프로세스가
+종료됐다. 관측 시각(ROS clock):
+
+| 시각 | 사건 |
+| --- | --- |
+| 1785193511.008 | `[CAN FAULT] phase=recv ... Network is down` |
+| 1785193511.060 | `[ESTOP ACTIVE] ... source=motor_can` (down 후 **52 ms**) |
+| 1785193511.509 | `[FAULT] ... source=motor_can,physical_stale` |
+
+출력은 `limit=(0.00m/s,0.00rad/s)`, `rpm MOT1/R=+0, MOT2/L=+0`으로 유지됐다.
+knob 프레임도 함께 끊기므로 CAN 게이트와 knob watchdog이 이중으로 0을 만든다.
+
+이 구간에서 관리자 reset은 거부됐다:
+`reason=active sources: motor_can,physical_stale`.
+
+### 6.3 복구 → reset 수락 (시험 ②-b)
+
+CAN이 한 번 끊기면 드라이버 동력이 차단되므로 드라이버 전원을 재투입한 뒤
+`can1`을 올렸다. **motor node는 재기동하지 않았다.**
+
+| 시각 | 사건 |
+| --- | --- |
+| 1785193677.717 | F1 프레임 재개 → `physical_stale` 해소, `source=motor_can` |
+| 1785193678.683 | `[CAN RECOVERED] iface=can1` (노드가 스스로 재연결) |
+| 1785193678.717 | `[WAIT RESET] ... source=none` |
+
+이후 `/safety_reset` 수락:
+`Safety reset 완료: Nav2 Goal 없음, 중앙 래치 해제, Supervisor READY_TO_GO 확인`.
+
+재연결에 성공해도 주행은 스스로 재개되지 않는다. 걸쇠는 `vica_safety`가
+소유하며 해제는 관리자 reset 하나뿐이라는 계약이 실기에서 확인됐다.
+
+### 6.4 motor node 강제 종료 → `motor_can_stale` (시험 ③)
+
+| 시각 | 사건 |
+| --- | --- |
+| 1785192978.410 | motor node에 SIGKILL |
+| 1785192978.947 | `[FAULT] ... source=motor_can_stale,physical_f1` (**537 ms**) |
+
+`motor_can_timeout_sec` 0.5초 설계값과 일치한다. 물리 원인과 함께 표기되며,
+`[ESTOP ACTIVE]`가 아니라 `[FAULT]`로 분류된다. 노드를 다시 띄우면 보고가
+재개되면서 `motor_can_stale`은 자동으로 해소되고 걸쇠만 남는다.
+
+### 6.5 부수 확인 사항
+
+- **"CAN은 살아 있고 드라이버만 죽은" 상태는 이 로봇에서 만들어지지 않는다.**
+  드라이버 전원이 없으면 `ip link set can1 up`이 실패하고 `can1`은
+  `state STOPPED`로 남는다(`mcp251xfd`, SPI). 드라이버 전원 차단 구간 내내
+  `/motor/can_ok`는 `False`였고 `[CAN RECOVERED]`는 한 번도 찍히지 않았다.
+  따라서 "재연결 성공만으로 `/motor/can_ok`가 거짓으로 true가 된다"는 우려는
+  이 하드웨어에서 성립하지 않는다.
+- **`can1 down`으로는 재현되지 않는 경로가 있다.** 인터페이스가 *존재하면*
+  down 상태여도 `can.interface.Bus()`의 bind가 성공하므로 재개방이 실패하지
+  않는다. 재개방이 실패하는 것은 인터페이스가 *사라지는* 경우(모듈 언로드,
+  USB-CAN 탈거)이며, 이때 닫힌 socketcan 소켓은 `CanError`도 `OSError`도 아닌
+  `ValueError`를 던진다(python-can 4.6.1 실측). 이 경로는 실기 대신
+  `test_can_reconnect.py` 회귀 테스트 8건으로 고정했다.
+- **운영 주의**: motor node를 재기동할 때마다 0.5초 뒤 `motor_can_stale`로
+  걸쇠가 걸리므로 매번 관리자 reset이 필요하다. 설계 의도(fail-closed)대로지만
+  현장에서 고장으로 오인하기 쉽다. 기동 매뉴얼에 반영할 것.
