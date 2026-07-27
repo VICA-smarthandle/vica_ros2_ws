@@ -1,6 +1,7 @@
 # VICA Safety STEADY_TIME 실기 검증·머지 체크리스트
 
 문서 기준일: 2026-07-26
+실기 검증일: 2026-07-27 (**세 검증 모두 통과**, 5절 기록 참조)
 대상 브랜치: `feat/safety-steady-clock` (repo `vica_ros2_ws`)
 관련 계약: 워크스페이스 `guideline/vica_system_health_monitoring_draft.md`
 (monotonic timeout 항목)
@@ -41,25 +42,30 @@ git pull                         # upstream 추적되어 있으므로 인자 없
 
 ### 2.1 실제 Safety–CAN–motor 종단 (바퀴 띄운 상태)
 
-- [ ] 바퀴를 바닥에서 띄운다(무부하).
-- [ ] 정상 주행: `/cmd_vel_safe`와 knob이 모두 살아 있을 때 바퀴가 knob 비율대로 회전.
-- [ ] cmd 끊김: `/cmd_vel_safe` 발행을 멈추면 `cmd_timeout_sec` 내에 0 rpm 정지.
-- [ ] knob 끊김: F1 monitor(knob) 수신을 끊으면 `knob_timeout_sec` 내에 0 rpm 정지.
-- [ ] 물리 E-stop: 물리 버튼 → 즉시 정지·latch 유지, 관리자 앱 reset 전까지 재기동 불가.
+- [x] 바퀴를 바닥에서 띄운다(무부하).
+- [x] 정상 주행: `/cmd_vel_safe`와 knob이 모두 살아 있을 때 바퀴가 knob 비율대로 회전.
+- [x] cmd 끊김: `/cmd_vel_safe` 발행을 멈추면 `cmd_timeout_sec` 내에 0 rpm 정지.
+- [x] knob 끊김: F1 monitor(knob) 수신을 끊으면 `knob_timeout_sec` 내에 0 rpm 정지.
+- [x] 물리 E-stop: 물리 버튼 → 즉시 정지·latch 유지, 관리자 앱 reset 전까지 재기동 불가.
 
 ### 2.2 `use_sim_time` + `/clock` 정지 내성
 
-- [ ] `use_sim_time:=true`로 Safety·motor 노드를 실행한다.
-- [ ] `/clock` 발행을 멈춘다.
-- [ ] STEADY_TIME watchdog이 계속 발화하여 stale 판정·정지를 유지하는지 확인
+- [x] `use_sim_time:=true`로 Safety·motor 노드를 실행한다.
+- [x] `/clock` 발행을 멈춘다.
+- [x] STEADY_TIME watchdog이 계속 발화하여 stale 판정·정지를 유지하는지 확인
       (ROS 시간이 멈춰도 monotonic clock은 흐르므로 정지해야 정상).
 
 ### 2.3 실행 중 시스템 시간 역전 내성
 
-- [ ] 노드 실행 중 `sudo date -s '<과거 시각>'`으로 시스템 시간을 뒤로 점프시킨다.
-- [ ] age가 음수가 되어도 timeout 판정이 정상(정지 유지)인지 확인
+- [x] 노드 실행 중 `sudo date -s '<과거 시각>'`으로 시스템 시간을 뒤로 점프시킨다.
+- [x] age가 음수가 되어도 timeout 판정이 정상(정지 유지)인지 확인
       (wall clock이었다면 stale 판정이 뒤집혀 위험. steady clock은 영향 없어야 함).
-- [ ] 검증 후 시스템 시간을 복원한다(`sudo date -s` 또는 NTP 재동기화).
+- [x] 검증 후 시스템 시간을 복원한다(`sudo date -s` 또는 NTP 재동기화).
+
+주의: `sudo timedatectl set-ntp false`로 NTP를 먼저 끄지 않으면 시간이 즉시
+되돌려져 시험이 성립하지 않는다. 또한 표준 `ros2 topic pub`은 wall clock 타이머를
+쓰므로 시간 역전과 동시에 발행이 멈춘다. 명령 공급원은 STEADY_TIME 타이머로
+직접 구현해야 한다(5.3 참조).
 
 ### 2.4 참고: 실기에서 로직 재확인 (선택)
 
@@ -115,3 +121,73 @@ git push origin --delete feat/safety-steady-clock    # 원격 삭제
   (`app_emergency_node.publish_state`).
 - 판정용 wall clock(`time.time()`/`time.monotonic()`)은 5개 대상 파일에서 제거됨.
   남은 `time.sleep()`은 순수 지연이라 무관하다.
+
+## 5. 실기 검증 결과 (2026-07-27)
+
+환경: Jetson Orin NX(`Z-jet`), ROS 2 Humble, `can1` 50 kbps, 바퀴 무부하(띄움),
+knob1 = 48%, 검증 시점 HEAD = `759fad2`(아래 5.4 수정 포함).
+
+측정 분해능 한계: motor node의 상태 로그는 0.2초 주기로 throttle된다. 따라서
+아래 "정지까지" 값은 **상한**이며 실제 발화는 최대 0.23초 더 이를 수 있다.
+
+### 5.1 §2.1 종단 (4/4 통과)
+
+| 항목 | 측정 | 기준 |
+|---|---|---|
+| 정상 주행 | `cmd=(+0.10)` → `rpm +15/+15`, 149샘플 연속 안정 | 끊김 없을 것 |
+| cmd 끊김 | `limit` 0.48 → 0.00, **≤234 ms** | `cmd_timeout_sec` 0.5 s |
+| knob 끊김 | `cmd=(+0.10)` 유지 + `limit=(0.00)`, 마지막 F1 후 **0.912 s** | `knob_timeout_sec` 0.8 s |
+| 물리 E-stop | 감지 → 0 rpm **120 ms** | 즉시 정지 |
+
+- cmd 끊김은 `safety_supervisor_node`를 종료해 `/cmd_vel_safe` 자체를 끊어 측정했다.
+  `/cmd_vel_req`만 끊으면 supervisor가 0을 계속 발행하므로 motor node 자체
+  watchdog이 아니라 supervisor gate를 보게 된다. 두 경로 모두 확인함(후자 ≤233 ms).
+- knob 끊김은 `tc qdisc add dev can1 ingress` + `basic action drop`으로 **수신만**
+  차단했다. 송신은 살아 있어 드라이버가 계속 명령을 받고 ACK했으므로(TX 15 Hz,
+  오류 0), 정지 원인이 소프트웨어임이 분리 확인된다. 문서화된
+  `CMD_PNT_IO_MONITOR_OFF(86)` 명령으로도 같은 상태를 만들 수 있다(sudo 불필요).
+- 차단 해제 즉시 15 rpm 재개 — stale 판정이 영구 latch되지 않음도 확인.
+- 물리 E-stop 해제만으로는 `ESTOP_RELEASED_WAIT_RESET`을 유지(13초 관측),
+  관리자 reset 후에만 `READY_TO_GO` 전이. 주행 명령이 살아 있는 동안의 reset은
+  `reason=/cmd_vel_req is not zero`로 거부됨(설계대로).
+
+### 5.2 §2.2 `/clock` 정지 내성 (통과)
+
+- `use_sim_time:=true` 적용 확인, `/clock`을 20 ms 주기로 발행하다 45초에 중단하여
+  ROS 시간을 **45.96 s에 동결**.
+- 동결 상태에서 control_loop 로그 6초간 27건(≈4.5 Hz) — 타이머가 계속 발화.
+- 동결 상태에서 cmd 끊김 → **233 ms** 내 0 rpm. ROS clock 기반이었다면 age가
+  얼어붙어 timeout이 발생하지 않았을 것이다.
+
+### 5.3 §2.3 시스템 시간 역전 내성 (통과)
+
+- `sudo date -s`로 **−3914.6 s(−1.09 시간)** 점프를 로그 타임스탬프로 확인.
+- 점프 순간 `limit=(0.48)` 유지 — cmd·knob 판정 모두 fresh, 뒤집힘 없음. 주행 무중단.
+- 점프 후에도 노드 로그 ≈4.6 Hz 지속, `/cmd_vel_safe` 30.005 Hz 유지.
+- 역전 상태에서 주행 → 명령 끊김 → **233 ms** 내 0 rpm(판정 기능 정상).
+- 대조군: 표준 `ros2 topic pub`은 점프와 동시에 발행이 정지(6255회에서 멈춤).
+  wall clock 타이머를 쓰는 도구는 실제로 망가지며, 대상 노드는 영향받지 않았다.
+
+### 5.4 검증 중 발견·수정한 결함
+
+`control_loop`이 판정 기준 시각 `now`를 캡처한 뒤 `drain_can_rx`가 자체적으로 더
+나중 시각을 찍어, 정상 수신한 knob이 **음수 age로 stale 오판정**되었다. 제어 루프의
+**33%**에서 `speed_ratio`가 0이 되어 초당 약 10회 출력이 끊겼다(동일 호출 순서로
+복제한 진단 노드에서 음수 age 31.8%, 최악 −2.378 ms 재현).
+
+`drain_can_rx(now_ns)`로 stamp를 사이클 기준 시각으로 주입해 수정하고 회귀 테스트
+3건을 추가했다(`test_knob_cycle_stamp.py`). 수정 후 실기 flapping **0%**.
+커밋 `759fad2`.
+
+### 5.5 부수 확인 사항
+
+- **드라이버 자체 통신 watchdog**: `PID_COM_WATCH_DELAY(185)`를 드라이버에서 직접
+  read한 값이 `5` = **0.5초**. 통신이 0.5초 끊기면 드라이버가 스스로 정지한다.
+  motor node를 강제 종료했을 때(CAN은 UP) 바퀴가 멈춘 것이 이 기능으로 설명된다.
+  단 이 계층은 *통신 자체가 끊겼을 때만* 반응하므로, 통신은 살아 있고 knob
+  프레임만 안 오는 경우는 소프트웨어 watchdog만 잡는다.
+- **[범위 밖 결함]** `sudo ip link set can1 down` 시 motor node가
+  `can.exceptions.CanOperationError`(`drain_can_rx`의 `bus.recv`) 미처리로 종료된다.
+  이 변경 이전부터 있던 동작이며 시간 판정과 무관하다. 드라이버 자체 타임아웃이
+  있어 폭주로는 이어지지 않으나, 정지 상태 유지·상태 보고 주체가 사라지므로 별도
+  이슈로 다룰 것.
