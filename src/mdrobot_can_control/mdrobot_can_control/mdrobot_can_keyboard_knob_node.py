@@ -3,6 +3,10 @@ import math
 import time
 import can
 
+from diagnostic_msgs.msg import DiagnosticStatus
+
+from diagnostic_updater import DiagnosticStatusWrapper, Updater
+
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
@@ -202,6 +206,10 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.pub_can_ok = self.create_publisher(Bool, '/motor/can_ok', 10)
 
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID(self.can_iface)
+        self.diag_updater.add('CAN link', self.diagnose_can_link)
+
         self.timer = self.create_timer(
             1.0 / self.send_hz,
             self.control_loop,
@@ -230,6 +238,42 @@ class MdrobotCanKeyboardKnobNode(Node):
                 f'error={exc}; 출력을 0으로 유지합니다'
             )
             self.last_can_error_log_ns = now
+
+    def diagnose_can_link(
+        self,
+        stat: DiagnosticStatusWrapper,
+    ) -> DiagnosticStatusWrapper:
+        """Report CAN link health for operators.
+
+        초안 3.1에 따라 보고 전용이다. 정지는 control_loop이 즉시 수행하며
+        이 진단이 늦거나 실패해도 정지에는 영향이 없다.
+        """
+        now = self.now_ns()
+        if self.can_link.is_ok():
+            stat.summary(DiagnosticStatus.OK, 'CAN link OK')
+        else:
+            stat.summary(
+                DiagnosticStatus.ERROR,
+                'CAN link FAILED; motor output forced to 0',
+            )
+        stat.add('iface', self.can_iface)
+        # last_error는 현재 오류가 아니라 "마지막으로 관측된" 오류다.
+        # record_success()가 이를 지우지 않으므로 CAN 복구 후에도 남는다.
+        stat.add(
+            'last_error',
+            f'last observed (may predate recovery): '
+            f'{self.can_link.last_error}',
+        )
+        stat.add('knob_age_sec', self.age_text(self.last_knob_ns, now))
+        stat.add('cmd_age_sec', self.age_text(self.last_cmd_ns, now))
+        return stat
+
+    @staticmethod
+    def age_text(last_ns, now_ns: int) -> str:
+        """Render an age in seconds, or 'never' when nothing arrived yet."""
+        if last_ns is None:
+            return 'never'
+        return f'{(now_ns - last_ns) / 1e9:.3f}'
 
     def try_reconnect_can(self, now_ns: int) -> None:
         """Reopen the CAN bus while the link is failed.
