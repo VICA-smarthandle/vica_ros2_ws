@@ -193,6 +193,8 @@ def test_motor_can_boundary_is_fresh():
 
     snapshot = latch.evaluate(now)
     assert "motor_can_stale" not in snapshot.active_sources
+    # 경계가 fresh라는 표시로 끝나지 않고 실제로 reset 문을 열어야 한다.
+    assert snapshot.reset_allowed is True
 
 
 def test_never_reported_motor_can_is_stale():
@@ -238,3 +240,39 @@ def test_reset_allowed_after_can_recovers():
     accepted, _ = latch.try_reset(now)
     assert accepted is True
     assert latch.evaluate(now).latched is False
+
+
+def test_time_reversal_marks_motor_can_stale():
+    """시각이 뒤로 가면 음수 age가 되고, motor_can도 physical과 같이 stale이다."""
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+    )
+    now = T0 - sec_to_ns(0.1)
+    latch.mark_physical_seen(False, now)
+    latch.mark_motor_can_seen(True, T0)
+
+    snapshot = latch.evaluate(now)
+
+    assert "motor_can_stale" in snapshot.active_sources
+
+
+def test_dead_motor_node_rejects_reset():
+    """모터 노드가 죽어 보고가 끊기면 관리자 reset도 거부된다.
+
+    이 브랜치의 핵심 주장이다. evaluate가 stale을 표시하는 것만으로는
+    부족하고, try_reset이 실제로 막아야 한다.
+    """
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+    )
+    latch.mark_physical_seen(False, T0)
+    latch.mark_motor_can_seen(True, T0)
+    dead_at = T0 + MOTOR_CAN_TIMEOUT_NS + 1
+
+    latch.mark_physical_seen(False, dead_at)
+    accepted, message = latch.try_reset(dead_at)
+
+    assert accepted is False
+    assert "motor_can_stale" in message
