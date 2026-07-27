@@ -241,7 +241,7 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.bus.send(msg)
 
-    def drain_can_rx(self):
+    def drain_can_rx(self, now_ns: int):
         """
         F1 monitor packet에서 knob1, knob2 값 읽기.
 
@@ -250,6 +250,10 @@ class MdrobotCanKeyboardKnobNode(Node):
           d[1] == 0
           d[6] = knob1, 0~100
           d[7] = knob2, 0~100
+
+        stamp는 호출자가 넘긴 사이클 기준 시각(`now_ns`)을 그대로 쓴다. 여기서
+        시각을 다시 조회하면 판정 기준 `now`보다 나중이 되어, 방금 정상 수신한
+        knob이 음수 age(시간 역전)로 stale 판정된다.
         """
         # 버스 혼잡을 줄이기 위해 사이클당 읽는 CAN 프레임 수를 제한합니다.
         for _ in range(50):
@@ -262,7 +266,7 @@ class MdrobotCanKeyboardKnobNode(Node):
                 if d[1] == 0:
                     self.knob1 = clamp(int(d[6]), 0, 100)
                     self.knob2 = clamp(int(d[7]), 0, 100)
-                    self.last_knob_ns = self.now_ns()
+                    self.last_knob_ns = now_ns
 
     # ============================================================
     # ROS 콜백
@@ -278,7 +282,7 @@ class MdrobotCanKeyboardKnobNode(Node):
     def control_loop(self):
         now = self.now_ns()
 
-        self.drain_can_rx()
+        self.drain_can_rx(now)
 
         # -------------------------
         # cmd·knob 신선도 판정 (단일 STEADY_TIME clock)
