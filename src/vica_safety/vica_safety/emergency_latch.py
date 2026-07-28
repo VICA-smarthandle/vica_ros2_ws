@@ -23,16 +23,25 @@ class EmergencyLatch:
     clock owned by the caller (the ROS node).
     """
 
-    def __init__(self, f1_timeout_ns: int, initially_latched: bool = True):
+    def __init__(
+        self,
+        f1_timeout_ns: int,
+        motor_can_timeout_ns: int,
+        initially_latched: bool = True,
+    ):
         self.f1_timeout_ns = f1_timeout_ns
+        self.motor_can_timeout_ns = motor_can_timeout_ns
         self.latched = initially_latched
         self.sources = {
             "physical_f1": False,
             "app": False,
             "voice": False,
+            "motor_can": False,
         }
         # None = 물리 F1을 한 번도 수신하지 않음 (0.0 sentinel 금지).
         self.last_physical_ns: Optional[int] = None
+        # None = motor node의 CAN 상태를 한 번도 수신하지 않음.
+        self.last_motor_can_ns: Optional[int] = None
 
     def update_source(self, name: str, active: bool, now: int) -> None:
         del now
@@ -48,17 +57,35 @@ class EmergencyLatch:
         if active:
             self.latched = True
 
+    def mark_motor_can_seen(self, ok: bool, now: int) -> None:
+        """Record the motor node CAN link report.
+
+        ``ok=False``는 CAN 장애이므로 즉시 latch한다. 보고가 끊기는 경우는
+        ``evaluate``가 stale로 처리한다(motor node 프로세스 사망 포함).
+        """
+        self.sources["motor_can"] = not ok
+        self.last_motor_can_ns = now
+        if not ok:
+            self.latched = True
+
     def evaluate(self, now: int) -> LatchSnapshot:
         physical_fresh = is_fresh_ns(
             self.last_physical_ns,
             now_ns=now,
             timeout_ns=self.f1_timeout_ns,
         )
+        motor_can_fresh = is_fresh_ns(
+            self.last_motor_can_ns,
+            now_ns=now,
+            timeout_ns=self.motor_can_timeout_ns,
+        )
         active_sources = [
             name for name, active in self.sources.items() if active
         ]
         if not physical_fresh:
             active_sources.append("physical_stale")
+        if not motor_can_fresh:
+            active_sources.append("motor_can_stale")
         if active_sources:
             self.latched = True
         return LatchSnapshot(

@@ -3,11 +3,18 @@ import math
 import time
 import can
 
+from diagnostic_msgs.msg import DiagnosticStatus
+
+from diagnostic_updater import DiagnosticStatusWrapper, Updater
+
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
+from std_msgs.msg import Bool
+
+from .can_link import CanLink
 from .can_preflight import require_can_interface_up
 from .freshness import is_fresh_ns, sec_to_ns
 from .motor_watchdog import motor_speed_ratio
@@ -27,6 +34,13 @@ from .motor_watchdog import motor_speed_ratio
 # 주의:
 #   왼쪽 바퀴가 MOT2라는 기존 조건 반영
 # ============================================================
+
+
+# CAN 경로에서 잡아야 하는 예외들.
+# 닫힌 socketcan 소켓은 CanError도 OSError도 아닌 ValueError
+# ('file descriptor cannot be a negative integer (-1)')를 던진다.
+# 이를 빠뜨리면 예외가 타이머 콜백 밖으로 탈출해 노드가 죽는다.
+CAN_FAILURES = (can.CanError, OSError, ValueError)
 
 
 # ====== MDROBOT CAN 프로토콜 ======
@@ -98,6 +112,9 @@ class MdrobotCanKeyboardKnobNode(Node):
         # 처음에는 0 추천
         self.declare_parameter("min_rpm_when_moving", 0)
 
+        # CAN 실패 후 재연결을 시도하는 최소 간격(초)
+        self.declare_parameter('can_reconnect_interval_sec', 1.0)
+
         # =========================
         # 파라미터 불러오기
         # =========================
@@ -130,6 +147,13 @@ class MdrobotCanKeyboardKnobNode(Node):
             self.get_parameter("min_rpm_when_moving").value
         )
 
+        self.can_reconnect_interval_sec = float(
+            self.get_parameter('can_reconnect_interval_sec').value
+        )
+        self.can_reconnect_interval_ns = sec_to_ns(
+            self.can_reconnect_interval_sec
+        )
+
         try:
             can_flags = require_can_interface_up(self.can_iface)
         except RuntimeError as exc:
@@ -155,6 +179,7 @@ class MdrobotCanKeyboardKnobNode(Node):
         self.prev_rpm_mot1 = None
         self.prev_rpm_mot2 = None
         self.last_send_ns = None
+        self.last_can_error_log_ns = None
 
         # =========================
         # CAN 초기화
@@ -162,6 +187,10 @@ class MdrobotCanKeyboardKnobNode(Node):
         self.bus = can.interface.Bus(
             channel=self.can_iface,
             interface="socketcan"
+        )
+
+        self.can_link = CanLink(
+            retry_interval_ns=self.can_reconnect_interval_ns
         )
 
         self.get_logger().info(f"CAN opened: {self.can_iface}")
@@ -182,6 +211,12 @@ class MdrobotCanKeyboardKnobNode(Node):
             10
         )
 
+        self.pub_can_ok = self.create_publisher(Bool, '/motor/can_ok', 10)
+
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID(self.can_iface)
+        self.diag_updater.add('CAN link', self.diagnose_can_link)
+
         self.timer = self.create_timer(
             1.0 / self.send_hz,
             self.control_loop,
@@ -196,10 +231,104 @@ class MdrobotCanKeyboardKnobNode(Node):
         """Return the current STEADY_TIME instant as integer nanoseconds."""
         return self.steady_clock.now().nanoseconds
 
+    def log_can_error_throttled(self, phase: str, exc: BaseException) -> None:
+        """Report a CAN failure at most once per reconnect interval."""
+        now = self.now_ns()
+        last_log_ns = self.last_can_error_log_ns
+        due = (
+            last_log_ns is None or
+            (now - last_log_ns) >= self.can_reconnect_interval_ns
+        )
+        if due:
+            self.get_logger().error(
+                f'[CAN FAULT] phase={phase} iface={self.can_iface} '
+                f'error={exc}; 출력을 0으로 유지합니다'
+            )
+            self.last_can_error_log_ns = now
+
+    def diagnose_can_link(
+        self,
+        stat: DiagnosticStatusWrapper,
+    ) -> DiagnosticStatusWrapper:
+        """Report CAN link health for operators.
+
+        초안 3.1에 따라 보고 전용이다. 정지는 control_loop이 즉시 수행하며
+        이 진단이 늦거나 실패해도 정지에는 영향이 없다.
+        """
+        now = self.now_ns()
+        if self.can_link.is_ok():
+            stat.summary(DiagnosticStatus.OK, 'CAN link OK')
+        else:
+            stat.summary(
+                DiagnosticStatus.ERROR,
+                'CAN link FAILED; motor output forced to 0',
+            )
+        stat.add('iface', self.can_iface)
+        # last_error는 현재 오류가 아니라 "마지막으로 관측된" 오류다.
+        # record_success()가 이를 지우지 않으므로 CAN 복구 후에도 남는다.
+        stat.add(
+            'last_error',
+            f'last observed (may predate recovery): '
+            f'{self.can_link.last_error}',
+        )
+        stat.add('knob_age_sec', self.age_text(self.last_knob_ns, now))
+        stat.add('cmd_age_sec', self.age_text(self.last_cmd_ns, now))
+        return stat
+
+    @staticmethod
+    def age_text(last_ns, now_ns: int) -> str:
+        """Render an age in seconds, or 'never' when nothing arrived yet."""
+        if last_ns is None:
+            return 'never'
+        return f'{(now_ns - last_ns) / 1e9:.3f}'
+
+    def try_reconnect_can(self, now_ns: int) -> None:
+        """Reopen the CAN bus while the link is failed.
+
+        걸쇠는 vica_safety가 소유하므로 재연결에 성공해도 주행이 스스로
+        재개되지 않는다. 재연결이 없으면 `/motor/can_ok`가 복구되지 않아
+        관리자 reset이 영원히 거부된다.
+
+        재개방이 실패하면 `self.bus`는 반드시 None으로 남긴다. 닫힌 핸들을
+        남기면 같은 사이클의 recv·send가 `ValueError`를 던져 노드가 죽는다.
+        """
+        if not self.can_link.should_retry(now_ns):
+            return
+        self.can_link.mark_retry_attempted(now_ns)
+        old_bus, self.bus = self.bus, None
+        try:
+            if old_bus is not None:
+                old_bus.shutdown()
+        except Exception:  # noqa: BLE001 - 종료 실패는 재개방을 막지 않는다
+            pass
+        try:
+            bus = can.interface.Bus(
+                channel=self.can_iface,
+                interface='socketcan'
+            )
+        except CAN_FAILURES as exc:
+            self.can_link.record_error(exc, now_ns)
+            return
+        self.bus = bus
+        try:
+            self.send_pnt_io_monitor_on()
+        except CAN_FAILURES as exc:
+            self.can_link.record_error(exc, now_ns)
+            return
+        self.can_link.record_success()
+        self.get_logger().info(
+            f'[CAN RECOVERED] iface={self.can_iface}; '
+            '주행 재개는 관리자 reset 이후에만 가능합니다'
+        )
+
     # ============================================================
     # CAN 함수
     # ============================================================
     def send_pnt_io_monitor_on(self):
+        # 예외를 삼키면 안 된다. socketcan은 상대 드라이버가 없어도 bind에
+        # 성공하므로, 이 프로브의 예외가 try_reconnect_can이 복구 여부를
+        # 판정하는 유일한 근거다. 감싸면 /motor/can_ok가 거짓으로 true가 되어
+        # 구동단이 죽은 채로 관리자 reset이 수락된다.
         msg = can.Message(
             arbitration_id=self.driver_id,
             is_extended_id=False,
@@ -239,7 +368,14 @@ class MdrobotCanKeyboardKnobNode(Node):
             data=data
         )
 
-        self.bus.send(msg)
+        if self.bus is None:
+            return
+
+        try:
+            self.bus.send(msg)
+        except CAN_FAILURES as exc:
+            self.can_link.record_error(exc, self.now_ns())
+            self.log_can_error_throttled('send', exc)
 
     def drain_can_rx(self, now_ns: int):
         """
@@ -255,18 +391,25 @@ class MdrobotCanKeyboardKnobNode(Node):
         시각을 다시 조회하면 판정 기준 `now`보다 나중이 되어, 방금 정상 수신한
         knob이 음수 age(시간 역전)로 stale 판정된다.
         """
-        # 버스 혼잡을 줄이기 위해 사이클당 읽는 CAN 프레임 수를 제한합니다.
-        for _ in range(50):
-            msg = self.bus.recv(timeout=0.0)
-            if msg is None:
-                break
+        if self.bus is None:
+            return
 
-            d = msg.data
-            if len(d) == 8 and d[0] == PID_PNT_IO_MONITOR:
-                if d[1] == 0:
-                    self.knob1 = clamp(int(d[6]), 0, 100)
-                    self.knob2 = clamp(int(d[7]), 0, 100)
-                    self.last_knob_ns = now_ns
+        try:
+            # 버스 혼잡을 줄이기 위해 사이클당 읽는 CAN 프레임 수를 제한합니다.
+            for _ in range(50):
+                msg = self.bus.recv(timeout=0.0)
+                if msg is None:
+                    break
+
+                d = msg.data
+                if len(d) == 8 and d[0] == PID_PNT_IO_MONITOR:
+                    if d[1] == 0:
+                        self.knob1 = clamp(int(d[6]), 0, 100)
+                        self.knob2 = clamp(int(d[7]), 0, 100)
+                        self.last_knob_ns = now_ns
+        except CAN_FAILURES as exc:
+            self.can_link.record_error(exc, now_ns)
+            self.log_can_error_throttled('recv', exc)
 
     # ============================================================
     # ROS 콜백
@@ -284,6 +427,18 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.drain_can_rx(now)
 
+        # 재연결 시도보다 먼저 발행한다. 뒤에 두면 재연결 간격이 0인 설정에서
+        # 장애와 복구가 같은 사이클에 일어나 false가 한 번도 나가지 않고,
+        # 중앙 걸쇠가 걸리지 않은 채 주행이 이어진다. 복구 보고가 한 사이클
+        # 늦어질 뿐이고, 장애는 반드시 최소 한 번 false로 보고된다.
+        can_ok = self.can_link.is_ok()
+        can_ok_msg = Bool()
+        can_ok_msg.data = can_ok
+        self.pub_can_ok.publish(can_ok_msg)
+
+        if not can_ok:
+            self.try_reconnect_can(now)
+
         # -------------------------
         # cmd·knob 신선도 판정 (단일 STEADY_TIME clock)
         # cmd 또는 knob 중 하나라도 stale·시간역전·미수신이면 0.0 → 정지
@@ -297,6 +452,13 @@ class MdrobotCanKeyboardKnobNode(Node):
             knob_timeout_ns=self.knob_timeout_ns,
             deadzone_pct=self.deadzone_pct,
         )
+
+        # CAN 링크가 비정상이면 cmd·knob 판정과 무관하게 0으로 막는다.
+        # 정지는 여기서 즉시 이루어지며 /diagnostics를 기다리지 않는다.
+        # 발행한 값과 같은 can_ok를 쓴다. 여기서 다시 조회하면 사이클 중간의
+        # 재연결 성공이 같은 사이클의 출력을 풀어 준다.
+        if not can_ok:
+            speed_ratio = 0.0
 
         # -------------------------
         # /cmd_vel_safe 원시 명령 (stale이면 speed_ratio가 이미 0이지만

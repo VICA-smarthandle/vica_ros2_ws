@@ -1,6 +1,8 @@
 import pytest
 
+from vica_safety.emergency_latch import LatchSnapshot
 from vica_safety.emergency_stop_node import (
+    classify_latch_state,
     describe_latch_transition,
     f1_frame_means_estop_active,
 )
@@ -40,3 +42,41 @@ def test_f1_decoder_rejects_out_of_range_byte_index():
 )
 def test_latch_transition_has_expected_severity(new_state, severity, marker):
     assert describe_latch_transition("OLD", new_state) == (severity, marker)
+
+
+def snapshot(active_sources, latched=True):
+    """Build a LatchSnapshot carrying only what classification reads."""
+    return LatchSnapshot(
+        latched=latched,
+        active_sources=tuple(active_sources),
+        physical_fresh="physical_stale" not in active_sources,
+        reset_allowed=False,
+    )
+
+
+def test_stale_motor_can_is_reported_as_fault_not_estop():
+    """모터 노드 사망은 FAULT다. ESTOP_ACTIVE로 찍으면 물리 버튼을 찾게 된다."""
+    assert classify_latch_state(snapshot(["motor_can_stale"])) == "FAULT"
+
+
+def test_stale_physical_input_is_reported_as_fault():
+    assert classify_latch_state(snapshot(["physical_stale"])) == "FAULT"
+
+
+def test_pressed_button_is_reported_as_estop_active():
+    assert classify_latch_state(snapshot(["physical_f1"])) == "ESTOP_ACTIVE"
+
+
+def test_reported_motor_can_failure_is_estop_active_not_fault():
+    """보고가 도착하는 한 원인은 알려져 있으므로 FAULT가 아니다."""
+    assert classify_latch_state(snapshot(["motor_can"])) == "ESTOP_ACTIVE"
+
+
+def test_latched_with_no_active_source_waits_for_reset():
+    state = classify_latch_state(snapshot([], latched=True))
+
+    assert state == "ESTOP_RELEASED_WAIT_RESET"
+
+
+def test_unlatched_with_no_active_source_is_cleared():
+    assert classify_latch_state(snapshot([], latched=False)) == "CLEARED"
