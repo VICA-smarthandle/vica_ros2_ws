@@ -342,3 +342,135 @@ class TestEmergency:
         assert any(isinstance(a, Say) for a in first)
         assert logic.on_estop(True, 0.05) == []
         assert logic.on_estop(True, 0.10) == []
+
+
+# ---- 취소 / 일시정지 / 재개 ---------------------------------------------------
+
+
+class TestPauseResumeCancel:
+    """안전 사건이 아닌 목표 조작. E-stop 과 달리 래치도 reset 도 없다."""
+
+    def test_pause_keeps_destination_and_resume_returns_to_it(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        dest = logic.active_destination
+
+        actions, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.PAUSED
+        assert logic.paused_destination is dest
+        assert logic.active_destination is None
+
+        actions, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.NAVIGATING
+        navigate = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigate) == 1
+        assert navigate[0].destination is dest
+        assert logic.paused_destination is None
+
+    def test_pause_emits_paused_event_not_canceled(self):
+        # 앱이 일시정지를 "주행 끝"으로 오해하면 안 된다.
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_pause_request(1.0)
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert len(cancels) == 1
+        assert cancels[0].event == "goal_paused"
+
+    def test_estop_discards_paused_destination(self):
+        # 보관분이 남으면 E-stop 뒤에 "다시 출발"이 통해 자동 재개 금지가 깨진다.
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        logic.on_estop(True, 2.0)
+        assert logic.state == State.ESTOPPED
+        assert logic.paused_destination is None
+
+        _, reason = logic.on_resume_request(True, 3.0)
+        assert reason == GateReason.ESTOP_ACTIVE
+
+        # 해제하고 grace 가 지나 idle 로 돌아와도 재개 대상은 없어야 한다.
+        logic.on_estop(False, 4.0)
+        logic.on_tick(10.0, NavStatus.NONE)
+        _, reason = logic.on_resume_request(True, 11.0)
+        assert reason == GateReason.NOT_PAUSED
+
+    @pytest.mark.parametrize(
+        "command", ["on_cancel_request", "on_pause_request"]
+    )
+    def test_estop_blocks_cancel_and_pause(self, command):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_estop(True, 1.0)
+        _, reason = getattr(logic, command)(2.0)
+        assert reason == GateReason.ESTOP_ACTIVE
+
+    def test_cancel_requires_active_navigation(self):
+        logic = MissionLogic()
+        _, reason = logic.on_cancel_request(0.0)
+        assert reason == GateReason.NOT_NAVIGATING
+
+    def test_cancel_clears_everything(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, reason = logic.on_cancel_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert logic.active_destination is None
+        assert logic.paused_destination is None
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert cancels and cancels[0].event == "goal_canceled"
+
+    def test_cancel_allowed_while_paused(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        _, reason = logic.on_cancel_request(2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+
+    def test_resume_requires_paused_state(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        _, reason = logic.on_resume_request(True, 1.0)
+        assert reason == GateReason.NOT_PAUSED
+
+
+class TestVoiceCancelConfirm:
+    """음성 취소는 잘못 알아들으면 안내가 끊기므로 되물어 확인한다."""
+
+    def test_confirm_request_does_not_cancel_yet(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, reason = logic.on_cancel_confirm_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.cancel_confirm_pending is True
+        # 확인하는 동안에도 주행은 계속된다.
+        assert logic.state == State.NAVIGATING
+        assert not any(isinstance(a, CancelNav) for a in actions)
+
+    def test_affirmative_answer_cancels(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_cancel_confirm_request(1.0)
+        actions = logic.on_cancel_confirm_answer(True, 2.0)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, CancelNav) for a in actions)
+
+    def test_negative_answer_keeps_navigating(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_cancel_confirm_request(1.0)
+        logic.on_cancel_confirm_answer(False, 2.0)
+        assert logic.state == State.NAVIGATING
+        assert logic.cancel_confirm_pending is False
+
+    def test_timeout_keeps_navigating(self):
+        # 응답이 없으면 취소하지 않고 안내를 이어간다.
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_cancel_confirm_request(1.0)
+        logic.on_tick(1.0 + logic.confirm_timeout_sec + 0.1, NavStatus.RUNNING)
+        assert logic.cancel_confirm_pending is False
+        assert logic.state == State.NAVIGATING

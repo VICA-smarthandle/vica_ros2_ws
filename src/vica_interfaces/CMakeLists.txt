@@ -9,6 +9,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotState.msg"
   "msg/EmergencyEvent.msg"
   "srv/RequestDestination.srv"
+  "srv/MissionCommand.srv"
 )
 
 ament_package()
