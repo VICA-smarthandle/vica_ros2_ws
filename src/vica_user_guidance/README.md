@@ -27,9 +27,33 @@ Safety 결정 사항이다.
 | `serial_link.py` | 시리얼 전송 래퍼 |
 | `turn_guide_node.py` | `/odom` → `/vica/turn_guide` |
 | `user_guidance_driver_node.py` | cue 병합 → 시리얼 전송 + 진단 발행 |
+| `firmware/` | 아두이노 나노 펌웨어와 bench 시험 도구 |
 
 순수 로직 모듈은 `rclpy`에 의존하지 않으며, 시각은 전부 호출자가 정수 나노초로
 주입한다. 하드웨어 없이 pytest로 검증할 수 있다.
+
+## 펌웨어
+
+`firmware/smart_handle_firmware/smart_handle_firmware.ino`가 서보·LED를 구동한다.
+**ROS와 1바이트 상태코드 프로토콜을 공유**하므로 같은 패키지에 둔다. `protocol.py`의
+상수를 바꾸면 펌웨어도 함께 바꿔야 하며, `test_protocol.py`가 두 값의 일치를
+자동으로 검사한다.
+
+```bash
+export PATH="$HOME/bin:$PATH"
+arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
+arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano \
+    firmware/smart_handle_firmware
+
+# 로봇과 분리한 상태에서 상태코드를 수동 전송해 표시를 확인한다
+python3 firmware/bench_test.py --list
+python3 firmware/bench_test.py --all
+```
+
+필요 라이브러리: `Adafruit NeoPixel`, `Servo` (Servo는 AVR 코어에 미포함).
+
+> 아두이노 IDE는 스케치 폴더명과 `.ino` 파일명이 같아야 하므로 `smart_handle_firmware/`
+> 하위 디렉터리 구조를 유지한다.
 
 ## `timebase.py`가 `vica_safety/freshness.py`의 복제인 이유
 
@@ -51,5 +75,5 @@ colcon test --packages-select vica_user_guidance
 
 ## 관련 문서
 
-- 설계·bench 결과: `devlog/2026-07-28-smart-handle-guidance-plan.md`
-- 펌웨어: `source_file/smart_handle_firmware/` (이동 예정)
+설계 근거와 bench 실측 결과는 작업공간 루트의
+`devlog/2026-07-28-smart-handle-guidance-plan.md`에 있다(별도 저장소).

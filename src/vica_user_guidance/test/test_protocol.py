@@ -7,11 +7,10 @@ import pytest
 from vica_user_guidance import protocol
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
+# 펌웨어는 같은 패키지 안에 있다. 프로토콜 상수를 공유하므로 함께 두어야
+# 한쪽만 바뀌는 일이 없다.
 FIRMWARE_INO = (
-    PKG_ROOT.parents[2]
-    / "source_file"
-    / "smart_handle_firmware"
-    / "smart_handle_firmware.ino"
+    PKG_ROOT / "firmware" / "smart_handle_firmware" / "smart_handle_firmware.ino"
 )
 
 
@@ -54,11 +53,20 @@ def test_firmware_arrival_duration_is_3_5_seconds():
     assert protocol.firmware_arrival_duration_sec() == pytest.approx(3.5)
 
 
-@pytest.mark.skipif(
-    not FIRMWARE_INO.exists(), reason="펌웨어 .ino가 이 경로에 없음 (이동했을 수 있음)"
-)
+def test_firmware_source_is_in_package():
+    """펌웨어가 패키지 안에 있어야 한다.
+
+    프로토콜 상수를 ROS와 공유하므로 같은 패키지에 두어 한쪽만 바뀌는 것을 막는다.
+    """
+    assert FIRMWARE_INO.exists(), f"펌웨어를 찾을 수 없다: {FIRMWARE_INO}"
+
+
 def test_firmware_constants_match_ino_source():
-    """protocol.py의 펌웨어 타이밍 상수가 실제 .ino와 일치하는지 확인한다."""
+    """protocol.py의 펌웨어 타이밍 상수가 실제 .ino와 일치하는지 확인한다.
+
+    펌웨어가 패키지 안에 있으므로 파일이 없으면 skip이 아니라 실패해야 한다.
+    조용히 넘어가면 프로토콜 불일치를 놓친다.
+    """
     source = FIRMWARE_INO.read_text(encoding="utf-8")
     assert f"#define ARRIVE_BLINK_MS    {protocol.FIRMWARE_ARRIVE_BLINK_MS}" in source
     assert (

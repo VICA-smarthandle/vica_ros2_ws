@@ -10,7 +10,6 @@ import pytest
 import yaml
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
-WS_SRC = PKG_ROOT.parent
 
 LAUNCH_FILE = PKG_ROOT / "launch" / "user_guidance.launch.py"
 CONFIG_FILE = PKG_ROOT / "config" / "user_guidance.yaml"
@@ -19,10 +18,7 @@ PACKAGE_XML = PKG_ROOT / "package.xml"
 NODE_DIR = PKG_ROOT / "vica_user_guidance"
 
 FIRMWARE_INO = (
-    WS_SRC.parents[1]
-    / "source_file"
-    / "smart_handle_firmware"
-    / "smart_handle_firmware.ino"
+    PKG_ROOT / "firmware" / "smart_handle_firmware" / "smart_handle_firmware.ino"
 )
 
 # guidance 계층이 절대 건드리면 안 되는 심볼들.
