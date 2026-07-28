@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_user_guidance</name>
+  <version>0.1.0</version>
+  <description>Smart Handle 사용자 안내 계층. 회전 판정과 서보·LED 표시만 담당하며 주행 명령을 발행하지 않는다.</description>
+  <maintainer email="2561110043@office.kopo.ac.kr">ji_w</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>vica_interfaces</depend>
+
+  <!-- vica_safety에 의존하지 않는다. guidance는 권한 없는 출력 계층이므로
+       안전 계층에 대한 역방향 의존을 만들지 않는다. 시간 판정 계약은
+       vica_user_guidance/timebase.py에 복제하고 테스트로 동일성을 고정한다. -->
+
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>python3-yaml</test_depend>
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

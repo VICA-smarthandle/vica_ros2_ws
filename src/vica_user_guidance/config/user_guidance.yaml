@@ -1,0 +1,51 @@
+# Smart Handle 사용자 안내 파라미터
+#
+# [중요] 최상위 키는 launch의 Node(name=...)와 정확히 일치해야 한다.
+# 다르면 파라미터가 조용히 무시되고 전부 기본값으로 동작한다.
+
+turn_guide_node:
+  ros__parameters:
+    odom_topic: /odom
+
+    # 회전 판정 임계값. 2026-07-28 시점 초기값이며 실주행 시험으로 확정한다. [미검증]
+    # 실내 90도 코너 기준으로 45도는 반응이 늦어 25도를 초기값으로 둔다.
+    window_sec: 1.5
+    enter_threshold_deg: 25.0
+    exit_threshold_deg: 10.0     # hysteresis. enter보다 작아야 채터링이 없다
+    min_duration_sec: 0.6        # 짧은 자세 보정을 회전으로 오판하지 않게 한다
+
+    odom_timeout_sec: 0.5        # 초과 시 source_stale=True, 누적 폐기
+    publish_rate_hz: 20.0
+    cue_valid_sec: 2.0           # valid_until 표시용 (판정에는 쓰지 않는다)
+
+user_guidance_driver_node:
+  ros__parameters:
+    # udev 규칙(99-vica-smart-handle.rules) 적용 후 /dev/vica_smart_handle로 바꾼다.
+    # 규칙 없이 먼저 바꾸면 모든 실행이 FAULT_PORT_OPEN이 된다.
+    serial_port: /dev/ttyUSB0
+    baudrate: 115200             # 펌웨어 Serial.begin(115200)과 반드시 일치
+
+    send_rate_hz: 10.0           # 펌웨어 워치독 1500ms 대비 15배 여유
+    diag_rate_hz: 2.0            # 진단은 전송보다 느리게 (대역폭 절약)
+
+    # write_timeout이 없으면 USB 버퍼가 찰 때 write()가 블로킹되어
+    # 단일 스레드 executor에서 노드 전체가 멈춘다. 전송 주기의 절반으로 둔다.
+    write_timeout_sec: 0.05
+
+    cue_timeout_sec: 1.0
+    estop_timeout_sec: 1.0
+
+    # true면 /estop_state가 끊겨도 ESTOP으로 다룬다(fail-safe).
+    # emergency_stop_node 없이 개발할 때만 false로 둔다.
+    estop_required: true
+
+    reconnect_interval_sec: 2.0
+
+    # 펌웨어 도착 애니메이션이 스스로 복귀할 때까지 3.5초가 걸린다.
+    #   ARRIVE_BLINK_MS(500) x (2 x ARRIVE_BLINK_COUNT(3) + 마지막 소등 1) = 3500ms
+    # 3.0으로 두면 마지막 프레임이 잘려 "2.5회 점멸"로 보인다(2026-07-28 프레임 추적).
+    # 10Hz 전송 양자화와 클록 드리프트 마진 0.5초를 더한 값이다.
+    # 펌웨어 상수를 바꾸면 이 값도 함께 바꾼다 — test_protocol.py가 관계를 고정한다.
+    arrival_hold_sec: 4.0
+
+    enable_serial: true
