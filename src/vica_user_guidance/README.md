@@ -56,6 +56,35 @@ python3 firmware/bench_test.py --all
 > 아두이노 IDE는 스케치 폴더명과 `.ino` 파일명이 같아야 하므로 `smart_handle_firmware/`
 > 하위 디렉터리 구조를 유지한다.
 
+## yaw 드리프트 진단 (`yaw_drift_check`)
+
+회전 임계값(기본 25°)이 실주행에서 안전한지 판단하려면 "yaw가 얼마나 흔들리나"
+보다 **"정지 상태에서 회전 오탐이 나는가"** 를 직접 재는 편이 낫다. 이 도구는
+`turn_detector.TurnDetector`를 **그대로 재사용**해 실제 판정 경로로 측정한다.
+로직을 복제하면 실제 노드와 달라져 측정이 무의미해진다.
+
+**로봇을 움직이지 않는다.** `/odom`을 구독만 하며 어떤 명령도 발행하지 않는다.
+
+```bash
+ros2 launch vica_localization wheel_ekf.launch.py          # 다른 터미널
+ros2 run vica_user_guidance yaw_drift_check --ros-args \
+    -p duration_sec:=300.0 -p csv_path:=/tmp/yaw.csv
+```
+
+측정 중 로봇을 건드리지 않는다. 사람이 기대거나 바닥이 흔들리면 IMU가 반응해
+실제보다 나쁘게 나온다.
+
+판정 기준:
+
+| 결과 | 조건 | 조치 |
+| --- | --- | --- |
+| 안전 | 오탐 0, 임계값까지 여유 3배 이상 | 그대로 진행 |
+| 주의 | 오탐 0, 여유 3배 미만 | Phase 5b에서 임계값 재검토 |
+| 위험 | 정지 상태 오탐 발생 | **임계값이 아니라 EKF 설정을 먼저 본다** |
+
+`/odom`이 오지 않으면 15초 뒤 원인을 안내하고 종료한다. EKF가 떠 있어도
+`/imu/base_link`나 `/wheel/odom`이 없으면 `/odom`이 나오지 않는다.
+
 ## 장치 이름 고정 (udev)
 
 `/dev/ttyUSB*`의 번호는 USB 재열거 순서에 따라 바뀐다. `udev/99-vica-smart-handle.rules`

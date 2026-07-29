@@ -36,6 +36,8 @@ setup(
             "turn_guide_node = vica_user_guidance.turn_guide_node:main",
             "user_guidance_driver_node = "
             "vica_user_guidance.user_guidance_driver_node:main",
+            # 진단 도구. 로봇을 움직이지 않고 /odom을 구독만 한다.
+            "yaw_drift_check = vica_user_guidance.yaw_drift_check:main",
         ],
     },
 )
