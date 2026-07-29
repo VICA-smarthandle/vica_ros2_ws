@@ -18,8 +18,11 @@ STL_SCALE = 0.001
 # URDF의 collision origin이 xyz="0 0 -0.044"로 z만 오프셋이므로
 # STL의 x/y는 base_link 좌표와 직접 대응한다.
 #
-# 후방은 STL 실측(-0.505)보다 footprint(-0.60)가 크다. 후방 충돌 이력이 없어
-# 안전 여유를 줄이지 않기로 했으므로 '덮는지'만 검사하고 일치는 요구하지 않는다.
+# 후방만은 STL을 신뢰하지 않는다. 2026-07-29 줄자 실측이 중심 -> 핸들 끝 56.5 cm인데
+# STL은 -0.505로 6 cm 짧다. 같은 날 핸들 기둥 위치도 CAD(-0.265~-0.305) 대비
+# 실측(-0.205)이 7~10 cm 어긋나, CAD 후방부가 실제 차체를 반영하지 못한다.
+# 따라서 후방 기준은 STL이 아니라 이 실측값이다.
+MEASURED_REAR = -0.565
 LASER_X = 0.185  # VICA.xacro laser_x
 CAMERA_X = 0.28683  # VICA.xacro camera_x
 
@@ -78,9 +81,10 @@ def test_footprint_covers_the_real_chassis(costmap):
     assert half_width >= max_abs_y, (
         f'{costmap} footprint 반폭 {half_width}이 실제 차체 {max_abs_y:.3f}보다 좁다'
     )
-    # 후방은 현행 안전 여유(-0.60)를 유지한다. 줄이려면 실기 검증이 먼저다.
-    assert rear <= -0.505, (
-        f'{costmap} footprint 후방 {rear}이 실제 차체 -0.505보다 짧다'
+    # 후방은 줄자 실측(-0.565)을 덮어야 한다. STL(-0.505)로 검사하면 6 cm 짧은
+    # footprint를 통과시켜, 2026-07-27 전방 충돌과 같은 종류의 결함을 놓친다.
+    assert rear <= MEASURED_REAR, (
+        f'{costmap} footprint 후방 {rear}이 실측 차체 {MEASURED_REAR}보다 짧다'
     )
 
 
