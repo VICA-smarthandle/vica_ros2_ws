@@ -28,6 +28,7 @@ Safety 결정 사항이다.
 | `turn_guide_node.py` | `/odom` → `/vica/turn_guide` |
 | `user_guidance_driver_node.py` | cue 병합 → 시리얼 전송 + 진단 발행 |
 | `firmware/` | 아두이노 나노 펌웨어와 bench 시험 도구 |
+| `udev/` | Smart Handle 고정 장치 이름 규칙 |
 
 순수 로직 모듈은 `rclpy`에 의존하지 않으며, 시각은 전부 호출자가 정수 나노초로
 주입한다. 하드웨어 없이 pytest로 검증할 수 있다.
@@ -54,6 +55,24 @@ python3 firmware/bench_test.py --all
 
 > 아두이노 IDE는 스케치 폴더명과 `.ino` 파일명이 같아야 하므로 `smart_handle_firmware/`
 > 하위 디렉터리 구조를 유지한다.
+
+## 장치 이름 고정 (udev)
+
+`/dev/ttyUSB*`의 번호는 USB 재열거 순서에 따라 바뀐다. `udev/99-vica-smart-handle.rules`
+가 `/dev/vica_smart_handle` 심볼릭 링크를 고정 부여한다.
+
+```bash
+sudo cp udev/99-vica-smart-handle.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+ls -l /dev/vica_smart_handle
+```
+
+**링크를 확인한 뒤에** `config/user_guidance.yaml`의 `serial_port`를 바꾼다. 규칙 없이
+먼저 바꾸면 모든 실행이 `FAULT_PORT_OPEN`이 된다.
+
+규칙은 보드 시리얼(`B003UMKG`)까지 조건에 넣는다. FTDI `0403:6001`은 흔한 값이라
+이것만으로는 다른 USB-시리얼 장치에도 링크가 걸린다. **보드를 교체하면 규칙도 함께
+갱신해야 한다.**
 
 ## `timebase.py`가 `vica_safety/freshness.py`의 복제인 이유
 

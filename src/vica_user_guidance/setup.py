@@ -18,6 +18,11 @@ setup(
         ("share/" + package_name, ["package.xml", "README.md"]),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
+        # 런타임에 읽지는 않지만, 소스 트리 없이 배포된 환경에서도 규칙 파일을
+        # 찾아 설치할 수 있어야 한다.
+        #   sudo cp $(ros2 pkg prefix vica_user_guidance)/share/vica_user_guidance/\
+        #       udev/99-vica-smart-handle.rules /etc/udev/rules.d/
+        (os.path.join("share", package_name, "udev"), glob("udev/*.rules")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
