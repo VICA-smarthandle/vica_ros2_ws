@@ -1,0 +1,23 @@
+# VICA Smart Handle — 아두이노 나노 (FTDI FT232R) 고정 장치 이름
+#
+# /dev/ttyUSB* 의 번호는 USB 재열거 순서에 따라 바뀐다. 다른 USB-시리얼 장치를
+# 먼저 꽂으면 스마트핸들이 ttyUSB1이 되어 config 기본값이 어긋난다.
+# SYMLINK 로 /dev/vica_smart_handle 을 고정 부여한다.
+#
+# [주의] idVendor/idProduct 0403:6001 은 FTDI FT232R 계열 전체가 공유하는 값이라
+# 이것만으로는 장치를 특정하지 못한다. 다른 FTDI 장치에도 같은 링크가 걸려
+# 엉뚱한 포트를 열게 된다. serial 까지 조건에 넣어야 한다.
+#
+# [갱신 필요] 아두이노 보드를 교체하면 serial 이 바뀌므로 이 파일도 함께 고친다.
+#   확인: udevadm info -a -n /dev/ttyUSB0 | grep 'ATTRS{serial}'
+#
+# ID_MM_DEVICE_IGNORE — ModemManager 가 시리얼 포트를 모뎀으로 오인해 AT 명령을
+# 탐침하면 DTR 토글로 나노가 리셋되고 수신 바이트가 오염된다. 증상이 간헐적이라
+# 원인 파악이 어려우므로 미리 차단한다. (2026-07-29 확인: ModemManager active)
+#
+# 설치:
+#   sudo cp 99-vica-smart-handle.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -l /dev/vica_smart_handle
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="B003UMKG", SYMLINK+="vica_smart_handle", MODE="0660", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
