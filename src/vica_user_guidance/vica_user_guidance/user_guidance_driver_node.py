@@ -150,8 +150,27 @@ class UserGuidanceDriverNode(Node):
         self.estop_last_ns = self.now_ns()
 
     def cb_goal(self, msg: String) -> None:
-        """goal_succeeded만 도착으로 본다."""
-        if is_arrival_event(parse_goal_event(msg.data)):
+        """goal_succeeded만 도착으로 본다.
+
+        파싱 실패는 경고로 남긴다. mission_manager가 payload 형식을 바꾸면 도착
+        표시가 조용히 사라지는데, 로그가 없으면 단서가 전혀 남지 않는다
+        (2026-07-29 실기 검증에서 평문 payload로 실제로 겪었다).
+
+        정상 운영에서는 발생하지 않으므로 로그가 시끄러워지지 않는다. goal_sent
+        같은 다른 이벤트는 정상적으로 파싱되므로 여기에 걸리지 않는다.
+        """
+        event = parse_goal_event(msg.data)
+        if event is None:
+            # payload를 자른다. 정상 payload에도 name·reason이 들어가 길고,
+            # 잘못된 payload는 얼마든지 길 수 있다. 진단에는 앞부분이면 족하다.
+            # throttle이 없으면 고빈도 오류 payload가 로그를 덮는다.
+            self.get_logger().warn(
+                "/vica_goal_event 파싱 실패 — 도착 표시가 동작하지 않습니다. "
+                f"JSON에 event 키가 필요합니다. payload={msg.data[:120]!r}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        if is_arrival_event(event):
             self.arrival_started_ns = self.now_ns()
             self.get_logger().info("도착 이벤트 수신 — Smart Handle 도착 표시 시작")
 
