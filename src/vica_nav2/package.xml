@@ -12,6 +12,8 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_common</exec_depend>
+  <!-- planner_server가 런타임에 로드하는 GridBased plugin. -->
+  <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>vica_localization</exec_depend>
 
   <test_depend>ament_copyright</test_depend>

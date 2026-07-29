@@ -11,13 +11,74 @@
 # esdf_slice_min_height는 launch 인자로도 노출되어 있어(기본 0.05) 실측하며 빠르게
 # 튜닝할 수 있다. 범위 대략 0.03~0.15. 바닥이 여전히 obstacle면 올리고, 낮은
 # 장애물(의자 다리 등)이 안 보이면 내린다.
+#
+# esdf_slice_max_height는 0.5였고, 그 위는 어떤 센서도 보지 않는 사각지대였다.
+#   로봇 최고점 0.86 m : base_link.stl 실측 z 상한 0.714(STL 로컬)에 collision
+#                        origin -0.044와 base_footprint->base_link +0.190을 적용한 값
+#   LiDAR      0.382 m : 단일 평면. 테이블 상판을 보지 못하고 다리만 본다
+#   카메라     0.320 m
+# 즉 0.50~0.86 m에 있는 테이블 상판(0.70~0.75)·선반·벽 돌출물은 아무도 보지 못해
+# 로봇 상부가 그대로 들이받는다. LiDAR는 상판 아래 다리만 보고 "통과 가능"으로
+# 판단하기 때문에 오히려 진입을 유도한다.
+# 0.9는 로봇 최고점(0.86)에 4 cm 여유를 둔 값이다. 천장·문틀 상단보다 충분히
+# 낮아 과검출 위험은 없다.
+# test_slice_covers_robot_height가 이 값과 STL 실측의 정합을 감시한다.
+#
+# mapping_type: static_tsdf였을 때는 벽·가구·사람이 한 TSDF에 함께 쌓였다.
+# 그래서 decay를 하나로만 조절할 수 있었고, 기본값 5 Hz는 카메라 시야를 벗어난
+# 것을 초당 5회 지웠다. X자 책상다리를 코너 접근 중 정면으로 보고도, 돌면서
+# 측면이 되자 기억이 사라져 costmap이 free가 되고 실제로 부딪혔다
+# (2026-07-28. 충돌 시점 costmap의 가장 가까운 lethal이 0.919 m였다).
+#
+# decay를 0으로 두고 시험하니 같은 경로에서 서행이 2회 8.8 s -> 0회, 측면 여유
+# 중앙값이 0.416 -> 0.543 m, 4구간 주행이 213 -> 185 s가 되었고 충돌도 없었다.
+# 다만 0은 원인 규명용 극단값이다. VICA는 사람이 많은 공공장소에서 다니므로
+# 지나간 사람이 영구히 유령으로 남으면 경로가 계속 막힌다.
+#
+# dynamic 모드는 정적/동적을 분리해 관리한다.
+#   static mapper  : 벽·가구      -> decay_tsdf_rate_hz            (기억)
+#   dynamic mapper : 사람          -> decay_dynamic_occupancy_rate_hz (망각)
+#   combined_map_slice 로 둘을 합쳐 발행한다. nav2의 nvblox_layer는 이 토픽을
+#   구독해야 한다(static_map_slice를 그대로 두면 동적 장애물이 빠진다).
 /**:
   ros__parameters:
+    # 2026-07-29 2차 시험: dynamic -> static_tsdf.
+    #
+    # 1차(r1_dyn25, dynamic + decay 2.5)는 복구 배선을 고친 뒤 처음으로 4구간을
+    # 완주했다(268 s). 그러나 배선 수정 전 static 기록(scale015_full, 231 s)보다
+    # 16 % 느리고 정지 시간이 1 s -> 32 s, 궤적 여유 중앙값이 0.885 -> 0.806 m로
+    # 모두 나빴다. 다만 그 기록은 복구가 죽어 있던 때라 완전한 대조군이 아니다.
+    # 그래서 배선을 고친 상태에서 mapping_type만 바꿔 다시 잰다.
+    #
+    # decay_tsdf_rate_hz는 2.5로 유지한다. 1차와의 차이를 mapping_type
+    # 하나로 묶기 위해서다.
+    mapping_type: static_tsdf
+    # 정적 지도는 아주 천천히만 감쇠시킨다.
+    #
+    # 0.0(감쇠 없음)으로 두었더니 combined_map_slice에서 costmap이 두 배로
+    # 찼다(2026-07-28). static_tsdf 모드일 때는 lethal 10.7 / inscribed 26.4 %
+    # 였는데 dynamic 모드에서 21.2 / 46.4 %가 되어 local_costmap의 46 %가
+    # 통과 불가가 됐고, 방2에서 출발조차 못 했다.
+    # 원인은 static과 dynamic이 같은 물체를 각자 잡아 합쳐지는데, static이
+    # 한 번 본 것을 절대 지우지 않아 로봇이 각도를 바꿀 때마다 같은 물체의
+    # 다른 면이 계속 누적되기 때문이다.
+    # 0.5로도 부족했다(inscribed 38.4 %, 1구간에서 갇힘). 감쇠는 확률적이라
+    # 자주 재관측되는 것은 살아남고 각도 차이로 생긴 중복만 지워지는 균형점이
+    # 있을 수 있어 2.5를 시험한다. nvblox 기본값 5.0은 X자 책상다리를 잊어
+    # 충돌했던 값이므로 그보다는 낮아야 한다.
+    #
+    # 주의: 이 값을 바꿔도 이미 쌓인 맵은 줄지 않는다. exclude_last_view_from_decay가
+    # True라 정지한 채 같은 곳을 보고 있으면 감쇠가 걸리지 않는다. nvblox에는
+    # 맵 초기화 서비스가 없으므로(save_map/load_map만 있다) 재시작해야 한다.
+    decay_tsdf_rate_hz: 2.5
+    # 동적 점유는 빠르게 잊는다. nvblox 기본값이며 사람이 지나간 자리가
+    # 0.1초마다 감쇠한다.
+    decay_dynamic_occupancy_rate_hz: 10.0
     static_mapper:
       esdf_slice_min_height: 0.05
-      esdf_slice_max_height: 0.5
+      esdf_slice_max_height: 0.9
       esdf_slice_height: 0.10
     dynamic_mapper:
       esdf_slice_min_height: 0.05
-      esdf_slice_max_height: 0.5
+      esdf_slice_max_height: 0.9
       esdf_slice_height: 0.10
