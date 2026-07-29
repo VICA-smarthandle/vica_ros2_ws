@@ -74,6 +74,29 @@ def generate_launch_description():
                     src="cmd_vel_smoothed",
                     dst="/cmd_vel_req",
                 ),
+                # behavior_server(Spin/BackUp/Wait/DriveOnHeading)는 Nav2
+                # navigation_launch.py에서 cmd_vel을 remap받지 못한다. controller만
+                # ('cmd_vel', 'cmd_vel_nav')를 받는다. 그래서 복구 동작은 /cmd_vel로
+                # 나가는데 VICA에는 그 토픽 구독자가 없다.
+                #
+                # 2026-07-29 실측: /cmd_vel 발행자 5(전부 behavior_server), 구독자 0.
+                # 즉 Spin·BackUp이 한 번도 로봇을 움직인 적이 없다. planner가
+                # "Starting point in lethal space"로 실패하면 복구 6회가 전부 헛돌고
+                # 곧바로 Goal failed가 된다 — 한 번 갇히면 빠져나올 수단이 없었다.
+                #
+                # Nav2 기본 구성에서도 behavior_server는 velocity_smoother를 거치지
+                # 않고 로봇의 최종 속도 토픽으로 직접 발행한다(복구 동작은 자체
+                # 램프를 갖는다). VICA의 그 토픽은 /cmd_vel_req이므로 Safety
+                # Supervisor 경로(CLAUDE.md)는 그대로 유지된다.
+                #
+                # 노드 지정 문법(node_name:from:=to)을 쓴다. 접두사 없는 전역
+                # remap은 global이 node-level보다 먼저 적용되어(launch_ros
+                # node.py 468~477행) controller_server의 cmd_vel:=cmd_vel_nav를
+                # 덮어쓰고 velocity_smoother를 자기루프로 만든다.
+                SetRemap(
+                    src="behavior_server:cmd_vel",
+                    dst="/cmd_vel_req",
+                ),
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(bringup_launch),
                     launch_arguments={

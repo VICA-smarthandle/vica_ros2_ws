@@ -52,6 +52,15 @@ bt_navigator:
     # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
     # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
     # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
+    #
+    # 2026-07-28: 기본 BT에 SmoothPath가 없다는 것을 근거로 커스텀 BT를 넣어
+    # smoother_server(simple_smoother)를 호출해 봤으나 실주행에서 악화되어
+    # 되돌렸다. SimpleSmoother는 경로 길이를 줄이는 방향으로 부드럽게 만들어
+    # 코너 안쪽으로 경로를 당긴다. 그 결과 측면 여유 중앙값이 0.476 -> 0.373 m로
+    # 줄었고, DWB가 저속 궤적만 고를 수 있게 되어 코너 구간의 '절반 이하 속도'
+    # 비율이 30.1 -> 52.8 %로 늘었다. 경로 꺾임 p95도 15.1 -> 24.0도로 나빠져
+    # 얻은 것이 없었다(costmap 장애물 밀도는 두 주행이 동일했다).
+    # 경로 각짐을 풀려면 smoother가 아니라 costmap을 아는 planner가 필요하다.
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -172,12 +181,49 @@ controller_server:
       trans_stopped_velocity: 0.03
       short_circuit_trajectory_evaluation: True
       stateful: True
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.08
+      # BaseObstacle은 "원형 로봇"을 가정하고 궤적 각 자세에서 중심 셀 하나만
+      # 조회한다. VICA footprint는 x -0.60~+0.305, y ±0.227(길이 0.905, 폭
+      # 0.454)이라 inscribed 0.277 m와 circumscribed 0.692 m가 2.5배 차이난다.
+      # 중심이 free여도 후방 0.60 m나 전방 0.305 m가 장애물에 들어가 있을 수
+      # 있고, inflation은 방향 무관 등방성이라 이 방향 의존성을 표현하지 못한다.
+      # 최협 통로 반폭 0.35 m < circumscribed 0.692 m이므로, 그곳에서 제자리
+      # 회전하면 후방이 부딪히는데 BaseObstacle로는 이를 걸러낼 수 없다.
+      # ObstacleFootprint는 궤적 각 자세에 footprint를 놓고 변을 순회한다.
+      #
+      # 교체만으로 서행이 11.0 -> 7.9 s로 줄었고 제어주기도 버텼다(중앙값
+      # 50.1 ms, 75 ms 초과 1.0 %). short_circuit_trajectory_evaluation이
+      # True라 조기 탈락이 유지되는 덕이다.
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      # critic은 '충돌하면 무효'라는 하드 판정만 정확하게 만든다. '장애물에서
+      # 멀어지려는 선호'의 세기는 scale이 정한다. 0.08에서는 무게가 이랬다:
+      #   ObstacleFootprint 최대 기여 = 253 x 0.08 = 20.2
+      #   PathDist 경로 이탈 1셀(5 cm) = 32
+      # 장애물 비용을 최대로 물어도 경로에서 3 cm 벗어나는 것보다 싸서, 경로가
+      # 벽에 붙어 있으면 그대로 따라갔다(측면 여유 0.415 -> 0.411 m, 무변화).
+      # inflation 곡선 cost = 253*exp(-3.5*(d-0.277))로 계산하면 벽 이격을
+      # 0.35 -> 0.45 m로 옮기는 이득이 58이고 대가가 경로 이탈 2셀 = 64이라
+      # 손익분기 scale이 약 1.1이다.
+      #
+      # 0.3으로 올렸더니 좁은 곳에서 로봇이 갇혔다(2026-07-28). 전방 여유가
+      # 0.146 m(중심 기준 0.451 m)인 지점에서 46초간 한 발도 못 나갔고,
+      # /plan은 계속 나오는데 /cmd_vel_nav에 5.2초짜리 공백이 반복됐다.
+      # 경로는 멀쩡한데 controller가 유효 궤적을 하나도 못 찾은 것이다.
+      # inflation_radius 0.45가 최협 통로 반폭 0.35 m보다 커서 좁은 곳은 전부
+      # 비용 지대인데, scale 0.3이 그 비용을 무겁게 쳐 모든 궤적이 탈락했다.
+      # 회피 선호는 남기되 궤적이 전멸하지 않도록 0.15로 낮춘다.
+      # 이래도 갇히면 다음은 inflation_radius를 0.45 -> 0.38로 낮춰 최협
+      # 통로에 비용 0인 중앙선을 만드는 것이다.
+      ObstacleFootprint.scale: 0.15
       PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
+      # forward_point_distance는 "로봇 앞 이 거리의 점"을 경로에 정렬시키는
+      # 기준점이다. 0.1은 footprint 전방(0.305) 안쪽, 즉 차체 내부라서
+      # PathAlign이 PathDist와 하는 일이 겹쳐 방향 정렬 정보가 사라진다.
+      # 그러면 코너를 미리 보고 꺾지 못하고 도달해서야 반응하므로 감속한다.
+      # 2026-07-28 주행에서 코너 구간의 |wz|-vx 상관이 -0.389였다(코너 없는
+      # 구간은 -0.116). Nav2 기본값 0.325로 되돌린다.
+      PathAlign.forward_point_distance: 0.325
       GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
+      GoalAlign.forward_point_distance: 0.325
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
       RotateToGoal.scale: 32.0
@@ -197,8 +243,24 @@ local_costmap:
       height: 6
       resolution: 0.05
       # robot_radius: 0.22
-      footprint: "[[0.15, 0.1875], [0.15, -0.1875], [-0.60, -0.1875], [-0.60, 0.1875]]"
-      footprint_padding: 0.03
+      # footprint는 vica_description/meshes/base_link.stl의 XY 투영 실측값이다.
+      # URDF collision origin이 z만 오프셋(xyz="0 0 -0.044")이라 STL x/y는 base_link
+      # 좌표와 직접 대응한다. 실측 bbox: x -0.505~+0.305, y ±0.227.
+      #   전방 +0.305 : 구값 +0.15은 실제보다 15.5 cm 짧아 커브 중 전방 범퍼가
+      #                 costmap상 free 영역을 쓸고 지나가 실제 충돌이 발생했다
+      #                 (2026-07-27 화장실 주행). LiDAR(+0.185)·카메라(+0.287)·
+      #                 전방 캐스터(+0.252)가 모두 구값 바깥이었던 것이 방증이다.
+      #   좌우 ±0.227 : 구값 ±0.1875는 각 4 cm 짧았다.
+      #   후방 -0.60  : STL 실측은 -0.505지만 후방 충돌 이력이 없어 안전 여유를
+      #                 줄이지 않기 위해 구값을 유지한다.
+      # test_footprint_contract가 이 값과 STL 실측의 정합을 감시한다.
+      footprint: "[[0.305, 0.227], [0.305, -0.227], [-0.60, -0.227], [-0.60, 0.227]]"
+      # padding은 유일한 '하드 여유'다. inscribed radius = 0.227 + padding 이고
+      # planner는 벽에서 그 거리까지 통과 가능으로 본다. padding 0.03이면 차체
+      # 가장자리가 벽에 정확히 닿는 지점까지 경로가 허용되어 여유가 0이었고,
+      # AMCL 오차만큼 그대로 충돌로 이어졌다. 0.06으로 3 cm 하드 여유를 준다.
+      # 맵 최협 구간 반폭이 0.35 m라 inscribed 0.287에도 통과 여지가 남는다.
+      footprint_padding: 0.05
       # nvblox_layer: LiDAR가 놓치는 3D 장애물을 보조로 반영한다. slice는 Docker의
       # nvblox_node가 odom frame으로 발행하므로 nav2_costmap_global_frame(odom)과
       # 정합해 TF 없이 병합된다. Host에 nvblox_nav2 plugin이 없으면 이 layer 때문에
@@ -208,6 +270,15 @@ local_costmap:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
         nav2_costmap_global_frame: odom  # local costmap global_frame과 일치해야 함
+        # nvblox가 mapping_type: dynamic이면 정적/동적을 나눠 관리하고
+        # combined_map_slice로 둘을 합쳐 발행한다. static_map_slice를 그대로
+        # 두면 사람 같은 동적 장애물이 costmap에 들어오지 않는다.
+        # 근거와 배경은 vica_nvblox_bringup/config/vica_nvblox_overrides.yaml 주석.
+        # 2026-07-29 2차 시험: mapping_type을 static_tsdf로 되돌리므로 이 토픽도
+        # 함께 static_map_slice로 돌린다. combined_map_slice는 dynamic 계열
+        # mapping_type에서만 발행되어, 짝이 어긋나면 nvblox_layer가 아무것도
+        # 받지 못한다. test_nav2_subscribes_the_slice_that_this_mapping_type_publishes가
+        # 이 짝을 감시한다.
         nvblox_map_slice_topic: /nvblox_node/static_map_slice
         convert_to_binary_costmap: True
       voxel_layer:
@@ -230,8 +301,17 @@ local_costmap:
           raytrace_min_range: 0.05
           obstacle_max_range: 3.0
           obstacle_min_range: 0.12
-          # 잔상 없애기
-          observation_persistence: 0.0 # 장애물을 보관하는 시간
+          # 관측을 보관하는 시간. 0.0이면 한 프레임만 놓쳐도 즉시 지워진다.
+          # LiDAR는 0.382 m 단일 평면이라 의자·테이블 다리처럼 얇은 기둥에는
+          # 점이 1~2개만 맞는다(거리 1 m, 각분해능 0.9도 -> 호 길이 1.6 cm).
+          # 그래서 검출이 프레임마다 들락날락하고, 0.0에서는 그 간헐성이 그대로
+          # costmap 깜빡임이 된다. 코너에서는 측면 물체의 각속도가 커서 더 심하다.
+          # 2026-07-28 주행에서 경로는 그대로인데(연속 /plan 변화 0.03~0.13 m,
+          # 전체 최대 2.64 m) DWB가 저속 궤적만 골라 3.43 s까지 기어가는 구간이
+          # 4회 있었다. 0.5 s를 보관해 얇은 다리를 안정적으로 유지한다.
+          # 주의: 다리 하나에도 inflation_radius 0.45가 적용되므로, 안정적으로
+          # 잡힐수록 서행 자체는 길어질 수 있다. 이는 실주행으로 확인한다.
+          observation_persistence: 0.5
           expected_update_rate: 0.2
           inf_is_valid: true
 
@@ -240,10 +320,31 @@ local_costmap:
         map_subscribe_transient_local: True
       always_send_full_costmap: True
 
+      # inflation_radius는 '통과 가능/불가'를 정하지 않는다. 그건 padding을 적용한
+      # footprint에서 계산되는 inscribed radius(0.227+0.05=0.277 m)가 정한다.
+      # inflation_radius는 "벽에서 이 거리까지는 비용을 물린다"는 목표 이격거리다.
+      # 그 바깥은 비용 0이라 경로가 자유롭다.
+      #
+      # 0.35일 때: 경사 구간이 0.277~0.35로 폭 7 cm뿐 → 중앙 유도력이 없어
+      #   NavFn이 벽에 붙은 최단경로를 그렸고 실제 충돌로 이어졌다.
+      # 0.65로 올렸을 때: 통로 반폭 중앙값(0.70 m)에 육박해 통로 '전체'가 비용
+      #   지대가 되었다. NavFn은 경로 비용 합을 최소화하므로 비용 0인 먼 길로
+      #   우회했고, 좁은 길에서는 최소비용 경로가 거의 동점이 되어 LiDAR 노이즈마다
+      #   경로가 뒤바뀌며 주춤거렸다(2026-07-27 실주행).
+      # 0.45: 벽 이격 목표를 0.45 m로 두고 그 바깥은 비용 0. 실여유는
+      #   0.45 - 0.277 = 0.17 m. 통로 중앙부가 평탄해 우회·진동이 없다.
+      # 0.38을 시험했다가 되돌렸다(2026-07-28). 의도한 효과는 나왔다 —
+      #   최장 서행이 8.37 -> 2.57 s로 줄고 costmap 비용 지대도 29.3 -> 19.6 %로
+      #   축소됐다. 그러나 같은 4구간 경로에서 0.45는 완주(4/4)한 반면 0.38은
+      #   마지막 구간에서 61초간 갇혀 실패했다. 갇힌 자리의 여유는 전방 0.264,
+      #   후방·우측 0.172 m로 inscribed(0.277) 안쪽이었다.
+      #   inflation_radius는 '얼마나 떨어져 갈 것인가'를 정하므로, 줄이면 좁은
+      #   곳에 진입하는 것 자체를 막지 못한다. 갇힘의 원인은 비용 지대의 폭이
+      #   아니라 진입 억제력이었다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.35
+        cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
+        inflation_radius: 0.45
 
 global_costmap:
   global_costmap:
@@ -253,8 +354,10 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       use_sim_time: false
-      footprint: "[[0.15, 0.1875], [0.15, -0.1875], [-0.60, -0.1875], [-0.60, 0.1875]]"
-      footprint_padding: 0.03
+      # local_costmap과 동일한 실측 footprint. 두 costmap이 다르면 planner가 통과
+      # 가능하다고 본 경로를 controller가 거부한다(근거는 local_costmap 주석 참고).
+      footprint: "[[0.305, 0.227], [0.305, -0.227], [-0.60, -0.227], [-0.60, 0.227]]"
+      footprint_padding: 0.05
       # robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
@@ -273,7 +376,9 @@ global_costmap:
           raytrace_min_range: 0.05
           obstacle_max_range: 3.0
           obstacle_min_range: 0.12
-          observation_persistence: 0.0
+          # local_costmap과 같은 값이어야 한다. 다르면 planner가 통과 가능하다고
+          # 본 경로를 controller가 거부한다(근거는 local_costmap 주석 참고).
+          observation_persistence: 0.5
           expected_update_rate: 0.2
           inf_is_valid: true
 
@@ -281,10 +386,13 @@ global_costmap:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
 
+      # local_costmap과 동일하게 유지한다(근거는 local_costmap 주석 참고).
+      # 전역 경로를 중앙으로 미는 것이 코너 붙음의 1차 해결책이므로 global 쪽이
+      # 특히 중요하다. DWB는 PathDist/PathAlign(32.0)로 이 경로를 충실히 따른다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.35
+        cost_scaling_factor: 3.5
+        inflation_radius: 0.45
       always_send_full_costmap: True
 
 map_server:
@@ -307,11 +415,42 @@ planner_server:
     expected_planner_frequency: 20.0
     use_sim_time: false
     planner_plugins: ["GridBased"]
+    # NavFn(gradient descent)은 비용이 거의 같은 셀 사이에서 경로가 진동한다.
+    # 2026-07-28 실측: 서행 7회가 전부 '앞 경로가 굽은' 지점이었고, 앞 1 m
+    # 누적 꺾임이 31~2639도였다(2639도는 1 m 안에서 7바퀴 도는 값이다).
+    # 앞 1.5 m가 10도 미만으로 곧은 명령은 5018개 중 123개(2.5 %)뿐이라,
+    # 실제 복도가 직선인데도 로봇이 계속 미세 조향을 강요받았다. 직진 구간의
+    # 실제 wz 표준편차 0.1273 rad/s는 max_vel_theta 0.4의 32 %다.
+    #
+    # SmacPlanner2D는 A* 기반이고 cost_travel_multiplier로 비용을 적극 반영하며
+    # collision-aware smoother를 planner 내부에 갖는다. BT의 planner_id가
+    # 'GridBased'로 같아 plugin 교체만으로 바뀌고 되돌리기도 한 줄이다.
+    #
+    # 되돌리려면 아래를 원복한다:
+    #   plugin: "nav2_navfn_planner/NavfnPlanner"
+    #   tolerance: 0.2 / use_astar: false / allow_unknown: true
     GridBased:
-      plugin: "nav2_navfn_planner/NavfnPlanner"
-      tolerance: 0.2 #0.5 -> 0.2
-      use_astar: false
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      # NavFn과 같은 목표 허용오차를 유지한다.
+      tolerance: 0.2
+      # 맵 해상도 0.05 m는 이미 거칠다. 더 줄이면 좁은 통로(반폭 0.35 m)를
+      # 통과 불가로 오판할 수 있어 downsample하지 않는다.
+      downsample_costmap: false
+      downsampling_factor: 1
       allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      # planner 재계획 주기는 1 Hz다. 그 안에 끝나야 경로 갱신이 밀리지 않는다.
+      max_planning_time: 0.5
+      # 경로 길이보다 비용 회피를 우선하는 정도. 기본 2.0은 벽 쪽으로 붙는
+      # 경향이 있어 통로 중앙 유지를 위해 조금 올린다.
+      cost_travel_multiplier: 3.0
+      use_final_approach_orientation: false
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
 
 smoother_server:
   ros__parameters:
@@ -372,11 +511,27 @@ velocity_smoother:
     max_velocity: [0.26, 0.0, 1.0]
     min_velocity: [-0.26, 0.0, -1.0]
     max_accel: [2.5, 0.0, 3.2]
-    # 목적지 도착 시 정지 명령의 급격한 변화만 완화한다. DWB decel_lim(비상
-    # 제동)과 달리 이 값은 전역 적용되어 cancel·controller 정지 시에도 쓰이며,
-    # [미검증] 트레이드오프로 남는다 — guideline/vica_scenario.md 참고. 값은
-    # 실기 테스트로 최종 확정한다.
-    max_decel: [-1.0, 0.0, -1.2]
+    # [x] 직선(-2.5): 회전에서 고친 것과 같은 정합 문제가 직선에도 있었다.
+    #   -1.0일 때 DWB의 decel_lim_x(-2.5)와 2.5배 어긋나, DWB는 0.104 s에
+    #   멈출 수 있다고 보고 궤적을 골랐지만 실제로는 0.26 s가 걸렸다.
+    #   2026-07-28 주행에서 전방 우측 범퍼가 실제로 충돌했고, 그 순간 기록은
+    #   명령 vx +0.010 m/s(정지 지시)인데 실제 vx +0.227 m/s였다. 정지거리를
+    #   나누면 이렇다.
+    #     CAN·드라이버 지연 300 ms 중 이동 : 0.227 x 0.3   = 6.8 cm
+    #     -1.0으로 감속하며 이동           : 0.227^2/2.0  = 2.6 cm
+    #     합계 9.4 cm  (footprint_padding은 5 cm)
+    #   -2.5로 정합시키면 감속 거리가 1.0 cm로 줄어 정지거리 7.8 cm가 된다.
+    #   여전히 padding보다 크다 — 지연 6.8 cm가 지배적이라 파라미터만으로는
+    #   해결되지 않는다. 드라이버 가속 램프가 근본 과제다.
+    #   승차감은 이 값이 아니라 Mission Manager의 approach_slowdown_distance_m
+    #   (잔여거리 3 m에서 70 % 속도 상한)이 담당한다. 둘은 독립이다.
+    # [yaw] 회전(-3.2): 승차감이 아니라 '조향 권한'이므로 완화하면 안 된다.
+    #   -1.2였을 때 DWB의 decel_lim_theta(-3.2)와 2.7배 어긋나, DWB는 회전을
+    #   0.125 s에 멈출 수 있다고 보고 궤적을 골랐는데 실제로는 0.333 s가 걸렸다.
+    #   그 0.21 s(제어주기 4회분) 지연이 목표 방위를 지나치게 만들고, 반대로
+    #   꺾었다가 또 지나치는 한계 진동 = 주행 중 비틀거림을 만들었다
+    #   (2026-07-27 실주행 영상). DWB acc/decel_lim_theta와 정합시킨다.
+    max_decel: [-2.5, 0.0, -3.2]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
