@@ -207,3 +207,30 @@ def test_write_timeout_shorter_than_send_period():
 def test_config_has_ros_parameters_block(key):
     """ros__parameters 블록이 없으면 파라미터가 로드되지 않는다."""
     assert "ros__parameters" in load_config()[key]
+
+
+def test_serial_port_default_matches_config():
+    """노드가 선언한 기본 포트와 config 값이 같아야 한다.
+
+    launch로 띄우면 YAML이 덮어쓰지만 `ros2 run`으로 직접 띄우면 declare_parameter
+    기본값이 쓰인다. 두 값이 어긋나면 실행 방식에 따라 다른 포트를 열게 되고,
+    번호가 밀린 다른 USB 장치를 스마트핸들로 오인해 열 수도 있다.
+    """
+    configured = load_config()["user_guidance_driver_node"]["ros__parameters"][
+        "serial_port"
+    ]
+    source = read(NODE_DIR / "user_guidance_driver_node.py")
+    assert f'declare_parameter("serial_port", "{configured}")' in source
+
+
+def test_serial_port_is_not_an_enumeration_dependent_path():
+    """/dev/ttyUSB* 같은 열거 순서 의존 경로를 기본값으로 쓰지 않는다.
+
+    다른 USB-시리얼 장치를 먼저 꽂으면 번호가 밀린다. udev 규칙이 부여하는 고정
+    이름을 쓰는 것이 이 규칙의 존재 이유다.
+    """
+    configured = load_config()["user_guidance_driver_node"]["ros__parameters"][
+        "serial_port"
+    ]
+    assert not configured.startswith("/dev/ttyUSB")
+    assert not configured.startswith("/dev/ttyACM")

@@ -20,9 +20,10 @@ turn_guide_node:
 
 user_guidance_driver_node:
   ros__parameters:
-    # udev 규칙(99-vica-smart-handle.rules) 적용 후 /dev/vica_smart_handle로 바꾼다.
-    # 규칙 없이 먼저 바꾸면 모든 실행이 FAULT_PORT_OPEN이 된다.
-    serial_port: /dev/ttyUSB0
+    # udev 규칙(udev/99-vica-smart-handle.rules)이 부여하는 고정 이름이다.
+    # /dev/ttyUSB* 번호는 USB 재열거 순서에 따라 바뀌므로 직접 쓰지 않는다.
+    # 규칙 미설치 장비에서는 FAULT_PORT_OPEN이 된다 — README의 udev 절을 따른다.
+    serial_port: /dev/vica_smart_handle
     baudrate: 115200             # 펌웨어 Serial.begin(115200)과 반드시 일치
 
     send_rate_hz: 10.0           # 펌웨어 워치독 1500ms 대비 15배 여유

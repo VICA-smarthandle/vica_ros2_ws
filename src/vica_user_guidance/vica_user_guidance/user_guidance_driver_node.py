@@ -34,7 +34,10 @@ class UserGuidanceDriverNode(Node):
     def __init__(self) -> None:
         super().__init__("user_guidance_driver_node")
 
-        self.declare_parameter("serial_port", "/dev/ttyUSB0")
+        # config/user_guidance.yaml과 같은 값이어야 한다. launch로 띄우면 YAML이
+        # 덮어쓰지만 ros2 run으로 직접 띄우면 이 값이 쓰인다. 두 값이 어긋나면
+        # 실행 방식에 따라 다른 포트를 열게 된다 — test_launch_contract.py가 고정한다.
+        self.declare_parameter("serial_port", "/dev/vica_smart_handle")
         self.declare_parameter("baudrate", protocol.FIRMWARE_BAUDRATE)
         self.declare_parameter("send_rate_hz", 10.0)
         self.declare_parameter("diag_rate_hz", 2.0)

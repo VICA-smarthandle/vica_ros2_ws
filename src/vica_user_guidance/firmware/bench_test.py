@@ -10,7 +10,7 @@
 펌웨어 빌드·업로드:
     export PATH="$HOME/bin:$PATH"
     arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
-    arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano \
+    arduino-cli upload -p /dev/vica_smart_handle --fqbn arduino:avr:nano \
         firmware/smart_handle_firmware
 
 사용법:
@@ -34,7 +34,8 @@ except ImportError:
         "  또는  pip install pyserial"
     )
 
-DEFAULT_PORT = "/dev/ttyUSB0"
+# udev 규칙이 부여하는 고정 이름. 규칙 미설치 장비에서는 --port로 지정한다.
+DEFAULT_PORT = "/dev/vica_smart_handle"
 DEFAULT_BAUD = 115200
 
 # 펌웨어 상태코드 (smart_handle_firmware.ino와 일치해야 한다)

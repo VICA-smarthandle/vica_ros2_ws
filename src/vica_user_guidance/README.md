@@ -43,7 +43,7 @@ Safety 결정 사항이다.
 ```bash
 export PATH="$HOME/bin:$PATH"
 arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
-arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano \
+arduino-cli upload -p /dev/vica_smart_handle --fqbn arduino:avr:nano \
     firmware/smart_handle_firmware
 
 # 로봇과 분리한 상태에서 상태코드를 수동 전송해 표시를 확인한다
