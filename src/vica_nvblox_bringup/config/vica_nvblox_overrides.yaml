@@ -86,7 +86,24 @@
     # 그때보다 누적이 덜해야 한다. 주행 후 local_costmap의 lethal/inscribed 비율을
     # 위 수치와 대조해 확인한다. 되돌리려면 이 한 줄만 static_tsdf로 바꾸고
     # nav2_params.yaml의 local nvblox_map_slice_topic도 static_map_slice로 돌린다.
-    mapping_type: dynamic
+    # 2026-07-30 4차: dynamic -> static_tsdf로 되돌린다.
+    #
+    # 3차에서 슬라이스 분리(global=static / local=combined)를 시험한 이유는 사람이
+    # static TSDF에 쌓여 global costmap에 유령으로 남는 것이었다. 그런데 실측이
+    # 개선을 보이지 않았다:
+    #   일시 LETHAL 셀 지속 p95   47.0 s (static_tsdf) -> 43.0 s (분리)
+    #   일시 셀 수                26,270 -> 26,059
+    # 즉 유령의 원인은 mapping_type이 아니었다. 원인은
+    # exclude_last_view_from_decay(아래)였고 그것만 남긴다.
+    #
+    # 그리고 분리 구성으로 완주한 회차가 없다(1/3). 유일하게 3/3 완주한 조합은
+    # static_tsdf + 두 costmap 모두 static_map_slice + scale 0.15 + decay 2.5였다
+    # (2026-07-30, 145.6 s). 그 조합으로 되돌리고 exclude_last_view만 얹는다.
+    #
+    # 주의: 되돌리면 combined_map_slice가 발행되지 않으므로 nav2_params.yaml의
+    # local nvblox_map_slice_topic도 static_map_slice여야 한다. 짝이 어긋나면
+    # nvblox_layer가 아무것도 받지 못한 채 조용히 무해해진다.
+    mapping_type: static_tsdf
     # 정적 지도는 아주 천천히만 감쇠시킨다.
     #
     # 0.0(감쇠 없음)으로 두었더니 combined_map_slice에서 costmap이 두 배로
@@ -125,8 +142,13 @@
     # 애초에 TSDF에 약하게만 들어가 weight가 낮았을 가능성). 이 주행이 그것을
     # 가른다 - 충돌이 재현되면 decay 속도가 맞고, 재현되지 않으면 해상도 문제이며
     # 그때는 voxel_size 0.05 -> 0.03이 대책이다.
-    # 되돌리려면 이 값을 2.5로 낮춘다.
-    decay_tsdf_rate_hz: 5.0
+    # 2026-07-30 4차: 5.0 -> 2.5로 되돌린다.
+    # 5.0은 2026-07-28 X자 책상다리 충돌로 기록된 값이다. 산수가 그 귀인을 지지하지
+    # 않지만(15 s 소멸 vs 7 s 회전) 검증 전에 안고 갈 위험이 아니다.
+    # exclude_last_view_from_decay: false만으로 시야 안 유령이 영구 -> 30.6 s가 된다
+    #   (5.0 x 0.95^n <= esdf_integrator_min_weight 0.1 -> n = 76 tick / 2.5 Hz).
+    # 그것으로 부족하다는 실측이 나온 뒤에 다시 올린다.
+    decay_tsdf_rate_hz: 2.5
     # 동적 점유는 빠르게 잊는다. nvblox 기본값이며 사람이 지나간 자리가
     # 0.1초마다 감쇠한다.
     decay_dynamic_occupancy_rate_hz: 10.0

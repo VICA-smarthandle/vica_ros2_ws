@@ -251,13 +251,17 @@ controller_server:
       # 냈으므로 controller가 그것을 거부하면 전멸했다. 지금은 planner가
       # 253을 피한 경로를 내므로 controller가 같은 기준을 따르는 것이 정합이다.
       #
-      # 2026-07-30 실측으로 0.5는 과했다. 방향은 맞았고 세기가 컸다:
-      #   scale 0.15   lethal space 25회 / DWB 무효   3회   (밴드를 자유롭게 드나든다)
-      #   scale 0.5    lethal space  2회 / DWB 무효 133회   (궤적이 전멸한다)
-      # lethal space가 25 -> 2회로 줄어 가설은 검증됐으나, 그 대가로 DWB가 유효
-      # 궤적을 44배 더 많이 잃었다. 0.25는 그 사이다 - 253 진입이 경로 2셀(10 cm)
-      # 이탈과 맞먹어, 피하려 하되 다른 선택이 없으면 들어갈 수 있다.
-      ObstacleFootprint.scale: 0.25
+      # 2026-07-30 실측 (같은 코스 방2 -> 화장실 -> 안내소, 7회):
+      #   scale 0.15  lethal space  1~25회 / DWB 무효   3~4회   완주 3/3 (사람 없음)
+      #   scale 0.25  lethal space     28회 / DWB 무효     1회   완주 1/3
+      #   scale 0.5   lethal space      2회 / DWB 무효   133회   완주 1/3
+      # 0.5는 궤적이 전멸했고(44배), 0.25는 lethal space가 오히려 최다였다.
+      # 완주한 것은 0.15뿐이므로 되돌린다.
+      #
+      # 임계값 비대칭(DWB 254 vs planner 253)은 여전히 열린 문제다. scale로는
+      # 두 실패 모드 사이에 앉히지 못했다 - 0.15에서 lethal space가 1회(사람 없음)와
+      # 25회(사람 있음)로 갈리므로, 이 값은 환경이 정하고 scale이 정하지 않는다.
+      ObstacleFootprint.scale: 0.15
       PathAlign.scale: 32.0
       # forward_point_distance는 "로봇 앞 이 거리의 점"을 경로에 정렬시키는
       # 기준점이다. 0.1은 footprint 전방(0.305) 안쪽, 즉 차체 내부라서
@@ -346,8 +350,14 @@ local_costmap:
         # combined_map_slice는 dynamic 계열 mapping_type에서만 발행된다
         # (nvblox_node.cpp advertiseTopics: isUsingHumanOrDynamicMapper 분기).
         # 짝이 어긋나면 nvblox_layer가 아무것도 받지 못한 채 조용히 무해해진다.
-        # test_nvblox_layer_contract.py가 이 짝과 분리를 감시한다.
-        nvblox_map_slice_topic: /nvblox_node/combined_map_slice
+        # test_nvblox_layer_contract.py가 이 짝을 감시한다.
+        #
+        # 2026-07-30 되돌림: combined -> static_map_slice.
+        # 슬라이스 분리(local=combined / global=static)를 시험했으나 유령 지표를
+        # 개선하지 못했다 -- 일시 LETHAL 셀 지속 p95가 47.0 s에서 43.0 s로 사실상
+        # 그대로였다. mapping_type도 static_tsdf로 되돌리므로 combined는 발행되지
+        # 않는다. 두 costmap이 같은 슬라이스를 쓴다.
+        nvblox_map_slice_topic: /nvblox_node/static_map_slice
         convert_to_binary_costmap: True
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"

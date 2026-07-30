@@ -14,6 +14,7 @@
 (nvblox_costmap_layer.cpp 238~250행). 이 값이 각 costmap의 global_frame과
 어긋나면 장애물이 엉뚱한 자리에 얹힌다 — 조용히 틀리는 종류의 결함이다.
 """
+import math
 from pathlib import Path
 
 import pytest
@@ -22,14 +23,25 @@ import yaml
 NVBLOX_PLUGIN = 'nvblox::nav2::NvbloxCostmapLayer'
 INFLATION_PLUGIN = 'nav2_costmap_2d::InflationLayer'
 
-# 두 costmap은 '서로 다른' 슬라이스를 써야 한다. 역할이 다르기 때문이다.
-#   local  <- combined : 정적 + 동적. DWB가 사람을 실시간 회피한다.
-#   global <- static   : 정적만. planner가 유령에 막히지 않는다.
-# 하나로 통일하면 둘 중 하나를 잃는다. static 하나로 global까지 먹였을 때
-# (2026-07-30) 사람이 static TSDF에 쌓여 global costmap에 중앙값 9 s / p95 46 s
-# 남았고, 그 유령이 "Starting point in lethal space" 22회를 만들었다.
+# nvblox_base.yaml의 값. 유령 소멸 시간 계산에 쓴다.
+MAX_WEIGHT = 5.0          # projective_integrator_max_weight (:78)
+ESDF_MIN_WEIGHT = 0.1     # esdf_integrator_min_weight (:95). 실질 소멸 기준이다
+# 시야 밖으로 나간 낮은 장애물을 로봇이 지나칠 때까지 필요한 기억:
+#   90도 회전 1.571 rad / max_vel_theta 0.4 = 3.93 s
+#   차체 통과 0.87 m / max_vel_x 0.26       = 3.35 s
+MANEUVER_BUDGET_S = 7.3
+
+# 두 costmap은 '같은' 슬라이스를 써야 한다. 다르면 planner와 controller가 다른
+# 장애물을 보고, planner가 통과 가능으로 만든 경로를 DWB가 거부해 로봇이 굳는다.
+#
+# 2026-07-30에 분리(local=combined / global=static)를 시험했다가 되돌렸다. 사람이
+# static TSDF에 쌓이는 것을 막으려는 의도였는데 실측이 개선을 보이지 않았다:
+#   일시 LETHAL 셀 지속 p95   47.0 s (통일) -> 43.0 s (분리)
+#   일시 셀 수                26,270 -> 26,059
+# 유령의 원인은 mapping_type이 아니라 exclude_last_view_from_decay였다.
+# 그리고 분리 구성으로 완주한 회차가 없다(1/3). 3/3 완주한 조합은 통일 쪽이다.
 EXPECTED_SLICE = {
-    'local_costmap': '/nvblox_node/combined_map_slice',
+    'local_costmap': '/nvblox_node/static_map_slice',
     'global_costmap': '/nvblox_node/static_map_slice',
 }
 # combined/dynamic 슬라이스는 dynamic 계열 mapping_type에서만 발행된다
@@ -106,12 +118,21 @@ def test_global_never_takes_the_dynamic_slice():
         )
 
 
-def test_local_sees_dynamic_obstacles():
-    """local이 정적 슬라이스만 보면 DWB가 사람을 못 피한다."""
-    topic = _costmap('local_costmap')['nvblox_layer']['nvblox_map_slice_topic']
-    assert any(d in topic for d in DYNAMIC_ONLY_SLICES), (
-        f'local_costmap이 동적 슬라이스를 구독하지 않는다: {topic}'
+def test_both_costmaps_use_the_same_slice():
+    """다른 슬라이스를 보면 planner와 controller의 장애물이 갈린다.
+
+    footprint 불일치(2026-07-28)와 같은 종류의 결함이다 -- planner가 통과 가능으로
+    만든 경로를 DWB가 전부 거부해 로봇이 굳는다.
+    """
+    local = _costmap('local_costmap')['nvblox_layer']
+    global_ = _costmap('global_costmap')['nvblox_layer']
+    assert (local['nvblox_map_slice_topic']
+            == global_['nvblox_map_slice_topic']), (
+        f'슬라이스가 다르다: local {local["nvblox_map_slice_topic"]} vs '
+        f'global {global_["nvblox_map_slice_topic"]}'
     )
+    assert (local['convert_to_binary_costmap']
+            == global_['convert_to_binary_costmap'])
 
 
 def test_mapping_type_publishes_the_slices_both_costmaps_subscribe():
@@ -139,35 +160,56 @@ def test_mapping_type_publishes_the_slices_both_costmaps_subscribe():
         )
 
 
-def test_static_and_dynamic_decay_pull_in_opposite_directions():
-    """정적은 붙잡고 동적은 놓아야 한다. 하나의 decay로는 둘을 만족시킬 수 없다.
+def test_decay_actually_runs_on_what_the_robot_is_looking_at():
+    """시야 안 유령이 영구히 남지 않아야 한다.
 
-    TSDF 무게는 소거마다 tsdf_decay_factor를 곱하고 1e-3 밑에서 소멸한다.
-      n = ln(1e-3) / ln(factor) 스텝,  소요 = n / decay_tsdf_rate_hz
-    2026-07-30 실측: factor 0.95 / 2.5 Hz -> 53.9 s 예측, p95 46 s 관측.
+    exclude_last_view_from_decay가 true면 '마지막 깊이 영상에 보이는 블록'이
+    decay에서 제외된다(mapper.cpp 368~375). 그런데 '보는 범위'(카메라 수직 FOV 58°)와
+    '갱신되는 범위'(관측 표면 앞뒤 0.20 m = truncation 4 vox x 0.05)가 달라서,
+    시야 안이면서 truncation 밖인 복셀은 integration으로도 decay로도 지워지지 않는다.
+    막혀 멈춘 로봇이 계속 그것을 쳐다보므로 상태가 원인을 유지한다
+    (devlog/2026-07-30-nvblox-ghost-obstacle.md 4.3).
+
+    false여도 시야 안 실제 장애물은 integration이 매 관측마다 weight를 되올려
+    보호한다(카메라 30 Hz >> decay 2.5 Hz). 시야 밖 거동은 바뀌지 않는다.
     """
     if not NVBLOX_OVERRIDES.is_file():
         pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
-    nv = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
-    p = nv['/**']['ros__parameters']
-    if p['mapping_type'] not in ('dynamic', 'human_with_static_tsdf',
-                                 'human_with_static_occupancy'):
-        pytest.skip('단일 mapper 모드에서는 분리 계약이 성립하지 않는다')
+    p = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
+    p = p['/**']['ros__parameters']
+    for mapper in ('static_mapper', 'dynamic_mapper'):
+        if mapper not in p:
+            continue
+        assert p[mapper].get('exclude_last_view_from_decay') is False, (
+            f'{mapper}.exclude_last_view_from_decay가 false가 아니다.'
+            ' 시야 안 유령이 영구히 남는다'
+        )
 
-    # 동적 소거 주기가 정적보다 빨라야 한다.
-    assert p['decay_dynamic_occupancy_rate_hz'] > p['decay_tsdf_rate_hz'], (
-        f'동적 소거 {p["decay_dynamic_occupancy_rate_hz"]} Hz가 정적'
-        f' {p["decay_tsdf_rate_hz"]} Hz보다 빠르지 않다'
+
+def test_ghost_clears_within_the_maneuver_budget():
+    """유령 소멸 시간이 로봇이 지나칠 시간보다 지나치게 길면 안 된다.
+
+    실질 소멸은 tsdf_decayed_weight_threshold(0.001)가 아니라
+    esdf_integrator_min_weight(0.1, nvblox_base.yaml:95)에서 일어난다. ESDF가 weight
+    0.1 미만 복셀을 아예 보지 않는다(esdf_integrator.cu:115).
+      projective_integrator_max_weight 5.0 x factor^n <= 0.1
+      n = ln(0.02)/ln(factor),  소요 = n / decay_tsdf_rate_hz
+    필요 기억은 90도 회전 1.571/0.4 = 3.93 s + 차체 통과 0.87/0.26 = 3.35 s
+    = 약 7.3 s다. 상한을 그 6배로 둔다 -- 2026-07-28에 decay 5.0 Hz(15.2 s)가
+    책상다리 충돌로 기록됐으므로 하한도 함께 건다.
+    """
+    if not NVBLOX_OVERRIDES.is_file():
+        pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
+    p = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
+    p = p['/**']['ros__parameters']
+    rate = p['decay_tsdf_rate_hz']
+    factor = p.get('static_mapper', {}).get('tsdf_decay_factor', 0.95)
+    n = math.log(ESDF_MIN_WEIGHT / MAX_WEIGHT) / math.log(factor)
+    seconds = n / rate
+    assert MANEUVER_BUDGET_S * 2 <= seconds <= MANEUVER_BUDGET_S * 6, (
+        f'유령 소멸 {seconds:.1f} s가 기동 예산 {MANEUVER_BUDGET_S} s의'
+        f' 2~6배 범위를 벗어난다 (rate {rate}, factor {factor})'
     )
-    # 소거된 복셀은 unknown이 아니라 free여야 한다. DWB의 pointCost는
-    # NO_INFORMATION(0xff)에서도 예외를 던져, 미지가 남으면 궤적이 전멸한다.
-    assert p['static_mapper']['tsdf_set_free_distance_on_decayed'] is True
-    assert p['dynamic_mapper']['occupancy_decay_to_free'] is True
-    # 확률 감쇠의 유효 범위 (occupancy_decay_integrator_params.h)
-    occ = p['dynamic_mapper']['occupied_region_decay_probability']
-    free = p['dynamic_mapper']['free_region_decay_probability']
-    assert 0.0 <= occ <= 0.5, f'occupied_region_decay_probability {occ} 범위 밖'
-    assert 0.5 <= free <= 1.0, f'free_region_decay_probability {free} 범위 밖'
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
