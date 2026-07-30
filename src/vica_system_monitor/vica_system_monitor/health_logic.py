@@ -82,11 +82,16 @@ class ComponentProbe(NamedTuple):
 
 
 class SafetyInput(NamedTuple):
-    """Safety Supervisor 상태. aggregator를 거치지 않고 직접 구독한다."""
+    """Safety Supervisor 상태. aggregator를 거치지 않고 직접 구독한다.
+
+    age_sec은 표시용 측정값이다. 미수신이면 None이며, 그때 문구는 "한 번도 수신되지
+    않았습니다"로 바뀐다. "?초"처럼 자리표시자가 사용자에게 보이면 안 된다.
+    """
 
     state: str
     estop_latched: bool
     fresh: bool
+    age_sec: Optional[float] = None
 
 
 class Fault(NamedTuple):
@@ -230,13 +235,21 @@ def _default_fault_code(component: str) -> str:
 def _judge_safety(safety: SafetyInput) -> Optional[Fault]:
     """Turn the safety input into a fault when it is stale, latched or unknown."""
     if not safety.fresh:
-        description = describe('SAFETY_STATE_STALE', age_sec='?')
+        if safety.age_sec is None:
+            detail = 'Safety 상태를 한 번도 수신하지 못했습니다.'
+            action = 'safety_supervisor_node 실행 상태를 확인해 주세요.'
+        else:
+            description = describe(
+                'SAFETY_STATE_STALE', age_sec=f'{safety.age_sec:.1f}'
+            )
+            detail = description.detail
+            action = description.suggested_action
         return Fault(
             component='safety',
             fault_code='SAFETY_STATE_STALE',
             severity=SEVERITY_STOP,
-            detail=description.detail,
-            suggested_action=description.suggested_action,
+            detail=detail,
+            suggested_action=action,
             latched=False,
         )
 

@@ -1,0 +1,149 @@
+# robot_health_monitor_node의 정책 계층 설정.
+#
+# 이 계층에서 소유하는 것 (계획서 2.0절):
+#   - 컴포넌트별 required 여부 (READY 판정에 필수인가)
+#   - 컴포넌트별 severity 등급 (결함이 났을 때 몇 등급인가)
+#   - startup grace (기동 직후 미수신을 언제부터 결함으로 볼 것인가)
+#   - 안전 신호 timeout (aggregator를 거치지 않는 입력만)
+#
+# 여기서 소유하지 않는 것:
+#   - 진단 항목별 timeout -> diagnostic_aggregator.yaml
+#   - 한국어 문구·조치 -> fault_catalog.py
+#
+# [중요] 최상위 키는 launch의 Node(name=...)와 정확히 일치해야 한다.
+#
+# [중요] 아래 값은 실측 전이다 `[미검증]`. Jetson 실측 후 확정한다.
+
+robot_health_monitor_node:
+  ros__parameters:
+    # 진단 입력 토픽. 기본은 aggregator 출력이다.
+    # aggregator 없이 단독 디버깅할 때 /diagnostics로 바꿔 붙일 수 있다.
+    # agg_parser가 계층 name과 평면 name을 모두 파싱한다.
+    diagnostics_topic: /diagnostics_agg
+
+    # /robot/health 발행 주기. 1 Hz 상시 발행이 앱 재접속 복원 수단이다.
+    # Humble rosbridge의 subscribe op는 durability를 지정하지 않아 transient_local
+    # latch를 앱이 못 받을 수 있다. /app_estop_state가 쓰는 주기 브로드캐스트와 같은 방식.
+    publish_period_sec: 1.0
+
+    # 같은 결함을 재알림하는 간격(초안 10.3절 규칙 3). ESTOP은 이 간격을 무시한다.
+    reminder_interval_sec: 30.0
+
+    # Nav2 lifecycle 상태 폴링 주기. GetState 서비스를 부른다.
+    nav2_state_poll_period_sec: 2.0
+    nav2_lifecycle_node: /bt_navigator
+
+    # -----------------------------------------------------------------------
+    # 안전 신호 timeout — aggregator를 거치지 않는 입력만 여기서 갖는다
+    # -----------------------------------------------------------------------
+    #
+    # 이 신호들을 aggregator로 보내지 않는 이유: 집계가 1 Hz라 ESTOP 표시가 최대 1초
+    # 늦어진다(초안 3.1절 "진단을 안전 신호 전달 경로로 쓰지 말 것").
+    #
+    # 값은 기존 노드와 정합을 맞춘다. emergency_stop_node의 f1_timeout_sec가 0.5다.
+    emergency_stop_timeout_sec: 0.5
+    safety_state_timeout_sec: 1.0
+    tf_timeout_sec: 3.0
+    robot_state_timeout_sec: 3.0
+
+    # 진단 입력 자체가 끊긴 것을 감지하는 timeout.
+    # aggregator가 죽으면 여기서 잡는다.
+    diagnostics_timeout_sec: 5.0
+
+    # TF 프레임. vica_nav2 설정 기준.
+    map_frame: map
+    base_frame: base_footprint
+
+    # -----------------------------------------------------------------------
+    # 컴포넌트 정책
+    # -----------------------------------------------------------------------
+    #
+    # required : true면 READY 판정에 필수다. false면 이상이 있어도 DEGRADED까지만 올린다
+    # observable: false면 관측 수단이 없다는 뜻이다. UNKNOWN을 보고하고 결함으로 올리지
+    #             않으며 READY를 막지도 않는다. 하드웨어나 진단이 추가되면 true로 바꾼다
+    # severity  : 이 컴포넌트에서 결함이 났을 때의 등급. fault_catalog의 기본값을 덮어쓴다
+    # grace_sec : 기동 후 이 시간 안에는 미수신을 결함으로 올리지 않는다(초안 13절)
+    #
+    # severity 값: 1=WARN 2=DEGRADED 3=STOP 4=ESTOP 5=FAULT
+    component_names:
+      - motor
+      - safety
+      - localization
+      - navigation
+      - lidar
+      - perception
+      - guidance
+      - voice
+      - app
+
+    motor:
+      required: true
+      observable: true
+      severity: 4          # ESTOP. CAN 통신 이상은 즉시 정지 사유다
+      grace_sec: 15.0
+
+    safety:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 15.0
+
+    localization:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 30.0      # EKF·Nav2가 뜨는 데 시간이 걸린다
+
+    navigation:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 45.0      # Nav2 lifecycle configure -> activate가 가장 늦다
+
+    # /scan이 global·local 두 costmap의 유일한 observation_sources다
+    # (nav2_params.yaml). 끊기면 장애물을 볼 수 없으므로 STOP이다.
+    lidar:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 20.0
+
+    # nvblox·카메라. LiDAR가 2D를 계속 커버하므로 DEGRADED로 둔다.
+    #
+    # [팀 확정 필요] 초안 19-11이 STOP/DEGRADED와 판정 임계를 팀 위험성 평가 대상으로
+    # 올려두었다. 3D 장애물(난간, 테이블 아래)을 놓치는 위험을 어떻게 볼지에 달렸다.
+    # 등급을 올리려면 아래 severity를 3으로 바꾸면 된다 — 코드 수정이 필요 없다.
+    perception:
+      required: false
+      observable: true
+      severity: 2
+      grace_sec: 45.0      # Docker 컨테이너 기동이 가장 늦다
+
+    # [관측 불가] Smart Handle은 아두이노 -> 젯슨 상향 통신이 없다. 서보·LED·진동이
+    # 실제로 동작했는지 확인할 방법이 없다(SmartHandleState.msg 주석).
+    # observable: false로 두어 UNKNOWN을 보고한다. READY로 보고하면 관리자 앱이 초록불을
+    # 띄워 잘못된 안심을 준다.
+    #
+    # 터치센서와 상향 프로토콜이 추가되면 observable: true, required: true로 바꾼다
+    # (vica_scenario.md 2-1.3절). 메시지와 앱은 고치지 않는다.
+    guidance:
+      required: false
+      observable: false
+      severity: 3
+      grace_sec: 20.0
+
+    # [관측 불가] 음성 노드는 아직 /diagnostics를 내지 않는다. 마이크 무입력은 오디오
+    # 콜백 내부 상태라 어댑터로 볼 수 없다(초안 8.6.1절).
+    # 진단이 추가되면 observable: true로 바꾼다.
+    voice:
+      required: false
+      observable: false
+      severity: 2
+      grace_sec: 60.0      # 모델 적재가 오래 걸린다
+
+    # [관측 불가] 앱 브리지 진단이 아직 없다.
+    app:
+      required: false
+      observable: false
+      severity: 1
+      grace_sec: 30.0

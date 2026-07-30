@@ -1,0 +1,107 @@
+# diagnostic_aggregator 설정. /diagnostics를 component별 tree로 묶어 /diagnostics_agg로 낸다.
+#
+# guideline/vica_system_health_monitoring_draft.md 17절 2단계의 tree를 따른다.
+#
+# 이 계층에서 소유하는 것 (계획서 2.0절의 책임 분리):
+#   - 분류 (어느 항목이 어느 component인지)
+#   - 항목별 timeout (갱신이 끊기면 Stale)
+#   - expected (있어야 하는데 아예 안 오는 항목 감지)
+#
+# 등급 결정·한국어 문구·폭주 억제는 robot_health_monitor_node가 소유한다.
+# timeout은 여기만 갖는다. required_components.yaml에 두지 않는다 — 두 곳에 두면 어느
+# 쪽이 이기는지 모호해진다. 예외는 aggregator를 거치지 않는 안전 신호뿐이다.
+#
+# [중요] expected에 적는 이름은 발행자가 만드는 실제 name과 정확히 같아야 한다.
+# diagnostic_updater는 `<node_name>: <label>` 형태로 만든다. 이름이 틀리면 그 항목이
+# 영구 Stale로 남아 오탐이 된다. test_config_contract가 우리 노드의 이름을 고정한다.
+#
+# [중요] 아래 timeout은 실측 전 값이다 `[미검증]`. Jetson에서 확정한다.
+
+aggregator_node:
+  ros__parameters:
+    path: VICA
+
+    # 집계 주기. 기본 1 Hz다. 안전 신호는 이 경로를 거치지 않으므로(모니터가 직접 구독)
+    # 이 지연이 정지 시점에 영향을 주지 않는다.
+    pub_rate: 1.0
+
+    # base_path 아래로 묶이지 않은 항목을 버리지 않는다. 새 노드가 진단을 추가했을 때
+    # 조용히 사라지는 것을 막는다. aggregator는 미분류 항목을 "Other"로 모은다.
+    analyzers:
+      hardware:
+        type: diagnostic_aggregator/AnalyzerGroup
+        path: Hardware
+        analyzers:
+          motor:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: Motor
+            contains: ['mdrobot', 'motor:']
+            # 모터 노드가 죽으면 이 항목이 사라진다. 그것을 Stale로 잡는다.
+            # 이름은 mdrobot_can_keyboard_knob_node의 diag_updater.add('CAN link', ...)에서
+            # 나온다. 그 문자열이 바뀌면 여기도 함께 바꿔야 한다.
+            expected: ['mdrobot_can_keyboard_knob_node: CAN link']
+            timeout: 5.0
+
+          lidar:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: LiDAR
+            contains: ['lidar:']
+            timeout: 5.0
+
+          perception:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: Perception
+            contains: ['perception:']
+            timeout: 5.0
+
+          smart_handle:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: SmartHandle
+            contains: ['guidance:', 'smart_handle']
+            timeout: 5.0
+
+      safety:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Safety
+        contains: ['safety:', 'emergency']
+        timeout: 5.0
+
+      localization:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Localization
+        contains: ['localization:']
+        timeout: 5.0
+
+      navigation:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Navigation
+        contains: ['navigation:', 'mission']
+        timeout: 5.0
+
+      voice:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Voice
+        contains: ['voice:', 'stt', 'tts']
+        timeout: 10.0
+
+      app:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: App
+        contains: ['app:', 'rosbridge', 'supervisor']
+        timeout: 10.0
+
+      computer:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Computer
+        contains: ['computer:', 'cpu_monitor', 'ram_monitor']
+        timeout: 10.0
+
+      # 감시 계층 자신. 어댑터나 모니터가 죽으면 여기가 Stale이 된다.
+      # 서로를 감시하는 구조다 — 모니터가 죽으면 aggregator가 잡고, aggregator가 죽으면
+      # 모니터가 /diagnostics_agg stale로 잡는다.
+      monitor:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Monitor
+        contains: ['external adapter', 'monitor:', 'system_monitor']
+        expected: ['external_diagnostics_node: external adapter']
+        timeout: 5.0

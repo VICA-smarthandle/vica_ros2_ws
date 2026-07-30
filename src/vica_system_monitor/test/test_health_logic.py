@@ -247,6 +247,59 @@ def test_stale_safety_input_is_fault():
     assert any(f.component == 'safety' for f in snapshot.faults)
 
 
+def test_never_received_safety_says_so_instead_of_showing_placeholder():
+    """한 번도 못 받은 것과 오래된 것을 문구로 구분한다.
+
+    age_sec이 없을 때 '?초'처럼 자리표시자를 노출하면 사용자가 읽을 수 없다.
+    실기동에서 실제로 그렇게 나왔던 회귀를 고정한다.
+    """
+    probes = [probe('motor')]
+    snapshot = evaluate(
+        probes, safety('IDLE', fresh=False), now_ns=0, started_ns=0
+    )
+
+    detail = next(f.detail for f in snapshot.faults if f.component == 'safety')
+    assert '?' not in detail
+    assert '{' not in detail
+    assert '한 번도' in detail
+
+
+def test_stale_safety_with_age_shows_the_measurement():
+    """age를 받으면 실제 값을 문구에 넣는다."""
+    probes = [probe('motor')]
+    snapshot = evaluate(
+        probes,
+        SafetyInput(state='IDLE', estop_latched=False, fresh=False, age_sec=2.4),
+        now_ns=0,
+        started_ns=0,
+    )
+
+    detail = next(f.detail for f in snapshot.faults if f.component == 'safety')
+    assert '2.4' in detail
+    assert '?' not in detail
+
+
+def test_no_fault_detail_ever_leaks_a_placeholder():
+    """어떤 결함 문구에도 중괄호나 물음표가 남지 않는다.
+
+    앱이 그대로 표시하므로 자리표시자가 새면 사용자에게 보인다.
+    """
+    probes = [
+        probe('motor', ok=False),
+        probe('lidar', last_seen_ns=None, grace_ns=0),
+        probe('perception', ok=False, required=False, severity=SEVERITY_DEGRADED),
+    ]
+    snapshot = evaluate(
+        probes, safety('IDLE', fresh=False), now_ns=SEC, started_ns=0
+    )
+
+    for fault in snapshot.faults:
+        assert '{' not in fault.detail, fault
+        assert '}' not in fault.detail, fault
+        assert fault.detail.strip(), fault
+        assert fault.suggested_action.strip(), fault
+
+
 def test_unknown_safety_state_is_fault():
     """정의되지 않은 safety enum은 원인 불명으로 본다."""
     probes = [probe('motor')]
