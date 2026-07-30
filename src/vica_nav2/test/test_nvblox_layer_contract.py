@@ -63,20 +63,41 @@ def _costmap(name):
     return _params()[name][name]['ros__parameters']
 
 
-@pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
-def test_nvblox_layer_is_enabled_on_both_costmaps(costmap):
-    """한쪽에만 있으면 planner와 controller가 다른 장애물을 본다.
+def test_local_costmap_always_has_nvblox():
+    """local에 nvblox가 없으면 DWB가 LiDAR 평면 아래 장애물을 못 본다.
 
-    그 상태에서는 planner가 통과 가능으로 만든 경로를 DWB가 전부 거부해
-    로봇이 멈춘다. footprint 불일치를 고친 것과 같은 종류의 결함이다.
+    laser_frame은 지면 0.382 m다. 사선 책상다리처럼 그 아래에서 올라오는 구조물은
+    voxel_layer(scan)가 못 보고 nvblox의 esdf slice만 본다. 이건 협상 대상이 아니다.
     """
-    cm = _costmap(costmap)
+    cm = _costmap('local_costmap')
     assert 'nvblox_layer' in cm['plugins'], (
-        f'{costmap} plugins에 nvblox_layer가 없다: {cm["plugins"]}'
+        f'local_costmap plugins에 nvblox_layer가 없다: {cm["plugins"]}'
     )
-    layer = cm['nvblox_layer']
-    assert layer['plugin'] == NVBLOX_PLUGIN
-    assert layer['enabled'] is True
+    assert cm['nvblox_layer']['plugin'] == NVBLOX_PLUGIN
+    assert cm['nvblox_layer']['enabled'] is True
+
+
+def test_global_nvblox_presence_is_recorded_as_an_open_experiment():
+    """global의 nvblox_layer 유무는 2026-07-30 현재 실측 중인 A/B다.
+
+    있으면: planner가 LiDAR 평면 아래 장애물과 거울면 물체를 본다. 청소기 구간이
+      계획 시점 LETHAL 0 -> 166개가 되어 그 구간을 완주했다(④ 3/3, 145.6 s).
+    없으면: 평균 LETHAL이 벽의 2.1~2.7배에서 1.1배로 떨어져 예민함이 사라진다.
+      대신 청소기 구간을 놓친다(③ 안내소 ABORTED).
+
+    어느 쪽도 아직 확정이 아니므로 존재 자체는 강제하지 않는다. 대신 어느 쪽이든
+    '설정이 일관된가'를 아래 테스트들이 검사한다. 확정되면 이 테스트를 존재 강제로
+    바꾼다.
+    """
+    plugins = _costmap('global_costmap')['plugins']
+    has = 'nvblox_layer' in plugins
+    # 블록은 항상 남겨 둔다. 한 줄로 되돌릴 수 있어야 한다.
+    assert 'nvblox_layer' in _costmap('global_costmap'), (
+        'global_costmap에 nvblox_layer 블록이 아예 없다. plugins에서 빼는 것은'
+        ' 되지만 블록은 남겨 두어야 한 줄로 되돌릴 수 있다'
+    )
+    if has:
+        assert _costmap('global_costmap')['nvblox_layer']['enabled'] is True
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
@@ -220,7 +241,12 @@ def test_inflation_layer_runs_after_nvblox(costmap):
     장애물에는 비용 경사가 생기지 않아, 경로가 그 장애물에 그대로 붙는다.
     """
     plugins = _costmap(costmap)['plugins']
-    assert plugins.index('inflation_layer') > plugins.index('nvblox_layer'), (
-        f'{costmap} plugins 순서가 잘못됐다: {plugins}'
+    if 'nvblox_layer' in plugins:
+        assert plugins.index('inflation_layer') > plugins.index('nvblox_layer'), (
+            f'{costmap} plugins 순서가 잘못됐다: {plugins}'
+        )
+    # nvblox가 없어도 inflation은 항상 마지막이어야 한다. 다른 어떤 계층이 찍은
+    # 장애물이든 비용 경사는 inflation_layer가 붙인다.
+    assert plugins[-1] == 'inflation_layer', (
+        f'{costmap} plugins 마지막이 inflation_layer가 아니다: {plugins}'
     )
-    assert plugins[-1] == 'inflation_layer'

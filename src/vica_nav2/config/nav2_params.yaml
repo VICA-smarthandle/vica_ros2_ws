@@ -504,8 +504,28 @@ global_costmap:
       #   master를 리셋한 뒤 레이어를 다시 씌우므로 영구 누적은 없다.
       #   사람 많은 공공장소 주행에서 재검증이 필요하다(guideline/vica_scenario.md).
       #
-      # 되돌리려면 plugins에서 "nvblox_layer"만 빼면 된다(아래 블록은 남겨도 무해).
-      plugins: ["static_layer", "obstacle_layer", "nvblox_layer", "inflation_layer"]
+      # 2026-07-30 A/B: global에서 nvblox_layer를 빼고 사람 있는 조건으로 재측정한다.
+      # 아래 nvblox_layer 블록은 남겨 둔다 -- plugins 목록에 없으면 Nav2가 로드하지
+      # 않으므로 무해하고, 한 줄로 되돌릴 수 있다.
+      #
+      # 빼는 이유: nvblox를 global에 넣은 뒤 평균 LETHAL이 벽(2,676셀)의 1.1배에서
+      # 2.1~2.7배로 늘었다. 같은 코스 실측:
+      #   nvblox 없음   2,923 / 2,918 / 2,954   (1.1배)
+      #   nvblox 있음   7,164 / 6,814 / 6,140 / 5,578 / 6,865   (2.1~2.7배)
+      # 원인은 오설정이 아니라 본질이다. LiDAR는 0.382 m 한 평면을 보고 nvblox는
+      # 0.05~0.9 m를 한 장으로 눌러 담으므로(max projection), 같은 물체가 훨씬 넓게
+      # 찍힌다. convert_to_binary_costmap: True가 이미 가장 덜 예민한 설정이고
+      # (distance<=0만 LETHAL, 나머지 FREE), esdf_slice_max_height를 낮추는 것은
+      # 로봇 최고점 0.86 m 보호를 잃어 쓸 수 없다.
+      #
+      # 지금 비교가 반쪽이라 이 회차가 필요하다:
+      #   nvblox 없음(③)  사람 없음  평균 LETHAL 2,954  완주 2/3 (안내소 실패)
+      #   nvblox 있음(⑧)  사람 있음  평균 LETHAL 6,865  완주 2/3 (안내소 실패)
+      # 사람 조건이 달라 nvblox의 순효과를 읽을 수 없다. 같은 사람 조건에서
+      # nvblox만 빼면 확정된다.
+      #
+      # 되돌리려면 plugins에 "nvblox_layer"를 다시 넣는다(inflation_layer 앞에).
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
