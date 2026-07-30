@@ -462,7 +462,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
-        inflation_radius: 0.40
+        inflation_radius: 0.35
 
 global_costmap:
   global_costmap:
@@ -504,27 +504,40 @@ global_costmap:
       #   master를 리셋한 뒤 레이어를 다시 씌우므로 영구 누적은 없다.
       #   사람 많은 공공장소 주행에서 재검증이 필요하다(guideline/vica_scenario.md).
       #
-      # 2026-07-30 A/B: global에서 nvblox_layer를 빼고 사람 있는 조건으로 재측정한다.
-      # 아래 nvblox_layer 블록은 남겨 둔다 -- plugins 목록에 없으면 Nav2가 로드하지
-      # 않으므로 무해하고, 한 줄로 되돌릴 수 있다.
+      # 2026-07-30 A/B 결과로 확정: global에 nvblox_layer를 둔다.
       #
-      # 빼는 이유: nvblox를 global에 넣은 뒤 평균 LETHAL이 벽(2,676셀)의 1.1배에서
-      # 2.1~2.7배로 늘었다. 같은 코스 실측:
-      #   nvblox 없음   2,923 / 2,918 / 2,954   (1.1배)
-      #   nvblox 있음   7,164 / 6,814 / 6,140 / 5,578 / 6,865   (2.1~2.7배)
-      # 원인은 오설정이 아니라 본질이다. LiDAR는 0.382 m 한 평면을 보고 nvblox는
-      # 0.05~0.9 m를 한 장으로 눌러 담으므로(max projection), 같은 물체가 훨씬 넓게
-      # 찍힌다. convert_to_binary_costmap: True가 이미 가장 덜 예민한 설정이고
-      # (distance<=0만 LETHAL, 나머지 FREE), esdf_slice_max_height를 낮추는 것은
-      # 로봇 최고점 0.86 m 보호를 잃어 쓸 수 없다.
+      # 한 번 빼고 같은 사람 조건에서 재봤다(⑨). 예민함은 예상대로 사라졌지만
+      # 결과가 나빠졌다 -- 가설이 정확히 반대였다.
+      #                     완주  평균LETHAL  유령p95  lethal space  DWB무효
+      #   ③ 없음 사람없음    2/3      2954     9.0s        2          62
+      #   ④ 있음 사람없음    3/3      7164    46.0s        1           4
+      #   ⑧ 있음 사람있음    2/3      6865    45.0s       16           1
+      #   ⑨ 없음 사람있음    1/3      2891     8.0s       29           9
+      # LETHAL이 2.4배 줄고 유령이 45 -> 8 s가 됐는데 lethal space는 16 -> 29회로
+      # 늘고 완주가 2/3 -> 1/3이 됐다. 사람 없는 조건에서도 같은 방향이다
+      # (③의 DWB 무효 62회 = ④의 15배).
       #
-      # 지금 비교가 반쪽이라 이 회차가 필요하다:
-      #   nvblox 없음(③)  사람 없음  평균 LETHAL 2,954  완주 2/3 (안내소 실패)
-      #   nvblox 있음(⑧)  사람 있음  평균 LETHAL 6,865  완주 2/3 (안내소 실패)
-      # 사람 조건이 달라 nvblox의 순효과를 읽을 수 없다. 같은 사람 조건에서
-      # nvblox만 빼면 확정된다.
+      # 기전: global이 장애물을 늦게 알면 planner가 사람 있는 자리로 경로를 낸다.
+      # 로봇이 도착할 때쯤 LiDAR가 마크하면 이미 그 자리에 서 있고, 그것이
+      # "Starting point in lethal space"다. nvblox가 있으면 planner가 미리 보고
+      # 넓게 우회해 그 자리에 애초에 들어가지 않는다.
+      # 즉 평균 LETHAL 2.4배는 비용이 아니라 '미리 보는 것'의 값이다.
       #
-      # 되돌리려면 plugins에 "nvblox_layer"를 다시 넣는다(inflation_layer 앞에).
+      # 예민함을 줄이려는 시도는 전부 막혔다:
+      #   convert_to_binary_costmap: False -> 253 밴드와 경사가 추가되어 더 예민해진다
+      #   esdf_slice_max_height 낮춤       -> 로봇 최고점 0.86 m 보호를 잃는다
+      # 2026-07-30 재제거: 사용자 지시. A/B(⑨)에서 빼면 나빠졌지만(2/3 -> 1/3),
+      # 그 실패의 성격이 이후 규명됐다. nvblox 유무가 아니라 '지도-실제 불일치'였다:
+      #   방2 -> 화장실  지도에는 있고 실주행에는 없던 장애물. global은 그것을 피해
+      #     경로를 냈지만 local은 비어 있어 DWB가 벽에 붙어 갔고, 결국 지도에 고정된
+      #     장애물의 inflation에 걸려 lethal 판정 -> 탈출 불가.
+      #   화장실 -> 안내소  지도에도 있고 실제로도 있던 코너 장애물에 부딪힘. 별개 문제.
+      # 전자는 지도를 고쳐야 하는 문제라 nvblox로 해결되지 않는다. 다음 주행 전에
+      # 지도에 실제 장애물을 채워 넣을 예정이다.
+      #
+      # nvblox_layer 블록은 남겨 둔다. plugins에 없으면 로드되지 않아 무해하고
+      # 한 줄로 되돌릴 수 있다. local에는 그대로 있다(LiDAR 평면 0.382 m 아래를
+      # 볼 유일한 수단).
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
@@ -567,7 +580,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5
-        inflation_radius: 0.40
+        inflation_radius: 0.35
       always_send_full_costmap: True
 
 map_server:
@@ -629,7 +642,26 @@ planner_server:
     #   유지한다. test_planner_contract.py가 이를 검사한다 — 한 번에 한
     #   변수만 바꾼다는 원칙이 A/B의 전제다.
     # ---------------------------------------------------------------------
-    GridBased:
+    # 2026-07-30 planner 축 전환: Hybrid <-> Lattice. 아래 두 블록의 키 이름만
+    # 서로 바꿨다(활성 블록은 planner_plugins의 "GridBased" 하나뿐이다).
+    #
+    # 전환 이유: 오늘 9회 주행을 전부 nvblox/costmap 축으로 썼는데 안내소 구간이
+    # 네 회차 연속 실패했다(③·⑧·⑨ ABORTED, ④만 성공 -- 그때는 사람이 없었다).
+    # nvblox 유무와 무관하고 사람이 있으면 항상 실패하므로 다른 축을 봐야 한다.
+    #
+    # Lattice가 이 실패에 맞는 근거: 갇힌 지점 (1.96, 2.96)에서 자세별로 padded
+    # footprint 외곽선을 지도에 훑으면
+    #   yaw 0/45/90/135/180/315°  지도 점유 0개   <- 합법
+    #   yaw 225°                  지도 점유 3개
+    #   yaw 270°                  지도 점유 4개
+    # 같은 자리에서 방향만 바꾸면 합법이 된다. Hybrid(DUBIN)는 제자리 회전
+    # primitive가 없어 반경 0.5 m 호로만 방향을 바꾸는데 좁은 곳에서 그 호가
+    # 들어가지 않는다. diff 격자에는 제자리 회전이 112개 중 32개 있다.
+    #
+    # 한계: "Starting point in lethal space"는 시작 자세 자체가 불법일 때 나오고
+    # 그때는 어떤 planner도 경로를 못 낸다. Lattice의 기대는 '경로 모양이 달라
+    # 애초에 그 자세에 들어가지 않는 것'이다.
+    GridBasedAlt:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
 
       # --- 핵심 1: 후진을 경로 단계에서 없앤다 ---
@@ -730,7 +762,7 @@ planner_server:
     # Lattice에는 Hybrid의 minimum_turning_radius / angle_quantization_bins /
     # motion_model_for_search / downsample_costmap 파라미터가 없다
     # (libnav2_smac_planner_lattice.so 확인). 격자 파일 metadata가 대신 정한다.
-    GridBasedLattice:
+    GridBased:
       plugin: "nav2_smac_planner/SmacPlannerLattice"
 
       # nav2 기본값은 ackermann 격자다. VICA는 차동구동이라 diff를 써야 하고,

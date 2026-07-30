@@ -123,7 +123,15 @@ DRIVEN_CORRIDOR_CLEARANCE = 0.412
 # 경로 추종 오차 실측(analysis/why_lethal_under_footprint.py, 2026-07-30
 # hybrid_infl035 주행 안내소 구간): 중앙값 0.045, p95 0.120, 최대 0.164 m.
 # inflation_radius는 이 오차를 흡수하는 완충이다. 근거는 아래 테스트 주석 참고.
+#
+# 이 값은 현재 하한으로 강제되지 않는다. '지도에는 있고 실제로는 없는' 장애물의
+# inflation이 로봇을 가두는 반대 방향 실패가 나와, 지도 수정이 끝날 때까지
+# 하한을 COSTMAP_RESOLUTION으로 낮춰 두었다. 지도가 고쳐지면 이 기준
+# (inscribed + 0.120 = 0.397 이상)으로 되돌린다. 상세는 아래 테스트 주석.
 PATH_TRACKING_ERROR_P95 = 0.120
+
+# costmap 해상도. 완충이 1셀도 안 되면 벽에서 멀어지려는 경사가 아예 없다.
+COSTMAP_RESOLUTION = 0.05
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
@@ -175,10 +183,31 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     #
     # footprint_padding으로 대신할 수 없다. padding은 하드 판정(253)을 키워
     # 통과 가능성 자체를 줄인다. 완충은 소프트 비용인 inflation의 일이다.
-    assert inflation_radius - inscribed >= PATH_TRACKING_ERROR_P95, (
-        f'{costmap} 완충 {inflation_radius - inscribed:.3f} m가 경로 추종 오차'
-        f' p95 {PATH_TRACKING_ERROR_P95} m보다 작다. 오차가 내접반경을 먹어'
-        ' footprint 안에 lethal이 들어온다(2026-07-30 안내소 구간 ABORTED)'
+    #
+    # ── 2026-07-30 저녁: 이 하한을 다시 1셀로 낮춰 0.35를 허용한다 ──
+    # 반대 방향의 실패 사례가 나왔기 때문이다. 두 근거가 서로 당긴다.
+    #
+    #   큰 inflation  추종 오차를 흡수한다 (위 문단)
+    #                 그러나 '지도에는 있고 실제로는 없는' 장애물의 inflation이
+    #                 통로를 막아 로봇을 가둔다.
+    #   작은 inflation  유령 inflation에 덜 걸린다
+    #                   그러나 추종 오차가 내접반경을 먹는다.
+    #
+    # 사용자 실측 관찰(2026-07-30, 방2 -> 화장실): 지도에는 있고 실주행에는 없던
+    # 장애물 때문에 global은 그것을 피해 경로를 냈는데 local은 비어 있어 DWB가
+    # 벽에 붙어 갔고, 결국 지도에 고정된 그 장애물의 inflation에 걸려 lethal로
+    # 판정되어 탈출하지 못했다.
+    #
+    # 이 긴장은 지도를 고치면 사라진다 -- 지도가 실제와 맞으면 유령 inflation이
+    # 없어지고 추종 오차 논거만 남는다. 사용자가 다음 주행 전에 지도에 실제
+    # 장애물을 채워 넣기로 했다. 따라서 0.35는 '지도 수정 중'에만 유효한 값이며,
+    # 지도가 고쳐지면 PATH_TRACKING_ERROR_P95 기준(0.397 이상)으로 되돌려야 한다.
+    #
+    # 기록해 둘 실측: 0.35에서 안내소 구간이 ABORTED 됐고 내접 미달 지점이 3점
+    # 있었다(2026-07-30 hybrid_infl035). 이 하한을 낮추는 것은 그 위험을 안는 것이다.
+    assert inflation_radius - inscribed >= COSTMAP_RESOLUTION, (
+        f'{costmap} 완충 {inflation_radius - inscribed:.3f} m가 costmap 1셀'
+        f'({COSTMAP_RESOLUTION} m)도 안 되어 벽에서 멀어지려는 경사가 없다'
     )
     # 상한: 로봇이 실제로 지나는 통로에 비용 0인 중앙선이 남아야 한다.
     #

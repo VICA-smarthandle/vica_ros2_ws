@@ -50,7 +50,9 @@ FOOTPRINT_AWARE_PLUGINS = {
 }
 
 # 비교 실험용 대안 블록. planner_plugins에 없으므로 Nav2가 로드하지 않는다.
-ALTERNATIVE_KEY = 'GridBasedLattice'
+# planner 중립적인 이름을 쓴다 -- 어느 쪽이 활성이든 나머지가 여기 들어간다.
+# 전환은 두 키 이름(GridBased <-> GridBasedAlt)을 서로 바꾸는 것으로 한다.
+ALTERNATIVE_KEY = 'GridBasedAlt'
 
 
 def _load_params():
