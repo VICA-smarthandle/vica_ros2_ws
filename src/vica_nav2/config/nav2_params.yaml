@@ -462,7 +462,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
-        inflation_radius: 0.35
+        inflation_radius: 0.40
 
 global_costmap:
   global_costmap:
@@ -580,7 +580,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5
-        inflation_radius: 0.35
+        inflation_radius: 0.40
       always_send_full_costmap: True
 
 map_server:

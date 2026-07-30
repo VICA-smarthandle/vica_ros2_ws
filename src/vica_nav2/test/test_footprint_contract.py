@@ -205,9 +205,22 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     #
     # 기록해 둘 실측: 0.35에서 안내소 구간이 ABORTED 됐고 내접 미달 지점이 3점
     # 있었다(2026-07-30 hybrid_infl035). 이 하한을 낮추는 것은 그 위험을 안는 것이다.
-    assert inflation_radius - inscribed >= COSTMAP_RESOLUTION, (
-        f'{costmap} 완충 {inflation_radius - inscribed:.3f} m가 costmap 1셀'
-        f'({COSTMAP_RESOLUTION} m)도 안 되어 벽에서 멀어지려는 경사가 없다'
+    # 2026-07-30 밤: 하한을 추종 오차 기준으로 되돌린다. 위 문단이 예고한 조건이
+    # 충족됐다 -- 사용자가 실물 장애물을 원위치로 복원해 지도-실제 불일치를 없앴고,
+    # 그래서 '유령 inflation이 통로를 막는' 쪽 근거가 사라졌다. 남은 것은 추종 오차
+    # 논거뿐이다.
+    #
+    # 그리고 0.35의 위험이 실제 사고로 나타났다(2026-07-30 lattice_infl035_mapfixed):
+    # 화장실 구간에서 lethal space가 14회 났고, 그 상태에서 Spin이 253 밴드에서
+    # 회전을 시작해 핸들이 의자 등받이에, 좌측 후방 모서리가 의자 다리에 부딪혔다.
+    # 회전 중 footprint 외곽선 최대값은 99(INSCRIBED)로 254에 닿지 않아
+    # isCollisionFree를 통과했다. 253 밴드는 벽에서 내접반경 안쪽이고 회전하면
+    # 외접반경 0.675 m가 쓸리므로, 그 밴드 진입 자체를 줄이는 것이 유일한 방어다.
+    assert inflation_radius - inscribed >= PATH_TRACKING_ERROR_P95, (
+        f'{costmap} 완충 {inflation_radius - inscribed:.3f} m가 경로 추종 오차'
+        f' p95 {PATH_TRACKING_ERROR_P95} m보다 작다. 오차가 내접반경을 먹어'
+        ' footprint가 253 밴드에 들어가고, 그 자리에서 Spin이 회전하면 부딪힌다'
+        ' (2026-07-30 의자 충돌)'
     )
     # 상한: 로봇이 실제로 지나는 통로에 비용 0인 중앙선이 남아야 한다.
     #
