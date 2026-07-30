@@ -15,6 +15,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/EmergencyEvent.msg"
   "msg/TurnGuide.msg"
   "msg/SmartHandleState.msg"
+  "msg/RobotFault.msg"
+  "msg/RobotEvent.msg"
+  "msg/RobotHealth.msg"
   "srv/RequestDestination.srv"
   DEPENDENCIES std_msgs builtin_interfaces
 )
