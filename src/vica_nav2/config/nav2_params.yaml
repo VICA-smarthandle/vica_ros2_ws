@@ -48,10 +48,21 @@ bt_navigator:
     bt_loop_duration: 10
     default_server_timeout: 20
     wait_for_service_timeout: 1000
-    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
-    # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
-    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
-    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
+    # 'default_nav_through_poses_bt_xml'은 기본값을 쓴다:
+    #   nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
+    #
+    # 'default_nav_to_pose_bt_xml'은 vica_nav2의 커스텀 트리를 쓴다. 기본 트리에서
+    # <BackUp backup_dist="0.30" backup_speed="0.05"/> 한 줄만 지운 것이다.
+    # 실주행에서 핸들 뒤에 사람이 따라오는데(guideline/vica_scenario.md),
+    # 2026-07-30 Hybrid 주행에서 BackUp이 실제로 0.30 m 후진을 실행했다.
+    # planner를 DUBIN으로 바꿔도 막히지 않는다 — BackUp은 planner를 거치지 않고
+    # behavior_server가 직접 발행하기 때문이다.
+    #
+    # 아래 값은 자리표시자다. RewrittenYaml은 '이미 존재하는 키'만 치환하므로
+    # 키가 있어야 하고, 실제 경로는 nav2_map_test.launch.py가 설치된 share
+    # 디렉터리로 덮어쓴다. 이 launch를 거치지 않고 이 yaml만 직접 쓰면
+    # bt_navigator가 파일을 못 찾아 실패한다(조용히 기본 트리로 돌아가지 않는다).
+    default_nav_to_pose_bt_xml: "SET_BY_VICA_NAV2_LAUNCH"
     #
     # 2026-07-28: 기본 BT에 SmoothPath가 없다는 것을 근거로 커스텀 BT를 넣어
     # smoother_server(simple_smoother)를 호출해 봤으나 실주행에서 악화되어
@@ -350,10 +361,50 @@ local_costmap:
       #   inflation_radius는 '얼마나 떨어져 갈 것인가'를 정하므로, 줄이면 좁은
       #   곳에 진입하는 것 자체를 막지 못한다. 갇힘의 원인은 비용 지대의 폭이
       #   아니라 진입 억제력이었다.
+      #
+      # 2026-07-30: 0.45 -> 0.35으로 내린다. 위 0.38 실패의 근거가 수명을 다했다.
+      # 그때의 planner는 SmacPlanner2D(점 로봇)였고, '진입 억제력'이 부족했던 것은
+      # planner가 footprint를 안 봤기 때문이다. SmacPlannerHybrid는 padding 포함
+      # footprint로 충돌을 검사하므로 진입 차단은 내접반경 0.277 m의 253 밴드가
+      # 담당한다. inflation_radius는 이제 순수하게 '이격 선호'만 정한다.
+      #
+      # 내리는 근거는 실측이다(2026-07-30 Hybrid 주행, analysis/bottleneck_path.py).
+      # 방2 -> 화장실에서 직선로(x 2.3~4.8)는 병목 여유가 0.250 m로 내접 0.277 m에
+      # 미달해 '물리적으로' 통과 불가다(벽 사이 0.50 m, 협착 y 3.56~3.91). 그래서
+      # 로봇은 서쪽으로 우회했고 그것이 정답이었다 — 실주행 7.86 m / 직선 4.02 m
+      # = 1.96배. 이 우회는 inflation과 무관하며 고칠 대상이 아니다.
+      # 문제는 우회로 '안에서' 30초를 허비한 지점이었다. (1.66, 3.04)의 여유가
+      # 0.412 m인데 inflation_radius 0.45면 비용 0인 중앙선이 아예 없어서 DWB가
+      # 어느 궤적을 골라도 비용을 물었고 vx=0, wz=±0.02로 진동했다.
+      #
+      # 그래서 0.35로 내려 주행했더니(2026-07-30 hybrid_infl035) 화장실 구간은
+      # 69.3 -> 33.7 s, 최장 정지 9.1 -> 0.8 s로 크게 개선됐지만 안내소 구간이
+      # ABORTED로 실패했다. 원인을 세 후보로 분리했다
+      # (analysis/why_lethal_under_footprint.py):
+      #   (A) planner가 lethal을 지나는 경로를 냈나 -> 39개 전부 여유 >= 0.283.
+      #       한 번도 아니다. footprint 인식 planner는 제 일을 했다.
+      #   (C) AMCL이 튀었나 -> 물리 최대 속도의 1.5배를 넘는 점프 0회. 아니다.
+      #   (B) 로봇이 경로를 벗어났나 -> 횡오차 중앙값 0.045, p95 0.120,
+      #       최대 0.164 m. 이것이다.
+      # 즉 경로 최소 여유 0.283 m(내접 0.277 위로 0.6 cm)를 오차 12~16 cm로
+      # 따라가서 footprint 안에 lethal이 들어왔다. 0.283 - 0.164 = 0.119 m다.
+      #
+      # 결론: inflation_radius의 실제 역할은 '이격 선호'가 아니라 계획과 실제의
+      # 차이를 흡수하는 '추종 오차 완충'이다. footprint_padding과 다르다 --
+      # padding은 하드 판정(253)을 키워 통과 가능성 자체를 줄이지만, inflation은
+      # 소프트 비용이라 통과는 허용하면서 여유를 번다.
+      #
+      # 비용 0 지대에서 planner는 경로 길이만 최소화하므로 경로 여유는
+      # inflation_radius 근처에 수렴한다. 따라서 필요한 값이 계산된다:
+      #   하한 = 내접 0.277 + 추종오차 p95 0.120 = 0.397 m
+      #   상한 = 화장실 우회로 최협 여유 0.412 m (넘으면 무비용 중앙선이 사라진다)
+      # 창이 1.5 cm뿐이고 0.40이 유일한 값이다. 0.35는 하한 미달이었다.
+      # 추종 오차 자체를 줄이는 것(CAN/드라이버 300 ms 지연이 0.26 m/s에서
+      # 7.8 cm를 만든다)은 별개 과제다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
-        inflation_radius: 0.45
+        inflation_radius: 0.40
 
 global_costmap:
   global_costmap:
@@ -370,7 +421,44 @@ global_costmap:
       # robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # nvblox_layer를 global에도 넣는다(2026-07-30). 그전에는 local에만 있었고,
+      # 그래서 planner는 카메라만 보는 장애물에 완전히 눈이 멀어 있었다.
+      #
+      # 근거 1 — LiDAR 평면 아래 장애물. laser_frame은 지면 0.382 m다. 사선
+      #   책상다리처럼 그 아래에서 올라오는 구조물은 obstacle_layer(scan)가 못 본다.
+      #   nvblox의 esdf slice만 본다. planner가 그것을 모르면 통과 가능한 경로를
+      #   내고 DWB가 전부 거부해 로봇이 굳는다.
+      #
+      # 근거 2 — 2D 레이트레이싱의 깜빡임. 2026-07-30 안내소 구간에서 산업용
+      #   청소기(거울면 스테인리스 드럼)가 global costmap에서 사라졌다 나타났다 했다.
+      #     구간 직전 t-42s ~ t-24s : LETHAL 0, INSCRIBED 0 (18초간 완전 소실)
+      #     구간 시작 t+1.9 ~ t+6.9 : LETHAL 0 (계획 시점에 장애물이 없었다)
+      #     t+8.0s                  : LETHAL 4 (뒤늦게 등장)
+      #     t+14.0s                 : DWB 유효 궤적 없음 — 이미 8 mm까지 접근
+      #   곡면 금속에 사각 입사한 빔은 반사가 안 돌아오고, observation_persistence
+      #   0.5 s라 0.5초만 놓치면 마크가 지워진다. nvblox는 TSDF에 누적하므로
+      #   이 깜빡임에 훨씬 강하다.
+      #
+      # 위험 — 동적 환경. 이 플러그인은 updateWithMax만 하고 자체 소거가 없다.
+      #   지나간 사람이 nvblox TSDF에 남아 있는 동안 global costmap에 유령으로
+      #   남아 1 Hz 재계획이 흔들릴 수 있다. 다만 (a) mapping_type: static_tsdf +
+      #   decay_tsdf_rate_hz 2.5로 소거가 돌고, (b) LayeredCostmap이 매 주기
+      #   master를 리셋한 뒤 레이어를 다시 씌우므로 영구 누적은 없다.
+      #   사람 많은 공공장소 주행에서 재검증이 필요하다(guideline/vica_scenario.md).
+      #
+      # 되돌리려면 plugins에서 "nvblox_layer"만 빼면 된다(아래 블록은 남겨도 무해).
+      plugins: ["static_layer", "obstacle_layer", "nvblox_layer", "inflation_layer"]
+      nvblox_layer:
+        plugin: "nvblox::nav2::NvbloxCostmapLayer"
+        enabled: True
+        # local은 odom, global은 map이다. 각 costmap의 global_frame과 반드시
+        # 같아야 한다. 슬라이스는 odom frame으로 오므로 값이 다르면 플러그인이
+        # tf_buffer_->lookupTransform(nav2_costmap_global_frame, slice_frame)으로
+        # 변환한다(nvblox_costmap_layer.cpp 238~250행). map<-odom은 AMCL이 발행한다.
+        nav2_costmap_global_frame: map
+        # local_costmap과 같은 슬라이스를 쓴다. mapping_type: static_tsdf와 짝이다.
+        nvblox_map_slice_topic: /nvblox_node/static_map_slice
+        convert_to_binary_costmap: True
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -401,7 +489,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5
-        inflation_radius: 0.45
+        inflation_radius: 0.40
       always_send_full_costmap: True
 
 map_server:
@@ -421,7 +509,7 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 20.0
+    expected_planner_frequency: 5.0 #20->5 hybrid쓰면 노이즈 로그 많아서 줄임.-
     use_sim_time: false
     planner_plugins: ["GridBased"]
     # NavFn(gradient descent)은 비용이 거의 같은 셀 사이에서 경로가 진동한다.
@@ -435,26 +523,146 @@ planner_server:
     # collision-aware smoother를 planner 내부에 갖는다. BT의 planner_id가
     # 'GridBased'로 같아 plugin 교체만으로 바뀌고 되돌리기도 한 줄이다.
     #
+    # 2026-07-30: SmacPlanner2D도 걷어낸다. NavFn과 마찬가지로 로봇을 '점'으로
+    # 보기 때문이다. 기계어 확인 결과
+    #   Node2D::isNodeValid     -> inCollision(unsigned int index, bool)
+    #   NodeHybrid::isNodeValid -> inCollision(float x, float y, float theta, bool)
+    # 앞은 셀 하나, 뒤는 padding 포함 footprint 전체를 본다. DWB의
+    # ObstacleFootprint도 footprint 전체를 보므로, 2D를 쓰면 planner가 통과
+    # 가능으로 만든 경로를 controller가 거부한다. 맵 free 영역 106.4 m2에서
+    # planner 74.9 % vs controller 42.0 %로 32.9 %p가 벌어졌고
+    # (analysis/rotatable_area.py), 2026-07-28~29 주행에서 통로 한가운데
+    # 20초 이상 갇히는 형태로 나타났다. footprint 3.3 cm 보정으로는 이 격차의
+    # 6.1 %만 줄어든다. planner 자체를 바꿔야 한다.
+    #
     # 되돌리려면 아래를 원복한다:
-    #   plugin: "nav2_navfn_planner/NavfnPlanner"
-    #   tolerance: 0.2 / use_astar: false / allow_unknown: true
+    #   plugin: "nav2_smac_planner/SmacPlanner2D"
+    #   tolerance: 0.2 / cost_travel_multiplier: 3.0
+    #   use_final_approach_orientation: false
+    #   (Hybrid 전용 키 motion_model_for_search / minimum_turning_radius /
+    #    angle_quantization_bins / cost_penalty 는 함께 지운다)
+    #
+    # ---------------------------------------------------------------------
+    # A/B 비교 방법
+    #   아래 두 블록의 '키 이름만' 서로 바꾼다(GridBased <-> GridBasedLattice).
+    #   planner_plugins에 있는 이름만 Nav2가 로드하므로, 켜지지 않은 블록은
+    #   파라미터로만 남고 아무 일도 하지 않는다.
+    #   두 블록이 공유 가능한 값(tolerance, cost_penalty 등)은 반드시 같게
+    #   유지한다. test_planner_contract.py가 이를 검사한다 — 한 번에 한
+    #   변수만 바꾼다는 원칙이 A/B의 전제다.
+    # ---------------------------------------------------------------------
     GridBased:
-      plugin: "nav2_smac_planner/SmacPlanner2D"
-      # NavFn과 같은 목표 허용오차를 유지한다.
-      tolerance: 0.2
-      # 맵 해상도 0.05 m는 이미 거칠다. 더 줄이면 좁은 통로(반폭 0.35 m)를
-      # 통과 불가로 오판할 수 있어 downsample하지 않는다.
+      plugin: "nav2_smac_planner/SmacPlannerHybrid"
+
+      # --- 핵심 1: 후진을 경로 단계에서 없앤다 ---
+      # 실주행에서는 핸들 뒤에 사람이 따라온다(guideline/vica_scenario.md).
+      # DUBIN 경로는 정의상 '전진 호 + 직선'이라 후진 primitive가 없다.
+      # REEDS_SHEPP은 후진을 포함하므로 reverse_penalty를 아무리 올려도
+      # 후진 세그먼트가 나올 수 있어 쓰지 않는다. DWB의 min_vel_x: 0.0에만
+      # 맡기면 planner가 낸 후진 경로를 controller가 못 따라가는, 지금 고치려는
+      # 것과 같은 종류의 불일치가 다시 생긴다.
+      motion_model_for_search: "DUBIN"
+
+      # --- 핵심 2: 최소 회전 반경 ---
+      # 90° L자 코너를 반경 R의 호로 돌 때 필요한 통로 폭을 padded footprint
+      # 스윕으로 구했다(analysis/turning_radius_detail.py). R이 작을수록 더
+      # 넓은 통로가 필요하다 — 급히 꺾으면 후방 0.615 m가 회전 중심 반대편으로
+      # 휘둘려 '진입 통로의 외벽'을 넘는다(위반 코너는 항상 후방 우측이다).
+      #   R 0.20 -> 1.160 m 필요   실측 최협 1.10 m에서 불가
+      #   R 0.30 -> 1.090 m        여유 1 cm, AMCL 오차 하나로 무효
+      #   R 0.50 -> 0.985 m        여유 11.5 cm  <- 채택
+      #   R 0.60 -> 0.945 m        여유 15.5 cm, 코너 이득 4 cm뿐인데
+      #                            180° 되돌기 필요폭이 1.85 -> 2.02 m로 늘어난다
+      # 방2 -> 화장실 최협 통로 1.10 m 실측(2026-07-30) 기준이다.
+      # 0.50은 설치된 diff 격자의 turning_radius와도 같아, 아래 Lattice 블록으로
+      # 갈아탈 때 회전 거동이 그대로 이어진다.
+      minimum_turning_radius: 0.50
+
+      # --- 핵심 3: 장애물에서 떨어지려는 세기 ---
+      # SmacPlanner2D의 cost_travel_multiplier와 같은 역할이다. 둘 다 기본
+      # 2.0인데 벽에 붙는 경향 때문에 3.0으로 올려 뒀다. 여기서 기본값으로
+      # 되돌리면 '장애물에서 떨어져 간다'는 원래 목적을 잃는다. 첫 튜닝 노브다.
+      #
+      # 2026-07-30: 3.0 -> 4.0. inflation_radius와 역할이 다르다.
+      #   inflation_radius = 비용이 '어디에' 있는가 (완충 폭)
+      #   cost_penalty     = 그 비용을 '얼마나 세게' 피하는가
+      # 0.35 주행에서 경로 최소 여유가 0.283 m로 비용 밴드(0.277~0.35) 바닥에
+      # 붙어 있었다. cost_penalty를 올리면 같은 밴드 안에서 경로를 바깥쪽으로
+      # 밀어 실제 경로 여유를 inflation_radius에 더 가깝게 만든다. 무비용
+      # 중앙선이 이미 있는 통로(화장실 우회로)에서는 비용이 0이라 영향이 없어,
+      # 좁은 협착부만 개선하고 정체 해소는 그대로 유지한다.
+      cost_penalty: 4.0
+
+      # --- 핵심 4: 연산량 ---
+      # 맵 해상도 0.05 m는 이미 거칠다. downsampling_factor 2면 셀이 0.10 m가
+      # 되어 최협 통로(반폭 0.35 m)를 통과 불가로 오판할 수 있다.
       downsample_costmap: false
       downsampling_factor: 1
+      # 5° 분해능. Hybrid는 (x, y, theta) 3차원을 탐색하므로 이 값이 메모리와
+      # 탐색 시간을 직접 정한다.
+      angle_quantization_bins: 72
+      # 같은 목적지로 1 Hz 재계획이 반복되므로 obstacle heuristic 캐시가 유효하다.
+      # Orin NX에서 Hybrid 탐색 시간을 줄이는 가장 큰 수단이다.
+      cache_obstacle_heuristic: true
+
+      tolerance: 0.2
       allow_unknown: true
       max_iterations: 1000000
       max_on_approach_iterations: 1000
-      # planner 재계획 주기는 1 Hz다. 그 안에 끝나야 경로 갱신이 밀리지 않는다.
-      max_planning_time: 0.5
-      # 경로 길이보다 비용 회피를 우선하는 정도. 기본 2.0은 벽 쪽으로 붙는
-      # 경향이 있어 통로 중앙 유지를 위해 조금 올린다.
-      cost_travel_multiplier: 3.0
-      use_final_approach_orientation: false
+      # 기본 BT의 ComputePathToPose는 RateController 1.0 Hz 아래에 있다. 이
+      # 예산을 넘기면 controller가 그만큼 낡은 경로를 따라간다. 2D는 0.5로도
+      # 충분했지만 Hybrid는 3차원 탐색이라 여유를 준다. Orin NX 실측 후 조정한다.
+      max_planning_time: 1.0
+
+      smooth_path: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+
+    # 비교용 대안. planner_plugins에 없으므로 Nav2가 로드하지 않는다.
+    #
+    # Hybrid(DUBIN)의 구조적 한계는 제자리 회전이 없다는 것이다. 목표가 뒤쪽에
+    # 있으면 반경 0.50 m 호로 180° 되돌아야 하는데 그러려면 통로 폭 1.85 m가
+    # 필요하다. 맵 통로 폭 중앙값 1.40 m, 최협 1.10 m라 어느 통로에서도 불가라서
+    # planner가 경로를 못 찾고 BT recovery(Spin)로 넘어간다. 복구 예산 실측은
+    # 19.0 s 중 Wait이 15.0 s였다 — 정상 경로가 아니라 매번 손실이다.
+    #
+    # SmacPlannerLattice는 미리 생성된 motion primitive를 쓰고, Humble에 이미
+    # 들어 있는 diff 격자(112개 중 제자리 회전 32개)가 차동구동 전용이다.
+    # 충돌 검사는 Hybrid와 같다(NodeLattice::isNodeValid -> footprint 버전).
+    # 대가는 회전 반경이 격자에 고정(0.5 m)되고 방향 분해능이 16 headings
+    # (22.5°)로 거칠다는 점이다. 0.5 m는 위 계산의 채택값과 같고, 방향
+    # 분해능은 DWB가 추종하면서 메꾼다.
+    #
+    # Lattice에는 Hybrid의 minimum_turning_radius / angle_quantization_bins /
+    # motion_model_for_search / downsample_costmap 파라미터가 없다
+    # (libnav2_smac_planner_lattice.so 확인). 격자 파일 metadata가 대신 정한다.
+    GridBasedLattice:
+      plugin: "nav2_smac_planner/SmacPlannerLattice"
+
+      # nav2 기본값은 ackermann 격자다. VICA는 차동구동이라 diff를 써야 하고,
+      # grid_resolution 0.05가 costmap resolution과 같아야 primitive 끝점이
+      # 셀 경계에 맞는다.
+      lattice_filepath: "/opt/ros/humble/share/nav2_smac_planner/sample_primitives/5cm_resolution/0.5m_turning_radius/diff/output.json"
+
+      # 후진 primitive로 확장하지 않는다. 위 DUBIN과 같은 이유다.
+      allow_reverse_expansion: false
+      # 제자리 회전 primitive에 붙는 비용. 낮추면 아무 데서나 돌고, 높이면
+      # 되돌아서야 할 곳에서도 호로 우회한다. 이 값이 Lattice의 주 노브다.
+      rotation_penalty: 5.0
+
+      # 아래는 위 GridBased 블록과 반드시 같은 값을 유지한다(A/B 전제).
+      cost_penalty: 4.0
+      cache_obstacle_heuristic: true
+      tolerance: 0.2
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 1.0
+
+      smooth_path: true
       smoother:
         max_iterations: 1000
         w_smooth: 0.3

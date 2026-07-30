@@ -1,0 +1,59 @@
+<!--
+  Nav2 기본 navigate_to_pose_w_replanning_and_recovery.xml에서 <BackUp/> 한 줄만
+  제거한 트리다. 그 외는 기본과 동일하게 유지한다.
+
+  제거 이유
+    실주행에서 핸들 뒤에 사람이 따라온다(guideline/vica_scenario.md).
+    2026-07-30 Hybrid 주행에서 BackUp이 실제로 실행되어 로봇이 0.30 m 후진했다:
+      /cmd_vel_safe 7346개 중 후진 173개, vx 정확히 -0.0500 고정, 연속 5.87 s
+      behavior_server: "backup completed successfully"
+    5.87 s x 0.05 m/s = 0.29 m로 기본 BT의 backup_dist="0.30"과 일치한다.
+
+    planner를 DUBIN으로 바꿔도 이건 막히지 않는다. DUBIN은 경로에 후진
+    primitive를 넣지 않지만, BackUp은 planner를 거치지 않고 behavior_server가
+    직접 /cmd_vel을 발행하기 때문이다. 후진원은 이 트리에서 BackUp 하나뿐이다
+    (AssistedTeleop과 DriveOnHeading은 트리에 없다. 로그의
+    "Exiting DriveOnHeading"은 BackUp이 DriveOnHeading을 상속해서 찍힌 것이다).
+
+  주의
+    behavior_server.behavior_plugins에서 "backup"을 빼는 것만으로는 안 된다.
+    BtActionNode::createActionClient가 액션 서버를 못 찾으면 예외를 던져
+    (throw std::runtime_error) BT 생성 자체가 실패하고 주행 전체가 죽는다.
+    그래서 트리에서 노드를 지우는 이 방법을 쓴다. 플러그인 목록은 그대로 둬도
+    무해하다(서버만 떠 있고 아무도 호출하지 않는다).
+
+  RoundRobin은 남은 3개를 순환한다: ClearingActions -> Spin -> Wait.
+
+  nav2를 올릴 때는 원본과 diff를 확인한다:
+    /opt/ros/humble/share/nav2_bt_navigator/behavior_trees/
+      navigate_to_pose_w_replanning_and_recovery.xml
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

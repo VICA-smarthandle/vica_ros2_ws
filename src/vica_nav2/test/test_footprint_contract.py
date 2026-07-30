@@ -115,6 +115,16 @@ def test_padding_keeps_a_hard_clearance_margin(costmap):
 # 맵 실측 통로 반폭(scratchpad/corridor_width.py): 중앙값 0.70 m, 10%tile 0.35 m.
 NARROWEST_CORRIDOR_HALF_WIDTH = 0.35
 
+# 로봇이 실제로 통과하는 경로의 최협 지점 여유(analysis/bottleneck_path.py,
+# 2026-07-30 Hybrid 주행). 방2 -> 화장실 우회로의 (1.66, 3.04) 지점이다.
+# 이 값보다 inflation_radius가 크면 그 통로에는 비용 0인 중앙선이 없다.
+DRIVEN_CORRIDOR_CLEARANCE = 0.412
+
+# 경로 추종 오차 실측(analysis/why_lethal_under_footprint.py, 2026-07-30
+# hybrid_infl035 주행 안내소 구간): 중앙값 0.045, p95 0.120, 최대 0.164 m.
+# inflation_radius는 이 오차를 흡수하는 완충이다. 근거는 아래 테스트 주석 참고.
+PATH_TRACKING_ERROR_P95 = 0.120
+
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
 def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
@@ -136,22 +146,49 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     inscribed = half_width + padding
     inflation_radius = cm['inflation_layer']['inflation_radius']
 
-    # 하한: 차체 가장자리 기준 실여유가 최소 15 cm는 되어야 한다.
+    # 하한: 경로 추종 오차를 흡수할 완충이 있어야 한다.
     #
-    # 2026-07-28에 이 하한을 padding의 2배(0.10)로 낮추고 inflation_radius를
-    # 0.38로 시험했다가 되돌렸다. 최협 통로(반폭 0.35)에 비용 0인 중앙선을
-    # 만들려는 의도였고 최장 서행은 8.37 -> 2.57 s로 줄었지만, 같은 4구간
-    # 경로에서 0.45가 완주한 반면 0.38은 마지막 구간에서 61초간 갇혔다.
-    # inflation_radius는 '얼마나 떨어져 갈 것인가'라서, 줄이면 좁은 곳에
-    # 진입하는 것 자체를 막지 못한다. 그래서 0.15를 유지한다.
-    assert inflation_radius - inscribed >= 0.15, (
-        f'{costmap} 실여유 {inflation_radius - inscribed:.3f} m가 너무 좁다'
+    # 이 하한은 두 번 근거가 바뀌었다.
+    #
+    # 2026-07-28까지는 0.15였다. 근거는 inflation_radius 0.38을 시험했다가
+    # 61초 갇혀 되돌린 경험이었고, 결론은 "inflation을 줄이면 좁은 곳 진입 자체를
+    # 막지 못한다"였다. 그때 planner는 SmacPlanner2D로 로봇을 점으로 봤다
+    # (Node2D::isNodeValid -> inCollision(index, bool), 셀 하나). 진입 억제력이
+    # 없었던 것은 inflation이 작아서가 아니라 planner가 footprint를 안 봤기
+    # 때문이라, 이 근거는 Hybrid 전환으로 수명을 다했다.
+    #
+    # 2026-07-30에 잠시 'costmap 1셀 경사'로 낮췄고(0.05), 그 값이 0.35를
+    # 통과시켰다. 그 주행에서 안내소 구간이 ABORTED로 실패했다. 원인을 셋으로
+    # 분리한 결과(analysis/why_lethal_under_footprint.py):
+    #   planner가 낸 /plan 39개는 전부 여유 >= 0.283 m로 lethal을 지나지 않았고,
+    #   AMCL 점프도 없었다(물리 최대 속도의 1.5배 초과 0회).
+    #   실제 원인은 경로 추종 오차였다 -- 중앙값 0.045, p95 0.120, 최대 0.164 m.
+    #   경로 최소 여유 0.283 m는 내접 0.277 위로 0.6 cm뿐이라, 오차 16 cm가
+    #   그것을 먹고 footprint 안에 lethal이 들어왔다(0.283 - 0.164 = 0.119).
+    #   그러면 planner가 "Starting point in lethal space"로 아무 경로도 못 내고,
+    #   Spin은 외접 0.675 m를 쓸어야 해서 여유 0.180 m에서는 원리적으로 불가하다.
+    #
+    # 그래서 하한의 정체는 '경사의 존재'가 아니라 '추종 오차 완충'이다.
+    # 비용 0 지대에서 planner는 경로 길이만 최소화하므로 경로 여유는
+    # inflation_radius 근처에 수렴한다. 따라서 inflation_radius가 내접 + 추종
+    # 오차보다 작으면 오차가 그대로 lethal 진입이 된다.
+    #
+    # footprint_padding으로 대신할 수 없다. padding은 하드 판정(253)을 키워
+    # 통과 가능성 자체를 줄인다. 완충은 소프트 비용인 inflation의 일이다.
+    assert inflation_radius - inscribed >= PATH_TRACKING_ERROR_P95, (
+        f'{costmap} 완충 {inflation_radius - inscribed:.3f} m가 경로 추종 오차'
+        f' p95 {PATH_TRACKING_ERROR_P95} m보다 작다. 오차가 내접반경을 먹어'
+        ' footprint 안에 lethal이 들어온다(2026-07-30 안내소 구간 ABORTED)'
     )
-    # 상한: 최협 통로의 반폭을 넘으면 그 통로 전체가 비용 지대가 되어
-    # 우회와 경로 진동을 유발한다.
-    assert inflation_radius <= NARROWEST_CORRIDOR_HALF_WIDTH + 0.15, (
-        f'{costmap} inflation_radius {inflation_radius}가 최협 통로 반폭'
-        f' {NARROWEST_CORRIDOR_HALF_WIDTH}에 비해 과도하다'
+    # 상한: 로봇이 실제로 지나는 통로에 비용 0인 중앙선이 남아야 한다.
+    #
+    # 2026-07-30 Hybrid 주행에서 inflation_radius 0.45가 이 조건을 깼다.
+    # 우회로 최협 지점 (1.66, 3.04)의 여유가 0.412 m라 통로 전체가 비용 지대가
+    # 되었고, DWB가 어느 궤적을 골라도 비용을 물어 vx=0 / wz=±0.02로 30초간
+    # 진동했다. 임의 상수가 아니라 실측 여유가 상한이다.
+    assert inflation_radius <= DRIVEN_CORRIDOR_CLEARANCE, (
+        f'{costmap} inflation_radius {inflation_radius}가 실주행 통로 최협 여유'
+        f' {DRIVEN_CORRIDOR_CLEARANCE} m를 넘어, 그 통로에 비용 0인 중앙선이 없다'
     )
 
 
