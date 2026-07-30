@@ -50,7 +50,20 @@
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <Spin spin_dist="1.57"/>
+          <!-- 2026-07-30: spin_dist 1.57(90도) -> 0.30(17.2도).
+               근거: 253 밴드에서 Spin이 회전을 시작해 핸들이 의자에 부딪혔다.
+               Spin이 쓰는 CostmapTopicCollisionChecker::isCollisionFree는
+               254(LETHAL)에서만 거부하고 253(INSCRIBED)은 통과시킨다(헤더에
+               임계값 인자가 없어 파라미터로 바꿀 수 없다). 253은 "벽에서
+               내접반경 0.277 m 이내"라는 뜻이고, 그 자리에서 회전하면 후방
+               꼭짓점이 반경 0.675 m를 쓸어 거의 확실히 닿는다.
+               inflation_radius를 0.35 -> 0.40으로 올려 253 진입을 줄여봤으나
+               회전 중 253 접촉 샘플이 18개 -> 18개로 동일했다. 진입 억제로는
+               막지 못한다.
+               각을 줄이면 쓸리는 각범위가 1/4바퀴 -> 1/21바퀴가 된다.
+               RoundRobin이 복구를 순환하므로 재시도마다 17도씩 누적되어
+               6회 재시도에서 최대 100도까지 돌 수 있다 : 복구 능력을 잃지 않는다. -->
+          <Spin spin_dist="0.30"/>
           <Wait wait_duration="5"/>
         </RoundRobin>
       </ReactiveFallback>

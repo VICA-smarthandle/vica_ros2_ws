@@ -16,6 +16,7 @@ BtActionNode::createActionClient가 액션 서버를 못 찾으면 예외를 던
 (throw std::runtime_error) BT 생성이 실패하고 주행 전체가 죽는다.
 """
 import importlib.util
+import math
 import re
 from pathlib import Path
 
@@ -33,6 +34,10 @@ NAV2_DEFAULT_BT = Path(
     '/navigate_to_pose_w_replanning_and_recovery.xml'
 )
 PLACEHOLDER = 'SET_BY_VICA_NAV2_LAUNCH'
+
+# Spin 회전각 상한 [rad]. nav2 기본값은 1.57(90도)이다.
+# 0.35 rad = 20도. 근거는 test_spin_angle_is_small_enough_to_limit_the_swept_arc.
+MAX_SPIN_DIST_RAD = 0.35
 
 
 def _pkg_dir():
@@ -105,9 +110,57 @@ def test_custom_bt_only_removes_backup_from_the_nav2_default():
     removed = [line for line in default if line not in ours]
     added = [line for line in ours if line not in default]
 
-    assert added == [], f'기본 트리에 없는 줄이 추가됐다: {added}'
-    assert len(removed) == 1 and removed[0].startswith('<BackUp'), (
-        f'BackUp 한 줄만 제거해야 한다. 실제 제거된 줄: {removed}'
+    # 허용되는 변경은 둘뿐이다.
+    #   (1) <BackUp/> 제거      -- 핸들 뒤 사람. 근거는 이 파일 상단.
+    #   (2) <Spin spin_dist> 값 -- 2026-07-30 의자 충돌. 근거는 BT 안 주석.
+    # 그 밖에 줄이 추가되거나 제거되면 실패시킨다. 2026-07-28에 커스텀 BT로
+    # SmoothPath를 넣었다가 실주행이 악화되어 되돌린 이력이 있다.
+    added_non_spin = [l for l in added if not l.startswith('<Spin')]
+    removed_non_backup = [
+        l for l in removed
+        if not (l.startswith('<BackUp') or l.startswith('<Spin'))
+    ]
+    assert added_non_spin == [], (
+        f'BackUp 제거와 Spin 각 조정 외의 줄이 추가됐다: {added_non_spin}'
+    )
+    assert removed_non_backup == [], (
+        f'BackUp 제거와 Spin 각 조정 외의 줄이 제거됐다: {removed_non_backup}'
+    )
+    assert any(l.startswith('<BackUp') for l in removed), (
+        f'BackUp 줄이 제거되지 않았다. 제거된 줄: {removed}'
+    )
+
+
+def test_spin_angle_is_small_enough_to_limit_the_swept_arc():
+    """253 밴드에서 Spin이 도는 것을 파라미터로는 막을 수 없으므로 각을 줄인다.
+
+    Spin이 쓰는 CostmapTopicCollisionChecker::isCollisionFree는 254(LETHAL)에서만
+    거부하고 253(INSCRIBED)은 통과시킨다. 헤더에 임계값 인자가 없어 설정으로
+    바꿀 수 없다(costmap_topic_collision_checker.hpp: isCollisionFree(pose, fetch)).
+    253은 '벽에서 내접반경 0.277 m 이내'이고 그 자리에서 회전하면 후방 꼭짓점이
+    반경 0.675 m를 쓸어 거의 확실히 닿는다 -- 2026-07-30에 실제로 핸들이 의자에
+    부딪혔다.
+
+    inflation_radius 0.35 -> 0.40으로 253 진입을 줄여봤으나 회전 중 253 접촉
+    샘플이 18개 -> 18개로 동일했다. 진입 억제로는 막지 못한다.
+
+    각을 줄이면 쓸리는 각범위가 줄어든다. 기본값 1.57(90도)은 1/4바퀴다.
+    RoundRobin이 복구를 순환하므로 작은 각도 재시도마다 누적되어 복구 능력을
+    잃지 않는다.
+    """
+    import re
+    body = _strip_comments(_bt_path().read_text(encoding='utf-8'))
+    m = re.search(r'<Spin\s+spin_dist="([0-9.]+)"', body)
+    assert m is not None, 'BT에서 Spin spin_dist를 찾을 수 없다'
+    spin_dist = float(m.group(1))
+    assert spin_dist <= MAX_SPIN_DIST_RAD, (
+        f'spin_dist {spin_dist} rad({math.degrees(spin_dist):.0f}도)가'
+        f' 상한 {MAX_SPIN_DIST_RAD} rad({math.degrees(MAX_SPIN_DIST_RAD):.0f}도)를'
+        ' 넘는다. 253 밴드에서 회전하면 후방 0.675 m가 쓸린다'
+    )
+    # 0이면 복구 수단을 잃는다. RoundRobin 누적을 쓰려면 한 번에 최소한은 돌아야 한다.
+    assert spin_dist >= 0.15, (
+        f'spin_dist {spin_dist} rad이 너무 작아 자세 전환에 기여하지 못한다'
     )
 
 
