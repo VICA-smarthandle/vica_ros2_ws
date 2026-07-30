@@ -114,6 +114,15 @@ CATALOG: Dict[str, FaultSpec] = {
         'odometry가 {age_sec}초 동안 갱신되지 않았습니다.',
         'encoder와 EKF 노드 실행 상태를 확인해 주세요.',
     ),
+    # /wheel/odom은 encoder_feedback의 원시 출력이고 /odom은 EKF 표준 출력이다
+    # (vica_architecture.md 6절). 둘을 구분해야 encoder 문제와 EKF 문제를 가를 수 있다.
+    # encoder_feedback이 죽으면 조용히 아무것도 나오지 않는다.
+    'LOCALIZATION_WHEEL_ODOM_STALE': FaultSpec(
+        'localization',
+        SEVERITY_STOP,
+        'encoder odometry가 {age_sec}초 동안 갱신되지 않았습니다.',
+        'encoder_feedback 노드와 CAN 연결을 확인해 주세요.',
+    ),
     'LOCALIZATION_TF_STALE': FaultSpec(
         'localization',
         SEVERITY_STOP,
