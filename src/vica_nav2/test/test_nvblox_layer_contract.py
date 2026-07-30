@@ -21,10 +21,25 @@ import yaml
 
 NVBLOX_PLUGIN = 'nvblox::nav2::NvbloxCostmapLayer'
 INFLATION_PLUGIN = 'nav2_costmap_2d::InflationLayer'
-# vica_nvblox_bringup의 mapping_type: static_tsdf와 짝이 되는 토픽.
-# dynamic 계열로 바꾸면 combined_map_slice가 되고, 짝이 어긋나면 이 레이어는
-# 아무것도 받지 못한 채 조용히 무해해진다(그리고 planner는 다시 눈이 먼다).
-EXPECTED_SLICE_TOPIC = '/nvblox_node/static_map_slice'
+
+# 두 costmap은 '서로 다른' 슬라이스를 써야 한다. 역할이 다르기 때문이다.
+#   local  <- combined : 정적 + 동적. DWB가 사람을 실시간 회피한다.
+#   global <- static   : 정적만. planner가 유령에 막히지 않는다.
+# 하나로 통일하면 둘 중 하나를 잃는다. static 하나로 global까지 먹였을 때
+# (2026-07-30) 사람이 static TSDF에 쌓여 global costmap에 중앙값 9 s / p95 46 s
+# 남았고, 그 유령이 "Starting point in lethal space" 22회를 만들었다.
+EXPECTED_SLICE = {
+    'local_costmap': '/nvblox_node/combined_map_slice',
+    'global_costmap': '/nvblox_node/static_map_slice',
+}
+# combined/dynamic 슬라이스는 dynamic 계열 mapping_type에서만 발행된다
+# (nvblox_node.cpp advertiseTopics의 isUsingHumanOrDynamicMapper 분기).
+# 짝이 어긋나면 nvblox_layer는 아무것도 받지 못한 채 조용히 무해해진다.
+DYNAMIC_ONLY_SLICES = ('combined_map_slice', 'dynamic_map_slice')
+NVBLOX_OVERRIDES = (
+    Path(__file__).parents[2]
+    / 'vica_nvblox_bringup' / 'config' / 'vica_nvblox_overrides.yaml'
+)
 
 
 def _params():
@@ -69,22 +84,90 @@ def test_nvblox_layer_frame_matches_the_costmap_global_frame(costmap):
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
-def test_nvblox_layer_subscribes_the_slice_that_static_tsdf_publishes(costmap):
+def test_each_costmap_subscribes_the_slice_matching_its_role(costmap):
     layer = _costmap(costmap)['nvblox_layer']
-    assert layer['nvblox_map_slice_topic'] == EXPECTED_SLICE_TOPIC, (
+    assert layer['nvblox_map_slice_topic'] == EXPECTED_SLICE[costmap], (
         f'{costmap}: 슬라이스 토픽 {layer["nvblox_map_slice_topic"]}가'
-        f' mapping_type static_tsdf의 발행 토픽과 다르다'
+        f' 역할에 맞지 않다. 기대값 {EXPECTED_SLICE[costmap]}'
     )
 
 
-def test_both_costmaps_use_the_same_slice_topic():
-    """서로 다른 슬라이스를 보면 planner와 controller의 장애물이 또 갈린다."""
-    local = _costmap('local_costmap')['nvblox_layer']
-    global_ = _costmap('global_costmap')['nvblox_layer']
-    assert (local['nvblox_map_slice_topic']
-            == global_['nvblox_map_slice_topic'])
-    assert (local['convert_to_binary_costmap']
-            == global_['convert_to_binary_costmap'])
+def test_global_never_takes_the_dynamic_slice():
+    """global costmap이 동적 슬라이스를 먹으면 유령이 planner를 막는다.
+
+    planner는 253 이상을 하드 거부하므로(GridCollisionChecker::inCollision,
+    cmp w1 #0xfc), 사람이 지나간 자리가 남아 있으면 그 자리에서 경로를 못 낸다.
+    동적 회피는 DWB(local)의 일이다.
+    """
+    topic = _costmap('global_costmap')['nvblox_layer']['nvblox_map_slice_topic']
+    for dyn in DYNAMIC_ONLY_SLICES:
+        assert dyn not in topic, (
+            f'global_costmap이 동적 슬라이스({dyn})를 구독한다: {topic}'
+        )
+
+
+def test_local_sees_dynamic_obstacles():
+    """local이 정적 슬라이스만 보면 DWB가 사람을 못 피한다."""
+    topic = _costmap('local_costmap')['nvblox_layer']['nvblox_map_slice_topic']
+    assert any(d in topic for d in DYNAMIC_ONLY_SLICES), (
+        f'local_costmap이 동적 슬라이스를 구독하지 않는다: {topic}'
+    )
+
+
+def test_mapping_type_publishes_the_slices_both_costmaps_subscribe():
+    """구독 토픽과 mapping_type의 짝이 맞는지 검사한다.
+
+    combined/dynamic 슬라이스는 dynamic 계열 mapping_type에서만 발행된다.
+    짝이 어긋나면 nvblox_layer가 아무것도 받지 못한 채 조용히 무해해지고,
+    planner는 다시 카메라 장애물에 눈이 먼다 — 경고도 나오지 않는다.
+    """
+    if not NVBLOX_OVERRIDES.is_file():
+        pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
+    nv = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
+    mapping_type = nv['/**']['ros__parameters']['mapping_type']
+
+    needs_dynamic = any(
+        any(d in _costmap(cm)['nvblox_layer']['nvblox_map_slice_topic']
+            for d in DYNAMIC_ONLY_SLICES)
+        for cm in ('local_costmap', 'global_costmap')
+    )
+    if needs_dynamic:
+        assert mapping_type in ('dynamic', 'human_with_static_tsdf',
+                                'human_with_static_occupancy'), (
+            f'동적 슬라이스를 구독하는데 mapping_type이 {mapping_type}다.'
+            ' 그 토픽은 발행되지 않는다'
+        )
+
+
+def test_static_and_dynamic_decay_pull_in_opposite_directions():
+    """정적은 붙잡고 동적은 놓아야 한다. 하나의 decay로는 둘을 만족시킬 수 없다.
+
+    TSDF 무게는 소거마다 tsdf_decay_factor를 곱하고 1e-3 밑에서 소멸한다.
+      n = ln(1e-3) / ln(factor) 스텝,  소요 = n / decay_tsdf_rate_hz
+    2026-07-30 실측: factor 0.95 / 2.5 Hz -> 53.9 s 예측, p95 46 s 관측.
+    """
+    if not NVBLOX_OVERRIDES.is_file():
+        pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
+    nv = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
+    p = nv['/**']['ros__parameters']
+    if p['mapping_type'] not in ('dynamic', 'human_with_static_tsdf',
+                                 'human_with_static_occupancy'):
+        pytest.skip('단일 mapper 모드에서는 분리 계약이 성립하지 않는다')
+
+    # 동적 소거 주기가 정적보다 빨라야 한다.
+    assert p['decay_dynamic_occupancy_rate_hz'] > p['decay_tsdf_rate_hz'], (
+        f'동적 소거 {p["decay_dynamic_occupancy_rate_hz"]} Hz가 정적'
+        f' {p["decay_tsdf_rate_hz"]} Hz보다 빠르지 않다'
+    )
+    # 소거된 복셀은 unknown이 아니라 free여야 한다. DWB의 pointCost는
+    # NO_INFORMATION(0xff)에서도 예외를 던져, 미지가 남으면 궤적이 전멸한다.
+    assert p['static_mapper']['tsdf_set_free_distance_on_decayed'] is True
+    assert p['dynamic_mapper']['occupancy_decay_to_free'] is True
+    # 확률 감쇠의 유효 범위 (occupancy_decay_integrator_params.h)
+    occ = p['dynamic_mapper']['occupied_region_decay_probability']
+    free = p['dynamic_mapper']['free_region_decay_probability']
+    assert 0.0 <= occ <= 0.5, f'occupied_region_decay_probability {occ} 범위 밖'
+    assert 0.5 <= free <= 1.0, f'free_region_decay_probability {free} 범위 밖'
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])

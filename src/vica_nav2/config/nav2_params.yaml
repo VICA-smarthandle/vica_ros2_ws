@@ -224,7 +224,40 @@ controller_server:
       # 회피 선호는 남기되 궤적이 전멸하지 않도록 0.15로 낮춘다.
       # 이래도 갇히면 다음은 inflation_radius를 0.45 -> 0.38로 낮춰 최협
       # 통로에 비용 0인 중앙선을 만드는 것이다.
-      ObstacleFootprint.scale: 0.15
+      #
+      # 2026-07-30: 0.15 -> 0.5. 이유는 '회피 선호'가 아니라 planner와 controller의
+      # '충돌 임계값 비대칭'을 닫는 것이다. 기계어로 확인했다:
+      #   dwb_critics ObstacleFootprintCritic::pointCost
+      #       cmp w1, #0xfe (254 LETHAL) / cmp w1, #0xff (255 UNKNOWN) -> 예외
+      #       0xfd(253 INSCRIBED) 비교가 없다 -> 253은 통과시킨다
+      #   nav2_smac_planner GridCollisionChecker::inCollision
+      #       cmp w1, #0xfc (252 초과 = 253 이상) -> 충돌 (footprint 전체)
+      # 즉 253 밴드는 controller에게 합법이고 planner에게 금지다. DWB가 footprint를
+      # 253 밴드에 넣으며 정상 주행하다가, 그 자리에서 planner가
+      # "Starting point in lethal space"로 아무 경로도 못 내고 굳는다. 부딪히지도
+      # 않았고 나갈 공간이 있는데 멈춘다.
+      # 2026-07-30 주행 실측(bins36_people): 정지 지점의 로봇 중심 셀 값이 74~79
+      # (경사 안, 합법)였고 중심이 99 이상인 샘플은 36개 중 0개였는데,
+      # planner "Starting point in lethal space"가 22회, DWB "No valid"는 3회였다.
+      # 대부분의 순간 셀은 253이었고 DWB만 괜찮다고 한 것이다.
+      #
+      # scale은 253 진입 비용을 정한다. PathDist.scale 32가 경로 1셀(5 cm) 이탈
+      # 비용이므로 무게 비교는 이렇다:
+      #   0.15 -> 253 x 0.15 =  38  = 경로 1.2셀   (싸다. 자유롭게 들어간다)
+      #   0.5  -> 253 x 0.5  = 127  = 경로 4.0셀   <- 채택
+      #   1.0  -> 253 x 1.0  = 253  = 경로 7.9셀
+      # 2026-07-28에 0.3이 나빴던 기록은 planner가 SmacPlanner2D(점 로봇)로
+      # 경로 자체가 달랐던 때다. 그때는 planner가 253 밴드를 지나는 경로를
+      # 냈으므로 controller가 그것을 거부하면 전멸했다. 지금은 planner가
+      # 253을 피한 경로를 내므로 controller가 같은 기준을 따르는 것이 정합이다.
+      #
+      # 2026-07-30 실측으로 0.5는 과했다. 방향은 맞았고 세기가 컸다:
+      #   scale 0.15   lethal space 25회 / DWB 무효   3회   (밴드를 자유롭게 드나든다)
+      #   scale 0.5    lethal space  2회 / DWB 무효 133회   (궤적이 전멸한다)
+      # lethal space가 25 -> 2회로 줄어 가설은 검증됐으나, 그 대가로 DWB가 유효
+      # 궤적을 44배 더 많이 잃었다. 0.25는 그 사이다 - 253 진입이 경로 2셀(10 cm)
+      # 이탈과 맞먹어, 피하려 하되 다른 선택이 없으면 들어갈 수 있다.
+      ObstacleFootprint.scale: 0.25
       PathAlign.scale: 32.0
       # forward_point_distance는 "로봇 앞 이 거리의 점"을 경로에 정렬시키는
       # 기준점이다. 0.1은 footprint 전방(0.305) 안쪽, 즉 차체 내부라서
@@ -294,12 +327,27 @@ local_costmap:
         # combined_map_slice로 둘을 합쳐 발행한다. static_map_slice를 그대로
         # 두면 사람 같은 동적 장애물이 costmap에 들어오지 않는다.
         # 근거와 배경은 vica_nvblox_bringup/config/vica_nvblox_overrides.yaml 주석.
-        # 2026-07-29 2차 시험: mapping_type을 static_tsdf로 되돌리므로 이 토픽도
-        # 함께 static_map_slice로 돌린다. combined_map_slice는 dynamic 계열
-        # mapping_type에서만 발행되어, 짝이 어긋나면 nvblox_layer가 아무것도
-        # 받지 못한다. test_nav2_subscribes_the_slice_that_this_mapping_type_publishes가
-        # 이 짝을 감시한다.
-        nvblox_map_slice_topic: /nvblox_node/static_map_slice
+        #
+        # 2026-07-30: local은 combined, global은 static으로 '분리'한다.
+        # 두 costmap의 역할이 다르기 때문이다.
+        #   local  <- combined_map_slice : 정적 + 동적. DWB가 사람을 실시간 회피한다.
+        #   global <- static_map_slice   : 정적만. planner가 유령에 막히지 않는다.
+        # 하나의 슬라이스로는 둘을 만족시킬 수 없다. 정적을 붙잡으려면 사람도
+        # 붙잡히고, 사람을 놓으려면 정적도 놓친다.
+        #
+        # 근거(2026-07-30 실측): static_tsdf 하나로 global까지 먹이니 사람이 static
+        # TSDF에 쌓여, 장애물이 사라진 뒤에도 global costmap에 중앙값 9 s / p95 46 s
+        # 남았다(일시 LETHAL 셀 7,693 -> 33,138개). 그 유령이 통로를 막아
+        # "Starting point in lethal space"가 22회 났다.
+        # TSDF 무게는 소거마다 x0.95이고 1e-3 밑에서 소멸하므로
+        #   n = ln(1e-3)/ln(0.95) = 134.7 스텝,  2.5 Hz -> 53.9 s
+        # 실측 p95 46 s와 맞는다. 즉 유령의 정체는 '사람이 static에 들어간 것'이다.
+        #
+        # combined_map_slice는 dynamic 계열 mapping_type에서만 발행된다
+        # (nvblox_node.cpp advertiseTopics: isUsingHumanOrDynamicMapper 분기).
+        # 짝이 어긋나면 nvblox_layer가 아무것도 받지 못한 채 조용히 무해해진다.
+        # test_nvblox_layer_contract.py가 이 짝과 분리를 감시한다.
+        nvblox_map_slice_topic: /nvblox_node/combined_map_slice
         convert_to_binary_costmap: True
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -598,8 +646,21 @@ planner_server:
       # 되어 최협 통로(반폭 0.35 m)를 통과 불가로 오판할 수 있다.
       downsample_costmap: false
       downsampling_factor: 1
-      # 5° 분해능. Hybrid는 (x, y, theta) 3차원을 탐색하므로 이 값이 메모리와
-      # 탐색 시간을 직접 정한다.
+      # Hybrid는 (x, y, theta) 3차원을 탐색하므로 이 값이 메모리와 탐색 시간을
+      # 직접 정한다.
+      #
+      # 5° 분해능.
+      #
+      # 2026-07-30에 36(10°)으로 내렸다가 되돌렸다. 근거가 오독이었다.
+      # "계획 시간 중앙값 265 -> 832 ms"로 읽었는데, 그 중앙값은 0.2 s를 넘긴
+      # 계획만의 중앙값이고 표본 수가 12개 vs 5개로 달라 서로 다른 모집단이었다.
+      # 실제 초과율은 이렇다(경고 수 / /plan 발행 수):
+      #   inflation 0.45                 32/196 = 16.3 %
+      #   inflation 0.40                 12/ 94 = 12.8 %
+      #   0.40 + nvblox global (bins 72)  5/129 =  3.9 %   <- 오히려 개선
+      #   bins 36                         2/ 68 =  2.9 %   <- 추가 이득 미미
+      # nvblox를 global에 넣은 것은 계획을 느리게 하지 않았고, bins 36의 이득은
+      # 1 %p뿐이었다. 근거 없는 변경이므로 기본값으로 되돌린다.
       angle_quantization_bins: 72
       # 같은 목적지로 1 Hz 재계획이 반복되므로 obstacle heuristic 캐시가 유효하다.
       # Orin NX에서 Hybrid 탐색 시간을 줄이는 가장 큰 수단이다.
