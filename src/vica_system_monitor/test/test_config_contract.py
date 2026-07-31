@@ -333,10 +333,25 @@ def test_lidar_is_required_and_stop_severity():
     assert int(params['lidar']['severity']) == 3
 
 
-def test_motor_severity_is_estop():
-    """모터 CAN 이상은 즉시 정지 사유다(초안 9.1절)."""
+def test_motor_severity_blocks_driving():
+    """모터 CAN 이상은 주행 불가 사유다(초안 9.1절).
+
+    등급 축에 비상정지가 없으므로 STOP(3)이 상한이다. 비상정지는 래치이며
+    RobotFault.latched와 RobotHealth.STATE_ESTOPPED가 나타낸다.
+    """
     params = load_monitor_params()
-    assert int(params['motor']['severity']) == 4
+    assert int(params['motor']['severity']) == 3
+
+
+def test_no_component_policy_uses_a_removed_severity():
+    """설정이 제거된 등급 값을 쓰지 않는다.
+
+    yaml은 숫자만 담으므로 오래된 4(ESTOP)가 남아도 조용히 통과한다. 여기서 막는다.
+    """
+    params = load_monitor_params()
+    for name, policy in params.items():
+        if isinstance(policy, dict) and 'severity' in policy:
+            assert 0 <= int(policy['severity']) <= 4, name
 
 
 def test_safety_input_timeouts_exist():

@@ -5,7 +5,7 @@ ROS 없이 실행한다. 시각은 정수 나노초로 주입한다.
 
 from vica_system_monitor.fault_catalog import (
     SEVERITY_DEGRADED,
-    SEVERITY_ESTOP,
+    SEVERITY_FAULT,
     SEVERITY_STOP,
     SEVERITY_WARN,
 )
@@ -235,7 +235,9 @@ def test_estop_latched_wins_over_everything():
     )
 
     assert snapshot.state == STATE_ESTOPPED
-    assert snapshot.highest_severity == SEVERITY_ESTOP
+    # 래치 결함은 주행 불가 등급이고, 래치라는 사실은 latched 플래그가 나타낸다.
+    assert snapshot.highest_severity == SEVERITY_STOP
+    assert any(f.latched for f in snapshot.faults)
 
 
 def test_stale_safety_input_is_fault():
@@ -321,12 +323,12 @@ def test_highest_severity_wins_among_simultaneous_faults():
     """동시 다발 결함에서 가장 심각한 것이 대표가 된다(초안 18.2 항목 6)."""
     probes = [
         probe('app', required=False, ok=False, severity=SEVERITY_WARN),
-        probe('motor', ok=False, severity=SEVERITY_ESTOP),
+        probe('motor', ok=False, severity=SEVERITY_FAULT),
         probe('lidar', ok=False, severity=SEVERITY_STOP),
     ]
     snapshot = evaluate(probes, safety(), now_ns=0, started_ns=0)
 
-    assert snapshot.highest_severity == SEVERITY_ESTOP
+    assert snapshot.highest_severity == SEVERITY_FAULT
     assert snapshot.faults[0].component == 'motor'
     assert snapshot.active_fault_count == 3
 
@@ -459,13 +461,13 @@ def test_estop_severity_fault_without_latch_is_stopped_not_estopped():
     now = 20 * SEC
     snap = evaluate(
         probes=[
-            probe('motor', last_seen_ns=now, ok=False, severity=SEVERITY_ESTOP)
+            probe('motor', last_seen_ns=now, ok=False, severity=SEVERITY_STOP)
         ],
         safety=safety(estop=False),
         now_ns=now,
         started_ns=0,
     )
-    assert snap.highest_severity == SEVERITY_ESTOP
+    assert snap.highest_severity == SEVERITY_STOP
     assert snap.state == STATE_STOPPED
 
 
@@ -571,7 +573,7 @@ def test_bare_bringup_reports_starting_not_stopped():
     snap = evaluate(
         probes=[
             probe('motor', last_seen_ns=now, ok=False, grace_ns=15 * SEC,
-                  severity=SEVERITY_ESTOP),
+                  severity=SEVERITY_STOP),
             probe('safety', last_seen_ns=now, ok=False, grace_ns=15 * SEC),
             probe('lidar', last_seen_ns=now, ok=False, grace_ns=15 * SEC),
             probe('localization', last_seen_ns=None, grace_ns=30 * SEC),

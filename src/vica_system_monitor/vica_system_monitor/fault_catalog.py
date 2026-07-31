@@ -22,19 +22,19 @@ from typing import Dict, NamedTuple, Optional
 # RobotFault.msg의 SEVERITY_* 상수와 같은 값이다. 순수 모듈이 ROS 메시지를
 # import하지 않도록 여기에 다시 정의하고, test_fault_catalog가 두 정의의 일치를
 # 검증한다.
+# 비상정지는 이 축에 없다. RobotFault.msg의 주석을 함께 본다 — E-stop은 STOP보다
+# 심각한 등급이 아니라 종류가 다른 것이며 latched 플래그가 나타낸다.
 SEVERITY_OK = 0
 SEVERITY_WARN = 1
 SEVERITY_DEGRADED = 2
 SEVERITY_STOP = 3
-SEVERITY_ESTOP = 4
-SEVERITY_FAULT = 5
+SEVERITY_FAULT = 4
 
 SEVERITY_NAMES: Dict[int, str] = {
     SEVERITY_OK: 'OK',
     SEVERITY_WARN: 'WARN',
     SEVERITY_DEGRADED: 'DEGRADED',
     SEVERITY_STOP: 'STOP',
-    SEVERITY_ESTOP: 'ESTOP',
     SEVERITY_FAULT: 'FAULT',
 }
 
@@ -72,26 +72,26 @@ CATALOG: Dict[str, FaultSpec] = {
     # --- motor -------------------------------------------------------------
     'MOTOR_CAN_TIMEOUT': FaultSpec(
         'motor',
-        SEVERITY_ESTOP,
+        SEVERITY_STOP,
         'CAN 응답이 {age_sec}초 동안 수신되지 않았습니다.',
         '로봇을 확인한 뒤 앱에서 안전 초기화를 실행해 주세요.',
     ),
     'MOTOR_CAN_FAILED': FaultSpec(
         'motor',
-        SEVERITY_ESTOP,
+        SEVERITY_STOP,
         'CAN 통신이 끊겨 모터 출력을 0으로 유지하고 있습니다.',
         'CAN 케이블과 can1 링크를 확인한 뒤 앱에서 안전 초기화를 실행해 주세요.',
     ),
     'MOTOR_NODE_SILENT': FaultSpec(
         'motor',
-        SEVERITY_ESTOP,
+        SEVERITY_STOP,
         '모터 노드 진단이 수신되지 않습니다. 노드가 종료됐을 수 있습니다.',
         '모터 노드 실행 상태를 확인한 뒤 앱에서 안전 초기화를 실행해 주세요.',
     ),
     # --- safety ------------------------------------------------------------
     'SAFETY_ESTOP_LATCHED': FaultSpec(
         'safety',
-        SEVERITY_ESTOP,
+        SEVERITY_STOP,
         '비상정지가 걸려 있습니다. 원인: {reason}',
         '위험 원인을 해소한 뒤 앱에서 안전 초기화를 실행해 주세요.',
     ),

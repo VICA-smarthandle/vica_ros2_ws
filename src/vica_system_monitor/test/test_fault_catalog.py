@@ -4,12 +4,13 @@
 안 되고, 알 수 없는 코드로 감시 노드가 죽어도 안 된다.
 """
 
+import vica_system_monitor.fault_catalog as fault_catalog
 from vica_system_monitor.fault_catalog import (
     CATALOG,
     COMPONENTS,
     describe,
     SEVERITY_DEGRADED,
-    SEVERITY_ESTOP,
+    SEVERITY_FAULT,
     severity_name,
     SEVERITY_NAMES,
     SEVERITY_OK,
@@ -45,10 +46,22 @@ def test_every_entry_has_nonempty_text():
         assert spec.suggested_action.strip(), code
 
 
-def test_motor_and_estop_faults_are_estop_severity():
-    """모터 통신 계열은 ESTOP 등급이다(초안 9.1절)."""
+def test_motor_faults_block_driving():
+    """모터 통신 계열은 주행 불가 등급이다(초안 9.1절)."""
     for code in ('MOTOR_CAN_TIMEOUT', 'MOTOR_CAN_FAILED', 'MOTOR_NODE_SILENT'):
-        assert CATALOG[code].severity == SEVERITY_ESTOP, code
+        assert CATALOG[code].severity == SEVERITY_STOP, code
+
+
+def test_no_catalog_entry_claims_estop_severity():
+    """등급 축에 비상정지가 없다.
+
+    E-stop은 STOP보다 심각한 등급이 아니라 종류가 다른 것이다. 래치가 걸리고 관리자
+    reset이 있어야 풀린다. 등급으로 표현하면 진단 결함 하나가 "비상 정지"로 표시되어
+    관리자가 있지도 않은 버튼을 찾는다.
+    """
+    assert not hasattr(fault_catalog, 'SEVERITY_ESTOP')
+    for code, spec in CATALOG.items():
+        assert spec.severity <= SEVERITY_FAULT, code
 
 
 def test_lidar_is_stop_severity():
@@ -154,7 +167,7 @@ def test_severity_name_covers_all_levels():
         SEVERITY_WARN,
         SEVERITY_DEGRADED,
         SEVERITY_STOP,
-        SEVERITY_ESTOP,
+        SEVERITY_FAULT,
     ):
         assert severity_name(level) != ''
         assert 'UNKNOWN' not in severity_name(level)

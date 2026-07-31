@@ -79,7 +79,8 @@ robot_health_monitor_node:
     motor:
       required: true
       observable: true
-      severity: 4          # ESTOP. CAN 통신 이상은 즉시 정지 사유다
+      severity: 3          # STOP. 안전 확인 전 주행 불가.
+                           # 비상정지는 등급이 아니라 래치다(RobotFault.msg 주석)
       grace_sec: 15.0
 
     safety:

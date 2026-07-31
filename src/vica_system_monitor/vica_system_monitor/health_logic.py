@@ -23,7 +23,6 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from .fault_catalog import (
     describe,
     SEVERITY_DEGRADED,
-    SEVERITY_ESTOP,
     SEVERITY_FAULT,
     SEVERITY_OK,
     SEVERITY_STOP,
@@ -286,7 +285,7 @@ def _judge_safety(
         return Fault(
             component='safety',
             fault_code='SAFETY_ESTOP_LATCHED',
-            severity=SEVERITY_ESTOP,
+            severity=SEVERITY_STOP,
             detail=description.detail,
             suggested_action=description.suggested_action,
             latched=True,
@@ -319,7 +318,7 @@ def _judge_safety(
         return Fault(
             component='safety',
             fault_code='SAFETY_ESTOP_LATCHED',
-            severity=SEVERITY_ESTOP,
+            severity=SEVERITY_STOP,
             detail=description.detail,
             suggested_action=description.suggested_action,
             latched=True,
@@ -359,22 +358,20 @@ def _overall_state(
 ) -> int:
     """Map faults, readiness and safety state onto one overall state.
 
-    우선순위: ESTOP > FAULT > STOP > STARTING > DEGRADED > READY
+    우선순위: ESTOPPED > FAULT > STOPPED > STARTING > DEGRADED > READY
     STARTING이 DEGRADED보다 뒤에 오는 이유는, 기동 중이라는 사실이 "일부 기능 저하"보다
-    사용자에게 더 정확한 설명이기 때문이다. 단 ESTOP·FAULT·STOP은 기동 중에도 그대로
-    보고한다.
+    사용자에게 더 정확한 설명이기 때문이다. 단 ESTOPPED·FAULT·STOPPED는 기동 중에도
+    그대로 보고한다.
 
     **ESTOPPED는 실제 래치가 걸렸을 때만이다.** 이 상태 이름은 `/emergency_stop` 중앙
     래치가 소유하는 의미이고, 해제하려면 관리자 reset이 필요하다는 뜻을 담고 있다.
-    진단 결함이 등급만 보고 그 이름을 빌려 쓰면 관리자가 있지도 않은 E-stop 버튼을
-    찾는다(2026-07-31 실기 전 검증에서 확인). 등급이 ESTOP인 진단 결함은 주행을 막는
-    사유이므로 STOPPED로 보고한다.
+    등급(severity)에는 ESTOP이 없다 — 그 축은 "얼마나 나쁜가"만 답한다.
     """
     if safety.estop_latched:
         return STATE_ESTOPPED
     if _has_severity(faults, SEVERITY_FAULT):
         return STATE_FAULT
-    if _has_severity(faults, SEVERITY_ESTOP) or _has_severity(faults, SEVERITY_STOP):
+    if _has_severity(faults, SEVERITY_STOP):
         return STATE_STOPPED
 
     if in_grace:
@@ -419,8 +416,6 @@ def severity_to_state(severity: int) -> int:
     """Map a single severity onto the state it would cause. 표시용 보조 함수."""
     if severity >= SEVERITY_FAULT:
         return STATE_FAULT
-    if severity >= SEVERITY_ESTOP:
-        return STATE_ESTOPPED
     if severity >= SEVERITY_STOP:
         return STATE_STOPPED
     if severity >= SEVERITY_DEGRADED:

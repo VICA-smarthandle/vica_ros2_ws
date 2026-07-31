@@ -20,7 +20,7 @@ from vica_system_monitor.event_deduplicator import (
 )
 from vica_system_monitor.fault_catalog import (
     SEVERITY_DEGRADED,
-    SEVERITY_ESTOP,
+    SEVERITY_FAULT,
     SEVERITY_STOP,
     SEVERITY_WARN,
 )
@@ -30,7 +30,12 @@ SEC = 1_000_000_000
 REMINDER = 30 * SEC
 
 
-def obs(component='motor', code='MOTOR_CAN_TIMEOUT', severity=SEVERITY_STOP):
+def obs(
+    component='motor',
+    code='MOTOR_CAN_TIMEOUT',
+    severity=SEVERITY_STOP,
+    latched=False,
+):
     """Build an observation with test-friendly defaults."""
     return Observation(
         component=component,
@@ -38,6 +43,7 @@ def obs(component='motor', code='MOTOR_CAN_TIMEOUT', severity=SEVERITY_STOP):
         severity=severity,
         detail='detail',
         suggested_action='action',
+        latched=latched,
     )
 
 
@@ -209,34 +215,56 @@ def test_severity_drop_does_not_emit_escalation():
 
 
 # ---------------------------------------------------------------------------
-# 규칙 6 — ESTOP은 rate limit 무시
+# 규칙 6 — 래치된 결함은 rate limit 무시
+#
+# 기준이 등급이 아니라 latched인 이유: E-stop은 "STOP보다 한 단계 심각한 것"이 아니라
+# 종류가 다른 것이다. 관리자 reset이 있어야 풀린다. 등급으로 판정하면 모터 진단이
+# 안 올 뿐인데도 초당 한 건씩 알림이 나간다(2026-07-31 실기동에서 223회 관측).
 # ---------------------------------------------------------------------------
 
 
-def test_estop_reminds_every_tick():
-    """ESTOP은 간격과 무관하게 매 tick 재알림한다.
+def test_latched_fault_reminds_every_tick():
+    """래치된 결함은 간격과 무관하게 매 tick 재알림한다.
 
-    가장 위험한 상태를 사용자가 놓치지 않는 것이 폭주 억제보다 우선이다.
+    관리자가 reset하기 전까지 풀리지 않는 상태를 놓치지 않는 것이 폭주 억제보다
+    우선이다.
     """
     dedup = make()
-    dedup.update([obs(severity=SEVERITY_ESTOP)], now_ns=0, wall_sec=100.0)
+    dedup.update([obs(latched=True)], now_ns=0, wall_sec=100.0)
 
     for tick in (1, 2, 3):
         events, _ = dedup.update(
-            [obs(severity=SEVERITY_ESTOP)],
+            [obs(latched=True)],
             now_ns=tick * SEC,
             wall_sec=100.0 + tick,
         )
         assert [e.transition for e in events] == [TRANSITION_REMINDER]
 
 
-def test_non_estop_does_not_remind_every_tick():
-    """대조: STOP은 간격을 지킨다."""
+def test_unlatched_fault_does_not_remind_every_tick():
+    """대조: 래치되지 않은 STOP은 간격을 지킨다."""
     dedup = make()
     dedup.update([obs(severity=SEVERITY_STOP)], now_ns=0, wall_sec=100.0)
     events, _ = dedup.update([obs(severity=SEVERITY_STOP)], now_ns=SEC, wall_sec=101.0)
 
     assert events == []
+
+
+def test_highest_severity_alone_does_not_defeat_rate_limit():
+    """등급이 가장 높아도 래치가 아니면 폭주 억제가 유지된다.
+
+    모터 진단 미수신이 매 tick 알림을 내던 실제 결함의 회귀 테스트다.
+    """
+    dedup = make()
+    dedup.update([obs(severity=SEVERITY_FAULT)], now_ns=0, wall_sec=100.0)
+
+    for tick in (1, 2, 3):
+        events, _ = dedup.update(
+            [obs(severity=SEVERITY_FAULT)],
+            now_ns=tick * SEC,
+            wall_sec=100.0 + tick,
+        )
+        assert events == []
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +309,7 @@ def test_active_list_is_sorted_most_severe_first():
     _, active = dedup.update(
         [
             obs(component='app', code='APP_BRIDGE_SILENT', severity=SEVERITY_WARN),
-            obs(component='motor', code='MOTOR_CAN_TIMEOUT', severity=SEVERITY_ESTOP),
+            obs(component='motor', code='MOTOR_CAN_TIMEOUT', severity=SEVERITY_STOP),
             obs(component='lidar', code='LIDAR_SCAN_STALE', severity=SEVERITY_STOP),
         ],
         now_ns=0,
@@ -289,7 +317,7 @@ def test_active_list_is_sorted_most_severe_first():
     )
 
     assert [f.severity for f in active] == [
-        SEVERITY_ESTOP,
+        SEVERITY_STOP,
         SEVERITY_STOP,
         SEVERITY_WARN,
     ]
@@ -301,7 +329,7 @@ def test_highest_returns_most_severe_active_fault():
     dedup.update(
         [
             obs(component='app', code='APP_BRIDGE_SILENT', severity=SEVERITY_WARN),
-            obs(component='motor', code='MOTOR_CAN_TIMEOUT', severity=SEVERITY_ESTOP),
+            obs(component='motor', code='MOTOR_CAN_TIMEOUT', severity=SEVERITY_STOP),
         ],
         now_ns=0,
         wall_sec=100.0,
@@ -375,7 +403,7 @@ def test_latched_flag_is_carried_through():
     latched = Observation(
         component='safety',
         fault_code='SAFETY_ESTOP_LATCHED',
-        severity=SEVERITY_ESTOP,
+        severity=SEVERITY_STOP,
         detail='d',
         suggested_action='a',
         latched=True,

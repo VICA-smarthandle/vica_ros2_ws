@@ -18,12 +18,16 @@ string component
 string fault_code
 
 # 등급. 초안 9절 체계와 같다. 값이 클수록 심각하다.
+#
+# **비상정지는 이 축에 없다.** E-stop은 STOP보다 한 단계 심각한 것이 아니라 종류가
+# 다르다 — 래치가 걸리고 관리자 reset이 있어야 풀리며 emergency_stop_node가 소유한다.
+# 그 사실은 아래 latched와 RobotHealth.STATE_ESTOPPED가 나타낸다. 등급에 섞으면
+# 진단 결함 하나가 "비상 정지"로 표시되어 관리자가 있지도 않은 버튼을 찾는다.
 uint8 SEVERITY_OK=0
 uint8 SEVERITY_WARN=1        # 성능 저하 가능성. 조건부 주행 허용
 uint8 SEVERITY_DEGRADED=2    # 일부 비필수 기능 사용 불가
 uint8 SEVERITY_STOP=3        # 안전 확인 전 주행 불가
-uint8 SEVERITY_ESTOP=4       # 즉시 정지 필요. 자동 해제 금지
-uint8 SEVERITY_FAULT=5       # 반복 복구 실패 또는 원인 불명
+uint8 SEVERITY_FAULT=4       # 반복 복구 실패 또는 원인 불명
 uint8 severity
 
 # 현재 원인이 진행 중인지. false는 해소된 결함(CLEARED 이벤트)을 뜻한다.

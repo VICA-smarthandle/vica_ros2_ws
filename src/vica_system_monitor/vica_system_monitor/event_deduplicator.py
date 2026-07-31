@@ -16,8 +16,6 @@ STEADY_TIME과 SYSTEM_TIME을 섞어 계산하지 않기 위해서다.
 
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from .fault_catalog import SEVERITY_ESTOP
-
 
 TRANSITION_RAISED = 0
 TRANSITION_ESCALATED = 1
@@ -166,13 +164,18 @@ class EventDeduplicator:
     def _reminder_due(self, record: _Record, now_ns: int) -> bool:
         """Return True when the re-notification interval has elapsed.
 
-        규칙 6: ESTOP은 간격을 무시하고 매 tick 재알림한다. 가장 위험한 상태를
-        사용자가 놓치지 않는 것이 폭주 억제보다 우선이다.
+        규칙 6: **래치된 결함**은 간격을 무시하고 매 tick 재알림한다. 관리자 reset이
+        있어야 풀리는 상태를 놓치지 않는 것이 폭주 억제보다 우선이다.
+
+        기준이 등급이 아니라 latched인 이유: 등급으로 판정하면 "가장 심각한 등급"이
+        곧 "가장 시끄러워야 할 상태"라는 뜻이 되는데 둘은 다르다. 실제로 모터 진단이
+        수신되지 않을 뿐인 결함이 초당 한 건씩 알림을 냈다(2026-07-31 실기동에서
+        occurrence_count 223회 관측).
 
         시간이 역전되면(now_ns < last_notified_ns) 알린다. 조용해지는 방향보다
         시끄러워지는 방향이 안전하다.
         """
-        if record.severity >= SEVERITY_ESTOP:
+        if record.latched:
             return True
         elapsed_ns = now_ns - record.last_notified_ns
         if elapsed_ns < 0:
