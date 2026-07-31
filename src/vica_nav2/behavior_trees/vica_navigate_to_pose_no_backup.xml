@@ -22,7 +22,8 @@
     그래서 트리에서 노드를 지우는 이 방법을 쓴다. 플러그인 목록은 그대로 둬도
     무해하다(서버만 떠 있고 아무도 호출하지 않는다).
 
-  RoundRobin은 남은 3개를 순환한다: ClearingActions -> Spin -> Wait.
+  RoundRobin은 4개를 순환한다: ClearingActions -> SpinLeft -> SpinRight -> Wait.
+  (2026-07-31에 Spin을 좌/우 둘로 나눴다. 근거는 아래 RoundRobin 안 주석.)
 
   nav2를 올릴 때는 원본과 diff를 확인한다:
     /opt/ros/humble/share/nav2_bt_navigator/behavior_trees/
@@ -62,8 +63,27 @@
                막지 못한다.
                각을 줄이면 쓸리는 각범위가 1/4바퀴 -> 1/21바퀴가 된다.
                RoundRobin이 복구를 순환하므로 재시도마다 17도씩 누적되어
-               6회 재시도에서 최대 100도까지 돌 수 있다 : 복구 능력을 잃지 않는다. -->
-          <Spin spin_dist="0.30"/>
+               6회 재시도에서 최대 100도까지 돌 수 있다 : 복구 능력을 잃지 않는다.
+
+               2026-07-31: 좌회전 하나였던 것을 좌/우 두 개로 나눈다.
+               nav2 Spin은 BT가 준 부호대로만 돈다. onCycleUpdate가
+               copysign(vel, cmd_yaw)로 방향을 정한다(libnav2_spin_behavior.so
+               0x1e4bc의 bit v8.8b, v0.8b, v2.8b). "빈 쪽으로 돌기" 판단은
+               없으므로, 양수 하나만 두면 막힌 쪽으로도 계속 돈다.
+               2026-07-30 12회차 화장실 구간 19.4초 정지가 그것이었다:
+                 t+74.4  Spin(+0.30)  wz +1.000  yaw 64.4 -> 94.4도
+                         footprint 안 LETHAL 겹침  1 -> 4 -> 6개  (악화)
+                 t+76.3  Collision Ahead - Exiting Spin
+                 이후 재시도 3회 모두 같은 방향, 모두 즉시 중단
+                 t+94.5  탈출한 첫 궤적은 wz -0.400, 곧 반대 방향이었다
+               좌가 막히면 다음 순회에서 우로 시도하게 한다. 총 회전량은
+               상쇄될 수 있으나, 그 자리가 좌로 막힌 경우에 유일한 대안이다.
+
+               주의. 이것은 완화이지 해결이 아니다. 그때의 진짜 원인은
+               AMCL이 약 30 cm 어긋난 것이었다(devlog/2026-07-30.md 5절).
+               자세가 틀리면 어느 방향으로 돌든 판정이 틀린다. -->
+          <Spin name="SpinLeft" spin_dist="0.30"/>
+          <Spin name="SpinRight" spin_dist="-0.30"/>
           <Wait wait_duration="5"/>
         </RoundRobin>
       </ReactiveFallback>

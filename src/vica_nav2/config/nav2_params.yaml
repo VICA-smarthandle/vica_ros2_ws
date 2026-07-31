@@ -144,8 +144,25 @@ controller_server:
     # Progress checker parameters
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5 
-      movement_time_allowance: 10.0
+      # 2026-07-31: 0.5/10.0 -> 0.10/20.0.
+      #
+      # SimpleProgressChecker는 "movement_time_allowance 안에
+      # required_movement_radius 이상 움직였는가"만 본다. 구값 0.5/10.0은
+      # 평균 0.05 m/s 이상을 끊임없이 유지하라는 뜻인데, 좁은 구간 서행이
+      # 정확히 그 속도다. 즉 정상 주행을 실패로 오판한다.
+      #
+      # recovery가 있을 때는 이 오판이 Spin 한 번으로 흡수됐다. 복구를 끈
+      # 지금은 오판이 곧 주행 종료이므로, 이 값을 고치지 않으면 좁은 구간에서
+      # 거의 확실히 죽는다. '인내를 늘리는 것'이 아니라 '오탐을 없애는 것'이다.
+      #
+      # 도착 구간도 위험하다. Isaac 시뮬레이션 쪽 주석에 "저속 컨트롤러가 이미
+      # 목표 허용범위 안에 멈춘 뒤에도 progress checker를 건드릴 수 있다"가
+      # 있고, 실기는 StoppedGoalChecker라 도착 판정이 더 오래 걸린다.
+      #
+      # 20.0은 velocity_smoother 정지시간(max_vel_x/max_decel)보다 훨씬 커야
+      # 한다는 test_nav2_params_contract의 계약도 함께 만족한다.
+      required_movement_radius: 0.10
+      movement_time_allowance: 20.0
     # Goal checker parameters
     general_goal_checker:
       # 감속 중 tolerance를 재이탈해도 속도 조건만으로 성공 처리되지 않도록
@@ -462,7 +479,33 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
-        inflation_radius: 0.40
+        # 2026-07-31: 0.40 -> 0.50 -> 0.45.
+        #
+        # 0.50 실측(회차 ⑬, clearingonly_infl050): 화장실 29.5 s로 역대 최고,
+        # 최장정지 0.5 s. 방2도 47.2 s / 최장정지 0.7 s. "좁은 통로가 비용
+        # 지대가 되어 못 지날 것"이라던 예상이 틀렸고, 넓게 도는 쪽이 실제로
+        # 더 빨랐다. 안내소 구간만 ABORTED 됐는데 원인은 inflation이 아니라
+        # 좌측 후방 4.6 cm의 실제 장애물이었다(AMCL 오차 2.2 cm로 정확했다).
+        #
+        # 0.45는 그 사이 값이다. 0.50의 이득을 두되 비용 지대 폭을 5 cm 줄인다.
+        # 종전 상한 0.412의 근거(우회로 최협 여유)는 ⑬에서 무효가 됐다.
+        #
+        # 참고: 0.35 -> 0.50에서 global costmap 발행 주기가 0.66 -> 0.67 Hz로
+        # 전혀 변하지 않았다. inflation은 이 시스템의 병목이 아니다.
+        #
+        # 0.40은 "이 통로를 지나되 추종오차를 흡수할 완충을 남긴다"는 값이었고
+        # 상한 0.412는 "화장실 우회로 최협 지점에 비용 0인 중앙선이 남아야
+        # 한다"는 근거였다. 이번에는 전제가 바뀐다 -- 복구가 필요할 만한 좁은
+        # 길은 굳이 지나지 않고, 돌아가더라도 넓은 길을 택하게 한다.
+        # 0.50은 최협 여유 0.412를 넘으므로 그 통로 전체가 비용 지대가 되고,
+        # planner는 비용 0인 다른 경로가 있으면 그쪽으로 돈다.
+        #
+        # 알고 안는 위험: 대안 경로가 없으면 그 통로를 여전히 지나야 하는데,
+        # 그때는 DWB가 어느 궤적을 골라도 비용을 물어 진동한다(2026-07-30에
+        # 0.45로 30초 진동을 실측했다). 복구가 없으므로 그 진동은 곧
+        # progress_checker 실패, 즉 주행 종료다. 그 실패 자체가 "이 값에서
+        # 이 통로는 못 쓴다"는 측정이다.
+        inflation_radius: 0.45
 
 global_costmap:
   global_costmap:
@@ -580,7 +623,33 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5
-        inflation_radius: 0.40
+        # 2026-07-31: 0.40 -> 0.50 -> 0.45.
+        #
+        # 0.50 실측(회차 ⑬, clearingonly_infl050): 화장실 29.5 s로 역대 최고,
+        # 최장정지 0.5 s. 방2도 47.2 s / 최장정지 0.7 s. "좁은 통로가 비용
+        # 지대가 되어 못 지날 것"이라던 예상이 틀렸고, 넓게 도는 쪽이 실제로
+        # 더 빨랐다. 안내소 구간만 ABORTED 됐는데 원인은 inflation이 아니라
+        # 좌측 후방 4.6 cm의 실제 장애물이었다(AMCL 오차 2.2 cm로 정확했다).
+        #
+        # 0.45는 그 사이 값이다. 0.50의 이득을 두되 비용 지대 폭을 5 cm 줄인다.
+        # 종전 상한 0.412의 근거(우회로 최협 여유)는 ⑬에서 무효가 됐다.
+        #
+        # 참고: 0.35 -> 0.50에서 global costmap 발행 주기가 0.66 -> 0.67 Hz로
+        # 전혀 변하지 않았다. inflation은 이 시스템의 병목이 아니다.
+        #
+        # 0.40은 "이 통로를 지나되 추종오차를 흡수할 완충을 남긴다"는 값이었고
+        # 상한 0.412는 "화장실 우회로 최협 지점에 비용 0인 중앙선이 남아야
+        # 한다"는 근거였다. 이번에는 전제가 바뀐다 -- 복구가 필요할 만한 좁은
+        # 길은 굳이 지나지 않고, 돌아가더라도 넓은 길을 택하게 한다.
+        # 0.50은 최협 여유 0.412를 넘으므로 그 통로 전체가 비용 지대가 되고,
+        # planner는 비용 0인 다른 경로가 있으면 그쪽으로 돈다.
+        #
+        # 알고 안는 위험: 대안 경로가 없으면 그 통로를 여전히 지나야 하는데,
+        # 그때는 DWB가 어느 궤적을 골라도 비용을 물어 진동한다(2026-07-30에
+        # 0.45로 30초 진동을 실측했다). 복구가 없으므로 그 진동은 곧
+        # progress_checker 실패,即 주행 종료다. 그 실패 자체가 "이 값에서
+        # 이 통로는 못 쓴다"는 측정이다.
+        inflation_radius: 0.45
       always_send_full_costmap: True
 
 map_server:

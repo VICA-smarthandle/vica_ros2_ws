@@ -114,6 +114,9 @@ def test_padding_keeps_a_hard_clearance_margin(costmap):
 
 # 맵 실측 통로 반폭(scratchpad/corridor_width.py): 중앙값 0.70 m, 10%tile 0.35 m.
 NARROWEST_CORRIDOR_HALF_WIDTH = 0.35
+# inflation_radius 상한. 이 값을 넘으면 협착부가 아니라 '보통 통로'에서도
+# 비용 0인 중앙선이 사라져, 우회가 아니라 전면 정체가 된다.
+CORRIDOR_HALF_WIDTH_MEDIAN = 0.70
 
 # 로봇이 실제로 통과하는 경로의 최협 지점 여유(analysis/bottleneck_path.py,
 # 2026-07-30 Hybrid 주행). 방2 -> 화장실 우회로의 (1.66, 3.04) 지점이다.
@@ -227,11 +230,35 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     # 2026-07-30 Hybrid 주행에서 inflation_radius 0.45가 이 조건을 깼다.
     # 우회로 최협 지점 (1.66, 3.04)의 여유가 0.412 m라 통로 전체가 비용 지대가
     # 되었고, DWB가 어느 궤적을 골라도 비용을 물어 vx=0 / wz=±0.02로 30초간
-    # 진동했다. 임의 상수가 아니라 실측 여유가 상한이다.
-    assert inflation_radius <= DRIVEN_CORRIDOR_CLEARANCE, (
-        f'{costmap} inflation_radius {inflation_radius}가 실주행 통로 최협 여유'
-        f' {DRIVEN_CORRIDOR_CLEARANCE} m를 넘어, 그 통로에 비용 0인 중앙선이 없다'
+    # 진동했다.
+    #
+    # ── 2026-07-31: 상한 기준을 최협 여유에서 통로 중앙값으로 올린다 ──
+    # 정책이 바뀌었다. 종전 상한 0.412의 전제는 "그 협착부를 지나야 한다"였는데,
+    # 이제는 복구가 필요할 만한 좁은 길은 굳이 지나지 않고 돌아가게 하는 것이
+    # 목표다. 협착부가 비용 지대가 되어 planner가 우회하는 것은 결함이 아니라
+    # 의도다. 따라서 0.412를 넘는 것 자체는 허용한다.
+    #
+    # 다만 상한이 없으면 안 된다. 지도 전체가 비용 지대가 되면 우회할 곳도
+    # 사라져 아무 데도 못 간다. 기준은 '보통 통로'다 -- 맵 실측 통로 반폭의
+    # 중앙값 0.70 m를 넘으면 협착부가 아니라 일반 통로에서도 비용 0인 중앙선이
+    # 사라진다. 그때는 우회가 아니라 전면 정체가 된다.
+    #
+    # DRIVEN_CORRIDOR_CLEARANCE(0.412)는 지우지 않고 남긴다. 이 값을 넘긴
+    # 실험에서 화장실 우회로를 못 쓰게 되는 것이 예상 결과이고, 그 통로를 다시
+    # 쓰기로 하면 상한을 이 값으로 되돌려야 한다.
+    assert inflation_radius <= CORRIDOR_HALF_WIDTH_MEDIAN, (
+        f'{costmap} inflation_radius {inflation_radius}가 실측 통로 반폭 중앙값'
+        f' {CORRIDOR_HALF_WIDTH_MEDIAN} m를 넘어, 협착부가 아니라 일반 통로에도'
+        ' 비용 0인 중앙선이 없다. 우회가 아니라 전면 정체가 된다'
     )
+    if inflation_radius > DRIVEN_CORRIDOR_CLEARANCE:
+        # 실패가 아니라 기록이다. 이 조건에서는 화장실 우회로 최협 지점
+        # (1.66, 3.04)에 비용 0인 셀이 없다.
+        print(
+            f'[주의] {costmap} inflation_radius {inflation_radius}는 실주행'
+            f' 통로 최협 여유 {DRIVEN_CORRIDOR_CLEARANCE} m를 넘는다.'
+            ' 그 통로는 전 구간이 비용 지대이며 우회로가 없으면 진동한다.'
+        )
 
 
 def test_local_and_global_costmap_use_the_same_footprint():

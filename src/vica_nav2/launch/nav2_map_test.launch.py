@@ -21,12 +21,21 @@ def generate_launch_description():
 
     bringup_launch = os.path.join(nav2_bringup_dir, "launch", "bringup_launch.py")
     default_params = os.path.join(vica_nav2_dir, "config", "nav2_params.yaml")
-    # 기본 BT에서 <BackUp/>만 제거한 트리. 근거는 nav2_params.yaml의
-    # bt_navigator 주석과 이 파일 상단 주석을 참고한다.
-    no_backup_bt = os.path.join(
+    # 2026-07-31: 복구가 costmap 초기화뿐인 측정용 트리로 바꾼다.
+    #
+    # 지금까지의 완주 성적은 recovery가 흡수해서 나온 것이고 순수 주행 실력은
+    # 측정된 적이 없다. 풀어야 하는 문제가 "빠져나오기"가 아니라 "못 움직일
+    # 자리에 애초에 안 들어가기"이므로, 로봇을 움직이는 복구(Spin·BackUp·Wait)를
+    # 걷어내고 그 실력만 본다. ClearEntireCostmap은 로봇을 움직이지 않고,
+    # 유령 장애물이 미해결이라 최소한의 원만한 주행을 위해 남긴다.
+    # 상세는 behavior_trees/vica_navigate_to_pose_clearing_only.xml 주석 참고.
+    #
+    # 되돌릴 때는 아래 파일명을 vica_navigate_to_pose_no_backup.xml로 바꾼다.
+    # 그 트리(BackUp 제거 + 좌우 Spin + Wait)는 그대로 남겨 두었다.
+    active_bt = os.path.join(
         vica_nav2_dir,
         "behavior_trees",
-        "vica_navigate_to_pose_no_backup.xml",
+        "vica_navigate_to_pose_clearing_only.xml",
     )
     wheel_ekf_launch = os.path.join(
         vica_localization_dir,
@@ -49,7 +58,7 @@ def generate_launch_description():
     configured_params = RewrittenYaml(
         source_file=params_file,
         root_key="",
-        param_rewrites={"default_nav_to_pose_bt_xml": no_backup_bt},
+        param_rewrites={"default_nav_to_pose_bt_xml": active_bt},
         convert_types=True,
     )
 

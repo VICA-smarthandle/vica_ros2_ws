@@ -1,0 +1,82 @@
+<!--
+  복구가 costmap 초기화뿐인 측정용 트리다. 2026-07-31에 추가했다.
+
+  왜 만드나
+    지금까지의 "완주 3/3"은 recovery가 만들어낸 성적이고, 순수 주행 실력은
+    한 번도 측정된 적이 없다. 2026-07-30 12회차(155.4 s, 3/3) 실측을 복구
+    동작 없이 다시 읽으면 이렇게 된다:
+      DWB 무효 59회      -> 흡수되던 것이 드러난다
+      lethal space 6회   -> 흡수되던 것이 드러난다
+      최장정지 19.4 s    -> Spin 3회가 만든 시간이다
+    지금 풀어야 하는 문제는 "빠져나오기"가 아니라 "장애물을 미리 보고 피해서
+    못 움직일 자리에 애초에 안 들어가기"다. 그래서 회전·후진·대기를 걷어내고
+    그 실력만 본다.
+
+  측정 지표가 바뀐다
+    "완주했는가"가 아니라 "어디서, 얼마의 여유를 남기고 실패했는가"다.
+    실패 지점의 pose·costmap·scan을 기록해 비교한다.
+
+  기본 트리와의 차이 - 뺀 것만 적는다
+    <BackUp/>   핸들 뒤에 사람이 따라온다(guideline/vica_scenario.md).
+                2026-07-30 주행에서 실제로 0.30 m 후진했다: /cmd_vel_safe
+                7346개 중 후진 173개, vx -0.0500 고정, 연속 5.87 s.
+    <Spin/>     253 밴드에서 회전하면 후방 꼭짓점이 반경 0.675 m를 쓴다.
+                2026-07-30에 핸들이 의자에 부딪혔고, 12회차에서는 좌회전만
+                가능해 막힌 쪽으로 돌다가 19.4초를 잃었다.
+    <Wait/>     실패를 시간으로 덮는다. 종전 복구 시간의 79 %가 이것이었다.
+
+  남긴 것과 이유
+    ClearEntireCostmap 4개
+      회전·후진과 달리 로봇을 움직이지 않는다. 유령 장애물(p95 43~46 s)이
+      아직 미해결이라, 이것까지 빼면 유령 실패와 진짜 실패가 섞여서 매 회차가
+      유령 때문에 조기 종료될 수 있다. 최소한의 원만한 주행을 위해 남긴다.
+      대가: ComputePathToPose 실패 시 도는 global 초기화는 "planner가 무엇을
+      보고 거부했는가"라는 증거를 지운다. 실패 분석 때 초기화 시각을 먼저
+      확인할 것.
+    RateController hz="1.0"과 무조건 재계획
+      Humble 기성 트리 navigate_w_replanning_only_if_path_becomes_invalid.xml은
+      recovery만 빼는 것이 아니라 IsPathValid로 재계획 정책까지 바꾼다. 변수가
+      둘 섞이므로 쓰지 않고, 현재 트리에서 해당 노드만 들어냈다.
+
+  주의
+    Wait가 사라져 RoundRobin 순환에 지연이 없다. 실패하면 초기화 -> 재시도가
+    곧바로 이어지므로 number_of_retries="6"이 몇 초 만에 소진될 수 있다.
+    ABORTED가 종전보다 훨씬 빨리 난다. 그것이 이 실험의 의도다.
+
+    behavior_server.behavior_plugins에서 플러그인을 빼지는 않았다.
+    BtActionNode::createActionClient가 액션 서버를 못 찾으면 예외를 던져
+    (throw std::runtime_error) BT 생성 자체가 실패한다. 트리에서 노드를 지우는
+    이 방법을 쓴다. 서버만 떠 있고 아무도 호출하지 않으므로 무해하다.
+
+  되돌리기
+    launch(nav2_map_test.launch.py)의 active_bt를
+    vica_navigate_to_pose_no_backup.xml로 바꾸면 Spin(좌우)·Wait가 돌아온다.
+    그 트리는 그대로 두었다.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
