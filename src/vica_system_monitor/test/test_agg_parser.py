@@ -10,6 +10,7 @@ from vica_system_monitor.agg_parser import (
     DIAG_STALE,
     DIAG_WARN,
     DiagItem,
+    localize_message,
     normalize_level,
     parse_name,
     to_fault_code,
@@ -151,3 +152,73 @@ def test_diag_item_component_uses_parse_name():
     item = DiagItem('/VICA/Hardware/Motor/CAN link', DIAG_ERROR, 'CAN link FAILED')
     assert item.component == 'motor'
     assert item.fault_code == 'DIAG_COMPONENT_ERROR'
+
+
+# ---------------------------------------------------------------------------
+# aggregator 영문 요약어 번역
+#
+# 2026-07-31 실행 검증에서 관리자 화면에 `detail: Missing`, `Error`, `Stale`이 그대로
+# 떴다. diagnostic_aggregator가 그룹·미보고 항목에 붙이는 영문 요약어다. `?초`
+# 자리표시자가 샜던 것과 같은 종류이고, 정보량도 없다.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_is_translated():
+    """항목이 아예 보고되지 않은 경우를 한국어로 알린다."""
+    assert localize_message('Missing') == '진단 항목이 보고되지 않았습니다.'
+
+
+def test_stale_is_translated():
+    """오래된 진단과 오류를 구분해 알린다."""
+    assert localize_message('Stale') == '진단이 갱신되지 않았습니다.'
+
+
+def test_error_and_warning_are_translated():
+    """그룹 요약어도 한국어로 바꾼다."""
+    assert localize_message('Error') == '오류를 보고했습니다.'
+    assert localize_message('Warning') == '경고를 보고했습니다.'
+
+
+def test_no_events_recorded_is_translated():
+    """diagnostic_updater가 아직 한 건도 못 받았을 때의 문구다."""
+    assert localize_message('No events recorded.') == (
+        '아직 한 건도 수신하지 못했습니다.'
+    )
+
+
+def test_translation_is_case_and_space_insensitive():
+    """대소문자·앞뒤 공백이 달라도 번역한다."""
+    assert localize_message('  missing ') == '진단 항목이 보고되지 않았습니다.'
+    assert localize_message('STALE') == '진단이 갱신되지 않았습니다.'
+
+
+def test_korean_message_from_our_node_passes_through():
+    """우리 노드가 쓴 문구는 그대로 둔다. 정본은 로봇 쪽에 있다."""
+    ours = '프로세스를 찾지 못했습니다 (미구성 또는 미실행)'
+    assert localize_message(ours) == ours
+
+
+def test_informative_english_from_a_third_party_passes_through():
+    """모르는 문구를 버리지 않는다. 버리면 정비 단서가 사라진다."""
+    other = 'CAN link FAILED: no frame for 0.82s'
+    assert localize_message(other) == other
+
+
+def test_empty_message_becomes_empty():
+    """빈 문구는 만들어내지 않는다."""
+    assert localize_message('') == ''
+    assert localize_message(None) == ''
+
+
+def test_diag_item_detail_is_localized():
+    """DiagItem이 표시용 문구를 직접 제공한다."""
+    item = DiagItem('/VICA/Hardware/Motor', DIAG_STALE, 'Missing')
+    assert item.detail == '진단 항목이 보고되지 않았습니다.'
+
+
+def test_no_diag_item_detail_is_a_bare_aggregator_token():
+    """aggregator가 만드는 영문 요약어가 하나도 사용자 문구로 새지 않는다."""
+    leaked = ('missing', 'stale', 'error', 'warning', 'ok', 'no events recorded.')
+    for raw in ('Missing', 'Stale', 'Error', 'Warning', 'OK', 'No events recorded.'):
+        detail = DiagItem('/VICA/Hardware/Motor', DIAG_ERROR, raw).detail
+        assert detail.strip().lower() not in leaked, detail

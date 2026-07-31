@@ -67,6 +67,10 @@ class ComponentProbe(NamedTuple):
     observable=True로 바꾸기만 하면 된다.
 
     fault_code를 지정하지 않으면 컴포넌트 이름으로 기본 코드를 만든다.
+
+    ever_ok는 "기동 이후 한 번이라도 정상이었는가"다. 기동 유예의 판정 기준이며 호출자가
+    누적한다. 신선도만으로는 유예를 판정할 수 없다 — aggregator는 아직 뜨지 않은 부품에
+    대해 "Missing"을 1 Hz로 계속 발행하므로, 그 입력은 언제나 신선하다.
     """
 
     name: str
@@ -79,6 +83,7 @@ class ComponentProbe(NamedTuple):
     severity: int
     fault_code: str = ''
     detail: str = ''
+    ever_ok: bool = False
 
 
 class SafetyInput(NamedTuple):
@@ -86,12 +91,16 @@ class SafetyInput(NamedTuple):
 
     age_sec은 표시용 측정값이다. 미수신이면 None이며, 그때 문구는 "한 번도 수신되지
     않았습니다"로 바뀐다. "?초"처럼 자리표시자가 사용자에게 보이면 안 된다.
+
+    ever_fresh는 ComponentProbe.ever_ok와 같은 역할이다. 기동 유예를 "아직 안 뜬 것"에만
+    적용하기 위해 필요하다.
     """
 
     state: str
     estop_latched: bool
     fresh: bool
     age_sec: Optional[float] = None
+    ever_fresh: bool = False
 
 
 class Fault(NamedTuple):
@@ -136,7 +145,12 @@ def evaluate(
             # 관측 가능하지만 아직 grace 중이라 판정을 보류한 경우다.
             in_grace_globally = True
 
-    safety_fault = _judge_safety(safety)
+    safety_fault = _judge_safety(
+        safety,
+        suppress_never_received=_safety_in_grace(
+            safety, probes, now_ns=now_ns, started_ns=started_ns
+        ),
+    )
     if safety_fault is not None:
         faults.append(safety_fault)
 
@@ -147,7 +161,6 @@ def evaluate(
 
     state = _overall_state(
         faults=faults,
-        highest=highest,
         readiness=readiness,
         probes=probes,
         safety=safety,
@@ -175,13 +188,21 @@ def _judge_probe(
         return UNKNOWN, None
 
     fresh = is_fresh_ns(item.last_seen_ns, now_ns=now_ns, timeout_ns=item.timeout_ns)
+    healthy = fresh and item.ok
 
-    if not fresh and _in_grace(now_ns, started_ns, item.grace_ns):
-        # 기동 유예 중이다. 아직 판정하지 않는다.
-        return UNKNOWN, None
-
-    if fresh and item.ok:
+    if healthy:
         return READY, _no_fault()
+
+    # 기동 유예는 "아직 안 뜬 것"만 봐준다.
+    #
+    # 판정 기준이 신선도가 아니라 ever_ok인 이유: aggregator는 아직 뜨지 않은 부품에도
+    # "Missing"을 1 Hz로 계속 발행한다. 그 입력은 항상 신선하므로 신선도로 판정하면
+    # 유예 분기에 도달조차 못 한다(2026-07-31 실기 전 검증에서 확인).
+    #
+    # 한 번이라도 정상이었다면 유예 안이라도 즉시 보고한다. 떴다가 죽은 것을 감추면
+    # 기동 직후의 실제 고장이 최대 45초 동안 묻힌다.
+    if not item.ever_ok and _in_grace(now_ns, started_ns, item.grace_ns):
+        return UNKNOWN, None
 
     return NOT_READY, _build_fault(item)
 
@@ -232,9 +253,49 @@ def _default_fault_code(component: str) -> str:
     return f'{component.upper()}_NOT_READY'
 
 
-def _judge_safety(safety: SafetyInput) -> Optional[Fault]:
-    """Turn the safety input into a fault when it is stale, latched or unknown."""
+def _safety_in_grace(
+    safety: SafetyInput,
+    probes: List[ComponentProbe],
+    now_ns: int,
+    started_ns: int,
+) -> bool:
+    """Return True while a never-received safety state is still inside grace.
+
+    유예 창은 safety 컴포넌트의 정책을 그대로 쓴다. 별도 파라미터를 만들면 두 값이
+    갈라져 "어느 쪽이 이기는지" 모호해진다.
+    """
+    if safety.ever_fresh or safety.fresh:
+        return False
+    for item in probes:
+        if item.name == 'safety':
+            return _in_grace(now_ns, started_ns, item.grace_ns)
+    return False
+
+
+def _judge_safety(
+    safety: SafetyInput,
+    suppress_never_received: bool = False,
+) -> Optional[Fault]:
+    """Turn the safety input into a fault when it is stale, latched or unknown.
+
+    E-stop 래치는 suppress_never_received와 무관하게 항상 보고한다. 모니터는 정지
+    권한이 없지만, 래치 사실을 늦게 알리면 관리자가 원인을 찾는 시간이 늘어난다.
+    """
+    if safety.estop_latched:
+        description = describe('SAFETY_ESTOP_LATCHED', reason=safety.state)
+        return Fault(
+            component='safety',
+            fault_code='SAFETY_ESTOP_LATCHED',
+            severity=SEVERITY_ESTOP,
+            detail=description.detail,
+            suggested_action=description.suggested_action,
+            latched=True,
+        )
+
     if not safety.fresh:
+        if suppress_never_received:
+            # 기동 유예 중이고 한 번도 받은 적이 없다. 아직 판정하지 않는다.
+            return None
         if safety.age_sec is None:
             detail = 'Safety 상태를 한 번도 수신하지 못했습니다.'
             action = 'safety_supervisor_node 실행 상태를 확인해 주세요.'
@@ -253,7 +314,7 @@ def _judge_safety(safety: SafetyInput) -> Optional[Fault]:
             latched=False,
         )
 
-    if safety.estop_latched or safety.state == 'ESTOP_ACTIVE':
+    if safety.state == 'ESTOP_ACTIVE':
         description = describe('SAFETY_ESTOP_LATCHED', reason=safety.state)
         return Fault(
             component='safety',
@@ -291,7 +352,6 @@ def _judge_safety(safety: SafetyInput) -> Optional[Fault]:
 
 def _overall_state(
     faults: List[Fault],
-    highest: int,
     readiness: Dict[str, int],
     probes: List[ComponentProbe],
     safety: SafetyInput,
@@ -303,12 +363,18 @@ def _overall_state(
     STARTING이 DEGRADED보다 뒤에 오는 이유는, 기동 중이라는 사실이 "일부 기능 저하"보다
     사용자에게 더 정확한 설명이기 때문이다. 단 ESTOP·FAULT·STOP은 기동 중에도 그대로
     보고한다.
+
+    **ESTOPPED는 실제 래치가 걸렸을 때만이다.** 이 상태 이름은 `/emergency_stop` 중앙
+    래치가 소유하는 의미이고, 해제하려면 관리자 reset이 필요하다는 뜻을 담고 있다.
+    진단 결함이 등급만 보고 그 이름을 빌려 쓰면 관리자가 있지도 않은 E-stop 버튼을
+    찾는다(2026-07-31 실기 전 검증에서 확인). 등급이 ESTOP인 진단 결함은 주행을 막는
+    사유이므로 STOPPED로 보고한다.
     """
-    if highest >= SEVERITY_ESTOP and _has_severity(faults, SEVERITY_ESTOP):
+    if safety.estop_latched:
         return STATE_ESTOPPED
     if _has_severity(faults, SEVERITY_FAULT):
         return STATE_FAULT
-    if _has_severity(faults, SEVERITY_STOP):
+    if _has_severity(faults, SEVERITY_ESTOP) or _has_severity(faults, SEVERITY_STOP):
         return STATE_STOPPED
 
     if in_grace:

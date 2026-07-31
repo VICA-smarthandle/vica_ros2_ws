@@ -77,6 +77,37 @@ _NAME_HINTS = (
 )
 
 
+# diagnostic_aggregator가 스스로 만드는 영문 요약어 → 관리자용 한국어.
+#
+# 그룹 노드(`/VICA/Hardware/Motor`)의 요약과 보고되지 않은 항목에 이 문자열이 붙는다.
+# 우리가 만든 문구가 아니므로 fault_catalog에 없고, 그대로 두면 한국어 화면에 "Missing"
+# 한 단어만 뜬다. 정보량도 없어서 관리자가 무엇이 없는지 알 수 없다.
+#
+# 여기 없는 문구는 손대지 않는다. 우리 노드가 쓴 한국어이거나 서드파티가 남긴 구체적인
+# 진단이며, 둘 다 버리면 정비 단서가 사라진다.
+_AGG_MESSAGES = {
+    'missing': '진단 항목이 보고되지 않았습니다.',
+    'stale': '진단이 갱신되지 않았습니다.',
+    'error': '오류를 보고했습니다.',
+    'warning': '경고를 보고했습니다.',
+    'warn': '경고를 보고했습니다.',
+    'ok': '정상입니다.',
+    'no events recorded.': '아직 한 건도 수신하지 못했습니다.',
+    'no events recorded': '아직 한 건도 수신하지 못했습니다.',
+}
+
+
+def localize_message(message: object) -> str:
+    """Translate an aggregator-generated English summary into Korean.
+
+    아는 요약어만 바꾸고 나머지는 원문을 유지한다. 모르는 문구를 버리거나 일반 문구로
+    덮으면 정비하는 사람이 실제 원인을 볼 수 없다.
+    """
+    if not message or not isinstance(message, str):
+        return ''
+    return _AGG_MESSAGES.get(message.strip().lower(), message)
+
+
 def parse_name(name: str) -> str:
     """Return the VICA component that this diagnostic name belongs to.
 
@@ -153,6 +184,15 @@ class DiagItem(NamedTuple):
     def fault_code(self) -> str:
         """Catalog code for this item, or empty when healthy."""
         return to_fault_code(self.level)
+
+    @property
+    def detail(self) -> str:
+        """Message ready to show an administrator.
+
+        `message`를 직접 쓰지 않는다. aggregator의 영문 요약어가 그대로 화면에 뜨는
+        것을 막는 지점이 여기 하나뿐이다.
+        """
+        return localize_message(self.message)
 
 
 def from_status(name: str, level: object, message: str) -> DiagItem:

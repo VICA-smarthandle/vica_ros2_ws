@@ -116,6 +116,13 @@ class RobotHealthMonitorNode(Node):
         self.diag_items: dict = {}
         self.last_diag_ns = None
 
+        # 기동 이후 한 번이라도 정상이었던 컴포넌트.
+        #
+        # 기동 유예를 신선도로 판정할 수 없어서 필요하다. aggregator는 아직 뜨지 않은
+        # 부품에도 "Missing"을 1 Hz로 계속 발행하므로 그 입력은 언제나 신선하다.
+        # 이 집합에 없으면 "아직 안 뜬 것", 있으면 "떴다가 죽은 것"이다.
+        self.ever_ok: set = set()
+
         self.estop_latched = False
         self.last_estop_ns = None
         self.safety_state = 'IDLE'
@@ -290,6 +297,8 @@ class RobotHealthMonitorNode(Node):
                 self.last_safety_ns, now_ns=now_ns, timeout_ns=self.safety_timeout_ns
             ),
             age_sec=self._age_sec(self.last_safety_ns, now_ns),
+            # 한 번이라도 받았으면 이후 끊김은 유예 대상이 아니다.
+            ever_fresh=self.last_safety_ns is not None,
         )
 
         snapshot = evaluate(probes, safety, now_ns=now_ns, started_ns=self.started_ns)
@@ -327,6 +336,11 @@ class RobotHealthMonitorNode(Node):
                 name, worst, now_ns
             )
 
+            # 정상을 한 번이라도 관측하면 기록한다. 되돌리지 않는다 — 이후의 고장은
+            # 유예 대상이 아니라 즉시 보고할 결함이다.
+            if ok and observable and last_seen_ns is not None:
+                self.ever_ok.add(name)
+
             probes.append(
                 ComponentProbe(
                     name=name,
@@ -339,6 +353,7 @@ class RobotHealthMonitorNode(Node):
                     severity=severity,
                     fault_code=fault_code,
                     detail=detail,
+                    ever_ok=name in self.ever_ok,
                 )
             )
 
@@ -353,7 +368,9 @@ class RobotHealthMonitorNode(Node):
         item = worst.get(name)
         diag_ok = item is None or not item[0].is_fault
         fault_code = '' if item is None else item[0].fault_code
-        detail = '' if item is None else item[0].message
+        # message가 아니라 detail을 쓴다. aggregator의 영문 요약어("Missing", "Stale")가
+        # 한국어 화면에 그대로 뜨는 것을 막는 지점이다.
+        detail = '' if item is None else item[0].detail
         last_seen_ns = self.last_diag_ns if item is None else item[1]
 
         if name == 'localization':
