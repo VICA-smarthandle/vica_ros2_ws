@@ -90,13 +90,19 @@ def test_estop_can_be_disabled_for_development():
         arrival_hold_ns=ARRIVAL_HOLD,
         estop_required=False,
     )
-    assert out.state_code == protocol.STATE_LEFT
+    # 좌회전 cue인데 STATE_RIGHT다 — 2026-08-01 하드웨어 임시 교환 때문이다.
+    # 여기서 보는 것은 "E-stop을 끄면 회전 안내가 나온다"이지 좌우가 아니다.
+    assert out.state_code == protocol.STATE_RIGHT
 
 
 def test_released_estop_returns_to_turn():
-    """E-stop이 풀리면 회전 안내로 돌아간다."""
+    """E-stop이 풀리면 회전 안내로 돌아간다.
+
+    좌회전 cue인데 STATE_RIGHT를 기대하는 것은 2026-08-01 하드웨어 임시 교환
+    때문이다. 이 시험이 보는 것은 좌우가 아니라 "E-stop 해제 후 회전 안내 복귀"다.
+    """
     out = resolve(estop_active=False, turn_direction=DIRECTION_LEFT)
-    assert out.state_code == protocol.STATE_LEFT
+    assert out.state_code == protocol.STATE_RIGHT
 
 
 # ── 도착이 회전보다 우선 ───────────────────────────────
@@ -129,14 +135,27 @@ def test_arrival_time_reversal_is_ignored():
 # ── 회전 cue ──────────────────────────────────────────
 
 
-def test_left_cue_maps_to_left_code():
+def test_left_cue_maps_to_right_code_by_hardware_workaround():
+    """좌회전 cue는 STATE_RIGHT를 보낸다. **일부러 뒤집은 것이다.**
+
+    2026-08-01 실주행에서 사용자가 "서보는 좌우 피드백이 맞는데 황색 점멸등만
+    좌우가 바뀌어 온다"고 보고했다. 올바른 자리는 펌웨어(.ino)의 WAVE_A/WAVE_B
+    이지만 젯슨에 arduino-cli도 Arduino IDE도 없어 올릴 수 없어서, 오늘은
+    ROS 쪽에서 뒤집어 대응한다.
+
+    **펌웨어를 고칠 수 있게 되면 이 교환과 이 시험을 함께 되돌린다.** 양쪽을
+    다 뒤집으면 원위치가 되어 다시 반대로 보인다.
+    """
     out = resolve(turn_direction=DIRECTION_LEFT)
-    assert out.state_code == protocol.STATE_LEFT
-
-
-def test_right_cue_maps_to_right_code():
-    out = resolve(turn_direction=DIRECTION_RIGHT)
     assert out.state_code == protocol.STATE_RIGHT
+    assert out.reason == "turn_left"
+
+
+def test_right_cue_maps_to_left_code_by_hardware_workaround():
+    """우회전 cue는 STATE_LEFT를 보낸다. 위와 같은 임시 조치다."""
+    out = resolve(turn_direction=DIRECTION_RIGHT)
+    assert out.state_code == protocol.STATE_LEFT
+    assert out.reason == "turn_right"
 
 
 def test_stale_cue_falls_back_to_normal():
