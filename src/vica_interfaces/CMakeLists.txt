@@ -4,8 +4,8 @@ project(vica_interfaces)
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-# TurnGuide가 std_msgs/Header와 builtin_interfaces/Time을 쓰므로 필요하다.
-# 기존 msg 3종과 srv는 내장 타입만 써서 이 선언이 없었다.
+# Header·Time 필드를 쓰는 msg용. 기존 msg 3종과 srv는 내장 타입만 써서 이 선언이 없었다.
+# 현재 대상: TurnGuide, SmartHandleState, RobotEvent, RobotHealth, RobotFault.
 find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
@@ -15,7 +15,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/EmergencyEvent.msg"
   "msg/TurnGuide.msg"
   "msg/SmartHandleState.msg"
+  "msg/RobotFault.msg"
+  "msg/RobotEvent.msg"
+  "msg/RobotHealth.msg"
   "srv/RequestDestination.srv"
+  "srv/MissionCommand.srv"
   DEPENDENCIES std_msgs builtin_interfaces
 )
 

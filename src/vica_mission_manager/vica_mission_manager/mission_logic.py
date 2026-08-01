@@ -26,6 +26,9 @@ class State(str, Enum):
     ARRIVED = "arrived"
     FAILED = "failed"
     ESTOPPED = "estopped"
+    # 목적지를 기억한 채 멈춘 상태. 사용자가 다시 출발을 요청하면 그 목적지로
+    # 새 goal 을 만든다. E-stop 과 달리 래치도 reset 도 없다.
+    PAUSED = "paused"
 
 
 class NavStatus(str, Enum):
@@ -51,6 +54,9 @@ class GateReason(str, Enum):
     NOT_APPROACHABLE = "not_approachable"
     POSE_INVALID = "pose_invalid"
     NAV_NOT_READY = "nav_not_ready"
+    # 취소·일시정지·재개 요청 전용 사유.
+    NOT_NAVIGATING = "not_navigating"
+    NOT_PAUSED = "not_paused"
 
 
 @dataclass(frozen=True)
@@ -117,6 +123,9 @@ class Navigate:
 @dataclass(frozen=True)
 class CancelNav:
     destination: Optional[Destination] = None
+    # 노드가 /vica_goal_event 로 알릴 이벤트 이름. 일시정지도 Nav2 goal 을 취소하지만
+    # 목적지를 기억하므로 취소와 구분해서 알려야 앱이 "주행 끝"으로 오해하지 않는다.
+    event: str = "goal_canceled"
 
 
 @dataclass(frozen=True)
@@ -151,6 +160,13 @@ MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도�
 MSG_ESTOPPED = "안전을 위해 멈추겠습니다."
 MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
+MSG_CANCELED = "안내를 취소했습니다."
+MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
+MSG_RESUMED = "{name}(으)로 다시 출발합니다."
+MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
+MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
+MSG_NOT_NAVIGATING = "지금은 안내 중이 아닙니다."
+MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 
 # 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
@@ -165,6 +181,8 @@ _REJECT_MESSAGES = {
     GateReason.POSE_INVALID: MSG_POSE_INVALID,
     GateReason.NAV_NOT_READY: MSG_NAV_NOT_READY,
     GateReason.ESTOP_ACTIVE: MSG_ESTOP_REJECT,
+    GateReason.NOT_NAVIGATING: MSG_NOT_NAVIGATING,
+    GateReason.NOT_PAUSED: MSG_NOT_PAUSED,
 }
 
 
@@ -221,6 +239,48 @@ def check_gate(
     return GateReason.OK
 
 
+def check_cancel_gate(state: State, estop_active: bool) -> GateReason:
+    """취소 요청 게이트. 주행 중이거나 일시정지 상태일 때만 취소할 수 있다.
+
+    E-stop 중에는 거부한다. E-stop 이 상위 상태이고, 취소로 그 상태를 흔들면
+    안 되기 때문이다 (해제는 관리자 reset 경로만 담당한다).
+    """
+    if estop_active or state == State.ESTOPPED:
+        return GateReason.ESTOP_ACTIVE
+    if state not in (State.NAVIGATING, State.PAUSED):
+        return GateReason.NOT_NAVIGATING
+    return GateReason.OK
+
+
+def check_pause_gate(state: State, estop_active: bool) -> GateReason:
+    """일시정지 게이트. 실제로 주행 중일 때만 멈출 수 있다."""
+    if estop_active or state == State.ESTOPPED:
+        return GateReason.ESTOP_ACTIVE
+    if state != State.NAVIGATING:
+        return GateReason.NOT_NAVIGATING
+    return GateReason.OK
+
+
+def check_resume_gate(
+    state: State,
+    paused_destination: Optional[Destination],
+    estop_active: bool,
+    nav_ready: bool,
+) -> GateReason:
+    """재개 게이트. 일시정지로 보관한 목적지가 있어야 다시 출발할 수 있다.
+
+    E-stop 이 걸리면 보관분을 폐기하므로 여기서 목적지가 없다면 재개할 수 없다.
+    "E-stop 해제 후 이전 Goal 을 자동 재개하지 않는다"는 원칙과 같은 방향이다.
+    """
+    if estop_active or state == State.ESTOPPED:
+        return GateReason.ESTOP_ACTIVE
+    if state != State.PAUSED or paused_destination is None:
+        return GateReason.NOT_PAUSED
+    if not nav_ready:
+        return GateReason.NAV_NOT_READY
+    return GateReason.OK
+
+
 def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
     """도(deg) yaw → 쿼터니언 (x, y, z, w). 변환은 goal 생성 시에만 (함정 2번)."""
     import math
@@ -261,7 +321,13 @@ class MissionLogic:
         self.state: State = State.IDLE
         self.estop_active: bool = False
         self.active_destination: Optional[Destination] = None
+        # 일시정지로 보관한 목적지. active_destination 은 _to_idle/_enter_estopped 에서
+        # 비워지므로 재개할 목적지는 따로 들고 있어야 한다.
+        self.paused_destination: Optional[Destination] = None
+        # 음성 취소 재확인 대기 여부. 확인하는 동안에도 로봇은 계속 주행한다.
+        self.cancel_confirm_pending: bool = False
 
+        self._cancel_confirm_deadline: Optional[float] = None
         self._confirming_dest_id: Optional[str] = None
         self._confirm_deadline: Optional[float] = None
         self._dwell_until: Optional[float] = None
@@ -328,6 +394,95 @@ class MissionLogic:
             Navigate(dest),
         ]
 
+    # -- 취소 / 일시정지 / 재개 --------------------------------------------------
+    #
+    # 세 요청 모두 안전 사건이 아니라 목표 조작이다. E-stop 과 달리 래치도 reset 도
+    # 없고, 처리 뒤 바로 새 요청을 받을 수 있다. 판정은 여기(Mission Manager)가 하고
+    # 앱·LLM·CLI 는 요청만 보낸다.
+
+    def on_cancel_request(self, now: float) -> tuple:
+        """목적지 취소. (actions, GateReason) 을 돌려준다."""
+        reason = check_cancel_gate(self.state, self.estop_active)
+        if reason != GateReason.OK:
+            return [], reason
+
+        actions: list = [SetNavSpeedLimit(0.0)]
+        if self.state == State.NAVIGATING:
+            actions.append(CancelNav(self.active_destination))
+        self._to_idle()
+        actions.append(Say(MSG_CANCELED, priority="response"))
+        return actions, GateReason.OK
+
+    def on_pause_request(self, now: float) -> tuple:
+        """일시정지. goal 을 취소하되 목적지는 보관해 재개할 수 있게 둔다."""
+        reason = check_pause_gate(self.state, self.estop_active)
+        if reason != GateReason.OK:
+            return [], reason
+
+        destination = self.active_destination
+        actions: list = [
+            SetNavSpeedLimit(0.0),
+            CancelNav(destination, event="goal_paused"),
+        ]
+        self.state = State.PAUSED
+        self.paused_destination = destination
+        self.active_destination = None
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
+        # 재개하면 새 goal 이므로 거리 안내도 처음부터 다시 한다.
+        self._announced_milestones = set()
+        self._approach_speed_limited = False
+        actions.append(Say(MSG_PAUSED, priority="response"))
+        return actions, GateReason.OK
+
+    def on_resume_request(self, nav_ready: bool, now: float) -> tuple:
+        """다시 출발. 보관한 목적지로 새 goal 을 만든다."""
+        reason = check_resume_gate(
+            self.state, self.paused_destination, self.estop_active, nav_ready
+        )
+        if reason != GateReason.OK:
+            return [], reason
+
+        destination = self.paused_destination
+        assert destination is not None  # check_resume_gate 가 보장
+        self.state = State.NAVIGATING
+        self.active_destination = destination
+        self.paused_destination = None
+        self._announced_milestones = set()
+        self._approach_speed_limited = False
+        return (
+            [
+                SetNavSpeedLimit(0.0),
+                Say(MSG_RESUMED.format(name=destination.name)),
+                Navigate(destination),
+            ],
+            GateReason.OK,
+        )
+
+    def on_cancel_confirm_request(self, now: float) -> tuple:
+        """음성 취소 요청. 바로 취소하지 않고 사용자에게 되묻는다.
+
+        확인을 기다리는 동안에도 주행은 계속된다. 확인 전에 goal 을 멈추면
+        사용자가 "아니오"라고 답했을 때 되돌릴 수 없기 때문이다.
+        """
+        reason = check_cancel_gate(self.state, self.estop_active)
+        if reason != GateReason.OK:
+            return [], reason
+        self.cancel_confirm_pending = True
+        self._cancel_confirm_deadline = now + self.confirm_timeout_sec
+        return [Say(MSG_CANCEL_CONFIRM, priority="response")], GateReason.OK
+
+    def on_cancel_confirm_answer(self, affirmative: bool, now: float) -> list:
+        """취소 재확인에 대한 응답. 긍정이면 실제로 취소한다."""
+        if not self.cancel_confirm_pending:
+            return []
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
+        if not affirmative:
+            return [Say(MSG_CANCEL_KEPT, priority="response")]
+        actions, _ = self.on_cancel_request(now)
+        return actions
+
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
 
@@ -380,6 +535,16 @@ class MissionLogic:
                 actions.append(Say(MSG_CONFIRM_TIMEOUT))
 
         elif self.state == State.NAVIGATING:
+            # 취소 재확인에 답이 없으면 주행을 그대로 이어간다(취소하지 않는다).
+            if (
+                self.cancel_confirm_pending
+                and self._cancel_confirm_deadline is not None
+                and now >= self._cancel_confirm_deadline
+            ):
+                self.cancel_confirm_pending = False
+                self._cancel_confirm_deadline = None
+                actions.append(Say(MSG_CANCEL_KEPT, priority="response"))
+
             if nav_status == NavStatus.SUCCEEDED:
                 dest = self.active_destination
                 text = (
@@ -463,6 +628,11 @@ class MissionLogic:
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
         self.active_destination = None
+        # 보관한 목적지도 함께 버린다. 남겨두면 E-stop 뒤에 "다시 출발"이 통해
+        # 이전 Goal 자동 재개 금지 원칙이 깨진다.
+        self.paused_destination = None
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._estop_entered_at = now
@@ -473,6 +643,9 @@ class MissionLogic:
     def _to_idle(self) -> None:
         self.state = State.IDLE
         self.active_destination = None
+        self.paused_destination = None
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._dwell_until = None

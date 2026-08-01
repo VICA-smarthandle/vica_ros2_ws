@@ -34,7 +34,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
-from vica_interfaces.srv import RequestDestination
+from vica_interfaces.srv import MissionCommand, RequestDestination
 
 from .destinations import load_destinations, load_map_bounds
 from .mission_logic import (
@@ -47,6 +47,7 @@ from .mission_logic import (
     Say,
     SetNavSpeedLimit,
     State,
+    _REJECT_MESSAGES,
     check_gate,
     yaw_deg_to_quaternion,
 )
@@ -175,6 +176,26 @@ class MissionManagerNode(Node):
             self._on_reload_destinations,
             callback_group=self._main_group,
         )
+        # 취소·일시정지·재개. 안전 사건이 아니라 목표 조작이므로 E-stop 과 달리
+        # _main_group 에 둔다(주행 판정과 같은 스레드에서 직렬 처리).
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/cancel_destination",
+            self._on_cancel_request,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/pause_navigation",
+            self._on_pause_request,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/resume_navigation",
+            self._on_resume_request,
+            callback_group=self._main_group,
+        )
 
         tick_hz = float(self.get_parameter("tick_hz").value)
         self.create_timer(1.0 / tick_hz, self._tick, callback_group=self._main_group)
@@ -185,6 +206,12 @@ class MissionManagerNode(Node):
     # -- 콜백 -------------------------------------------------------------------
 
     def _on_intent(self, msg: VicaIntent) -> None:
+        # 음성 취소·일시정지·재개는 service 와 같은 로직을 탄다.
+        # 다만 취소는 바로 실행하지 않고 되물어 확인한 뒤에만 처리한다.
+        if msg.intent in ("cancel", "pause", "resume"):
+            self._on_voice_mission_command(msg)
+            return
+
         intent = IntentData(
             intent=msg.intent,
             matched_destination_id=msg.matched_destination_id,
@@ -200,6 +227,117 @@ class MissionManagerNode(Node):
             f"confirm={msg.need_confirm} -> state={self.logic.state.value}"
         )
         self._run_actions(actions)
+
+    def _on_voice_mission_command(self, msg: VicaIntent) -> None:
+        """음성으로 온 취소·일시정지·재개를 처리한다.
+
+        취소는 잘못 알아들으면 안내가 끊기므로 곧바로 실행하지 않는다.
+        "취소할까요?"로 되묻고, 확인 응답이 와야 실제로 취소한다. 확인을 기다리는
+        동안에도 주행은 계속되며, 응답이 없으면 그대로 안내를 이어간다.
+        """
+        now = self._now()
+        before = self.logic.state
+
+        if msg.intent == "cancel":
+            if self.logic.cancel_confirm_pending:
+                # 이미 되물은 상태에서 다시 "취소"라고 하면 긍정으로 본다.
+                actions = self.logic.on_cancel_confirm_answer(True, now)
+                self._run_actions(actions)
+                self.get_logger().info(
+                    f"음성 취소 확정: {before.value} -> {self.logic.state.value}"
+                )
+                return
+            actions, reason = self.logic.on_cancel_confirm_request(now)
+        elif msg.intent == "pause":
+            actions, reason = self.logic.on_pause_request(now)
+        else:
+            actions, reason = self.logic.on_resume_request(self._nav2_ready(), now)
+
+        if reason != GateReason.OK:
+            message = _REJECT_MESSAGES.get(reason)
+            if message:
+                self._run_actions([Say(message, priority="response")])
+            self.get_logger().warn(
+                f"음성 {msg.intent} 거부: state={before.value} reason={reason.value}"
+            )
+            return
+
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"음성 {msg.intent} 처리: {before.value} -> {self.logic.state.value}"
+        )
+
+    # -- 취소 / 일시정지 / 재개 service -------------------------------------------
+    #
+    # 앱·CLI 는 요청만 보내고 허용 여부는 여기서 판정한다. 음성(LLM)은 같은 로직을
+    # _on_intent 의 cancel/pause/resume 분기로 탄다.
+
+    def _on_cancel_request(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        return self._handle_mission_command(request, response, "cancel")
+
+    def _on_pause_request(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        return self._handle_mission_command(request, response, "pause")
+
+    def _on_resume_request(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        return self._handle_mission_command(request, response, "resume")
+
+    def _handle_mission_command(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+        command: str,
+    ) -> MissionCommand.Response:
+        try:
+            request_id = str(UUID(request.request_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+
+        before = self.logic.state
+        actions, reason = self._run_mission_command(command)
+        if reason != GateReason.OK:
+            response.accepted = False
+            response.message = f"{command} 요청 거부: {reason.value}"
+            self.get_logger().warn(
+                f"{command} 요청 거부: state={before.value} reason={reason.value}"
+            )
+            return response
+
+        self._run_actions(actions)
+        response.accepted = True
+        response.message = f"{command} 요청을 처리했습니다."
+        self.get_logger().info(
+            f"{command} 처리: {before.value} -> {self.logic.state.value}"
+        )
+        return response
+
+    def _run_mission_command(self, command: str) -> tuple:
+        """command 이름에 맞는 로직 핸들러를 부른다. (actions, GateReason)"""
+        now = self._now()
+        if command == "cancel":
+            return self.logic.on_cancel_request(now)
+        if command == "pause":
+            return self.logic.on_pause_request(now)
+        if command == "resume":
+            return self.logic.on_resume_request(self._nav2_ready(), now)
+        return [], GateReason.NOT_NAVIGATE
 
     def _on_destination_request(
         self,
@@ -331,6 +469,8 @@ class MissionManagerNode(Node):
         msg.current_floor = int(self.get_parameter("current_floor").value)
         msg.current_building = str(self.get_parameter("current_building").value)
         msg.is_moving = self.logic.state == State.NAVIGATING
+        # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
+        msg.is_paused = self.logic.state == State.PAUSED
         self.pub_state.publish(msg)
 
     # -- Action 실행 -------------------------------------------------------------
@@ -344,7 +484,7 @@ class MissionManagerNode(Node):
                 self.pub_tts.publish(out)
                 self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
             elif isinstance(action, CancelNav):
-                self._cancel_nav(action.destination)
+                self._cancel_nav(action.destination, action.event)
             elif isinstance(action, Navigate):
                 self._start_nav(action)
             elif isinstance(action, SetNavSpeedLimit):
@@ -389,17 +529,18 @@ class MissionManagerNode(Node):
             self.get_logger().error(f"NavigateToPose goal 거부됨: {dest.id}")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
-    def _cancel_nav(self, destination=None) -> None:
+    def _cancel_nav(self, destination=None, event: str = "goal_canceled") -> None:
         with self._nav_lock:
             if self._nav_active:
                 self.navigator.cancelTask()
                 self._nav_active = False
         if destination is not None:
-            self._publish_goal_event(
-                "goal_canceled",
-                destination,
-                "비상정지 또는 Mission 요청으로 목적지가 취소되었습니다.",
+            reason = (
+                "일시정지 요청으로 목적지를 보관하고 멈췄습니다."
+                if event == "goal_paused"
+                else "비상정지 또는 Mission 요청으로 목적지가 취소되었습니다."
             )
+            self._publish_goal_event(event, destination, reason)
         self.get_logger().warn("Nav2 goal 취소 (보조 경로 — 모터 정지 권위는 래치 체인)")
 
     def _poll_nav_status(self) -> NavStatus:
