@@ -36,17 +36,20 @@ def _bounds() -> MapBounds:
     return MapBounds(min_x=-10.0, max_x=10.0, min_y=-10.0, max_y=10.0)
 
 
-@pytest.fixture
-def navigating() -> MissionLogic:
-    """주행 중 상태의 MissionLogic."""
-    logic = MissionLogic()
-    intent = IntentData(
+def _intent() -> IntentData:
+    return IntentData(
         intent="navigate",
         matched_destination_id="cafeteria",
         need_confirm=False,
         safety_flag="normal",
     )
-    logic.on_intent(intent, _destination(), _bounds(), True, now=0.0)
+
+
+@pytest.fixture
+def navigating() -> MissionLogic:
+    """주행 중 상태의 MissionLogic."""
+    logic = MissionLogic()
+    logic.on_intent(_intent(), _destination(), _bounds(), True, now=0.0)
     assert logic.state == State.NAVIGATING
     return logic
 
@@ -63,20 +66,40 @@ def _speed_limits(actions) -> list:
     ]
 
 
-def test_limits_speed_once_when_entering_three_meter_approach_zone(navigating):
-    assert _speed_limits(
-        navigating.on_tick(1.0, NavStatus.RUNNING, 3.1)
-    ) == []
-    assert _speed_limits(
-        navigating.on_tick(2.0, NavStatus.RUNNING, 3.0)
-    ) == [70.0]
-    assert _speed_limits(
-        navigating.on_tick(3.0, NavStatus.RUNNING, 2.0)
-    ) == []
-    # 재계획으로 남은 거리가 늘어도 같은 Goal에서는 제한을 유지한다.
-    assert _speed_limits(
-        navigating.on_tick(4.0, NavStatus.RUNNING, 3.5)
-    ) == []
+def test_no_speed_limit_before_first_stage(navigating):
+    """1.5 m 직전까지는 제한이 없다. 이 로봇은 이미 저속이라 미리 줄이면 손해다."""
+    assert _speed_limits(navigating.on_tick(1.0, NavStatus.RUNNING, 3.0)) == []
+    assert _speed_limits(navigating.on_tick(2.0, NavStatus.RUNNING, 2.0)) == []
+    assert _speed_limits(navigating.on_tick(3.0, NavStatus.RUNNING, 1.6)) == []
+
+
+def test_speed_limit_descends_stage_by_stage(navigating):
+    """한 Goal 안에서 70 → 55 → 40 % 가 순서대로 한 번씩만 나간다."""
+    assert _speed_limits(navigating.on_tick(1.0, NavStatus.RUNNING, 1.5)) == [70.0]
+    assert _speed_limits(navigating.on_tick(2.0, NavStatus.RUNNING, 1.2)) == []
+    assert _speed_limits(navigating.on_tick(3.0, NavStatus.RUNNING, 1.0)) == [55.0]
+    assert _speed_limits(navigating.on_tick(4.0, NavStatus.RUNNING, 0.7)) == []
+    assert _speed_limits(navigating.on_tick(5.0, NavStatus.RUNNING, 0.5)) == [40.0]
+    assert _speed_limits(navigating.on_tick(6.0, NavStatus.RUNNING, 0.2)) == []
+
+
+def test_speed_limit_never_goes_back_up(navigating):
+    """재계획으로 남은 거리가 늘어도 같은 Goal에서는 제한을 유지한다.
+
+    제한이 오르내리면 핸들을 잡은 사용자 손에 울컥거림으로 전달된다.
+    """
+    navigating.on_tick(1.0, NavStatus.RUNNING, 0.9)  # 55 % 진입
+
+    assert _speed_limits(navigating.on_tick(2.0, NavStatus.RUNNING, 1.4)) == []
+    assert _speed_limits(navigating.on_tick(3.0, NavStatus.RUNNING, 4.0)) == []
+    assert navigating.approach_speed_limit_percent == 55.0
+
+
+def test_missing_distance_does_not_move_the_ladder(navigating):
+    """Nav2 가 경로 계산 전에 주는 None/0.0 을 '도착'으로 읽으면 안 된다."""
+    assert _speed_limits(navigating.on_tick(1.0, NavStatus.RUNNING, None)) == []
+    assert _speed_limits(navigating.on_tick(2.0, NavStatus.RUNNING, 0.0)) == []
+    assert navigating.approach_speed_limit_percent == 0.0
 
 
 @pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED])
@@ -84,15 +107,58 @@ def test_clears_approach_speed_limit_when_navigation_finishes(
     navigating,
     status,
 ):
-    navigating.on_tick(1.0, NavStatus.RUNNING, 2.5)
+    navigating.on_tick(1.0, NavStatus.RUNNING, 1.2)
 
     assert _speed_limits(navigating.on_tick(2.0, status)) == [0.0]
+    assert navigating.approach_speed_limit_percent == 0.0
 
 
 def test_clears_approach_speed_limit_when_estop_cancels_goal(navigating):
-    navigating.on_tick(1.0, NavStatus.RUNNING, 2.5)
+    navigating.on_tick(1.0, NavStatus.RUNNING, 1.2)
 
     assert _speed_limits(navigating.on_estop(True, 2.0)) == [0.0]
+    assert navigating.approach_speed_limit_percent == 0.0
+
+
+def test_new_destination_resets_the_ladder(navigating):
+    """목적지가 바뀌면 다음 접근은 처음 단계부터 다시 내려간다."""
+    navigating.on_tick(1.0, NavStatus.RUNNING, 0.4)  # 40 % 까지 소진
+    navigating.on_tick(2.0, NavStatus.SUCCEEDED)
+    navigating.on_tick(10.0, NavStatus.NONE)  # dwell 경과 -> idle
+
+    navigating.on_intent(_intent(), _destination(), _bounds(), True, now=11.0)
+
+    assert navigating.approach_speed_limit_percent == 0.0
+    assert _speed_limits(navigating.on_tick(12.0, NavStatus.RUNNING, 2.0)) == []
+    assert _speed_limits(navigating.on_tick(13.0, NavStatus.RUNNING, 1.4)) == [70.0]
+
+
+def test_resume_resets_the_ladder(navigating):
+    """일시정지 후 재개도 새 Goal 이다."""
+    navigating.on_tick(1.0, NavStatus.RUNNING, 0.9)  # 55 % 진입
+    navigating.on_pause_request(2.0)
+    actions, _ = navigating.on_resume_request(True, 3.0)
+
+    assert _speed_limits(actions) == [0.0]
+    assert navigating.approach_speed_limit_percent == 0.0
+    assert _speed_limits(navigating.on_tick(4.0, NavStatus.RUNNING, 1.4)) == [70.0]
+
+
+def test_stage_list_is_configurable():
+    """단계 개수·값은 실기에서 파라미터로 바꾼다."""
+    logic = MissionLogic(approach_stages=[(2.0, 80.0), (0.4, 30.0)])
+    logic.on_intent(_intent(), _destination(), _bounds(), True, now=0.0)
+
+    assert _speed_limits(logic.on_tick(1.0, NavStatus.RUNNING, 1.5)) == [80.0]
+    assert _speed_limits(logic.on_tick(2.0, NavStatus.RUNNING, 0.4)) == [30.0]
+
+
+def test_slowdown_can_be_disabled():
+    """빈 단계 목록이면 접근 감속이 걸리지 않는다."""
+    logic = MissionLogic(approach_stages=[])
+    logic.on_intent(_intent(), _destination(), _bounds(), True, now=0.0)
+
+    assert _speed_limits(logic.on_tick(1.0, NavStatus.RUNNING, 0.1)) == []
 
 
 def test_announces_when_crossing_milestone(navigating):
@@ -136,13 +202,7 @@ def test_new_goal_resets_milestones(navigating):
     navigating.on_tick(2.0, NavStatus.SUCCEEDED)
     navigating.on_tick(10.0, NavStatus.NONE)  # dwell 경과 -> idle
 
-    intent = IntentData(
-        intent="navigate",
-        matched_destination_id="cafeteria",
-        need_confirm=False,
-        safety_flag="normal",
-    )
-    navigating.on_intent(intent, _destination(), _bounds(), True, now=11.0)
+    navigating.on_intent(_intent(), _destination(), _bounds(), True, now=11.0)
 
     assert _spoken(navigating.on_tick(12.0, NavStatus.RUNNING, 9.0)) == [
         MSG_DISTANCE_REMAINING.format(meters=10)
