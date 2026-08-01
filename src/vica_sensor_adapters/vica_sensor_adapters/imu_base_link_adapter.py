@@ -10,6 +10,8 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from vica_sensor_adapters.gyro_bias import GyroBiasEstimator
+
 
 def _quat_to_matrix(q):
     x = q.x
@@ -87,9 +89,32 @@ class ImuBaseLinkAdapter(Node):
         self.declare_parameter("target_frame", "base_link")
         self.declare_parameter("transform_timeout_sec", 0.05)
 
+        # 정지 중 자이로 편향 보정. 0이면 끈다.
+        #
+        # 4000표본은 200 Hz에서 약 20초다. 표본 수는 잔차를 좌우한다 — 편향 추정의
+        # 표준오차가 sigma/sqrt(N)이기 때문이다. 2026-08-01 Jetson 실측:
+        #
+        #   표본 없음   161 deg/hour   (수정 전)
+        #   400  (2초)   38 deg/hour
+        #   4000 (20초)   4.7 deg/hour
+        #
+        # 20초는 bringup 시간에 비하면 짧고, 그 사이에도 원값이 그대로 나가므로
+        # 손해가 없다. 더 늘려도 편향 자체가 온도에 따라 변하므로 이득이 줄어든다.
+        #
+        # 임계 0.05 rad/s(약 2.9°/s)는 실측 잡음 표준편차 0.0079 rad/s의 6배 이상이라
+        # 정지 중 오탐이 나지 않는다.
+        self.declare_parameter("gyro_bias_sample_count", 4000)
+        self.declare_parameter("gyro_bias_max_rate", 0.05)
+
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value
         self.target_frame = self.get_parameter("target_frame").value
+
+        self.bias = GyroBiasEstimator(
+            sample_count=self.get_parameter("gyro_bias_sample_count").value,
+            max_abs_rate=self.get_parameter("gyro_bias_max_rate").value,
+        )
+        self._bias_reported = False
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -144,6 +169,11 @@ class ImuBaseLinkAdapter(Node):
 
         out.angular_velocity = _copy_vector(msg.angular_velocity)
         _rotate_vector(matrix, out.angular_velocity)
+
+        # 편향은 회전 뒤 base_link 기준으로 다룬다. EKF가 쓰는 축이 그것이다.
+        # 선가속도에는 적용하지 않는다 — 중력은 실제 값이다.
+        self._apply_gyro_bias(out.angular_velocity)
+
         out.angular_velocity_covariance = _rotate_covariance(
             matrix,
             msg.angular_velocity_covariance,
@@ -157,6 +187,31 @@ class ImuBaseLinkAdapter(Node):
         )
 
         self.pub.publish(out)
+
+    def _apply_gyro_bias(self, gyro):
+        """정지 중 추정한 편향을 뺀다. 확정 전이면 원값이 그대로 나간다."""
+        self.bias.add(gyro.x, gyro.y, gyro.z)
+        gyro.x, gyro.y, gyro.z = self.bias.correct(gyro.x, gyro.y, gyro.z)
+
+        if self._bias_reported:
+            return
+
+        if self.bias.ready:
+            bx, by, bz = self.bias.bias
+            drift = math.degrees(bz) * 3600.0
+            self.get_logger().info(
+                f"Gyro bias calibrated over {self.bias.collected} samples: "
+                f"({bx:+.6f}, {by:+.6f}, {bz:+.6f}) rad/s. "
+                f"Removed yaw drift of {drift:+.1f} deg/hour."
+            )
+            self._bias_reported = True
+        elif self.bias.aborted:
+            self.get_logger().warn(
+                "Gyro bias calibration aborted: motion detected during startup. "
+                "Publishing uncorrected rates - yaw will drift. "
+                "Restart this node while the robot is stationary."
+            )
+            self._bias_reported = True
 
 
 def main():
