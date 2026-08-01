@@ -218,15 +218,35 @@ def test_baseline_probes_for_optimization_gate_exist():
     assert 'imu_adapter' in process_names, 'imu adapter CPU baseline 프로브가 없습니다'
 
 
-def test_thresholds_are_marked_unverified_in_comments():
-    """임계값이 실측 전임을 파일에 명시했는지 확인한다.
+def test_unmeasured_configs_stay_marked_unverified():
+    """아직 실측하지 않은 설정은 `[미검증]` 표기를 유지해야 한다.
 
-    계획서 3절: 1차에서 임계값을 확정하지 않는다. 표기가 사라지면 다음 사람이 이 값을
-    검증된 것으로 오해한다.
+    표기가 사라지면 다음 사람이 이 값을 검증된 것으로 오해한다. 이 두 파일은
+    2026-08-01 1차 측정 범위 밖이었다.
     """
-    for path in (PROBES_YAML, AGGREGATOR_YAML, COMPONENTS_YAML):
+    for path in (AGGREGATOR_YAML, COMPONENTS_YAML):
         text = path.read_text(encoding='utf-8')
         assert '[미검증]' in text, f'{path.name}에 [미검증] 표기가 없습니다'
+
+
+def test_probes_yaml_records_measurement_and_remaining_gaps():
+    """probes.yaml은 실측 근거와 **남은 미측정 항목**을 함께 적어야 한다.
+
+    2026-08-01 Jetson 1차 측정으로 이 파일의 임계값을 확정했다(devlog 14절). 그러나
+    전부 확정된 것은 아니다 — 측정은 **바퀴를 띄운 정지 상태**에서만 했다.
+
+    - `controller_server` CPU는 Nav2 미활성 값이다
+    - `/wheel/odom` 주기는 주행 중에 달라진다
+
+    근거 없이 값만 바뀌는 것과, 남은 구멍을 숨긴 채 "확정"으로 적는 것을 둘 다 막는다.
+    """
+    text = PROBES_YAML.read_text(encoding='utf-8')
+
+    assert '실측 2026-08-01' in text, 'probes.yaml에 실측 근거 표기가 없습니다'
+    assert '[미측정]' in text, (
+        'probes.yaml에 남은 미측정 항목 표기가 없습니다. '
+        '정지 상태에서만 쟀다는 사실이 사라지면 안 됩니다'
+    )
 
 
 # ---------------------------------------------------------------------------
