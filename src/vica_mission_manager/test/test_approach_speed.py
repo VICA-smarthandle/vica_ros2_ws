@@ -29,28 +29,33 @@ def test_default_stages_descend_in_distance_and_percent():
 
 
 def test_default_stages_match_agreed_table():
-    """2026-08-01 사용자 확정 값. 첫 감속은 3.0 m 가 아니라 1.5 m 다."""
-    assert DEFAULT_APPROACH_STAGES == ((1.5, 70.0), (1.0, 55.0), (0.5, 40.0))
+    """2026-08-01 실주행 뒤 확정 값.
+
+    초안 (1.5,70)(1.0,55)(0.5,40)에서 조정했다. 제한이 회전에도 같은 비율로
+    걸려 도착 직전 제자리 회전이 9도/초가 되었고 사용자가 답답하다고 보고했다.
+    단계를 둘로 줄이고 시작을 1.0 m로 늦춰 마지막 회전을 14도/초로 올린다.
+    """
+    assert DEFAULT_APPROACH_STAGES == ((1.0, 80.0), (0.5, 60.0))
 
 
 # ---- 경계값 ------------------------------------------------------------------
 
 
 def test_no_limit_before_first_stage():
-    """1.5 m 직전까지는 100 % 로 달린다 — 미리 줄이면 손해만 크다."""
+    """1.0 m 직전까지는 100 % 로 달린다 — 미리 줄이면 손해만 크다."""
     ladder = ApproachSpeedLadder()
     assert ladder.update(9.0) is None
     assert ladder.update(1.6) is None
-    assert ladder.update(1.5001) is None
+    assert ladder.update(1.0001) is None
     assert ladder.percent == NO_SPEED_LIMIT
 
 
 @pytest.mark.parametrize(
     "distance,expected",
-    [(1.5, 70.0), (1.0, 55.0), (0.5, 40.0)],
+    [(1.0, 80.0), (0.5, 60.0)],
 )
 def test_boundary_distance_enters_stage(distance, expected):
-    """경계값은 포함이다. 정확히 1.5/1.0/0.5 m 면 그 단계에 들어간다."""
+    """경계값은 포함이다. 정확히 1.0/0.5 m 면 그 단계에 들어간다."""
     ladder = ApproachSpeedLadder()
     assert ladder.update(distance) == expected
     assert ladder.percent == expected
@@ -59,22 +64,20 @@ def test_boundary_distance_enters_stage(distance, expected):
 def test_stages_engage_in_order():
     ladder = ApproachSpeedLadder()
     assert ladder.update(2.0) is None
-    assert ladder.update(1.4) == 70.0
-    assert ladder.update(1.2) is None  # 같은 단계 안에서는 다시 발행하지 않는다
-    assert ladder.update(0.9) == 55.0
-    assert ladder.update(0.6) is None
-    assert ladder.update(0.4) == 40.0
+    assert ladder.update(0.9) == 80.0
+    assert ladder.update(0.7) is None  # 같은 단계 안에서는 다시 발행하지 않는다
+    assert ladder.update(0.4) == 60.0
     assert ladder.update(0.1) is None
 
 
 def test_skipping_stages_jumps_to_deepest():
     """한 tick 에 여러 단계를 건너뛰면 중간 단계를 거치지 않고 가장 깊은 단계로 간다.
 
-    0.3 m 인데 70 % 를 먼저 거는 것은 이미 늦은 감속이다.
+    0.3 m 인데 80 % 를 먼저 거는 것은 이미 늦은 감속이다.
     """
     ladder = ApproachSpeedLadder()
-    assert ladder.update(0.3) == 40.0
-    assert ladder.index == 2
+    assert ladder.update(0.3) == 60.0
+    assert ladder.index == 1
 
 
 # ---- latch: 되돌아가지 않는다 -------------------------------------------------
@@ -83,10 +86,10 @@ def test_skipping_stages_jumps_to_deepest():
 def test_limit_holds_when_distance_grows_again():
     """재계획으로 잔여거리가 늘어도 제한은 유지된다."""
     ladder = ApproachSpeedLadder()
-    assert ladder.update(1.4) == 70.0
+    assert ladder.update(0.9) == 80.0
     assert ladder.update(3.0) is None
     assert ladder.update(9.0) is None
-    assert ladder.percent == 70.0
+    assert ladder.percent == 80.0
 
 
 def test_backward_motion_does_not_raise_limit():
@@ -95,7 +98,7 @@ def test_backward_motion_does_not_raise_limit():
     ladder.update(0.4)
     for distance in (0.6, 0.9, 1.2, 1.6, 4.0):
         assert ladder.update(distance) is None
-    assert ladder.percent == 40.0
+    assert ladder.percent == 60.0
 
 
 def test_reset_starts_over_for_new_goal():
@@ -106,7 +109,7 @@ def test_reset_starts_over_for_new_goal():
     assert ladder.index == -1
     assert ladder.percent == NO_SPEED_LIMIT
     assert ladder.update(2.0) is None
-    assert ladder.update(1.5) == 70.0
+    assert ladder.update(1.0) == 80.0
 
 
 # ---- 잔여거리 미수신 ---------------------------------------------------------
@@ -127,7 +130,7 @@ def test_missing_distance_keeps_current_stage():
     ladder.update(0.9)
     assert ladder.update(None) is None
     assert ladder.update(0.0) is None
-    assert ladder.percent == 55.0
+    assert ladder.percent == 80.0
 
 
 # ---- 단계 목록 검증 -----------------------------------------------------------

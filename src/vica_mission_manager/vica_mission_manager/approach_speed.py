@@ -69,13 +69,29 @@ from __future__ import annotations
 
 from typing import Optional, Sequence, Tuple
 
-# (잔여거리 m, 최대속도 상한 %) — 먼 거리부터. 위 표의 기본값이다.
+# (잔여거리 m, 최대속도 상한 %) — 먼 거리부터.
 # 실기 조정은 launch parameter (approach_slowdown_distances_m /
 # approach_speed_limit_percents) 로 하고 이 상수는 건드리지 않는다.
+#
+# 2026-08-01 1차 실주행 뒤 조정. 초안은 (1.5, 70) (1.0, 55) (0.5, 40)이었는데
+# 사용자가 "감속이 너무 느려서 답답하다"고 보고했다. 원인은 이 제한이 직진뿐
+# 아니라 **회전에도 같은 비율로 걸린다**는 점이다.
+#
+#   40 % 구간에서 max_vel_theta 0.4 -> 0.16 rad/s = 9도/초
+#   -> 도착 직전 제자리 회전 90도에 10초가 걸린다
+#
+# 단계를 셋에서 둘로 줄이고 시작 지점을 1.5 m -> 1.0 m로 늦춘다.
+#
+#   마지막 1.5 m 소요   11.0 -> 7.5초
+#   마지막 회전 속도    9 -> 14도/초
+#   정지 시 Δv         0.104 -> 0.156 m/s
+#   정지 거리          3.3 -> 5.2 cm  (xy_goal_tolerance 0.25 m의 1/5)
+#
+# 안전 여유는 유지된다. 급정지의 실체는 감속률이 아니라 속도 낙차이고,
+# 0.156 m/s는 무제한 0.26 m/s 대비 여전히 40 % 낮다.
 DEFAULT_APPROACH_STAGES: Tuple[Tuple[float, float], ...] = (
-    (1.5, 70.0),
-    (1.0, 55.0),
-    (0.5, 40.0),
+    (1.0, 80.0),
+    (0.5, 60.0),
 )
 
 # nav2_msgs/SpeedLimit 은 percentage=True 에서 0.0 을 "제한 없음"으로 읽는다.
