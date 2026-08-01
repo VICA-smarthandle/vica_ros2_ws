@@ -14,10 +14,19 @@
 - CPU 사용률로 주행을 막지 않는다. 등급은 WARN 상한으로 둔다.
 """
 
-from typing import Dict, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 
 NS_PER_SEC = 1_000_000_000
+
+# 패턴에 걸려도 노드가 아닌 것들. 2026-08-01 실기에서 이것들 때문에 imu_adapter CPU가
+# 0.0 %로 보고됐다(실제 45 %). 셸과 런처는 노드 이름을 인자로 들고 있을 뿐이다.
+_SHELL_NAMES = frozenset({'bash', 'sh', 'dash', 'zsh', 'ksh', 'fish'})
+
+# `ros2 run`·`ros2 launch` 런처. argv 원소가 정확히 `ros2`이거나 `/ros2`로 끝나는 것만
+# 본다. 부분 문자열로 보면 `.../vica_ros2_ws/install/...` 같은 실제 노드 경로를
+# 런처로 오인한다.
+_ROS2_SUBCOMMANDS = frozenset({'run', 'launch'})
 
 # /proc/<pid>/stat에서 utime·stime의 위치. comm 필드 뒤를 0-based로 센다.
 # 전체 필드는 1-based로 pid(1) comm(2) state(3) ... utime(14) stime(15)이다.
@@ -80,6 +89,56 @@ def match_cmdline(cmdline_text: str, pattern: str) -> bool:
     if not joined:
         return False
     return pattern in joined
+
+
+def _argv(cmdline_text: str) -> List[str]:
+    """Split a NUL-separated /proc/<pid>/cmdline into arguments."""
+    return [part for part in cmdline_text.split('\x00') if part]
+
+
+def is_node_process(cmdline_text: str) -> bool:
+    """Return False for shells and `ros2 run|launch` launchers.
+
+    이 둘은 노드 이름을 **인자로 들고 있을 뿐** 노드가 아니다. 실기에서 셋이 같은
+    패턴에 걸렸고 감시 노드가 그중 셸을 골라 CPU 0.0 %를 보고했다.
+    """
+    argv = _argv(cmdline_text)
+    if not argv:
+        return False
+
+    if argv[0].rsplit('/', 1)[-1] in _SHELL_NAMES:
+        return False
+
+    # `python3 /opt/ros/humble/bin/ros2 run pkg exe` 형태를 잡는다.
+    for index, arg in enumerate(argv):
+        name = arg.rsplit('/', 1)[-1]
+        if name != 'ros2':
+            continue
+        following = argv[index + 1] if index + 1 < len(argv) else ''
+        if following in _ROS2_SUBCOMMANDS:
+            return False
+
+    return True
+
+
+def select_probe_pid(
+    candidates: Sequence[Tuple[str, str]],
+) -> Tuple[Optional[str], List[str]]:
+    """Pick the node process among pattern matches.
+
+    `candidates`는 (pid, cmdline) 목록이다. 셸과 런처를 걸러낸 뒤 남은 pid 전체를 함께
+    돌려준다. **후보가 둘 이상이면 호출자가 그 사실을 진단에 남겨야 한다** — 조용히 하나
+    고르는 것이 이 결함의 본질이었다.
+
+    남은 것 중에서는 pid를 수치로 정렬해 가장 작은 것을 고른다. 매 tick 같은 것을
+    골라야 CPU 델타가 깨지지 않는다.
+    """
+    kept = [pid for pid, cmdline in candidates if is_node_process(cmdline)]
+    if not kept:
+        return None, []
+
+    chosen = min(kept, key=lambda pid: (int(pid) if pid.isdigit() else 0, pid))
+    return chosen, kept
 
 
 class CpuTracker:

@@ -46,7 +46,7 @@ from .probe_config import (
     QOS_SENSOR_DATA,
     ZERO_QOS_SUSPECTED,
 )
-from .process_cpu import match_cmdline, parse_stat_jiffies
+from .process_cpu import match_cmdline, parse_stat_jiffies, select_probe_pid
 
 
 PROC_ROOT = Path('/proc')
@@ -196,6 +196,9 @@ class ExternalDiagnosticsNode(Node):
         self.cpu_percent: dict = {}
         self.cpu_pid: dict = {}
         self.cpu_previous: dict = {}
+        # 패턴에 걸린 노드 후보 전체. 2개 이상이면 어느 것을 쟀는지 알 수 없으므로
+        # 진단에 그대로 남긴다(2026-08-01 실기 오보고).
+        self.cpu_candidates: dict = {}
         self.clock_ticks = self._clock_ticks()
 
     def _import_msg_type(self, msg_type: str):
@@ -240,7 +243,8 @@ class ExternalDiagnosticsNode(Node):
         now_ns = self.steady_clock.now().nanoseconds
 
         for spec in self.process_specs:
-            pid = self._find_pid(spec.cmdline_pattern)
+            pid, kept = self._find_pid(spec.cmdline_pattern)
+            self.cpu_candidates[spec.name] = kept
             if pid is None:
                 self.cpu_percent[spec.name] = None
                 self.cpu_pid[spec.name] = None
@@ -281,12 +285,17 @@ class ExternalDiagnosticsNode(Node):
         return (cpu_seconds / (elapsed_ns / 1_000_000_000)) * 100.0
 
     def _find_pid(self, pattern: str):
-        """Return the first pid whose cmdline matches, or None."""
+        """Return (chosen pid or None, every node-looking candidate pid).
+
+        패턴에 걸린 것을 모두 모은 뒤 셸과 `ros2 run|launch` 런처를 걸러낸다. 첫 일치를
+        그냥 쓰면 노드 대신 그것을 띄운 셸을 재게 된다(2026-08-01 실기, CPU 0.0 % 오보고).
+        """
         try:
             entries = list(PROC_ROOT.iterdir())
         except OSError:
-            return None
+            return None, []
 
+        candidates = []
         for entry in entries:
             if not entry.name.isdigit():
                 continue
@@ -295,8 +304,9 @@ class ExternalDiagnosticsNode(Node):
             except OSError:
                 continue
             if match_cmdline(cmdline, pattern):
-                return entry.name
-        return None
+                candidates.append((entry.name, cmdline))
+
+        return select_probe_pid(candidates)
 
     def _read_jiffies(self, pid: str):
         """Return utime+stime for a pid, or None when it disappeared."""
@@ -334,11 +344,23 @@ class ExternalDiagnosticsNode(Node):
                 if percent >= spec.warn_percent
                 else DiagnosticStatus.OK
             )
-            stat.summary(level, f'CPU {percent:.1f}%')
+            summary = f'CPU {percent:.1f}%'
+
+            # 후보가 둘 이상이면 어느 프로세스를 잰 값인지 단정할 수 없다. 숨기지 않는다.
+            candidates = self.cpu_candidates.get(spec.name) or []
+            if len(candidates) > 1:
+                level = max(level, DiagnosticStatus.WARN)
+                summary = (
+                    f'{summary} — 같은 패턴에 {len(candidates)}개가 걸립니다. '
+                    f'측정 대상이 모호하므로 pattern을 좁혀 주세요'
+                )
+
+            stat.summary(level, summary)
             stat.add('pid', str(pid))
             stat.add('cpu_percent', f'{percent:.1f}')
             stat.add('warn_percent', f'{spec.warn_percent:.1f}')
             stat.add('pattern', spec.cmdline_pattern)
+            stat.add('candidate_pids', ','.join(candidates))
             return stat
 
         return task
