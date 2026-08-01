@@ -64,6 +64,18 @@ aggregator_node:
         type: diagnostic_aggregator/GenericAnalyzer
         path: Safety
         contains: ['safety:', 'emergency']
+        # vica_safety 세 노드의 label이 모두 `safety: `로 시작하므로 위 contains가
+        # 그대로 잡는다. 이름은 vica_safety/diagnostics.py의 LABEL_* 상수가 소유하며
+        # test_safety_diagnostics가 고정한다. 한쪽만 바꾸면 영구 Stale이 된다.
+        #
+        # expected를 두는 이유 — 셋 중 하나만 죽으면 나머지 둘이 OK를 내서 경로가
+        # 정상으로 보인다. 이름을 적어 두어야 죽은 노드가 Stale로 드러난다.
+        # 2026-08-01 실기에서 세 노드가 아무것도 발행하지 않아 경로 자체가 Stale이었고,
+        # 그것이 앱에 "Safety 고장"으로 뜬 것이 이 설정의 계기다.
+        expected:
+          - 'emergency_stop_node: safety: estop latch'
+          - 'safety_supervisor_node: safety: cmd_vel gate'
+          - 'app_emergency_node: safety: app bridge'
         timeout: 5.0
 
       localization:
@@ -87,7 +99,11 @@ aggregator_node:
       app:
         type: diagnostic_aggregator/GenericAnalyzer
         path: App
-        contains: ['app:', 'rosbridge', 'supervisor']
+        # 'supervisor'가 아니라 'vica_supervisor'다. 전자는 `safety_supervisor_node:`를
+        # 함께 잡아 Safety 항목이 App 아래에도 중복으로 걸린다. aggregator는 조건에
+        # 맞는 모든 analyzer에 항목을 넣으므로 관리자 화면에 안전 항목이 앱 고장으로
+        # 보인다. 'vica_supervisor'는 Flutter 관리자 앱의 이름이며 이 의도에 맞다.
+        contains: ['app:', 'rosbridge', 'vica_supervisor']
         timeout: 10.0
 
       computer:

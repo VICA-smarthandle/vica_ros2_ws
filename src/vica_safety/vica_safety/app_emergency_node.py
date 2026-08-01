@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
+from diagnostic_updater import Updater
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.clock import Clock, ClockType
@@ -17,7 +18,8 @@ from rclpy.qos import qos_profile_action_status_default
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from .freshness import sec_to_ns
+from .diagnostics import LABEL_BRIDGE, bridge_summary
+from .freshness import is_fresh_ns, sec_to_ns
 from .logging_utils import log_with_severity
 from .reset_sequence import ResetSequence
 
@@ -203,6 +205,12 @@ class AppEmergencyNode(Node):
             self.publish_state,
             callback_group=self.cb_group,
         )
+
+        # 이 노드가 앱의 유일한 창구다. 조용히 죽으면 관리자는 리셋 수단을 잃는데
+        # 화면에는 아무 표시도 나지 않는다.
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID('app_bridge')
+        self.diag_updater.add(LABEL_BRIDGE, self.diagnose_bridge)
 
         self.get_logger().warn(
             "Public /safety_reset is an unauthenticated maintenance [GAP]."
@@ -460,6 +468,35 @@ class AppEmergencyNode(Node):
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)
         self.state_publisher.publish(msg)
+
+    def diagnose_bridge(self, stat):
+        """Report whether the app still has a working reset path.
+
+        앱이 보내는 E-stop 요청과 관리자 reset은 모두 이 노드를 지난다. 위쪽 두
+        노드의 신호가 끊기면 화면의 값이 조용히 낡은 것으로 굳는다.
+        """
+        now = self.steady_clock.now().nanoseconds
+        emergency_fresh = is_fresh_ns(
+            self.last_emergency_ns,
+            now_ns=now,
+            timeout_ns=self.state_timeout_ns,
+        )
+        safety_state_fresh = is_fresh_ns(
+            self.last_safety_state_ns,
+            now_ns=now,
+            timeout_ns=self.state_timeout_ns,
+        )
+        level, message = bridge_summary(
+            emergency_fresh=emergency_fresh,
+            safety_state_fresh=safety_state_fresh,
+        )
+        stat.summary(level, message)
+        stat.add('app_active', str(self.app_active))
+        stat.add('emergency_active', str(self.emergency_active))
+        stat.add('safety_state', self.safety_state)
+        stat.add('emergency_fresh', str(emergency_fresh))
+        stat.add('safety_state_fresh', str(safety_state_fresh))
+        return stat
 
 
 def main(args=None) -> None:

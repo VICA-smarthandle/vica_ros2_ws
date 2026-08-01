@@ -1,5 +1,6 @@
 """ROS wiring for the VICA drive-command safety gate."""
 
+from diagnostic_updater import Updater
 from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.clock import Clock, ClockType
@@ -7,6 +8,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
+from .diagnostics import LABEL_GATE, gate_summary
 from .freshness import is_fresh_ns, sec_to_ns
 from .logging_utils import log_with_severity
 from .safety_gate import SafetyGate, SafetyState
@@ -118,6 +120,11 @@ class SafetySupervisorNode(Node):
             clock=self.steady_clock,
         )
 
+        # 게이트가 조용히 죽으면 로봇은 멈추지만 관리자는 이유를 모른다.
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID('cmd_vel_gate')
+        self.diag_updater.add(LABEL_GATE, self.diagnose_gate)
+
         self.get_logger().warn(
             "Safety supervisor is a software guard; hardware E-stop remains final."
         )
@@ -192,6 +199,27 @@ class SafetySupervisorNode(Node):
         state_msg.data = state.value
         self.pub_state.publish(state_msg)
         self.log_transition_if_needed(state)
+
+    def diagnose_gate(self, stat):
+        """Report gate health. A blocked gate is not a fault; a blind one is.
+
+        `control_loop`가 30 Hz로 이미 판정하고 있으므로 여기서는 같은 입력을
+        다시 읽기만 한다. 게이트 상태를 여기서 재계산하면 두 개의 진실이 생긴다.
+        """
+        now = self.now_ns()
+        estop_fresh = self.estop_is_fresh(now)
+        level, message = gate_summary(
+            estop_fresh=estop_fresh,
+            gate_state=self.gate.state.value,
+        )
+        stat.summary(level, message)
+        stat.add('gate_state', self.gate.state.value)
+        stat.add('reset_armed', str(self.gate.reset_armed))
+        stat.add('can_forward_command', str(self.gate.can_forward_command))
+        stat.add('estop_active', str(self.estop_active))
+        stat.add('estop_fresh', str(estop_fresh))
+        stat.add('cmd_alive', str(self.cmd_is_alive(now)))
+        return stat
 
     def estop_is_fresh(self, now: int) -> bool:
         """Reject missing, stale, or time-reversed central E-stop input."""
