@@ -32,7 +32,16 @@ DIAG_FAULT_THRESHOLD = DIAG_WARN
 FALLBACK_COMPONENT = 'monitor'
 
 # name 조각(소문자) → 컴포넌트. 계층형·평면형 모두 이 표로 판정한다.
-# 왼쪽 항이 name 안에 부분 문자열로 있으면 매칭한다. 위쪽이 우선이다.
+# 왼쪽 항이 name 안에 부분 문자열로 있으면 매칭한다. **위쪽이 우선이다.**
+#
+# 순서가 곧 규칙이므로 새 항목을 아무 데나 끼우면 안 된다. 한 이름이 여러 항에
+# 걸릴 때 위에 있는 것이 이긴다. 2026-08-01에 이것으로 오분류가 나왔다 —
+# `lifecycle_manager_localization: Nav2 Health`는 'localization'과 'nav2'에 모두
+# 걸리는데 'localization'이 위에 있어서 위치추정 항목으로 분류됐다. Nav2
+# lifecycle 상태가 위치추정 상태로 보고되면 정비하는 사람이 엉뚱한 곳을 본다.
+#
+# 규칙: **더 구체적인 이름을 위에** 둔다. 노드 이름(nav2, bt_navigator)이
+# 컴포넌트 이름(localization)보다 구체적이다.
 _NAME_HINTS = (
     # 하드웨어
     ('mdrobot', 'motor'),
@@ -44,16 +53,17 @@ _NAME_HINTS = (
     ('nvblox', 'perception'),
     ('camera', 'perception'),
     ('perception', 'perception'),
-    # 위치추정 · 주행
-    ('/odom', 'localization'),
-    ('wheel/odom', 'localization'),
-    ('ekf', 'localization'),
-    ('localization', 'localization'),
+    # 주행. 위치추정보다 먼저 본다 — 위 주석의 lifecycle_manager 오분류 때문이다.
     ('nav2', 'navigation'),
     ('navigation', 'navigation'),
     ('controller_server', 'navigation'),
     ('planner_server', 'navigation'),
     ('bt_navigator', 'navigation'),
+    # 위치추정
+    ('/odom', 'localization'),
+    ('wheel/odom', 'localization'),
+    ('ekf', 'localization'),
+    ('localization', 'localization'),
     # 안전 · 안내
     ('safety', 'safety'),
     ('emergency', 'safety'),
@@ -106,6 +116,42 @@ def localize_message(message: object) -> str:
     if not message or not isinstance(message, str):
         return ''
     return _AGG_MESSAGES.get(message.strip().lower(), message)
+
+
+# 무시할 외부 진단. 판정에 넣지 않는다.
+#
+# 남의 노드가 내는 진단을 함부로 버리면 진짜 고장을 놓친다. 그래서 **한 번도 참인
+# 적이 없었다는 근거가 있을 때만** 여기 올린다. 지금 한 건뿐이다.
+#
+# robot_localization의 `odometry/filtered topic status`는 2026-08-01 실기에서
+# 기동 이후 단 한 번도 카운터가 돌지 않았다.
+#
+#     Events since startup: 0
+#     Actual frequency: 0.000000
+#     Minimum acceptable: 25.2 Hz
+#
+# 같은 시각 `/odom`은 24.7 Hz로 정상 발행 중이었다. `print_diagnostics: false`를
+# ekf.yaml에 넣어도 사라지지 않아(설정을 읽는 것은 확인했다) 소비 쪽에서 막는다.
+# robot_localization의 .cpp가 설치돼 있지 않아 정확한 기전은 확인하지 못했다.
+#
+# 이것이 상시 ERROR로 남으면 앱에 "주행 불가 · 위치추정 오류"가 계속 떠서
+# 관리자가 진짜 결함을 무시하게 된다. 6절이 경고한 "감시 도구가 스스로 오탐을
+# 만든다"의 실제 사례다.
+#
+# `/odom` 주기 감시는 우리 프로브가 대신한다(probes.yaml, min 20 / max 35 Hz).
+# 2026-08-01에 RViz가 두 개 떠 CPU가 모자랐을 때 15.5 Hz를 실제로 잡아냈다.
+IGNORED_NAME_FRAGMENTS = (
+    'odometry/filtered topic status',
+    'odometry filtered topic status',
+)
+
+
+def is_ignored(name: str) -> bool:
+    """Report whether this diagnostic should be dropped before judging."""
+    if not name:
+        return False
+    lowered = name.lower()
+    return any(frag in lowered for frag in IGNORED_NAME_FRAGMENTS)
 
 
 def parse_name(name: str) -> str:

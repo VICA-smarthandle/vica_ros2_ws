@@ -25,6 +25,25 @@ ekf_filter_node:
     publish_tf: true
     publish_acceleration: false
 
+    # robot_localization 자체 진단을 끈다. 2026-08-01 실기에서 이것이 상시 거짓
+    # ERROR를 냈고, 앱에 "주행 불가 · 위치추정 오류"로 떠서 원인을 한참 찾았다.
+    #
+    #   name: 'ekf_filter_node: odometry/filtered topic status'
+    #   message: No events recorded.
+    #   Events since startup: 0        <- 기동 이후 단 한 번도 세지 않았다
+    #   Actual frequency: 0.000000
+    #   Minimum acceptable: 25.2 Hz
+    #
+    # `Events since startup: 0`이 핵심이다. 주기가 낮은 것이 아니라 카운터가 아예
+    # 돌지 않는다. 실제 `/odom`은 같은 시각에 24.7 Hz로 정상 발행 중이었다.
+    # robot_localization의 .cpp가 설치돼 있지 않아 정확한 기전은 확인하지 못했다.
+    # 다만 **한 번도 참인 적이 없는 진단**이므로 끄는 것이 맞다.
+    #
+    # 주기 감시는 우리 계층이 이미 한다 — vica_system_monitor의 probes.yaml이
+    # `/odom`을 min 20 / max 35 Hz로 본다. 그쪽이 정본이며, 2026-08-01에 RViz가
+    # 두 개 떠 CPU가 모자랐을 때 15.5 Hz로 떨어진 것을 실제로 잡아냈다.
+    print_diagnostics: false
+
     # Canonical source: src/vica_localization/config/ekf.yaml
     # encoder_feedback publishes raw wheel odometry without TF.
     odom0: /wheel/odom

@@ -40,7 +40,7 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vica_interfaces.msg import RobotEvent, RobotFault, RobotHealth, RobotState
 
-from .agg_parser import from_status
+from .agg_parser import from_status, is_ignored
 from .event_deduplicator import EventDeduplicator, Observation
 from .fault_catalog import describe
 from .freshness import is_fresh_ns, sec_to_ns
@@ -224,6 +224,10 @@ class RobotHealthMonitorNode(Node):
         self.last_diag_ns = now_ns
 
         for status in msg.status:
+            # 한 번도 참인 적 없는 외부 진단은 여기서 버린다. 근거는
+            # agg_parser.IGNORED_NAME_FRAGMENTS 주석에 있다.
+            if is_ignored(status.name):
+                continue
             item = from_status(status.name, status.level, status.message)
             self.diag_items[status.name] = (item, now_ns)
 
@@ -241,6 +245,29 @@ class RobotHealthMonitorNode(Node):
         """Track the mission heartbeat."""
         self.last_robot_state_ns = self.steady_clock.now().nanoseconds
 
+    def _nav2_active_by_diagnostic(self) -> bool:
+        """Read Nav2 liveness from lifecycle_manager's own diagnostic.
+
+        `<node>/get_state` 서비스가 응답하지 않을 때 쓰는 두 번째 근거다.
+
+        2026-08-01 실기에서 `/bt_navigator/get_state` 호출이 응답 없이 멈췄다
+        (CLI로 부른 것도 10분간 반환되지 않았다). 그런데 같은 시각
+        `lifecycle_manager_navigation`은 "Nav2 is active"를 정상 발행하고 있었다.
+        서비스 하나가 막혔다고 Nav2 전체를 죽은 것으로 보고하면, 관리자 화면에
+        "주행 불가"가 뜨는데 실제로는 주행이 되는 어긋남이 생긴다.
+
+        lifecycle_manager는 자기가 관리하는 노드를 bond로 감시하므로, 그것이
+        active라고 말하면 그 관리 그룹은 살아 있다. 서비스 응답보다 약한 근거라
+        **서비스가 안 될 때만** 쓴다.
+        """
+        for name, (item, _seen) in self.diag_items.items():
+            lowered = name.lower()
+            if 'lifecycle_manager' not in lowered or 'nav2 health' not in lowered:
+                continue
+            if 'active' in (item.message or '').lower():
+                return True
+        return False
+
     def poll_nav2_state(self) -> None:
         """Poll the Nav2 lifecycle state.
 
@@ -249,7 +276,10 @@ class RobotHealthMonitorNode(Node):
         """
         if self._nav2_in_flight or not self.nav2_client.service_is_ready():
             if not self.nav2_client.service_is_ready():
-                self.nav2_state = 'unavailable'
+                # 서비스가 막혀도 lifecycle_manager 진단이 살아 있으면 그것을 믿는다.
+                self.nav2_state = (
+                    'active' if self._nav2_active_by_diagnostic() else 'unavailable'
+                )
             return
         self._nav2_in_flight = True
         future = self.nav2_client.call_async(GetState.Request())
@@ -262,10 +292,14 @@ class RobotHealthMonitorNode(Node):
             response = future.result()
         except Exception as exc:  # ROS future 예외는 배포판마다 다르다
             self.get_logger().warn(f'Nav2 lifecycle 조회 실패: {exc}')
-            self.nav2_state = 'unavailable'
+            self.nav2_state = (
+                'active' if self._nav2_active_by_diagnostic() else 'unavailable'
+            )
             return
         if response is None:
-            self.nav2_state = 'unavailable'
+            self.nav2_state = (
+                'active' if self._nav2_active_by_diagnostic() else 'unavailable'
+            )
             return
         self.nav2_state = str(response.current_state.label)
 
