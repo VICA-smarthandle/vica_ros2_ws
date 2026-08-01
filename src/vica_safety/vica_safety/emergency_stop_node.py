@@ -2,11 +2,13 @@
 
 import can
 import rclpy
+from diagnostic_updater import Updater
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
+from .diagnostics import LABEL_LATCH, STALE, latch_summary, sources_text
 from .emergency_latch import EmergencyLatch, LatchSnapshot
 from .freshness import sec_to_ns
 from .logging_utils import log_with_severity
@@ -119,6 +121,10 @@ class EmergencyStopNode(Node):
         self.last_f1_log_ns = None
         self.last_can_error_log_ns = None
         self.last_latch_state = "IDLE"
+        # 진단은 publish_loop가 이미 만든 스냅샷을 읽는다. 진단 콜백에서
+        # latch.evaluate()를 다시 부르면 CAN을 두 번 비우고 래치를 다시 세우는
+        # 부작용이 생긴다. 관측은 관측만 해야 한다.
+        self.last_snapshot: LatchSnapshot | None = None
 
         self.pub_estop = self.create_publisher(Bool, "/emergency_stop", 10)
         self.pub_estop_state = self.create_publisher(Bool, "/estop_state", 10)
@@ -156,6 +162,12 @@ class EmergencyStopNode(Node):
             self.publish_loop,
             clock=self.steady_clock,
         )
+
+        # /diagnostics가 없으면 aggregator의 Safety 경로가 항목 0개로 남아 경로
+        # 자체가 Stale이 된다. 정상인데도 관리자 화면에 고장으로 뜬다.
+        self.diag_updater = Updater(self)
+        self.diag_updater.setHardwareID(self.can_iface)
+        self.diag_updater.add(LABEL_LATCH, self.diagnose_latch)
 
         if self.input_mode == "can_f1":
             self.open_can_bus()
@@ -242,11 +254,47 @@ class EmergencyStopNode(Node):
             self.drain_can_f1_frames()
 
         snapshot = self.latch.evaluate(self.now_ns())
+        self.last_snapshot = snapshot
         msg = Bool()
         msg.data = snapshot.latched
         self.pub_estop.publish(msg)
         self.pub_estop_state.publish(msg)
         self.log_transition_if_needed(snapshot)
+
+    def can_input_is_ready(self) -> bool:
+        """Report whether the configured physical input path is actually open."""
+        if self.input_mode == "can_f1":
+            return self.bus is not None
+        # test_topic 모드는 CAN을 쓰지 않는다. 경로 없음을 고장으로 보고하지 않는다.
+        return True
+
+    def diagnose_latch(self, stat):
+        """Report whether this node can still judge safety, not whether it stopped.
+
+        래치가 걸려 있는 것은 결함이 아니라 상태다. 등급은 판정 능력만 반영하고
+        래치는 값으로 싣는다. 근거는 diagnostics 모듈 docstring에 있다.
+        """
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            stat.summary(STALE, '아직 첫 판정을 수행하지 않았습니다')
+            return stat
+
+        level, message = latch_summary(
+            can_ready=self.can_input_is_ready(),
+            physical_fresh=snapshot.physical_fresh,
+            # LatchSnapshot은 motor_can 신선도를 따로 담지 않는다. evaluate()가
+            # 그것을 active_sources에 넣으므로 여기서 되읽는다.
+            motor_can_fresh='motor_can_stale' not in snapshot.active_sources,
+            latch_state=classify_latch_state(snapshot),
+        )
+        stat.summary(level, message)
+        stat.add('latched', str(snapshot.latched))
+        stat.add('latch_state', classify_latch_state(snapshot))
+        stat.add('active_sources', sources_text(snapshot.active_sources))
+        stat.add('physical_fresh', str(snapshot.physical_fresh))
+        stat.add('reset_allowed', str(snapshot.reset_allowed))
+        stat.add('input_mode', self.input_mode)
+        return stat
 
     def drain_can_f1_frames(self) -> None:
         """Drain matching F1 frames without transmitting CAN data."""
