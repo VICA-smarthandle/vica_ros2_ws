@@ -92,11 +92,31 @@ def resolve_state_code(
         # 시간 역전(age < 0)이나 만료는 아래로 흘려보낸다
 
     # ③ 회전 cue (fresh할 때만).
+    #
+    # [실주행 정정 2026-08-01] 좌·우를 **일부러 뒤집어 보낸다.**
+    #
+    # 사용자 보고: "서보모터는 좌우 회전 피드백을 제대로 주는데 황색 점멸등이
+    # 좌우가 바뀌어서 온다." 즉 서보는 맞고 LED만 반대다.
+    #
+    # 올바른 자리는 펌웨어다. 황색 점멸등은 .ino의 drawLine()이 그리는 ORANGE
+    # 흐름선이고 어느 스트립에 그릴지는 WAVE_A/WAVE_B가 정한다. 그런데 젯슨에는
+    # arduino-cli도 Arduino IDE도 없어 펌웨어를 올릴 수 없다. 그래서 오늘은
+    # 여기서 뒤집는다. **임시 조치이며 정본은 펌웨어다.**
+    #
+    # 펌웨어를 고칠 수 있게 되면 반드시 이 교환을 되돌리고 .ino를 고친다.
+    # 양쪽을 다 뒤집으면 원위치가 되어 다시 반대로 보인다.
+    #
+    # 기록이 서로 어긋나 있다는 점도 남긴다. .ino 주석은 "bench에서 좌/우 모두
+    # LED 방향과 서보 방향이 일치함을 확인했다"고 하지만,
+    # devlog/2026-07-28-smart-handle-guidance-plan.md는 같은 항목을
+    # "LED 좌우 매핑 [미검증] — A/B 스트립의 물리적 좌·우 위치를 실측으로
+    # 확인만 하면 된다"로 남겼다. 오늘 실주행은 devlog 쪽을 지지한다.
+    # A/B 스트립의 물리적 좌우를 실측으로 확정하는 것이 남은 숙제다.
     if is_fresh_ns(inputs.turn_last_ns, now_ns, cue_timeout_ns):
         if inputs.turn_direction == DIRECTION_LEFT:
-            return GuidanceOutcome(protocol.STATE_LEFT, "turn_left")
+            return GuidanceOutcome(protocol.STATE_RIGHT, "turn_left")
         if inputs.turn_direction == DIRECTION_RIGHT:
-            return GuidanceOutcome(protocol.STATE_RIGHT, "turn_right")
+            return GuidanceOutcome(protocol.STATE_LEFT, "turn_right")
 
     # ④ 기본.
     return GuidanceOutcome(protocol.STATE_NORMAL, "normal")
