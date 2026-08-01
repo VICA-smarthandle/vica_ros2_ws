@@ -1,0 +1,11 @@
+# 진행 중인 Mission을 제어하는 공통 요청.
+# 취소·일시정지·재개가 같은 형태를 쓰며, 무엇을 할지는 service 이름이 정한다.
+#   /vica/mission/cancel_destination   목적지 취소
+#   /vica/mission/pause_navigation     일시정지 (goal 취소 후 목적지 보관)
+#   /vica/mission/resume_navigation    다시 출발 (보관한 목적지로 재요청)
+#
+# 허용 여부는 Mission Manager가 판정한다. 요청자는 결과만 받는다.
+string request_id
+---
+bool accepted
+string message
