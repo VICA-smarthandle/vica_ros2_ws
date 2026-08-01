@@ -221,7 +221,25 @@ controller_server:
       # 교체만으로 서행이 11.0 -> 7.9 s로 줄었고 제어주기도 버텼다(중앙값
       # 50.1 ms, 75 ms 초과 1.0 %). short_circuit_trajectory_evaluation이
       # True라 조기 탈락이 유지되는 덕이다.
-      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      # 2026-08-01: ObstacleFootprint -> BaseObstacle 로 되돌린다.
+      #
+      # 위 주석이 적은 ObstacleFootprint의 장점은 사실이다. 그런데 그 장점은
+      # planner도 footprint를 볼 때만 성립한다. 오늘 planner를 NavFn(점)으로
+      # 되돌렸으므로 이대로 두면 **planner는 점, controller는 footprint**가 되어
+      # 이 저장소가 지금까지 싸워 온 불일치가 방향만 바뀐 채 그대로 남는다.
+      #
+      # 판정 기준을 둘 다 '점'으로 맞춘다. 2026-07-28까지의 실제 구성이며,
+      # 사용자 증언으로 그때 주행이 가장 좋았다. 다만 그때는 footprint가 실제보다
+      # 작았고(전방 15.5 cm, 좌우 4 cm) 범퍼가 부딪혔다. 이번에는 footprint를
+      # 실측값으로 유지한 채 판정 축만 맞추는 조합이며, 저장소에 처음 남긴다.
+      #
+      # 대가는 알고 받는다. BaseObstacle은 중심 셀 하나만 보므로 길이 0.905 m인
+      # 차체의 후방 0.60 m가 장애물에 들어가는 것을 걸러내지 못한다. 그 위험은
+      # inflation_radius가 흡수한다 — 아래에서 0.40으로 두는 이유다.
+      #
+      # 되돌리려면 아래 한 줄에서 BaseObstacle을 ObstacleFootprint로 바꾸고
+      # scale도 0.15로 되돌린다. 그때는 planner도 footprint 기반으로 함께 바꾼다.
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       # critic은 '충돌하면 무효'라는 하드 판정만 정확하게 만든다. '장애물에서
       # 멀어지려는 선호'의 세기는 scale이 정한다. 0.08에서는 무게가 이랬다:
       #   ObstacleFootprint 최대 기여 = 253 x 0.08 = 20.2
@@ -278,7 +296,7 @@ controller_server:
       # 임계값 비대칭(DWB 254 vs planner 253)은 여전히 열린 문제다. scale로는
       # 두 실패 모드 사이에 앉히지 못했다 - 0.15에서 lethal space가 1회(사람 없음)와
       # 25회(사람 있음)로 갈리므로, 이 값은 환경이 정하고 scale이 정하지 않는다.
-      ObstacleFootprint.scale: 0.15
+      BaseObstacle.scale: 0.08     # 2026-08-01 NavFn 복귀. 점 판정으로 맞춘 그때 값이다
       PathAlign.scale: 32.0
       # forward_point_distance는 "로봇 앞 이 거리의 점"을 경로에 정렬시키는
       # 기준점이다. 0.1은 footprint 전방(0.305) 안쪽, 즉 차체 내부라서
@@ -478,7 +496,7 @@ local_costmap:
       # 7.8 cm를 만든다)은 별개 과제다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
+        cost_scaling_factor: 3.5   # 2026-08-01 사용자 지정. NavFn 시절 4.0이 아니라 이 값으로 주행했다
         # 2026-07-31: 0.40 -> 0.50 -> 0.45.
         #
         # 0.50 실측(회차 ⑬, clearingonly_infl050): 화장실 29.5 s로 역대 최고,
@@ -505,7 +523,7 @@ local_costmap:
         # 0.45로 30초 진동을 실측했다). 복구가 없으므로 그 진동은 곧
         # progress_checker 실패, 즉 주행 종료다. 그 실패 자체가 "이 값에서
         # 이 통로는 못 쓴다"는 측정이다.
-        inflation_radius: 0.45
+        inflation_radius: 0.45     # 2026-08-01 저녁: 0.60은 통로 전체를 비용 지대로 만들어 경로가 진동했다
 
 global_costmap:
   global_costmap:
@@ -622,7 +640,7 @@ global_costmap:
       # 특히 중요하다. DWB는 PathDist/PathAlign(32.0)로 이 경로를 충실히 따른다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.5
+        cost_scaling_factor: 3.5   # 2026-08-01 사용자 지정. 잘 달렸던 조합의 값이다
         # 2026-07-31: 0.40 -> 0.50 -> 0.45.
         #
         # 0.50 실측(회차 ⑬, clearingonly_infl050): 화장실 29.5 s로 역대 최고,
@@ -649,7 +667,7 @@ global_costmap:
         # 0.45로 30초 진동을 실측했다). 복구가 없으므로 그 진동은 곧
         # progress_checker 실패,即 주행 종료다. 그 실패 자체가 "이 값에서
         # 이 통로는 못 쓴다"는 측정이다.
-        inflation_radius: 0.45
+        inflation_radius: 0.45     # 2026-08-01 저녁: 0.60은 통로 전체를 비용 지대로 만들어 경로가 진동했다
       always_send_full_costmap: True
 
 map_server:
@@ -669,7 +687,7 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 5.0 #20->5 hybrid쓰면 노이즈 로그 많아서 줄임.-
+    expected_planner_frequency: 20.0  # NavFn 복귀. 5.0은 Hybrid 로그 억제용이었다
     use_sim_time: false
     planner_plugins: ["GridBased"]
     # NavFn(gradient descent)은 비용이 거의 같은 셀 사이에서 경로가 진동한다.
@@ -831,35 +849,81 @@ planner_server:
     # Lattice에는 Hybrid의 minimum_turning_radius / angle_quantization_bins /
     # motion_model_for_search / downsample_costmap 파라미터가 없다
     # (libnav2_smac_planner_lattice.so 확인). 격자 파일 metadata가 대신 정한다.
+    # 2026-08-01: Lattice를 걷어내고 NavFn으로 되돌린다.
+    #
+    # 되돌리는 이유는 이론이 아니라 실측이다. 오늘 안내소 -> 방2 주행에서
+    # 7.1 m를 간 뒤 목표 3 m 앞에서 ABORT했고, 그 자리에서 라이다는 정면 1.17 m,
+    # 좌앞 0.60 m, 우측 3.75 m를 보고 있었다. 오른쪽이 뚫려 있는데 우회 경로가
+    # 나오지 않았다. 사용자 평가로도 "장애물 회피를 아예 못한다"였다.
+    #
+    # 위 주석이 적은 대로 NavFn에는 경로 진동 결함이 있다(앞 1 m 누적 꺾임
+    # 31~2639도). 그것을 알고도 되돌리는 근거는, 사용자가 NavFn 시절에
+    # **footprint를 실측값으로 고친 상태로** 주행했을 때 훨씬 잘 달렸다는
+    # 증언이다. 그 조합은 커밋된 적이 없어 저장소에 기록이 없었다.
+    # 이 커밋이 그 조합을 처음으로 남긴다.
+    #
+    #   NavFn(옛 footprint)  -> 범퍼 충돌. 폐기된 조합이다
+    #   NavFn(실측 footprint) -> 잘 달렸다. 기록 없음. 이번에 재현한다
+    #   Lattice(실측 footprint) -> 2026-08-01 실패
+    #
+    # **footprint는 절대 되돌리지 않는다.** 옛 값은 실제 차체보다 전방 15.5 cm,
+    # 좌우 4 cm 작아 범퍼가 부딪혔다. 줄자 실측으로 고친 지금 값을 유지한다.
+    #
+    # Lattice로 되돌리려면 아래를 원복한다:
+    #   plugin: "nav2_smac_planner/SmacPlannerLattice"
+    #   lattice_filepath: ".../5cm_resolution/0.5m_turning_radius/diff/output.json"
+    #   allow_reverse_expansion: false / rotation_penalty: 5.0
+    #   cost_penalty: 4.0 / cache_obstacle_heuristic: true
+    #   max_iterations / max_on_approach_iterations / max_planning_time
+    #   smooth_path: true 와 smoother 블록
+    # 2026-08-01 저녁: NavFn -> SmacPlanner2D. 같은 날 두 번째 교체다.
+    #
+    # NavFn으로는 두 증상을 동시에 없앨 수 없다는 것이 하루 실주행으로 확인됐다.
+    #
+    #   inflation 0.45 : 경로가 고정 장애물에 붙어 몸체가 부딪혔다
+    #   inflation 0.60 : 부딪힘은 사라졌지만 코너에서 멈추고 yaw가 지그재그
+    #
+    # 뒤쪽은 이 파일이 이미 예언해 둔 증상이다. inflation_layer 주석의
+    # "0.65로 올렸을 때" 문단이 그대로다 — 통로 전체가 비용 지대가 되면 NavFn의
+    # 최소비용 경로가 거의 동점이 되어 LiDAR 노이즈마다 경로가 뒤바뀌고 주춤거린다.
+    # 반대로 0.35 문단은 "경사 구간이 폭 7 cm뿐이라 중앙 유도력이 없어 벽에 붙었다"
+    # 고 적었다. 좁히면 붙고 넓히면 진동하는 것이 NavFn의 구조적 한계다.
+    #
+    # 원인은 NavFn에 **비용 회피 가중치가 없다**는 것이다. 파라미터가
+    # tolerance / use_astar / allow_unknown 셋뿐이라, 경로를 벽에서 떼는 유일한
+    # 수단이 inflation_radius를 키우는 것이고 그 대가가 진동이다.
+    #
+    # SmacPlanner2D는 cost_travel_multiplier로 비용을 명시적으로 가중한다.
+    # 좁은 inflation(0.45)으로도 통로 중앙을 유지할 수 있어 두 증상이 분리된다.
+    # 로봇을 점으로 보는 것은 NavFn과 같으므로 DWB의 BaseObstacle과 판정 축이
+    # 그대로 일치한다 — test_planner_and_controller_use_the_same_collision_model이
+    # 그 계약을 지킨다.
+    #
+    # ---------------------------------------------------------------------
+    # 2026-08-02: SmacPlanner2D -> NavFn 되돌림. 사용자 지정.
+    #
+    # 위 SmacPlanner2D 전환은 **실주행으로 한 번도 시험하지 않았다.** 어제
+    # 마지막으로 실제 달린 상태(run03)는 NavFn이고, 그 조합을 먼저 다시
+    # 재현한다. 미검증 조합을 기준선으로 깔면 다음 회차에 무엇이 달라졌는지
+    # 가를 수 없다 — 한 번에 한 변수만 바꾼다는 원칙이 그것이다.
+    #
+    # SmacPlanner2D로 다시 가려면 아래를 원복한다(위 문단의 근거는 그대로 유효하다):
+    #   plugin: "nav2_smac_planner/SmacPlanner2D"
+    #   tolerance: 0.2 / downsample_costmap: false / downsampling_factor: 1
+    #   allow_unknown: true / max_iterations: 1000000
+    #   max_on_approach_iterations: 1000 / max_planning_time: 0.5
+    #   cost_travel_multiplier: 3.0 / use_final_approach_orientation: false
+    #   smoother: max_iterations 1000 / w_smooth 0.3 / w_data 0.2 /
+    #             tolerance 1.0e-10
+    #   (NavFn 전용 키 use_astar 는 함께 지운다)
+    # ---------------------------------------------------------------------
     GridBased:
-      plugin: "nav2_smac_planner/SmacPlannerLattice"
-
-      # nav2 기본값은 ackermann 격자다. VICA는 차동구동이라 diff를 써야 하고,
-      # grid_resolution 0.05가 costmap resolution과 같아야 primitive 끝점이
-      # 셀 경계에 맞는다.
-      lattice_filepath: "/opt/ros/humble/share/nav2_smac_planner/sample_primitives/5cm_resolution/0.5m_turning_radius/diff/output.json"
-
-      # 후진 primitive로 확장하지 않는다. 위 DUBIN과 같은 이유다.
-      allow_reverse_expansion: false
-      # 제자리 회전 primitive에 붙는 비용. 낮추면 아무 데서나 돌고, 높이면
-      # 되돌아서야 할 곳에서도 호로 우회한다. 이 값이 Lattice의 주 노브다.
-      rotation_penalty: 5.0
-
-      # 아래는 위 GridBased 블록과 반드시 같은 값을 유지한다(A/B 전제).
-      cost_penalty: 4.0
-      cache_obstacle_heuristic: true
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      # run03과 같은 값이다. planner 외의 변수를 섞지 않는다.
       tolerance: 0.2
+      # NavFn의 A*는 경로 품질이 아니라 탐색 방식만 바꾼다. run03은 false였다.
+      use_astar: false
       allow_unknown: true
-      max_iterations: 1000000
-      max_on_approach_iterations: 1000
-      max_planning_time: 1.0
-
-      smooth_path: true
-      smoother:
-        max_iterations: 1000
-        w_smooth: 0.3
-        w_data: 0.2
-        tolerance: 1.0e-10
 
 smoother_server:
   ros__parameters:
@@ -892,8 +956,23 @@ behavior_server:
     transform_tolerance: 0.1
     use_sim_time: false
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
+    # 2026-08-01 실주행에서 사용자가 "도착 직전 천천히 가다가 훽 돌아버린다"고
+    # 보고했다. 원인은 두 속도의 낙차다.
+    #
+    #   슬로우스탑 40 % 구간   max_vel_theta  0.16 rad/s  (9도/초)
+    #   Spin 복구              max_rotational_vel 1.0     (57도/초)   -> 6.3배
+    #
+    # 시각장애인이 핸들을 잡고 걷는 로봇이라 이 급변은 중심을 잃게 만든다.
+    # 주행 중 회전(DWB max_vel_theta 0.4)과 같은 값으로 낮춘다. 복구가 빠른 것보다
+    # 예측 가능한 것이 중요하다. 0.30 rad짜리 Spin 한 번이 0.39초에서 0.75초로
+    # 늘어날 뿐이고, RoundRobin 6회에서 Spin은 2회뿐이라 총 0.7초 손해다.
+    #
+    # min도 함께 내려야 한다. spin.cpp는
+    #   vel = clamp(sqrt(2*acc_lim*remaining), min, max)
+    # 이므로 min이 0.4로 남으면 clamp(_,0.4,0.4)가 되어 늘 0.4가 나오고
+    # 끝에서 부드럽게 멈추는 감속 곡선이 통째로 사라진다.
+    max_rotational_vel: 0.4
+    min_rotational_vel: 0.15
     rotational_acc_lim: 3.2
 
 robot_state_publisher:
@@ -940,7 +1019,7 @@ velocity_smoother:
     #   그 0.21 s(제어주기 4회분) 지연이 목표 방위를 지나치게 만들고, 반대로
     #   꺾었다가 또 지나치는 한계 진동 = 주행 중 비틀거림을 만들었다
     #   (2026-07-27 실주행 영상). DWB acc/decel_lim_theta와 정합시킨다.
-    max_decel: [-2.5, 0.0, -3.2]
+    max_decel: [-1.0, 0.0, -3.2]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
