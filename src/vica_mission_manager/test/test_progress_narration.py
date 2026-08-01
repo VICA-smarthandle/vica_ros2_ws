@@ -75,11 +75,11 @@ def test_no_speed_limit_before_first_stage(navigating):
 
 def test_speed_limit_descends_stage_by_stage(navigating):
     """한 Goal 안에서 70 → 55 → 40 % 가 순서대로 한 번씩만 나간다."""
-    assert _speed_limits(navigating.on_tick(1.0, NavStatus.RUNNING, 1.5)) == [70.0]
+    assert _speed_limits(navigating.on_tick(1.0, NavStatus.RUNNING, 1.0)) == [80.0]
     assert _speed_limits(navigating.on_tick(2.0, NavStatus.RUNNING, 1.2)) == []
-    assert _speed_limits(navigating.on_tick(3.0, NavStatus.RUNNING, 1.0)) == [55.0]
+    assert _speed_limits(navigating.on_tick(3.0, NavStatus.RUNNING, 0.5)) == [60.0]
     assert _speed_limits(navigating.on_tick(4.0, NavStatus.RUNNING, 0.7)) == []
-    assert _speed_limits(navigating.on_tick(5.0, NavStatus.RUNNING, 0.5)) == [40.0]
+    assert _speed_limits(navigating.on_tick(5.0, NavStatus.RUNNING, 0.3)) == []
     assert _speed_limits(navigating.on_tick(6.0, NavStatus.RUNNING, 0.2)) == []
 
 
@@ -88,11 +88,11 @@ def test_speed_limit_never_goes_back_up(navigating):
 
     제한이 오르내리면 핸들을 잡은 사용자 손에 울컥거림으로 전달된다.
     """
-    navigating.on_tick(1.0, NavStatus.RUNNING, 0.9)  # 55 % 진입
+    navigating.on_tick(1.0, NavStatus.RUNNING, 0.9)  # 80 % 진입
 
     assert _speed_limits(navigating.on_tick(2.0, NavStatus.RUNNING, 1.4)) == []
     assert _speed_limits(navigating.on_tick(3.0, NavStatus.RUNNING, 4.0)) == []
-    assert navigating.approach_speed_limit_percent == 55.0
+    assert navigating.approach_speed_limit_percent == 80.0
 
 
 def test_missing_distance_does_not_move_the_ladder(navigating):
@@ -122,7 +122,7 @@ def test_clears_approach_speed_limit_when_estop_cancels_goal(navigating):
 
 def test_new_destination_resets_the_ladder(navigating):
     """목적지가 바뀌면 다음 접근은 처음 단계부터 다시 내려간다."""
-    navigating.on_tick(1.0, NavStatus.RUNNING, 0.4)  # 40 % 까지 소진
+    navigating.on_tick(1.0, NavStatus.RUNNING, 0.4)  # 60 % 까지 소진
     navigating.on_tick(2.0, NavStatus.SUCCEEDED)
     navigating.on_tick(10.0, NavStatus.NONE)  # dwell 경과 -> idle
 
@@ -130,18 +130,18 @@ def test_new_destination_resets_the_ladder(navigating):
 
     assert navigating.approach_speed_limit_percent == 0.0
     assert _speed_limits(navigating.on_tick(12.0, NavStatus.RUNNING, 2.0)) == []
-    assert _speed_limits(navigating.on_tick(13.0, NavStatus.RUNNING, 1.4)) == [70.0]
+    assert _speed_limits(navigating.on_tick(13.0, NavStatus.RUNNING, 0.9)) == [80.0]
 
 
 def test_resume_resets_the_ladder(navigating):
     """일시정지 후 재개도 새 Goal 이다."""
-    navigating.on_tick(1.0, NavStatus.RUNNING, 0.9)  # 55 % 진입
+    navigating.on_tick(1.0, NavStatus.RUNNING, 0.9)  # 80 % 진입
     navigating.on_pause_request(2.0)
     actions, _ = navigating.on_resume_request(True, 3.0)
 
     assert _speed_limits(actions) == [0.0]
     assert navigating.approach_speed_limit_percent == 0.0
-    assert _speed_limits(navigating.on_tick(4.0, NavStatus.RUNNING, 1.4)) == [70.0]
+    assert _speed_limits(navigating.on_tick(4.0, NavStatus.RUNNING, 0.9)) == [80.0]
 
 
 def test_stage_list_is_configurable():
