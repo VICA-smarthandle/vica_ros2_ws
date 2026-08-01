@@ -25,10 +25,34 @@ Nav2 `NavigateToPose` Goal을 생성한다.
 | 발행 | `/vica/robot_state` | `vica_interfaces/msg/RobotState` |
 | 발행 | `/speed_limit` | `nav2_msgs/msg/SpeedLimit` |
 
-Nav2 feedback의 잔여거리가 기본 3.0 m 이하가 되면 Goal별로 70% 속도 제한을 래치한다.
-성공·실패·취소·E-stop과 새 Goal 시작 시 `speed_limit=0.0`으로 해제한다. 거리와 비율은
-`approach_slowdown_distance_m`, `approach_speed_limit_percent` launch parameter로
-조정할 수 있으며 실제 주행 종단은 `[미검증]`이다.
+## 목적지 접근 감속
+
+Nav2 feedback의 잔여거리에 따라 `/speed_limit`(percentage)으로 최대속도 상한을 단계적으로
+내린다. 급정지의 실체는 감속률이 아니라 속도 낙차(Δv)이므로, 세우기 전에 이미 느리게
+만드는 설계다. `/speed_limit`은 `max_vel_x`·`max_vel_theta`만 바꾸고 `decel_lim_*`은
+건드리지 않아 비상 제동력은 그대로다.
+
+| 잔여거리 | 제한 | max_vel_x | 정지 시 Δv |
+|---|---|---|---|
+| ~1.5 m | 100 % | 0.260 | 0.260 |
+| ≤ 1.5 m | 70 % | 0.182 | 0.182 |
+| ≤ 1.0 m | 55 % | 0.143 | 0.143 |
+| ≤ 0.5 m | 40 % | 0.104 | 0.104 |
+
+한 번 내려간 제한은 그 Goal 동안 다시 올라가지 않는다(latch). Nav2 잔여거리는 재계획마다
+출렁이므로, 그때마다 제한이 오르내리면 사용자 손에 울컥거림으로 전달된다. 성공·실패·취소·
+일시정지·E-stop과 새 Goal 시작 시 `speed_limit=0.0`으로 해제하고 사다리를 초기화한다.
+
+단계는 `approach_slowdown_distances_m`, `approach_speed_limit_percents` launch
+parameter(double 배열, 순번끼리 짝)로 조정한다. 단계 개수도 바꿀 수 있고, 빈 배열이면
+접근 감속을 끈다. 가까운 단계일수록 비율이 낮아야 하며 어기면 기동 시 거부한다.
+
+첫 감속 지점은 3.0 m가 아니라 1.5 m다. 최고속도 0.26 m/s에서 3 m는 그 자체로 11.5초라,
+아직 도착 준비가 필요 없는 구간을 미리 늦추면 손해만 크다는 판단이다(2026-08-01).
+음성 안내는 그대로 3 m에서 나가므로 사용자는 먼저 듣고 그 다음 감속을 느낀다.
+
+마지막 단계는 `max_vel_theta`도 0.16 rad/s로 낮추므로 **목적지 직전 0.5 m에 회전이 남으면
+도착이 지연된다.** 실제 주행 종단은 `[미검증]`이다.
 
 목적지 정본은 다음 지도별 파일이다.
 

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
+
+from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
 
 # 하드 긴급어: 즉시 goal 취소 + estopped 진입 (LLM 우회 경로).
 # "천천히/느리게/잠깐" 등 감속·유보 계열은 v2 (TODOS.md #6) — 여기서는 무시한다.
@@ -171,6 +173,9 @@ MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
 # 각 지점은 목적지 하나당 한 번만 안내한다.
+#
+# 감속 단계(approach_speed.DEFAULT_APPROACH_STAGES)와는 별개다. 안내는 3 m 에서
+# 하고 감속은 1.5 m 부터 시작한다 — 사용자가 먼저 듣고, 그 다음 몸으로 느낀다.
 DISTANCE_MILESTONES_M = (10.0, 3.0)
 
 _REJECT_MESSAGES = {
@@ -303,20 +308,14 @@ class MissionLogic:
         confirm_timeout_sec: float = 30.0,
         dwell_sec: float = 2.0,
         estop_release_grace_sec: float = 2.0,
-        approach_slowdown_distance_m: float = 3.0,
-        approach_speed_limit_percent: float = 70.0,
+        approach_stages: Optional[Sequence] = None,
     ) -> None:
-        if approach_slowdown_distance_m <= 0.0:
-            raise ValueError("approach_slowdown_distance_m must be greater than 0")
-        if not 0.0 < approach_speed_limit_percent <= 100.0:
-            raise ValueError(
-                "approach_speed_limit_percent must be in the range (0, 100]"
-            )
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
         self.estop_release_grace_sec = estop_release_grace_sec
-        self.approach_slowdown_distance_m = approach_slowdown_distance_m
-        self.approach_speed_limit_percent = approach_speed_limit_percent
+        # 접근 감속 사다리. 단계 검증(거리 양수·비율 범위·단조 감소)은
+        # ApproachSpeedLadder 가 하고 잘못된 값이면 여기서 ValueError 로 죽는다.
+        self._approach = ApproachSpeedLadder(approach_stages)
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -334,7 +333,18 @@ class MissionLogic:
         self._estop_entered_at: Optional[float] = None
         self._estop_clear_since: Optional[float] = None
         self._announced_milestones: set = set()  # 이번 목적지에서 안내한 거리 지점
-        self._approach_speed_limited = False
+
+    # -- 접근 감속 조회 ---------------------------------------------------------
+
+    @property
+    def approach_stages(self) -> tuple:
+        """검증·정렬을 마친 접근 감속 단계 목록 (먼 거리부터)."""
+        return self._approach.stages
+
+    @property
+    def approach_speed_limit_percent(self) -> float:
+        """지금 걸려 있는 접근 제한율. 제한 전이면 0.0(해제)."""
+        return self._approach.percent
 
     # -- 입력 이벤트 -----------------------------------------------------------
 
@@ -387,9 +397,9 @@ class MissionLogic:
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._announced_milestones = set()
-        self._approach_speed_limited = False
+        self._approach.reset()
         return [
-            SetNavSpeedLimit(0.0),
+            SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(MSG_START.format(name=dest.name)),
             Navigate(dest),
         ]
@@ -406,7 +416,7 @@ class MissionLogic:
         if reason != GateReason.OK:
             return [], reason
 
-        actions: list = [SetNavSpeedLimit(0.0)]
+        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if self.state == State.NAVIGATING:
             actions.append(CancelNav(self.active_destination))
         self._to_idle()
@@ -421,7 +431,7 @@ class MissionLogic:
 
         destination = self.active_destination
         actions: list = [
-            SetNavSpeedLimit(0.0),
+            SetNavSpeedLimit(NO_SPEED_LIMIT),
             CancelNav(destination, event="goal_paused"),
         ]
         self.state = State.PAUSED
@@ -431,7 +441,7 @@ class MissionLogic:
         self._cancel_confirm_deadline = None
         # 재개하면 새 goal 이므로 거리 안내도 처음부터 다시 한다.
         self._announced_milestones = set()
-        self._approach_speed_limited = False
+        self._approach.reset()
         actions.append(Say(MSG_PAUSED, priority="response"))
         return actions, GateReason.OK
 
@@ -449,10 +459,10 @@ class MissionLogic:
         self.active_destination = destination
         self.paused_destination = None
         self._announced_milestones = set()
-        self._approach_speed_limited = False
+        self._approach.reset()
         return (
             [
-                SetNavSpeedLimit(0.0),
+                SetNavSpeedLimit(NO_SPEED_LIMIT),
                 Say(MSG_RESUMED.format(name=destination.name)),
                 Navigate(destination),
             ],
@@ -494,7 +504,7 @@ class MissionLogic:
 
         actions: list = []
         if self.state == State.NAVIGATING:
-            actions.append(SetNavSpeedLimit(0.0))
+            actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
         self._enter_estopped(now)
@@ -510,7 +520,7 @@ class MissionLogic:
             if self.state != State.ESTOPPED:
                 actions: list = []
                 if self.state == State.NAVIGATING:
-                    actions.append(SetNavSpeedLimit(0.0))
+                    actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(CancelNav(self.active_destination))
                 self._enter_estopped(now)
                 actions.append(Say(MSG_ESTOPPED, priority="emergency"))
@@ -554,20 +564,20 @@ class MissionLogic:
                 )
                 self.state = State.ARRIVED
                 self._dwell_until = now + self.dwell_sec
-                self._approach_speed_limited = False
-                actions.append(SetNavSpeedLimit(0.0))
+                self._approach.reset()
+                actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                 actions.append(Say(text))
             elif nav_status == NavStatus.RUNNING:
-                if (
-                    distance_remaining is not None
-                    and 0.0 < distance_remaining
-                    <= self.approach_slowdown_distance_m
-                    and not self._approach_speed_limited
-                ):
-                    self._approach_speed_limited = True
-                    actions.append(
-                        SetNavSpeedLimit(self.approach_speed_limit_percent)
-                    )
+                # 접근 감속: 목적지에 가까워질수록 최대속도 상한을 한 단계씩 내려
+                # 도착 순간의 속도 낙차(Δv)를 줄인다. 근거와 단계 값의 뜻은
+                # approach_speed.py 모듈 docstring 에 있다.
+                #
+                # 사다리는 한 방향으로만 내려가므로, 재계획으로 잔여거리가 다시
+                # 늘어도 제한은 풀리지 않는다. 새 단계에 진입한 tick 에서만
+                # 값이 나오고 그 외에는 None 이라 중복 발행도 없다.
+                approach_percent = self._approach.update(distance_remaining)
+                if approach_percent is not None:
+                    actions.append(SetNavSpeedLimit(approach_percent))
                 milestone = self._crossed_milestone(distance_remaining)
                 if milestone is not None:
                     actions.append(
@@ -578,8 +588,8 @@ class MissionLogic:
                 # 여기 도달한 취소/실패는 주행 실패로 취급한다.
                 self.state = State.FAILED
                 self._dwell_until = now + self.dwell_sec
-                self._approach_speed_limited = False
-                actions.append(SetNavSpeedLimit(0.0))
+                self._approach.reset()
+                actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                 actions.append(Say(MSG_NAV_FAILED))
 
         elif self.state in (State.ARRIVED, State.FAILED):
@@ -638,7 +648,7 @@ class MissionLogic:
         self._estop_entered_at = now
         self._estop_clear_since = None
         self._announced_milestones = set()
-        self._approach_speed_limited = False
+        self._approach.reset()
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -652,4 +662,4 @@ class MissionLogic:
         self._estop_entered_at = None
         self._estop_clear_since = None
         self._announced_milestones = set()
-        self._approach_speed_limited = False
+        self._approach.reset()

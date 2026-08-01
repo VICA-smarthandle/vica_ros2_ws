@@ -8,6 +8,8 @@
     ros2 launch vica_mission_manager mission_manager.launch.py \
         destinations_yaml:=/path/to/destinations.yaml map_yaml:=/path/to/map.yaml
 """
+from typing import List
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import (
@@ -16,6 +18,7 @@ from launch.substitutions import (
     PathJoinSubstitution,
 )
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -41,13 +44,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="2.0"),
+            # 접근 감속 단계. 두 배열은 순번끼리 짝이며 개수가 같아야 한다.
+            # 잔여거리가 1.5 m 이하면 70 %, 1.0 m 이하면 55 %, 0.5 m 이하면 40 %로
+            # 최대속도 상한을 내린다. 한 번 내려간 제한은 그 Goal 동안 풀리지 않는다.
+            # 값의 근거와 위험(마지막 구간 회전 지연)은 approach_speed.py 참조.
             DeclareLaunchArgument(
-                "approach_slowdown_distance_m",
-                default_value="3.0",
+                "approach_slowdown_distances_m",
+                default_value="[1.5, 1.0, 0.5]",
             ),
             DeclareLaunchArgument(
-                "approach_speed_limit_percent",
-                default_value="70.0",
+                "approach_speed_limit_percents",
+                default_value="[70.0, 55.0, 40.0]",
             ),
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
@@ -67,11 +74,15 @@ def generate_launch_description() -> LaunchDescription:
                         "estop_release_grace_sec": LaunchConfiguration(
                             "estop_release_grace_sec"
                         ),
-                        "approach_slowdown_distance_m": LaunchConfiguration(
-                            "approach_slowdown_distance_m"
+                        # 노드는 double 배열로 선언한다. launch 인자는 문자열이라
+                        # value_type 을 지정해야 "[1.5, 1.0, 0.5]" 가 배열로 해석된다.
+                        "approach_slowdown_distances_m": ParameterValue(
+                            LaunchConfiguration("approach_slowdown_distances_m"),
+                            value_type=List[float],
                         ),
-                        "approach_speed_limit_percent": LaunchConfiguration(
-                            "approach_speed_limit_percent"
+                        "approach_speed_limit_percents": ParameterValue(
+                            LaunchConfiguration("approach_speed_limit_percents"),
+                            value_type=List[float],
                         ),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),

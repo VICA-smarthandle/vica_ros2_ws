@@ -36,6 +36,7 @@ from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.srv import MissionCommand, RequestDestination
 
+from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_map_bounds
 from .mission_logic import (
     CancelNav,
@@ -76,8 +77,18 @@ class MissionManagerNode(Node):
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("confirm_timeout_sec", 30.0)
         self.declare_parameter("estop_release_grace_sec", 2.0)
-        self.declare_parameter("approach_slowdown_distance_m", 3.0)
-        self.declare_parameter("approach_speed_limit_percent", 70.0)
+        # 접근 감속 단계. ROS 2 파라미터에 쌍의 배열 타입이 없어 double 배열 둘로
+        # 나눠 받는다. 같은 순번끼리 짝이며 개수가 다르면 기동 시 죽는다.
+        # 기본값의 근거·위험은 approach_speed.py docstring 참조 — 특히 첫 감속
+        # 지점을 3.0 m 에서 1.5 m 로 늦춘 이유가 거기 있다.
+        self.declare_parameter(
+            "approach_slowdown_distances_m",
+            [distance for distance, _ in DEFAULT_APPROACH_STAGES],
+        )
+        self.declare_parameter(
+            "approach_speed_limit_percents",
+            [percent for _, percent in DEFAULT_APPROACH_STAGES],
+        )
         self.declare_parameter("tick_hz", 5.0)
         # RobotState 층/건물 값 소스는 미결 사항 #5 — 일단 파라미터.
         self.declare_parameter("current_floor", -1)
@@ -110,16 +121,31 @@ class MissionManagerNode(Node):
                 "실기 운용 전 반드시 지정할 것."
             )
 
+        # 잘못된 단계 조합으로 조용히 굴러가는 것보다 기동 시점에 죽는 편이 안전하다.
+        # 사용자가 핸들을 잡은 뒤 감속이 어긋난 것을 알게 되는 것이 가장 나쁘다.
+        try:
+            approach_stages = stages_from_lists(
+                self.get_parameter("approach_slowdown_distances_m").value,
+                self.get_parameter("approach_speed_limit_percents").value,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"접근 감속 단계 파라미터가 잘못되었습니다: {exc}") from exc
+
         self.logic = MissionLogic(
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
-            approach_slowdown_distance_m=float(
-                self.get_parameter("approach_slowdown_distance_m").value
-            ),
-            approach_speed_limit_percent=float(
-                self.get_parameter("approach_speed_limit_percent").value
-            ),
+            approach_stages=approach_stages,
         )
+        if approach_stages:
+            ladder = ", ".join(
+                f"{distance:.2f}m이하 {percent:.0f}%"
+                for distance, percent in approach_stages
+            )
+            self.get_logger().info(f"접근 감속 단계: {ladder}")
+        else:
+            self.get_logger().warn(
+                "접근 감속 단계가 비어 있습니다 — 목적지까지 최대속도로 접근합니다."
+            )
 
         # Nav2 커맨더. 별도 노드로 두고 executor 에 넣지 않는다.
         # 호출은 _nav_lock 으로 직렬화 (goToPose/cancelTask/isTaskComplete 는 짧게 끝남).
