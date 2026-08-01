@@ -10,6 +10,7 @@ from vica_system_monitor.agg_parser import (
     DIAG_STALE,
     DIAG_WARN,
     DiagItem,
+    is_ignored,
     localize_message,
     normalize_level,
     parse_name,
@@ -222,3 +223,57 @@ def test_no_diag_item_detail_is_a_bare_aggregator_token():
     for raw in ('Missing', 'Stale', 'Error', 'Warning', 'OK', 'No events recorded.'):
         detail = DiagItem('/VICA/Hardware/Motor', DIAG_ERROR, raw).detail
         assert detail.strip().lower() not in leaked, detail
+
+
+def test_nav2_lifecycle_manager_is_navigation_not_localization():
+    """`lifecycle_manager_localization: Nav2 Health`는 navigation 이다.
+
+    2026-08-01 실기에서 이 이름이 위치추정으로 분류됐다. 'localization'과 'nav2'에
+    모두 걸리는데 _NAME_HINTS 에서 'localization'이 위에 있었기 때문이다. Nav2
+    lifecycle 상태가 위치추정 상태로 보고되면 정비하는 사람이 엉뚱한 곳을 본다.
+
+    규칙은 "더 구체적인 이름을 위에"다. 노드 이름이 컴포넌트 이름보다 구체적이다.
+    """
+    assert parse_name(
+        '/VICA/Localization/lifecycle_manager_localization: Nav2 Health'
+    ) == 'navigation'
+    assert parse_name('lifecycle_manager_navigation: Nav2 Health') == 'navigation'
+
+
+def test_real_localization_items_still_map_to_localization():
+    """위 순서 변경이 진짜 위치추정 항목까지 옮기지 않았는지 확인한다."""
+    for name in (
+        'external_diagnostics_node: localization:  odom frequency topic status',
+        'external_diagnostics_node: localization: ekf_node cpu',
+        'ekf_filter_node: odometry/filtered topic status',
+    ):
+        assert parse_name(name) == 'localization', name
+
+
+def test_broken_ekf_frequency_diagnostic_is_ignored():
+    """robot_localization의 odometry/filtered 진단은 판정에서 뺀다.
+
+    2026-08-01 실기에서 기동 이후 단 한 번도 카운터가 돌지 않았다
+    (Events since startup: 0, Actual frequency: 0.000). 같은 시각 /odom 은
+    24.7 Hz로 정상 발행 중이었다. ekf.yaml 에 print_diagnostics: false 를
+    넣어도 사라지지 않아 소비 쪽에서 막는다.
+
+    이것이 상시 ERROR로 남으면 앱에 "주행 불가 · 위치추정 오류"가 계속 떠서
+    관리자가 진짜 결함을 무시하게 된다.
+    """
+    assert is_ignored('ekf_filter_node: odometry/filtered topic status')
+    assert is_ignored(
+        '/VICA/Other/ekf_filter_node: odometry filtered topic status'
+    )
+
+
+def test_ignore_list_does_not_swallow_our_own_odom_probe():
+    """우리 프로브가 보는 /odom 주기 감시는 살아 있어야 한다.
+
+    무시 목록이 넓어지면 진짜 주기 저하를 놓친다. 2026-08-01에 RViz가 두 개 떠
+    CPU가 모자랐을 때 이 프로브가 15.5 Hz를 잡아냈다.
+    """
+    assert not is_ignored(
+        'external_diagnostics_node: localization:  odom frequency topic status'
+    )
+    assert not is_ignored('external_diagnostics_node: localization: ekf_node cpu')
