@@ -1,7 +1,20 @@
 ekf_filter_node:
   ros__parameters:
     frequency: 30.0
-    sensor_timeout: 0.1
+
+    # [실측 2026-08-01] 0.1에서 0.2로 올린다.
+    #
+    # `/wheel/odom`의 실효 주기는 **9.45 Hz = 105.8 ms**다. MDROBOT 드라이버가 C5 응답을
+    # 약 105 ms마다 뭉쳐서 보내기 때문이며 encoder_feedback의 request_hz를 올려도 변하지
+    # 않는다(devlog 2026-07-31-health-monitor-implementation.md 14.14).
+    #
+    # 즉 기존 0.1(100 ms)은 **모든 주기마다 timeout을 넘겼다.** robot_localization은
+    # sensor_timeout이 지나면 그 센서가 끊겼다고 보고 **보정 없이 예측만** 수행한다.
+    # 필터가 상시로 눈을 감고 도는 셈이다.
+    #
+    # 0.2는 실효 주기의 약 2배로, 정말 끊겼을 때만 걸린다.
+    sensor_timeout: 0.2
+
     two_d_mode: true
 
     map_frame: map
