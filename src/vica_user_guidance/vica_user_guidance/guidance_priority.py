@@ -93,30 +93,34 @@ def resolve_state_code(
 
     # ③ 회전 cue (fresh할 때만).
     #
-    # [실주행 정정 2026-08-01] 좌·우를 **일부러 뒤집어 보낸다.**
+    # ══════════════════════════════════════════════════════════════════════
+    # [계약] 여기서 좌우를 뒤집지 않는다. 왼쪽이면 STATE_LEFT를 보낸다.
     #
-    # 사용자 보고: "서보모터는 좌우 회전 피드백을 제대로 주는데 황색 점멸등이
-    # 좌우가 바뀌어서 온다." 즉 서보는 맞고 LED만 반대다.
+    # 배선이 거꾸로 달린 것을 보정하는 자리는 **펌웨어 한 곳**이다. 상위에서
+    # 한 번 더 뒤집으면 두 반전이 서로 상쇄돼, 어느 층이 무엇을 뒤집는지
+    # 아무도 추적하지 못한다. test_left_cue_sends_left_code가 이 계약을 지킨다.
     #
-    # 올바른 자리는 펌웨어다. 황색 점멸등은 .ino의 drawLine()이 그리는 ORANGE
-    # 흐름선이고 어느 스트립에 그릴지는 WAVE_A/WAVE_B가 정한다. 그런데 젯슨에는
-    # arduino-cli도 Arduino IDE도 없어 펌웨어를 올릴 수 없다. 그래서 오늘은
-    # 여기서 뒤집는다. **임시 조치이며 정본은 펌웨어다.**
+    # 2026-08-01에 이 자리에서 좌우를 뒤집은 적이 있다. LED가 반대로 보인다는
+    # 보고를 여기서 대응한 것인데, 아두이노는 상태코드 하나로 LED와 서보를
+    # 같은 case에서 함께 정하므로 **서보까지 같이 뒤집혔다.** LED를 맞추면서
+    # 서보를 깨뜨린 셈이다. 시각장애인이 손목으로 느끼는 것은 서보다.
     #
-    # 펌웨어를 고칠 수 있게 되면 반드시 이 교환을 되돌리고 .ino를 고친다.
-    # 양쪽을 다 뒤집으면 원위치가 되어 다시 반대로 보인다.
+    # 2026-08-02 실측으로 원인이 확정됐다. ROS를 거치지 않고 펌웨어에 코드를
+    # 직접 넣어 확인했다.
     #
-    # 기록이 서로 어긋나 있다는 점도 남긴다. .ino 주석은 "bench에서 좌/우 모두
-    # LED 방향과 서보 방향이 일치함을 확인했다"고 하지만,
-    # devlog/2026-07-28-smart-handle-guidance-plan.md는 같은 항목을
-    # "LED 좌우 매핑 [미검증] — A/B 스트립의 물리적 좌·우 위치를 실측으로
-    # 확인만 하면 된다"로 남겼다. 오늘 실주행은 devlog 쪽을 지지한다.
-    # A/B 스트립의 물리적 좌우를 실측으로 확정하는 것이 남은 숙제다.
+    #   코드 1 STATE_LEFT   서보 왼쪽  (정상)   주황 LED 오른쪽 (반대)
+    #   코드 2 STATE_RIGHT  서보 오른쪽 (정상)   주황 LED 왼쪽  (반대)
+    #
+    # 즉 D8(A)이 왼쪽, D9(B)가 오른쪽이고 .ino 주석이 반대로 적혀 있었다.
+    # 서보는 펌웨어가 이미 올바르게 보정하고 있다. 남은 것은 펌웨어의 LED
+    # 배정뿐이며 그것은 아두이노를 올릴 수 있는 곳에서 고친다
+    # (docs/handoff_laptop_firmware_and_apk.md).
+    # ══════════════════════════════════════════════════════════════════════
     if is_fresh_ns(inputs.turn_last_ns, now_ns, cue_timeout_ns):
         if inputs.turn_direction == DIRECTION_LEFT:
-            return GuidanceOutcome(protocol.STATE_RIGHT, "turn_left")
+            return GuidanceOutcome(protocol.STATE_LEFT, "turn_left")
         if inputs.turn_direction == DIRECTION_RIGHT:
-            return GuidanceOutcome(protocol.STATE_LEFT, "turn_right")
+            return GuidanceOutcome(protocol.STATE_RIGHT, "turn_right")
 
     # ④ 기본.
     return GuidanceOutcome(protocol.STATE_NORMAL, "normal")
