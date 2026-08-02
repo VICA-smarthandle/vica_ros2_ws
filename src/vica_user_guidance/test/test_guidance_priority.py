@@ -90,19 +90,17 @@ def test_estop_can_be_disabled_for_development():
         arrival_hold_ns=ARRIVAL_HOLD,
         estop_required=False,
     )
-    # 좌회전 cue인데 STATE_RIGHT다 — 2026-08-01 하드웨어 임시 교환 때문이다.
     # 여기서 보는 것은 "E-stop을 끄면 회전 안내가 나온다"이지 좌우가 아니다.
-    assert out.state_code == protocol.STATE_RIGHT
+    assert out.state_code == protocol.STATE_LEFT
 
 
 def test_released_estop_returns_to_turn():
     """E-stop이 풀리면 회전 안내로 돌아간다.
 
-    좌회전 cue인데 STATE_RIGHT를 기대하는 것은 2026-08-01 하드웨어 임시 교환
-    때문이다. 이 시험이 보는 것은 좌우가 아니라 "E-stop 해제 후 회전 안내 복귀"다.
+    이 시험이 보는 것은 좌우가 아니라 "E-stop 해제 후 회전 안내 복귀"다.
     """
     out = resolve(estop_active=False, turn_direction=DIRECTION_LEFT)
-    assert out.state_code == protocol.STATE_RIGHT
+    assert out.state_code == protocol.STATE_LEFT
 
 
 # ── 도착이 회전보다 우선 ───────────────────────────────
@@ -135,26 +133,34 @@ def test_arrival_time_reversal_is_ignored():
 # ── 회전 cue ──────────────────────────────────────────
 
 
-def test_left_cue_maps_to_right_code_by_hardware_workaround():
-    """좌회전 cue는 STATE_RIGHT를 보낸다. **일부러 뒤집은 것이다.**
+def test_left_cue_sends_left_code():
+    """좌회전 cue는 STATE_LEFT를 보낸다. **여기서 좌우를 뒤집지 않는다.**
 
-    2026-08-01 실주행에서 사용자가 "서보는 좌우 피드백이 맞는데 황색 점멸등만
-    좌우가 바뀌어 온다"고 보고했다. 올바른 자리는 펌웨어(.ino)의 WAVE_A/WAVE_B
-    이지만 젯슨에 arduino-cli도 Arduino IDE도 없어 올릴 수 없어서, 오늘은
-    ROS 쪽에서 뒤집어 대응한다.
+    이 시험의 목적은 값 확인이 아니라 **계약을 못 박는 것**이다. 배선이 거꾸로
+    달린 것을 보정하는 자리는 펌웨어 한 곳이다. 상위에서 한 번 더 뒤집으면 두
+    반전이 상쇄돼 어느 층이 무엇을 뒤집는지 추적할 수 없게 된다.
 
-    **펌웨어를 고칠 수 있게 되면 이 교환과 이 시험을 함께 되돌린다.** 양쪽을
-    다 뒤집으면 원위치가 되어 다시 반대로 보인다.
+    2026-08-01에 실제로 그 일이 있었다. LED가 반대로 보인다는 보고를 이 자리에서
+    대응했는데, 아두이노는 상태코드 하나로 LED와 서보를 같은 case에서 함께 정하므로
+    **서보까지 뒤집혔다.** LED를 맞추면서 서보를 깨뜨린 셈이다.
+
+    2026-08-02 실측(ROS를 거치지 않고 펌웨어에 코드 직접 전송)으로 확정했다.
+
+        코드 1 STATE_LEFT   서보 왼쪽  정상 · 주황 LED 오른쪽  반대
+        코드 2 STATE_RIGHT  서보 오른쪽 정상 · 주황 LED 왼쪽   반대
+
+    남은 것은 펌웨어의 LED 배정뿐이다. **이 시험이 빨간불이면 고칠 자리는 여기가
+    아니라 .ino다.**
     """
     out = resolve(turn_direction=DIRECTION_LEFT)
-    assert out.state_code == protocol.STATE_RIGHT
+    assert out.state_code == protocol.STATE_LEFT
     assert out.reason == "turn_left"
 
 
-def test_right_cue_maps_to_left_code_by_hardware_workaround():
-    """우회전 cue는 STATE_LEFT를 보낸다. 위와 같은 임시 조치다."""
+def test_right_cue_sends_right_code():
+    """우회전 cue는 STATE_RIGHT를 보낸다. 위와 같은 계약이다."""
     out = resolve(turn_direction=DIRECTION_RIGHT)
-    assert out.state_code == protocol.STATE_LEFT
+    assert out.state_code == protocol.STATE_RIGHT
     assert out.reason == "turn_right"
 
 
