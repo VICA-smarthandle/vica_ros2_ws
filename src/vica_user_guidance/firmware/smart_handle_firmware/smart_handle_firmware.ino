@@ -152,7 +152,7 @@ void applyState(uint8_t state) {
     // 실제로는 서보를 왼쪽으로 움직인다. 2026-08-02 재실측에서도 그대로였다.
     // 상수명에 맞춰 "고치면" 오히려 반대로 동작한다. **서보 줄은 건드리지 말 것.**
     //
-    // ── LED: 좌우가 반대다 [아직 안 고침] ────────────────────────────
+    // ── LED: 좌우를 바로잡았다 (2026-08-02) ──────────────────────────
     // [정정 2026-08-02] 2026-07-28 주석의 "bench에서 좌/우 모두 LED 방향과 서보
     // 방향이 일치함을 확인했다"는 **틀렸다.** ROS를 거치지 않고 이 펌웨어에 코드를
     // 직접 넣어 확인했다(firmware/bench_test.py --hold 1 / --hold 2).
@@ -160,27 +160,30 @@ void applyState(uint8_t state) {
     //   코드 1 STATE_LEFT   서보 왼쪽  정상 · 주황 LED 오른쪽  반대
     //   코드 2 STATE_RIGHT  서보 오른쪽 정상 · 주황 LED 왼쪽   반대
     //
-    // 즉 D8(A)이 왼쪽이고 D9(B)가 오른쪽이다. 아래 (좌측)/(우측) 표기가 반대로
-    // 적혀 있었다. 고치는 방법은 두 case에서 **LED 두 줄만**(currentMode와
-    // setA/setB) 서로 맞바꾸는 것이다. servoMoveTo 줄은 그대로 둔다.
+    // 즉 D8(A)이 왼쪽이고 D9(B)가 오른쪽이다. 그 전 주석의 (좌측)/(우측) 표기가
+    // 반대로 적혀 있었다. 아래 두 case에서 **LED 두 줄만**(currentMode와
+    // setA/setB) 서로 맞바꿔 고쳤다. servoMoveTo 줄은 그대로 두었다.
     //
-    // 이 저장소에서는 아직 고치지 않았다. 젯슨에 아두이노 업로드 도구가 없어
-    // 소스만 고치면 실물과 어긋나기 때문이다. 고치고 올리는 절차는
-    // docs/handoff_laptop_firmware_and_apk.md에 있다.
+    // currentMode는 주황 흐름선이 흐를 스트립을 정하고 setA/setB는 반대쪽을
+    // 하늘색 상시 점등으로 둔다. 둘은 항상 짝을 이뤄 반대여야 한다.
+    //
+    // 2026-08-02 노트북(x86_64)에서 arduino-cli로 이 소스를 실물에 업로드하고
+    // bench_test.py --hold 1 / --hold 2로 확인했다. 코드 1은 주황·서보가 모두
+    // 왼쪽, 코드 2는 모두 오른쪽이었다. 소스와 실물이 일치한다.
     //
     // 상위(ROS)에서 뒤집어 때우지 않는다. 2026-08-01에 그렇게 했다가 LED는
     // 맞았지만 서보가 함께 뒤집혔다 — 코드 하나가 LED와 서보를 같이 정하기
     // 때문이다. test_left_cue_sends_left_code가 그 재발을 막는다.
     case STATE_LEFT:
-      currentMode = WAVE_B;   // D9 = 실제로는 우측 [반대. 위 주석 참고]
-      setA(SKY); setB(OFF);
-      servoMoveTo(SERVO_RIGHT);   // 실측: 서보가 왼쪽으로 이동 (정상)
+      currentMode = WAVE_A;   // D8 = 왼쪽 (2026-08-02 실측)
+      setB(SKY); setA(OFF);   // 주황이 흐르는 A는 끄고 반대쪽 B를 하늘색으로
+      servoMoveTo(SERVO_RIGHT);   // 실측: 서보가 왼쪽으로 이동 (정상). 건드리지 말 것
       break;
 
     case STATE_RIGHT:
-      currentMode = WAVE_A;   // D8 = 실제로는 좌측 [반대. 위 주석 참고]
-      setA(OFF); setB(SKY);
-      servoMoveTo(SERVO_LEFT);    // 실측: 서보가 오른쪽으로 이동 (정상)
+      currentMode = WAVE_B;   // D9 = 오른쪽 (2026-08-02 실측)
+      setA(SKY); setB(OFF);
+      servoMoveTo(SERVO_LEFT);    // 실측: 서보가 오른쪽으로 이동 (정상). 건드리지 말 것
       break;
 
     case STATE_ESTOP:
