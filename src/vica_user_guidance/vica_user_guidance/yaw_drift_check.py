@@ -52,7 +52,7 @@ class YawDriftCheck(Node):
 
         # turn_guide_node와 같은 기본값이어야 실제 판정을 재현한다.
         self.declare_parameter("window_sec", 1.5)
-        self.declare_parameter("enter_threshold_deg", 25.0)
+        self.declare_parameter("enter_threshold_deg", 20.0)
         self.declare_parameter("exit_threshold_deg", 10.0)
         self.declare_parameter("min_duration_sec", 0.6)
         self.declare_parameter("odom_timeout_sec", 0.5)

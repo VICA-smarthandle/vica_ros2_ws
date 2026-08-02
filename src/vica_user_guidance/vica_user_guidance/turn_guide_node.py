@@ -26,7 +26,7 @@ class TurnGuideNode(Node):
 
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("window_sec", 1.5)
-        self.declare_parameter("enter_threshold_deg", 25.0)
+        self.declare_parameter("enter_threshold_deg", 20.0)
         self.declare_parameter("exit_threshold_deg", 10.0)
         self.declare_parameter("min_duration_sec", 0.6)
         self.declare_parameter("odom_timeout_sec", 0.5)
