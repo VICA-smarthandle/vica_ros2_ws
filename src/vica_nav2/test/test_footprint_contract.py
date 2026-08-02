@@ -104,10 +104,29 @@ def test_padding_keeps_a_hard_clearance_margin(costmap):
     planner는 벽에서 inscribed radius(반폭 + padding)만큼 떨어진 곳까지 통과
     가능으로 본다. padding이 0이면 차체 가장자리가 벽에 정확히 닿는 경로가
     합법이 되어, AMCL 오차가 그대로 충돌이 된다(2026-07-27 실제 충돌).
+
+    2026-08-02: 하한을 0.05 -> 0.03으로 내린다. 반대 방향 실패가 실측됐다.
+
+    Smac의 GridCollisionChecker는 로봇 중심 셀이 253(INSCRIBED) 이상이면
+    footprint 모양을 보지도 않고 충돌로 끝낸다. 그 253 밴드를 칠하는 범위가
+    내접반경(반폭 + padding)이므로, padding이 클수록 "여기 서 있으면 안 된다"는
+    영역이 넓어진다. 2026-08-02 주행에서 planner "Starting point in lethal
+    space"가 회차마다 14회씩 나며 1 m 폭 구간을 통과하지 못했다.
+
+      padding 0.05 -> 내접 0.2775 m -> 1.0 m 통로에서 중심 허용폭 0.445 m
+      padding 0.03 -> 내접 0.2575 m ->                        0.485 m
+
+    같은 날 footprint를 육각형으로 바꿔 외접반경을 줄여봤으나 이 판정에는
+    영향이 없었다(lethal space 14회 -> 14회). 내접반경은 가장 가까운 변까지의
+    거리이고 그 변은 차체 좌우 변이라 뒤를 뾰족하게 해도 안 바뀐다.
+
+    0.03은 costmap 해상도 0.05 m보다 작다. 격자 반올림에 묻힐 수 있어 효과가
+    없을 가능성이 있고, 그 경우 남는 축은 차체 좌우 폭 축소(하드웨어)다.
+    벽·의자에 스치기 시작하면 0.05로 되돌린다.
     """
     params = _load_params()
     padding = params[costmap][costmap]['ros__parameters']['footprint_padding']
-    assert padding >= 0.05, (
+    assert padding >= 0.03, (
         f'{costmap} footprint_padding {padding}은 하드 여유로 부족하다'
     )
 
