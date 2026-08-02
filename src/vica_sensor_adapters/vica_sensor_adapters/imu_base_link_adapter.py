@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+import time
 
 import rclpy
 from geometry_msgs.msg import Vector3
@@ -103,8 +104,27 @@ class ImuBaseLinkAdapter(Node):
         #
         # 임계 0.05 rad/s(약 2.9°/s)는 실측 잡음 표준편차 0.0079 rad/s의 6배 이상이라
         # 정지 중 오탐이 나지 않는다.
-        self.declare_parameter("gyro_bias_sample_count", 4000)
+        # 편향 표본 수. publish_rate_hz 로 스로틀하면 그만큼 표본이 느리게
+        # 쌓이므로 함께 줄인다. 50 Hz x 1000개 = 20초로, 200 Hz x 4000개와 같다.
+        self.declare_parameter("gyro_bias_sample_count", 1000)
         self.declare_parameter("gyro_bias_max_rate", 0.05)
+
+        # 출력 주파수 상한. 0 이하면 제한하지 않는다(입력 그대로).
+        #
+        # 2026-08-02 주행 중 CPU 실측에서 이 노드가 **1위(34.7 %)** 였다. 하는 일은
+        # IMU 메시지의 좌표계를 바꿔 다시 내보내는 것뿐인데, D455 가 200 Hz 로
+        # 보내고 EKF 는 30 Hz 만 쓰므로 6배를 헛돌고 있었다.
+        #
+        # 비용의 대부분은 메시지당 tf_buffer.lookup_transform 호출이다. 스로틀을
+        # 콜백 맨 앞에 두어 TF 조회 자체를 건너뛴다.
+        #
+        # 같은 주행에서 load average 가 17.1(코어 8개)인데 CPU 는 461 %(4.6 코어)
+        # 였다. 계산이 많아서가 아니라 **실행 대기 줄이 길어서** controller 가
+        # 20 Hz 제어 주기를 382회 놓쳤고, 그것이 "주행이 매끄럽지 못하다"로
+        # 나타났다. 이 노드를 줄이면 그 줄이 짧아진다.
+        #
+        # 50 Hz 는 EKF 사용 주기(30 Hz)의 1.7배다. 더 낮추면 EKF 입력이 부족해진다.
+        self.declare_parameter("publish_rate_hz", 50.0)
 
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value
@@ -115,6 +135,11 @@ class ImuBaseLinkAdapter(Node):
             max_abs_rate=self.get_parameter("gyro_bias_max_rate").value,
         )
         self._bias_reported = False
+
+        rate = float(self.get_parameter("publish_rate_hz").value)
+        # monotonic 기준이다. 시스템 시계가 바뀌어도 간격 판정이 흔들리지 않는다.
+        self._min_period_sec = (1.0 / rate) if rate > 0.0 else 0.0
+        self._last_publish_monotonic = 0.0
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -133,6 +158,14 @@ class ImuBaseLinkAdapter(Node):
         )
 
     def imu_callback(self, msg: Imu):
+        # 스로틀은 TF 조회보다 **먼저** 한다. lookup_transform 이 이 노드 비용의
+        # 대부분이므로, 뒤에 두면 CPU 를 아끼지 못한다.
+        if self._min_period_sec > 0.0:
+            now = time.monotonic()
+            if now - self._last_publish_monotonic < self._min_period_sec:
+                return
+            self._last_publish_monotonic = now
+
         timeout = Duration(
             seconds=float(self.get_parameter("transform_timeout_sec").value)
         )
