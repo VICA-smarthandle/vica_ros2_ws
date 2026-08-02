@@ -30,8 +30,13 @@ BT_NAME = 'vica_navigate_to_pose_no_backup.xml'
 # 2026-07-31부터 launch가 실제로 쓰는 트리. 복구가 costmap 초기화뿐이다.
 # 지금까지의 완주 성적은 recovery가 흡수해서 나온 것이라, 순수 주행 실력을
 # 측정하려고 로봇을 움직이는 복구를 걷어냈다. 근거는 그 파일 상단 주석.
+NO_BACKUP_BT = 'vica_navigate_to_pose_no_backup.xml'
 CLEARING_ONLY_BT = 'vica_navigate_to_pose_clearing_only.xml'
-ACTIVE_BT = CLEARING_ONLY_BT
+# 2026-08-01: 측정이 끝나 제품 트리로 되돌렸다. clearing_only는 복구가 실패를
+# 흡수하는 것을 막아 순수 주행 실력을 재려고 만든 실험 트리였고, 그 측정에서
+# "복구 없이는 장애물 앞에서 못 빠져나온다"가 확인됐다(안내소 -> 방2, 목표
+# 3 m 앞 ABORT, 우측 3.75 m가 뚫려 있었는데 우회 못 함).
+ACTIVE_BT = NO_BACKUP_BT
 # 두 트리 모두 저장소에 남긴다. no_backup은 되돌릴 자리이므로 계속 검사한다.
 SHIPPED_BTS = (BT_NAME, CLEARING_ONLY_BT)
 # 측정용 트리에서 빼야 하는 것 = behavior_server가 로봇을 '움직이는' 복구.
@@ -104,6 +109,15 @@ def test_custom_bt_has_no_reverse_capable_node(node_name, bt_name):
 
 
 @pytest.mark.parametrize('node_name', MOTION_RECOVERY_NODES)
+@pytest.mark.skipif(
+    ACTIVE_BT != CLEARING_ONLY_BT,
+    reason=(
+        '측정용 트리에만 적용되는 계약이다. 2026-08-01에 그 측정을 마쳤고'
+        ' 제품 트리(no_backup)로 되돌렸다 — 복구 없이는 장애물 앞에서'
+        ' 빠져나오지 못한다는 것이 실기로 확인됐다. clearing_only를 다시'
+        ' 활성으로 두면 이 계약이 자동으로 살아난다.'
+    ),
+)
 def test_active_bt_has_no_motion_recovery(node_name):
     """측정용 트리에는 '로봇을 움직이는' 복구가 없어야 한다.
 

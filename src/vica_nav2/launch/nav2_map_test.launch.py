@@ -32,10 +32,21 @@ def generate_launch_description():
     #
     # 되돌릴 때는 아래 파일명을 vica_navigate_to_pose_no_backup.xml로 바꾼다.
     # 그 트리(BackUp 제거 + 좌우 Spin + Wait)는 그대로 남겨 두었다.
+    # 2026-08-01: 측정용 clearing_only에서 제품용 no_backup으로 되돌린다.
+    #
+    # clearing_only는 "복구가 실패를 흡수해서 순수 주행 실력이 한 번도 측정된
+    # 적이 없다"를 풀려고 만든 실험 트리였다. 오늘 그 측정을 했고 답이 나왔다 —
+    # 안내소 -> 방2에서 7.1 m를 간 뒤 목표 3 m 앞에서 ABORT했고, 오른쪽이
+    # 3.75 m 뚫려 있는데도 우회하지 못했다. 복구 없이는 못 빠져나온다.
+    #
+    # 측정이 끝났으므로 Spin(좌우 ±0.30 rad)과 Wait(5초)이 있는 트리로 돌아간다.
+    # BackUp은 여전히 없다 — 핸들 뒤에 사람이 따라온다.
+    #
+    # 되돌릴 때는 아래 파일명을 vica_navigate_to_pose_clearing_only.xml로 바꾼다.
     active_bt = os.path.join(
         vica_nav2_dir,
         "behavior_trees",
-        "vica_navigate_to_pose_clearing_only.xml",
+        "vica_navigate_to_pose_no_backup.xml",
     )
     wheel_ekf_launch = os.path.join(
         vica_localization_dir,

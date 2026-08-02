@@ -892,8 +892,21 @@ behavior_server:
     transform_tolerance: 0.1
     use_sim_time: false
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
+    # 2026-08-01: Spin 복구 회전을 주행 중 회전과 같은 속도로 맞춘다.
+    # "도착 직전 천천히 가다가 훽 돌아버린다"는 실주행 보고 때문이다. 낙차를
+    # 재보면 슬로우스탑 40 % 구간이 0.16 rad/s(9도/초)인데 Spin은 1.0(57도/초)로
+    # 6.3배였다.
+    #
+    # min도 함께 내린다. spin.cpp가 clamp(sqrt(2*acc*remaining), min, max)이므로
+    # min이 0.4로 남으면 남은 각도와 무관하게 늘 0.4가 나와 끝의 감속 곡선이
+    # 사라진다.
+    #
+    # 대가는 0.30 rad Spin 한 번에 0.39 -> 0.75초다. RoundRobin 6회에서 Spin은
+    # 2회뿐이라 총 0.7초 손해다.
+    #
+    # planner 비교와 무관한 공통 항목이다. NavFn 쪽 브랜치와 같은 값을 쓴다.
+    max_rotational_vel: 0.4
+    min_rotational_vel: 0.15
     rotational_acc_lim: 3.2
 
 robot_state_publisher:
@@ -940,7 +953,15 @@ velocity_smoother:
     #   그 0.21 s(제어주기 4회분) 지연이 목표 방위를 지나치게 만들고, 반대로
     #   꺾었다가 또 지나치는 한계 진동 = 주행 중 비틀거림을 만들었다
     #   (2026-07-27 실주행 영상). DWB acc/decel_lim_theta와 정합시킨다.
-    max_decel: [-2.5, 0.0, -3.2]
+    # [x] 직선 감속 2026-08-01: -2.5 -> -1.0. 사용자 승차감 요구다. 시각장애인이
+    #   핸들을 잡고 걷기 때문에 정지 순간의 충격이 곧 안전이다.
+    #   대가는 정지 거리다. 최고속도 0.26 m/s에서 감속 구간 이동이 1.35 -> 3.38 cm로
+    #   2.0 cm 늘어난다. footprint_padding 0.05 m가 이를 덮으므로 DWB가 계획한
+    #   정지선을 실제로 넘지 않는다. test_nav2_params_contract가 그 관계를 지킨다.
+    #   회전(-3.2)은 위 문단대로 DWB와 그대로 맞춘다.
+    #
+    # planner 비교와 무관한 공통 항목이다. NavFn 쪽 브랜치와 같은 값을 쓴다.
+    max_decel: [-1.0, 0.0, -3.2]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

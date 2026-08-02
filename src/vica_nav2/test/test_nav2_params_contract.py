@@ -132,6 +132,19 @@ def test_smoother_lets_dwb_stop_moving_as_fast_as_it_plans_to():
     이 정합만으로 충돌이 막히지는 않는다. 정지거리의 대부분은 CAN·드라이버
     응답 지연 300 ms 구간의 이동(0.227 x 0.3 = 6.8 cm)이고, 감속 구간은
     -1.0에서 2.6 cm, -2.5에서 1.0 cm다. 그래도 줄일 수 있는 쪽은 줄인다.
+
+    2026-08-01 정정. 그전까지 이 시험은 `smoother >= DWB`를 요구했다. 그런데
+    사용자가 승차감을 위해 직선 감속만 -1.0으로 두기로 했다. 시각장애인이 핸들을
+    잡고 걷는 로봇이라 정지 순간의 충격이 곧 안전이기 때문이다.
+
+    그래서 요구를 '같아야 한다'에서 **'초과분이 footprint_padding 안에 있어야
+    한다'**로 바꾼다. 위 주석의 계산이 그대로 근거다 — 최고속도 0.26 m/s에서
+    감속 구간 이동은 -2.5에서 1.35 cm, -1.0에서 3.38 cm로 차이가 2.0 cm다.
+    padding 0.05 m가 이를 덮는다. 덮지 못하면 DWB가 계획한 정지선을 실제로
+    넘어서므로 그때는 감속을 되돌리거나 padding을 늘려야 한다.
+
+    회전 감속(-3.2)은 DWB와 그대로 맞춘다. 조향 지연은 승차감이 아니라
+    경로 이탈로 나타나기 때문이다.
     """
     params = _load_params()
     follow_path = params['controller_server']['ros__parameters']['FollowPath']
@@ -139,10 +152,21 @@ def test_smoother_lets_dwb_stop_moving_as_fast_as_it_plans_to():
 
     dwb_x_decel = abs(follow_path['decel_lim_x'])
     smoother_x_decel = abs(smoother['max_decel'][0])
+    max_vel_x = follow_path['max_vel_x']
+    padding = params['local_costmap']['local_costmap']['ros__parameters'][
+        'footprint_padding'
+    ]
 
-    assert smoother_x_decel >= dwb_x_decel, (
-        f'smoother 직선 감속 {smoother_x_decel}이 '
-        f'DWB decel_lim_x {dwb_x_decel}보다 약하다 — 정지거리가 계획보다 길어진다'
+    planned = max_vel_x ** 2 / (2 * dwb_x_decel)
+    actual = max_vel_x ** 2 / (2 * smoother_x_decel)
+    extra = actual - planned
+
+    assert extra <= padding, (
+        f'smoother 직선 감속 {smoother_x_decel}이 DWB {dwb_x_decel}보다 약해'
+        f' 정지거리가 {extra * 100:.1f} cm 더 길어지는데'
+        f' footprint_padding {padding * 100:.0f} cm를 넘는다.'
+        ' DWB가 계획한 정지선을 실제로 넘어서므로 감속을 되돌리거나'
+        ' padding을 늘린다'
     )
 
 

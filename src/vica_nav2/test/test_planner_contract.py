@@ -144,15 +144,43 @@ def test_exactly_one_planner_is_active_and_matches_the_bt_planner_id():
     )
 
 
-@pytest.mark.parametrize('which', ['active', 'alternative'])
-def test_planner_checks_the_full_footprint(which):
-    active, alternative = _planner_blocks(_load_params())
-    block = active if which == 'active' else alternative
+def test_planner_and_controller_use_the_same_collision_model():
+    """planner와 DWB critic이 같은 자로 재야 한다. 이것이 진짜 계약이다.
 
-    assert block['plugin'] in FOOTPRINT_AWARE_PLUGINS, (
-        f'{which} planner {block["plugin"]}는 footprint로 충돌을 검사하지 않는다.'
-        ' SmacPlanner2D/NavfnPlanner는 점 로봇이라 DWB가 거부하는 경로를 내고'
-        ' 2026-07-28 갇힘이 재발한다'
+    2026-08-01 정정. 그전까지 이 파일은 "planner가 footprint를 봐야 한다"를
+    계약으로 삼았다. 그런데 그날 실기에서 Lattice(footprint) + ObstacleFootprint
+    조합이 장애물 앞에서 우회하지 못했고, 사용자는 NavFn(점) + BaseObstacle(점)
+    시절이 훨씬 잘 달렸다고 보고했다.
+
+    두 시기를 다시 보면 공통점은 'footprint를 보느냐'가 아니라 **둘이 일치하느냐**다.
+
+        NavFn(점)    + BaseObstacle(점)       -> 일치. 잘 달렸다
+        Lattice(면)  + ObstacleFootprint(면)  -> 일치. 2026-08-01 실패
+        2D(점)       + ObstacleFootprint(면)  -> 불일치. 2026-07-28 갇힘
+
+    불일치가 재발을 부르는 축이므로 그것만 막는다. 어느 축으로 맞출지는 실측으로
+    고르는 튜닝 사항이지 계약이 아니다. 점으로 맞출 때의 대가(긴 차체 후방이
+    걸러지지 않는다)는 inflation_radius가 흡수하며 test_footprint_contract가
+    그 하한을 지킨다.
+    """
+    params = _load_params()
+    active, _alternative = _planner_blocks(params)
+    critics = params['controller_server']['ros__parameters']['FollowPath']['critics']
+
+    planner_sees_footprint = active['plugin'] in FOOTPRINT_AWARE_PLUGINS
+    controller_sees_footprint = 'ObstacleFootprint' in critics
+    controller_sees_point = 'BaseObstacle' in critics
+
+    assert controller_sees_footprint != controller_sees_point, (
+        f'DWB critics {critics}에 장애물 critic이 없거나 둘 다 있다.'
+        ' BaseObstacle(점)이나 ObstacleFootprint(면) 중 하나만 둔다'
+    )
+    assert planner_sees_footprint == controller_sees_footprint, (
+        f'planner {active["plugin"]}와 DWB critic이 로봇 형태를 다르게 본다.'
+        f' planner footprint={planner_sees_footprint},'
+        f' controller footprint={controller_sees_footprint}.'
+        ' 한쪽이 통과 가능으로 만든 경로를 다른 쪽이 거부해'
+        ' 2026-07-28 통로 갇힘이 재발한다. 둘을 함께 바꾼다'
     )
 
 
@@ -166,6 +194,12 @@ def test_turning_radius_clears_the_narrowest_measured_corner(which):
     params = _load_params()
     active, alternative = _planner_blocks(params)
     block = active if which == 'active' else alternative
+
+    if block['plugin'] not in FOOTPRINT_AWARE_PLUGINS:
+        pytest.skip(
+            f'{which} planner {block["plugin"]}는 점 로봇이라 이 키가 없다.'
+            ' 회전 반경·후진·계획 예산은 격자 기반 planner 전용 개념이다'
+        )
 
     radius = _turning_radius(block)
     needed = _min_corner_width(_padded_footprint(params), radius)
@@ -192,6 +226,12 @@ def test_planner_never_plans_a_reverse_segment(which):
     active, alternative = _planner_blocks(_load_params())
     block = active if which == 'active' else alternative
 
+    if block['plugin'] not in FOOTPRINT_AWARE_PLUGINS:
+        pytest.skip(
+            f'{which} planner {block["plugin"]}는 점 로봇이라 이 키가 없다.'
+            ' 회전 반경·후진·계획 예산은 격자 기반 planner 전용 개념이다'
+        )
+
     if block['plugin'].endswith('SmacPlannerHybrid'):
         # DUBIN은 전진 호와 직선만으로 이루어져 후진 primitive가 없다.
         # REEDS_SHEPP은 후진을 포함하므로 reverse_penalty로도 막을 수 없다.
@@ -209,6 +249,12 @@ def test_planner_never_plans_a_reverse_segment(which):
 def test_planning_budget_fits_the_replan_period(which):
     active, alternative = _planner_blocks(_load_params())
     block = active if which == 'active' else alternative
+
+    if block['plugin'] not in FOOTPRINT_AWARE_PLUGINS:
+        pytest.skip(
+            f'{which} planner {block["plugin"]}는 점 로봇이라 이 키가 없다.'
+            ' 회전 반경·후진·계획 예산은 격자 기반 planner 전용 개념이다'
+        )
 
     assert block['max_planning_time'] <= REPLAN_PERIOD_SEC, (
         f'{which} planner의 max_planning_time {block["max_planning_time"]}가'
@@ -233,6 +279,8 @@ def test_active_hybrid_does_not_downsample_the_narrow_corridor_away():
 
 
 def test_lattice_file_matches_the_map_and_keeps_in_place_rotation():
+    if not _has_lattice(_load_params()):
+        pytest.skip('활성·대안 어느 블록도 Lattice가 아니다')
     """Lattice를 쓰는 이유가 제자리 회전이므로 격자에 그것이 있는지 확인한다.
 
     Hybrid(DUBIN)는 반경 R의 호로만 방향을 바꿔서, 목표가 뒤쪽에 있으면
@@ -271,7 +319,21 @@ def test_lattice_file_matches_the_map_and_keeps_in_place_rotation():
     )
 
 
+def _has_lattice(params):
+    planner = params['planner_server']['ros__parameters']
+    names = [planner['planner_plugins'][0], ALTERNATIVE_KEY]
+    return any(
+        planner.get(n, {}).get('plugin', '').endswith('SmacPlannerLattice')
+        for n in names
+    )
+
+
 def test_both_planner_blocks_change_only_the_planner():
+    if not _has_lattice(_load_params()):
+        pytest.skip(
+            'Smac 계열끼리 비교할 때만 성립하는 계약이다.'
+            ' NavFn은 cost_penalty 같은 공유 키를 갖지 않는다'
+        )
     """A/B 비교에서 planner 외의 변수가 섞이면 결과를 해석할 수 없다.
 
     2026-07-29에 사용자가 명시했다: 한 번에 한 파라미터만 바꾼다.
@@ -301,6 +363,8 @@ def test_both_planner_blocks_change_only_the_planner():
 
 
 def test_planner_avoids_obstacles_at_least_as_hard_as_the_2d_baseline():
+    if not _has_lattice(_load_params()):
+        pytest.skip('cost_penalty는 Smac 계열 전용 키다')
     """cost_penalty는 '장애물에서 얼마나 떨어져 갈 것인가'의 직접 노브다.
 
     SmacPlanner2D에서는 같은 역할을 cost_travel_multiplier가 했고, 벽에
