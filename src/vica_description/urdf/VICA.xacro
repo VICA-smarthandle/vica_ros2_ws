@@ -266,4 +266,14 @@
   <child link="camera_link"/>
 </joint>
 
+
+<!-- REP-103: +Z forward, +X right, +Y down -->
+<!-- 실물은 RealSense 드라이버가 자체 발행하지만, Isaac에는 드라이버가 없어
+     URDF가 제공해야 한다. 정본을 하나로 유지하려고 여기에 둔다. -->
+<link name="camera_optical_frame"/>
+<joint name="camera_optical_joint" type="fixed">
+  <origin xyz="0 0 0" rpy="-${pi/2} 0 -${pi/2}"/>
+  <parent link="camera_link"/>
+  <child  link="camera_optical_frame"/>
+</joint>
 </robot>
