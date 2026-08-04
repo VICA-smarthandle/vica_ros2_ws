@@ -619,7 +619,9 @@ class MissionLogic:
                 self._dwell_until = now + self.dwell_sec
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                actions.append(Say(MSG_NAV_FAILED))
+                # narration 은 큐 정원 초과 시 가장 먼저 버려진다(tts_queue._trim).
+                # 주행 실패는 사용자가 왜 멈췄는지 알 유일한 단서라 버려지면 안 된다.
+                actions.append(Say(MSG_NAV_FAILED, priority="response"))
 
         elif self.state in (State.ARRIVED, State.FAILED):
             if self._dwell_until is None or now >= self._dwell_until:
@@ -636,7 +638,8 @@ class MissionLogic:
                 )
                 if t0 is not None and now - t0 >= self.estop_release_grace_sec:
                     self._to_idle()
-                    actions.append(Say(MSG_ESTOP_RELEASED))
+                    # 위와 같은 이유. 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
+                    actions.append(Say(MSG_ESTOP_RELEASED, priority="response"))
 
         return actions
 
