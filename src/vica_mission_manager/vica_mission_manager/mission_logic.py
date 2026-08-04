@@ -147,7 +147,36 @@ Action = Union[Say, Navigate, CancelNav, SetNavSpeedLimit]
 # 생긴다 (/vica/emergency → emergency_estop_bridge → /voice_emergency_stop).
 # test/test_spoken_text.py 가 이를 강제한다.
 
-MSG_START = "{name}(으)로 안내를 시작합니다."
+
+def josa_euro(word: str) -> str:
+    """단어 뒤에 붙는 조사 '으로 / 로' 를 받침에 맞게 돌려준다.
+
+    받침 없음 또는 ㄹ 받침이면 '로', 그 외 받침이면 '으로'.
+    예) 화장실 -> 로, 안내센터 -> 로, 식당 -> 으로
+
+    "(으)로" 를 그대로 두면 TTS 가 "화장실으로" 처럼 읽는다 (2026-08-04 실기 확인).
+    vica-voice-llm 의 destination_loader._josa_euro 와 같은 로직이며, 저장소 간
+    의존을 만들지 않으려고 사본을 둔다 (freshness.py 사본과 같은 이유).
+    """
+    if not word:
+        return "로"
+    last = word[-1]
+    if not ("가" <= last <= "힣"):  # 한글이 아니면 '로'로 둔다
+        return "로"
+    jongseong = (ord(last) - 0xAC00) % 28  # 0=받침없음, 8=ㄹ
+    return "로" if jongseong in (0, 8) else "으로"
+
+
+def say_destination(template: str, name: str) -> str:
+    """목적지 이름이 들어가는 멘트를 조사까지 맞춰 완성한다.
+
+    호출부가 josa 를 빠뜨리면 KeyError 로 바로 드러나지만, 매번 두 인자를 넘기는
+    대신 여기 한 곳을 거치게 해 빠뜨릴 자리를 없앤다.
+    """
+    return template.format(name=name, josa=josa_euro(name))
+
+
+MSG_START = "{name}{josa} 안내를 시작합니다."
 MSG_ARRIVED_FALLBACK = "{name}에 도착했습니다."
 MSG_BUSY = "지금 이동 중입니다. 먼저 현재 안내를 취소해 주세요."
 MSG_UNKNOWN_DEST = "아직 안내할 수 없는 곳입니다."
@@ -164,7 +193,7 @@ MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적�
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
 MSG_CANCELED = "안내를 취소했습니다."
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
-MSG_RESUMED = "{name}(으)로 다시 출발합니다."
+MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
 MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
 MSG_NOT_NAVIGATING = "지금은 안내 중이 아닙니다."
@@ -400,7 +429,7 @@ class MissionLogic:
         self._approach.reset()
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
-            Say(MSG_START.format(name=dest.name)),
+            Say(say_destination(MSG_START, dest.name)),
             Navigate(dest),
         ]
 
@@ -463,7 +492,7 @@ class MissionLogic:
         return (
             [
                 SetNavSpeedLimit(NO_SPEED_LIMIT),
-                Say(MSG_RESUMED.format(name=destination.name)),
+                Say(say_destination(MSG_RESUMED, destination.name)),
                 Navigate(destination),
             ],
             GateReason.OK,
