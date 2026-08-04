@@ -409,7 +409,7 @@ local_costmap:
       resolution: 0.05
       # robot_radius: 0.22
       # footprint는 vica_description/meshes/base_link.stl의 XY 투영 실측값이다.
-      # URDF collision origin이 z만 오프셋(xyz="0 0 -0.044")이라 STL x/y는 base_link
+      # URDF collision origin이 z만 오프셋(xyz="0 0 -body_center_z")이라 STL x/y는 base_link
       # 좌표와 직접 대응한다. 실측 bbox: x -0.505~+0.305, y ±0.227.
       #   전방 +0.305 : 구값 +0.15은 실제보다 15.5 cm 짧아 커브 중 전방 범퍼가
       #                 costmap상 free 영역을 쓸고 지나가 실제 충돌이 발생했다
