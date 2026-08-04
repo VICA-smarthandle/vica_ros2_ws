@@ -4,6 +4,9 @@
 <xacro:include filename="$(find vica_description)/urdf/materials.xacro" />
 <!-- Measured heights from the ground-aligned base_footprint. -->
 <!-- base_link=0.190, laser_frame=0.382, camera_link=0.320 [m] -->
+<!-- 이 값을 바꾸면 base_link/laser_frame 메시(visual·collision 4곳)만 따라온다.
+     구동륜·캐스터 메시는 joint z(-0.125)와 visual z(+0.084)에 이 값을 별도로
+     인코딩하고 있어 함께 손봐야 한다. -->
 <xacro:property name="body_center_z" value="0.041" />
 <xacro:property name="base_link_height" value="0.19" />
 <xacro:property name="laser_x" value="0.185" />
