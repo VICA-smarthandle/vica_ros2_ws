@@ -7,6 +7,7 @@
 
 이 테스트는 slice 상한이 로봇 최고점 아래로 다시 내려가는 회귀를 막는다.
 """
+import re
 import struct
 from pathlib import Path
 
@@ -16,12 +17,6 @@ import yaml
 
 # base_link.stl은 mm 단위이고 URDF에서 scale 0.001로 쓰인다.
 STL_SCALE = 0.001
-# URDF collision origin이 xyz="0 0 -0.044"라 STL z에서 이만큼 내려간 값이
-# base_link 좌표다.
-COLLISION_Z_OFFSET = -0.044
-# base_footprint -> base_link (VICA.xacro base_link_height). 바닥 기준으로
-# 환산하려면 이만큼 더한다. 실측 TF와도 일치한다.
-BASE_LINK_HEIGHT = 0.19
 
 # 실측 TF(base_footprint 기준). 이 둘만으로는 로봇 상부를 볼 수 없다는 것이
 # 이 계약의 전제다.
@@ -31,6 +26,25 @@ CAMERA_Z = 0.320
 
 def _repo_src():
     return Path(__file__).parents[2]
+
+
+def _xacro_property(name):
+    """VICA.xacro의 xacro:property 값을 읽는다.
+
+    좌표 정본은 URDF 하나다. 여기서 값을 복사해 두면 URDF가 바뀔 때 이 계약이
+    조용히 어긋난다. 실제로 body_center_z가 0.044로 네 곳에 흩어져 있었다.
+    """
+    path = _repo_src() / 'vica_description' / 'urdf' / 'VICA.xacro'
+    text = path.read_text(encoding='utf-8')
+    match = re.search(
+        rf'<xacro:property\s+name="{name}"\s+value="([^"]+)"',
+        text,
+    )
+    assert match is not None, (
+        f'VICA.xacro에서 xacro:property "{name}"을 찾지 못했다.'
+        ' URDF 구조가 바뀌었다면 이 계약도 다시 봐야 한다'
+    )
+    return float(match.group(1))
 
 
 def _overrides():
@@ -60,7 +74,13 @@ def _robot_top_from_floor():
             off = base + 12 + vertex * 12 + 8  # x, y 건너뛰고 z
             z = struct.unpack('<f', data[off:off + 4])[0]
             max_z = max(max_z, z * STL_SCALE)
-    return max_z + COLLISION_Z_OFFSET + BASE_LINK_HEIGHT
+    # collision origin이 xyz="0 0 -body_center_z"이므로 STL z에서 그만큼 내려간
+    # 값이 base_link 좌표다. 바닥 기준으로 환산하려면 base_link_height를 더한다.
+    return (
+        max_z
+        - _xacro_property('body_center_z')
+        + _xacro_property('base_link_height')
+    )
 
 
 @pytest.mark.parametrize('mapper', ['static_mapper', 'dynamic_mapper'])

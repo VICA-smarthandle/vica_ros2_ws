@@ -15,8 +15,8 @@ import yaml
 
 # base_link.stl은 mm 단위이고 URDF에서 scale 0.001로 쓰인다.
 STL_SCALE = 0.001
-# URDF의 collision origin이 xyz="0 0 -0.044"로 z만 오프셋이므로
-# STL의 x/y는 base_link 좌표와 직접 대응한다.
+# URDF의 collision origin이 xyz="0 0 -body_center_z"로 z만 오프셋이므로
+# STL의 x/y는 base_link 좌표와 직접 대응한다. z 값이 바뀌어도 이 대응은 유지된다.
 #
 # 후방만은 STL을 신뢰하지 않는다. 2026-07-29 줄자 실측이 중심 -> 핸들 끝 56.5 cm인데
 # STL은 -0.505로 6 cm 짧다. 같은 날 핸들 기둥 위치도 CAD(-0.265~-0.305) 대비
