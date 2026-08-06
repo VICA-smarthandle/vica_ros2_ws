@@ -263,12 +263,16 @@ controller_server:
       short_circuit_trajectory_evaluation: True
       stateful: True
       # BaseObstacle은 "원형 로봇"을 가정하고 궤적 각 자세에서 중심 셀 하나만
-      # 조회한다. VICA footprint는 x -0.60~+0.305, y ±0.227(길이 0.905, 폭
-      # 0.454)이라 inscribed 0.277 m와 circumscribed 0.692 m가 2.5배 차이난다.
-      # 중심이 free여도 후방 0.60 m나 전방 0.305 m가 장애물에 들어가 있을 수
+      # 조회한다. VICA footprint는 x -0.595~+0.305, y ±0.2275(길이 0.900, 폭
+      # 0.455)이라 padding 0.05 적용 후 inscribed 0.2775 m와 circumscribed
+      # 0.6506 m가 2.3배 차이난다.
+      # 중심이 free여도 후방 0.595 m나 전방 0.305 m가 장애물에 들어가 있을 수
       # 있고, inflation은 방향 무관 등방성이라 이 방향 의존성을 표현하지 못한다.
-      # 최협 통로 반폭 0.35 m < circumscribed 0.692 m이므로, 그곳에서 제자리
+      # 최협 통로 반폭 0.35 m < circumscribed 0.6506 m이므로, 그곳에서 제자리
       # 회전하면 후방이 부딪히는데 BaseObstacle로는 이를 걸러낼 수 없다.
+      # (2026-08-06 수치 갱신: 이 문단은 원래 사각형 footprint 기준으로
+      #  x -0.60 / inscribed 0.277 / circumscribed 0.692라 적혀 있었다. 2026-08-02
+      #  육각형 전환으로 외접이 0.675 -> 0.651로 줄었다. 결론은 그대로다.)
       # ObstacleFootprint는 궤적 각 자세에 footprint를 놓고 변을 순회한다.
       #
       # 교체만으로 서행이 11.0 -> 7.9 s로 줄었고 제어주기도 버텼다(중앙값
@@ -404,6 +408,17 @@ local_costmap:
       robot_base_frame: base_footprint
       use_sim_time: false
       rolling_window: true
+      # [근거 없음] nav2 기본값은 3×3이다. 6×6으로 키운 경위를 적은 주석도
+      # devlog 기록도 없다. 2026-08-06 전수 점검에서 확인했다.
+      #
+      # 판단에 쓸 수 있는 재료만 적어 둔다(추정이며 검증되지 않았다):
+      #   - rolling_window 이므로 6×6 은 로봇 중심 반경 3.0 m 를 담는다.
+      #     아래 raytrace_max_range 3.5 m 는 그래도 맵 밖으로 나간다.
+      #   - DWB 가 실제로 검사하는 거리는 sim_time 2.5 × 0.26 + footprint 앞단
+      #     0.355 = 1.01 m 라 3×3(반경 1.5 m)로도 담기기는 한다.
+      #   - 대가는 셀 수다. 6 m/0.05 = 120셀 → 14,400셀로 3×3(3,600셀)의 4배다.
+      #     update_frequency 5.0 Hz 로 갱신하므로 CPU 여유를 볼 것.
+      # 줄이려면 raytrace_max_range 와 함께 판단해야 한다.
       width: 6
       height: 6
       resolution: 0.05
@@ -653,6 +668,10 @@ local_costmap:
         z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 2.0
+        # [근거 없음] nav2 기본값 0에서 1로 바꾼 경위가 기록돼 있지 않다
+        # (2026-08-06 확인). z 컬럼에 마크된 복셀이 이 수 이상일 때만 2D costmap에
+        # 표시한다. LiDAR가 단일 평면(0.382 m)이라 컬럼당 복셀이 많지 않으므로
+        # 이 값을 올리면 표시가 사라질 수 있다. 되돌릴 때는 0으로.
         mark_threshold: 1
         observation_sources: scan
         scan:
@@ -661,6 +680,17 @@ local_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
+          # [근거 없음] 아래 네 값은 nav2 기본값(3.0 / 0.0 / 2.5 / 0.0)에서
+          # 바뀌었으나 경위를 적은 주석도 devlog 기록도 없다(2026-08-06 확인).
+          # 아는 것은 둘뿐이다:
+          #   - raytrace(소거) > obstacle(표시) 관계는 유지해야 한다. 표시 범위가
+          #     소거 범위보다 넓으면 지워지지 않는 마크가 남는다.
+          #   - 그래서 obstacle_max_range 를 올릴 때는 raytrace_max_range 도 함께
+          #     올린다. 안 그러면 유령 장애물을 새로 만든다
+          #     (devlog/2026-07-31.md 270-274행).
+          # min_range 0.12 / 0.05 의 근거는 확인되지 않았다. 내접반경 0.2775 m
+          # 보다 작으므로 '자기 차체 필터링'이 목적이라면 값이 부족할 수 있다 —
+          # 이는 추정이며 검증되지 않았다.
           raytrace_max_range: 3.5
           raytrace_min_range: 0.05
           obstacle_max_range: 3.0
@@ -673,9 +703,19 @@ local_costmap:
           # 2026-07-28 주행에서 경로는 그대로인데(연속 /plan 변화 0.03~0.13 m,
           # 전체 최대 2.64 m) DWB가 저속 궤적만 골라 3.43 s까지 기어가는 구간이
           # 4회 있었다. 0.5 s를 보관해 얇은 다리를 안정적으로 유지한다.
-          # 주의: 다리 하나에도 inflation_radius 0.45가 적용되므로, 안정적으로
+          # 주의: 다리 하나에도 inflation_radius(현재 0.55)가 적용되므로, 안정적으로
           # 잡힐수록 서행 자체는 길어질 수 있다. 이는 실주행으로 확인한다.
+          # (2026-08-06 정정: 이 문장은 0.45라 적혀 있었다. 그 뒤 0.50을 거쳐
+          #  2026-08-02에 0.55로 확정됐으므로 이 주의는 오히려 더 커졌다.)
           observation_persistence: 0.5
+          # [근거 없음] 둘 다 nav2 기본값(0.0 / false)에서 바뀌었으나 경위가
+          # 기록돼 있지 않다(2026-08-06 확인).
+          #   expected_update_rate 0.2 = "5 Hz 보다 느리면 이 관측원을 stale로 본다".
+          #     stale이 되면 costmap이 isCurrent()=false가 되는데, Nav2가 그때
+          #     로봇을 멈추는지 자체가 [미검증]이다
+          #     (devlog/2026-07-30-nvblox-ghost-obstacle.md:63).
+          #   inf_is_valid true = LiDAR의 inf(반사 없음)를 range_max로 바꿔
+          #     raytrace 소거에 쓴다. false면 빈 공간이 지워지지 않는다.
           expected_update_rate: 0.2
           inf_is_valid: true
 
@@ -747,6 +787,11 @@ local_costmap:
       # 7.8 cm를 만든다)은 별개 과제다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
+        # [근거 약함] nav2 기본값 3.0 에서 3.5 로 올렸다. 남은 사유는 아래 한 줄
+        # ("2.5는 감쇠가 느려…")뿐이고 날짜·회차·실측 수치가 없다(2026-08-06 확인).
+        # 3.5 자체를 정당화한 기록은 없으나, 이 값을 전제로 계산한 비용표가
+        # 여러 곳에 있으므로(inflation 0.45 vs 0.55 비교표 등) 바꾸면 그 표들이
+        # 전부 무효가 된다. 바꿀 때는 함께 다시 계산할 것.
         cost_scaling_factor: 3.5   # 2.5는 감쇠가 느려 통로 중앙까지 비용이 남았다
         # 2026-07-31: 0.40 -> 0.50 -> 0.45.
         #
@@ -849,6 +894,16 @@ local_costmap:
         #
         # **되돌릴 조건**: 꼭 지나야 하는 목적지가 우회로 없는 좁은 통로 안에
         # 있을 때. 그때는 그 통로를 못 써 도달 자체가 불가능해진다.
+        #
+        # ** controller 를 바꾸기 전에 반드시 읽을 것 **
+        # 이 값 0.55 는 padding 포함 외접반경 0.6506 m 보다 짧다. 그래서 Smac 의
+        # GridCollisionChecker 는 벽에서 0.55~0.651 m 구간(폭 0.10 m)에서
+        # footprint 검사를 건너뛴다 — planner 단계의 사각지대다.
+        # 지금 이것을 막는 것은 DWB 의 ObstacleFootprint critic 하나뿐이고,
+        # MPPI 등 potential-field 최적화를 쓰는 controller 로 바꾸면 그 방벽이
+        # 사라진다. 바꾸려면 먼저 이 값을 0.651 이상으로 올려야 한다.
+        # 계산 근거와 이를 강제하는 계약 테스트 초안:
+        #   devlog/2026-08-05-inflation-외접반경-검증.md (5절 · 8절)
         inflation_radius: 0.55
 
 global_costmap:
@@ -950,6 +1005,9 @@ global_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
+          # 아래 네 값은 local_costmap 과 같아야 한다(그쪽 주석에 [근거 없음]
+          # 표식과 판단 재료를 적어 뒀다). 다르면 planner 가 통과 가능하다고 본
+          # 경로를 controller 가 거부한다.
           raytrace_max_range: 3.5
           raytrace_min_range: 0.05
           obstacle_max_range: 3.0
@@ -957,6 +1015,14 @@ global_costmap:
           # local_costmap과 같은 값이어야 한다. 다르면 planner가 통과 가능하다고
           # 본 경로를 controller가 거부한다(근거는 local_costmap 주석 참고).
           observation_persistence: 0.5
+          # [근거 없음] 둘 다 nav2 기본값(0.0 / false)에서 바뀌었으나 경위가
+          # 기록돼 있지 않다(2026-08-06 확인).
+          #   expected_update_rate 0.2 = "5 Hz 보다 느리면 이 관측원을 stale로 본다".
+          #     stale이 되면 costmap이 isCurrent()=false가 되는데, Nav2가 그때
+          #     로봇을 멈추는지 자체가 [미검증]이다
+          #     (devlog/2026-07-30-nvblox-ghost-obstacle.md:63).
+          #   inf_is_valid true = LiDAR의 inf(반사 없음)를 range_max로 바꿔
+          #     raytrace 소거에 쓴다. false면 빈 공간이 지워지지 않는다.
           expected_update_rate: 0.2
           inf_is_valid: true
 
@@ -969,6 +1035,7 @@ global_costmap:
       # 특히 중요하다. DWB는 PathDist/PathAlign(32.0)로 이 경로를 충실히 따른다.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
+        # local_costmap 과 같은 값이어야 한다(그쪽 주석에 [근거 약함] 표식이 있다).
         cost_scaling_factor: 3.5
         # 2026-07-31: 0.40 -> 0.50 -> 0.45.
         #
@@ -1001,6 +1068,11 @@ global_costmap:
         # controller 가 다른 비용으로 읽어 판단이 갈린다.
         # 2026-08-02 최종: 0.55. 사람이 따라오는 안전 기준으로 재판정했다
         # (local 쪽 주석 참고). 두 costmap 의 inflation 은 같게 유지한다.
+        #
+        # 2026-08-06: 이 값이 외접반경 0.6506 m 보다 짧아 planner 충돌 검사에
+        # 폭 0.10 m 의 사각지대가 있다. controller 를 MPPI 등으로 바꾸기 전에
+        # 0.651 이상으로 올려야 한다 — 계산은 local 쪽 같은 항목의 주석과
+        # devlog/2026-08-05-inflation-외접반경-검증.md 에 있다.
         inflation_radius: 0.55
       always_send_full_costmap: True
 
@@ -1021,7 +1093,12 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 5.0 #20->5 hybrid쓰면 노이즈 로그 많아서 줄임.-
+    # 20 -> 5. 당시 사유는 "hybrid 쓰면 노이즈 로그가 많아서"였다.
+    # [근거 없음] planner는 그 뒤 Lattice로 바뀌었고(아래 planner_plugins),
+    # 5.0이 지금도 맞는 값인지는 재확인되지 않았다. 이 파라미터는 계획이 이
+    # 주기보다 느릴 때 경고 로그만 낸다 — 실제 계획 주기는 BT의
+    # RateController(1.0 Hz)가 정하므로 값을 바꿔도 주행은 변하지 않는다.
+    expected_planner_frequency: 5.0
     use_sim_time: false
     planner_plugins: ["GridBased"]
     # NavFn(gradient descent)은 비용이 거의 같은 셀 사이에서 경로가 진동한다.
@@ -1082,6 +1159,11 @@ planner_server:
     # 한계: "Starting point in lethal space"는 시작 자세 자체가 불법일 때 나오고
     # 그때는 어떤 planner도 경로를 못 낸다. Lattice의 기대는 '경로 모양이 달라
     # 애초에 그 자세에 들어가지 않는 것'이다.
+    #
+    # ===== 비교용 대안. planner_plugins에 없으므로 Nav2가 로드하지 않는다 =====
+    # A/B 를 하려면 이 키(GridBasedAlt)와 아래 활성 블록의 키(GridBased)를
+    # 서로 바꾼다. 그때 이 헤더 주석도 함께 옮길 것 — 2026-08-06 이전에는
+    # 옮기지 않아 두 헤더가 서로 반대 블록에 붙어 있었다.
     GridBasedAlt:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
 
@@ -1149,6 +1231,10 @@ planner_server:
       # Orin NX에서 Hybrid 탐색 시간을 줄이는 가장 큰 수단이다.
       cache_obstacle_heuristic: true
 
+      # [근거 없음] nav2 기본값 0.5 에서 0.2 로 줄인 경위가 기록돼 있지 않다
+      # (2026-08-06 확인). goal 에 정확히 못 닿을 때 이 반경 안의 대체 지점을
+      # 허용한다는 뜻이라, 줄이면 "경로 없음"이 늘고 키우면 목표에서 먼 곳에
+      # 도착한다. 두 planner 블록이 같은 값이어야 한다(A/B 전제).
       tolerance: 0.2
       allow_unknown: true
       max_iterations: 1000000
@@ -1165,7 +1251,10 @@ planner_server:
         w_data: 0.2
         tolerance: 1.0e-10
 
-    # 비교용 대안. planner_plugins에 없으므로 Nav2가 로드하지 않는다.
+    # ===== 활성 planner. planner_plugins: ["GridBased"] 가 이 블록을 로드한다 =====
+    # (2026-08-06 주석 정정: 여기 "비교용 대안. Nav2가 로드하지 않는다"가 붙어
+    #  있었다. A/B 스왑으로 키 이름만 바꾸면서 헤더를 옮기지 않은 결과다.
+    #  비활성 블록은 위쪽 GridBasedAlt 다.)
     #
     # Hybrid(DUBIN)의 구조적 한계는 제자리 회전이 없다는 것이다. 목표가 뒤쪽에
     # 있으면 반경 0.50 m 호로 180° 되돌아야 하는데 그러려면 통로 폭 1.85 m가
@@ -1253,16 +1342,25 @@ planner_server:
       # 다음 축은 footprint 를 줄이는 쪽이다(padding 축소 또는 하드웨어).
       #
       # 되돌리려면 경로의 0.5m 를 1m 로 바꾼다. 다른 값은 건드리지 않았다
-      # (inflation 0.50 · sim_time 2.5 · ObstacleFootprint.scale 0.15 유지).
+      # (실험 당시 inflation 0.50 · sim_time 2.5 · ObstacleFootprint.scale 0.15).
+      # 주의: inflation 은 같은 날 늦게 0.50 -> 0.55 로 확정됐다. 현재 값은
+      # 0.55 이며 이 문단의 0.50 은 1m 격자 실험 시점의 기록이다.
       lattice_filepath: "/opt/ros/humble/share/nav2_smac_planner/sample_primitives/5cm_resolution/0.5m_turning_radius/diff/output.json"
 
       # 후진 primitive로 확장하지 않는다. 위 DUBIN과 같은 이유다.
       allow_reverse_expansion: false
       # 제자리 회전 primitive에 붙는 비용. 낮추면 아무 데서나 돌고, 높이면
       # 되돌아서야 할 곳에서도 호로 우회한다. 이 값이 Lattice의 주 노브다.
+      # [근거 없음] 왜 5.0 인지 적힌 곳이 없고, 다른 값을 시험한 기록도 없다
+      # (2026-08-06 확인). "주 노브"라고 적어 두고 한 번도 돌려보지 않은
+      # 항목이므로, 유턴·좁은 통로 문제를 다시 볼 때 1순위 후보다.
+      # (Humble 의 Lattice 기본값이 얼마인지는 소스가 설치돼 있지 않아 이
+      #  장비에서 확인하지 못했다.)
       rotation_penalty: 5.0
 
-      # 아래는 위 GridBased 블록과 반드시 같은 값을 유지한다(A/B 전제).
+      # 아래는 위 GridBasedAlt 블록과 반드시 같은 값을 유지한다(A/B 전제).
+      # (2026-08-06 정정: "위 GridBased 블록"이라 적혀 있었으나 여기가 곧
+      #  GridBased 블록이라 자기 자신을 가리키는 문장이었다.)
       cost_penalty: 4.0
       cache_obstacle_heuristic: true
       tolerance: 0.2
