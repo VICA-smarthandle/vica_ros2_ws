@@ -45,6 +45,12 @@ from .event_deduplicator import EventDeduplicator, Observation
 from .fault_catalog import describe
 from .freshness import is_fresh_ns, sec_to_ns
 from .health_logic import ComponentProbe, evaluate, SafetyInput, UNKNOWN
+from .nav2_liveness import (
+    decide_poll_action,
+    is_nav2_active,
+    POLL_FALLBACK,
+    POLL_WAIT,
+)
 
 
 # required_components.yaml에서 컴포넌트별로 읽을 필드.
@@ -81,6 +87,9 @@ class RobotHealthMonitorNode(Node):
         self.declare_parameter('reminder_interval_sec', 30.0)
         self.declare_parameter('nav2_state_poll_period_sec', 2.0)
         self.declare_parameter('nav2_lifecycle_node', '/bt_navigator')
+        # get_state 호출을 포기하는 시한. 2026-08-01에 이 호출이 10분간 반환되지 않았다.
+        # 폴링 주기보다 넉넉히 길게 두되 유한해야 한다 — 시한이 없으면 폴링이 영구 정지한다.
+        self.declare_parameter('nav2_call_timeout_sec', 5.0)
         self.declare_parameter('emergency_stop_timeout_sec', 0.5)
         self.declare_parameter('safety_state_timeout_sec', 1.0)
         self.declare_parameter('tf_timeout_sec', 3.0)
@@ -103,6 +112,7 @@ class RobotHealthMonitorNode(Node):
         self.tf_timeout_ns = self._timeout_ns('tf_timeout_sec')
         self.robot_state_timeout_ns = self._timeout_ns('robot_state_timeout_sec')
         self.diagnostics_timeout_ns = self._timeout_ns('diagnostics_timeout_sec')
+        self.nav2_call_timeout_ns = self._timeout_ns('nav2_call_timeout_sec')
 
         self.policies = self._read_component_policies()
         self.dedup = EventDeduplicator(
@@ -164,6 +174,9 @@ class RobotHealthMonitorNode(Node):
             GetState, f'{lifecycle_node}/get_state'
         )
         self._nav2_in_flight = False
+        self._nav2_call_started_ns = None
+        # 시한을 넘겨 포기한 호출의 늦은 응답이 새 판정을 덮어쓰지 않게 한다.
+        self._nav2_future = None
         self.create_timer(
             float(self.get_parameter('nav2_state_poll_period_sec').value),
             self.poll_nav2_state,
@@ -245,10 +258,10 @@ class RobotHealthMonitorNode(Node):
         """Track the mission heartbeat."""
         self.last_robot_state_ns = self.steady_clock.now().nanoseconds
 
-    def _nav2_active_by_diagnostic(self) -> bool:
+    def _nav2_state_by_diagnostic(self, now_ns: int) -> str:
         """Read Nav2 liveness from lifecycle_manager's own diagnostic.
 
-        `<node>/get_state` 서비스가 응답하지 않을 때 쓰는 두 번째 근거다.
+        `<node>/get_state` 서비스가 답을 주지 못할 때 쓰는 두 번째 근거다.
 
         2026-08-01 실기에서 `/bt_navigator/get_state` 호출이 응답 없이 멈췄다
         (CLI로 부른 것도 10분간 반환되지 않았다). 그런데 같은 시각
@@ -258,48 +271,72 @@ class RobotHealthMonitorNode(Node):
 
         lifecycle_manager는 자기가 관리하는 노드를 bond로 감시하므로, 그것이
         active라고 말하면 그 관리 그룹은 살아 있다. 서비스 응답보다 약한 근거라
-        **서비스가 안 될 때만** 쓴다.
+        **서비스가 답하지 못할 때만** 쓴다.
+
+        판정 자체는 nav2_liveness에 있다. 문구·등급·신선도를 함께 봐야 하는 이유는
+        그 모듈 주석에 적었다.
         """
-        for name, (item, _seen) in self.diag_items.items():
-            lowered = name.lower()
-            if 'lifecycle_manager' not in lowered or 'nav2 health' not in lowered:
-                continue
-            if 'active' in (item.message or '').lower():
-                return True
-        return False
+        active = is_nav2_active(
+            self.diag_items, now_ns, self.diagnostics_timeout_ns
+        )
+        return 'active' if active else 'unavailable'
 
     def poll_nav2_state(self) -> None:
         """Poll the Nav2 lifecycle state.
 
-        서비스가 없으면(Nav2 미실행) 조용히 넘어간다. vica_status_app_node의
-        _poll_map_yaml과 같은 방어다.
+        서비스가 없거나(Nav2 미실행) 응답이 오지 않으면 진단으로 판정한다.
+        어느 쪽이든 폴링이 멈추지 않는다.
         """
-        if self._nav2_in_flight or not self.nav2_client.service_is_ready():
-            if not self.nav2_client.service_is_ready():
-                # 서비스가 막혀도 lifecycle_manager 진단이 살아 있으면 그것을 믿는다.
-                self.nav2_state = (
-                    'active' if self._nav2_active_by_diagnostic() else 'unavailable'
-                )
+        now_ns = self.steady_clock.now().nanoseconds
+        action = decide_poll_action(
+            in_flight=self._nav2_in_flight,
+            call_started_ns=self._nav2_call_started_ns,
+            service_ready=self.nav2_client.service_is_ready(),
+            now_ns=now_ns,
+            timeout_ns=self.nav2_call_timeout_ns,
+        )
+
+        if action == POLL_WAIT:
             return
+
+        if action == POLL_FALLBACK:
+            if self._nav2_in_flight:
+                # 시한을 넘겼다. 이 호출은 버리고 다음 tick에 다시 묻는다.
+                self.get_logger().warn(
+                    'Nav2 lifecycle 조회가 시한 내에 응답하지 않아 진단으로 판정한다.'
+                )
+                self._nav2_in_flight = False
+                self._nav2_call_started_ns = None
+                self._nav2_future = None
+            self.nav2_state = self._nav2_state_by_diagnostic(now_ns)
+            return
+
         self._nav2_in_flight = True
+        self._nav2_call_started_ns = now_ns
         future = self.nav2_client.call_async(GetState.Request())
+        self._nav2_future = future
         future.add_done_callback(self._on_nav2_state)
 
     def _on_nav2_state(self, future) -> None:
-        """Store the lifecycle label from the service response."""
+        """Store the lifecycle label from the service response.
+
+        시한을 넘겨 버린 호출의 늦은 응답은 무시한다. 그것을 반영하면 이미 진단으로 내린
+        판정을 낡은 값이 덮어쓴다.
+        """
+        if future is not self._nav2_future:
+            return
         self._nav2_in_flight = False
+        self._nav2_call_started_ns = None
+        self._nav2_future = None
+        now_ns = self.steady_clock.now().nanoseconds
         try:
             response = future.result()
         except Exception as exc:  # ROS future 예외는 배포판마다 다르다
             self.get_logger().warn(f'Nav2 lifecycle 조회 실패: {exc}')
-            self.nav2_state = (
-                'active' if self._nav2_active_by_diagnostic() else 'unavailable'
-            )
+            self.nav2_state = self._nav2_state_by_diagnostic(now_ns)
             return
         if response is None:
-            self.nav2_state = (
-                'active' if self._nav2_active_by_diagnostic() else 'unavailable'
-            )
+            self.nav2_state = self._nav2_state_by_diagnostic(now_ns)
             return
         self.nav2_state = str(response.current_state.label)
 
