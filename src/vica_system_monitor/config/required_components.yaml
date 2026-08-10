@@ -33,6 +33,11 @@ robot_health_monitor_node:
     nav2_state_poll_period_sec: 2.0
     nav2_lifecycle_node: /bt_navigator
 
+    # GetState 호출을 포기하는 시한. 2026-08-01 실기에서 /bt_navigator/get_state가
+    # 응답 없이 10분간 반환되지 않았다. 시한이 없으면 그 tick 이후 폴링이 영구히 멈추고
+    # lifecycle_manager 진단 fallback도 실행되지 못한다. 폴링 주기보다 길되 유한해야 한다.
+    nav2_call_timeout_sec: 5.0
+
     # -----------------------------------------------------------------------
     # 안전 신호 timeout — aggregator를 거치지 않는 입력만 여기서 갖는다
     # -----------------------------------------------------------------------
