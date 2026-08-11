@@ -23,9 +23,9 @@ setup(
         ],
     },
     entry_points={
-        "console_scripts": [
-            "vslam_covariance_adapter = vica_sensor_adapters.vslam_covariance_adapter:main",
-            "imu_base_link_adapter = vica_sensor_adapters.imu_base_link_adapter:main",
+        'console_scripts': [
+            'vslam_covariance_adapter = vica_sensor_adapters.vslam_covariance_adapter:main',
+            'imu_base_link_adapter = vica_sensor_adapters.imu_base_link_adapter:main',
         ],
     },
 )

@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        	'encoder_feedback = encoder_feedback.encoder_feedback:main',
+            'encoder_feedback = encoder_feedback.encoder_feedback:main',
         ],
     },
 )

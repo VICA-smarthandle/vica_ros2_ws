@@ -5,11 +5,10 @@ import struct
 import time
 
 import can
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
-
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 
 
@@ -32,14 +31,15 @@ def yaw_to_quaternion(yaw: float):
 
 
 def int32_le(byte_list):
-    """
-    Decode little-endian signed int32.
+    """Decode little-endian signed int32.
 
-    Examples:
+    Examples
+    --------
       05 00 00 00 -> 5
       F0 FF FF FF -> -16
+
     """
-    return struct.unpack("<i", bytes(byte_list))[0]
+    return struct.unpack('<i', bytes(byte_list))[0]
 
 
 def int32_delta(current: int, previous: int) -> int:
@@ -53,66 +53,68 @@ def int32_delta(current: int, previous: int) -> int:
 
 
 class EncoderFeedbackNode(Node):
+    """Publish wheel odometry decoded from MDROBOT CAN position frames."""
+
     def __init__(self):
-        super().__init__("encoder_feedback")
+        super().__init__('encoder_feedback')
 
         # =========================
         # 파라미터
         # =========================
-        self.declare_parameter("can_iface", "can1")
-        self.declare_parameter("driver_id", 0x001)
-        self.declare_parameter("driver_response_id", 0x701)
+        self.declare_parameter('can_iface', 'can1')
+        self.declare_parameter('driver_id', 0x001)
+        self.declare_parameter('driver_response_id', 0x701)
 
         # CAN C5 위치값 기준 바퀴 1회전당 tick 수.
-        self.declare_parameter("ticks_per_rev", 61.2) #default:55
-        self.declare_parameter("wheel_radius_m", 0.065)
-        self.declare_parameter("wheel_base_m", 0.37)
+        self.declare_parameter('ticks_per_rev', 61.2)  # 기본 55에서 실측으로 올린 값
+        self.declare_parameter('wheel_radius_m', 0.065)
+        self.declare_parameter('wheel_base_m', 0.37)
 
-        self.declare_parameter("right_sign", 1.0)
-        self.declare_parameter("left_sign", 1.0)
+        self.declare_parameter('right_sign', 1.0)
+        self.declare_parameter('left_sign', 1.0)
 
-        self.declare_parameter("odom_frame", "odom")
-        self.declare_parameter("base_frame", "base_footprint")
-        self.declare_parameter("odom_topic", "/wheel/odom")
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('odom_topic', '/wheel/odom')
 
-        self.declare_parameter("publish_tf", False)
+        self.declare_parameter('publish_tf', False)
         # 주행 통합 중에는 모터 노드가 CAN 명령을 담당하므로 encoder_feedback은
         # 기본적으로 수신만 수행하고, 단독 테스트 때만 요청 프레임을 켭니다.
-        self.declare_parameter("request_position_feedback", False) #default False
+        self.declare_parameter('request_position_feedback', False)  # 기본 False
         # 인코더 CAN 요청 부하를 줄이기 위해 피드백 요청 빈도를 낮춥니다.
         # 30Hz는 이 시스템에 과도했습니다. odom에는 10Hz 정도면 충분합니다.
-        self.declare_parameter("request_hz", 20.0)
+        self.declare_parameter('request_hz', 20.0)
 
-        self.can_iface = self.get_parameter("can_iface").value
-        self.driver_id = int(self.get_parameter("driver_id").value)
+        self.can_iface = self.get_parameter('can_iface').value
+        self.driver_id = int(self.get_parameter('driver_id').value)
         self.driver_response_id = int(
-            self.get_parameter("driver_response_id").value
+            self.get_parameter('driver_response_id').value
         )
 
-        self.ticks_per_rev = float(self.get_parameter("ticks_per_rev").value)
-        self.wheel_radius_m = float(self.get_parameter("wheel_radius_m").value)
-        self.wheel_base_m = float(self.get_parameter("wheel_base_m").value)
+        self.ticks_per_rev = float(self.get_parameter('ticks_per_rev').value)
+        self.wheel_radius_m = float(self.get_parameter('wheel_radius_m').value)
+        self.wheel_base_m = float(self.get_parameter('wheel_base_m').value)
 
-        self.right_sign = float(self.get_parameter("right_sign").value)
-        self.left_sign = float(self.get_parameter("left_sign").value)
+        self.right_sign = float(self.get_parameter('right_sign').value)
+        self.left_sign = float(self.get_parameter('left_sign').value)
 
-        self.odom_frame = self.get_parameter("odom_frame").value
-        self.base_frame = self.get_parameter("base_frame").value
-        self.odom_topic = self.get_parameter("odom_topic").value
-        self.publish_tf = bool(self.get_parameter("publish_tf").value)
+        self.odom_frame = self.get_parameter('odom_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
+        self.odom_topic = self.get_parameter('odom_topic').value
+        self.publish_tf = bool(self.get_parameter('publish_tf').value)
         self.request_position_feedback = bool(
-            self.get_parameter("request_position_feedback").value
+            self.get_parameter('request_position_feedback').value
         )
-        self.request_hz = float(self.get_parameter("request_hz").value)
+        self.request_hz = float(self.get_parameter('request_hz').value)
 
         if self.ticks_per_rev <= 0.0:
-            raise ValueError("ticks_per_rev must be greater than zero")
+            raise ValueError('ticks_per_rev must be greater than zero')
         if self.wheel_radius_m <= 0.0:
-            raise ValueError("wheel_radius_m must be greater than zero")
+            raise ValueError('wheel_radius_m must be greater than zero')
         if self.wheel_base_m <= 0.0:
-            raise ValueError("wheel_base_m must be greater than zero")
+            raise ValueError('wheel_base_m must be greater than zero')
         if self.request_hz <= 0.0:
-            raise ValueError("request_hz must be greater than zero")
+            raise ValueError('request_hz must be greater than zero')
 
         # =========================
         # 런타임 상태
@@ -138,21 +140,21 @@ class EncoderFeedbackNode(Node):
         # =========================
         self.bus = can.interface.Bus(
             channel=self.can_iface,
-            interface="socketcan"
+            interface='socketcan'
         )
 
-        self.get_logger().info(f"CAN opened: {self.can_iface}")
-        self.get_logger().info(f"driver_id: 0x{self.driver_id:03X}")
+        self.get_logger().info(f'CAN opened: {self.can_iface}')
+        self.get_logger().info(f'driver_id: 0x{self.driver_id:03X}')
         self.get_logger().info(
-            f"driver_response_id: 0x{self.driver_response_id:03X}"
+            f'driver_response_id: 0x{self.driver_response_id:03X}'
         )
         self.get_logger().info(
-            f"ticks_per_rev={self.ticks_per_rev}, "
-            f"wheel_radius={self.wheel_radius_m}, "
-            f"wheel_base={self.wheel_base_m}"
+            f'ticks_per_rev={self.ticks_per_rev}, '
+            f'wheel_radius={self.wheel_radius_m}, '
+            f'wheel_base={self.wheel_base_m}'
         )
-        mode = "request+read" if self.request_position_feedback else "read-only"
-        self.get_logger().info(f"position feedback mode: {mode}")
+        mode = 'request+read' if self.request_position_feedback else 'read-only'
+        self.get_logger().info(f'position feedback mode: {mode}')
 
         # =========================
         # ROS 퍼블리셔
@@ -162,8 +164,8 @@ class EncoderFeedbackNode(Node):
             TransformBroadcaster(self) if self.publish_tf else None
         )
         self.get_logger().info(
-            f"Publishing raw wheel odometry: {self.odom_topic} "
-            f"(publish_tf={self.publish_tf})"
+            f'Publishing raw wheel odometry: {self.odom_topic} '
+            f'(publish_tf={self.publish_tf})'
         )
 
         # 타이머 주기가 오도메트리 갱신 루프 빈도를 결정합니다.
@@ -255,7 +257,7 @@ class EncoderFeedbackNode(Node):
             self.prev_left_pos = self.left_pos
             self.last_odom_time = now
             self.get_logger().info(
-                f"Initial position set: right={self.right_pos}, left={self.left_pos}"
+                f'Initial position set: right={self.right_pos}, left={self.left_pos}'
             )
             return
 
@@ -372,5 +374,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

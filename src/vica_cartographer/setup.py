@@ -1,6 +1,7 @@
-import os
 from glob import glob
-from setuptools import find_packages, setup
+import os
+
+from setuptools import setup
 
 package_name = 'vica_cartographer'
 
