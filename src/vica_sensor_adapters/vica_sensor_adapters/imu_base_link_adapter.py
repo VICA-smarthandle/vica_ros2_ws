@@ -3,8 +3,8 @@
 import math
 import time
 
-import rclpy
 from geometry_msgs.msg import Vector3
+import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -82,13 +82,15 @@ def _rotate_covariance(matrix, covariance):
 
 
 class ImuBaseLinkAdapter(Node):
-    def __init__(self):
-        super().__init__("imu_base_link_adapter")
+    """Republish IMU data in the base_link frame with the gyro bias removed."""
 
-        self.declare_parameter("input_topic", "/camera/camera/imu")
-        self.declare_parameter("output_topic", "/imu/base_link")
-        self.declare_parameter("target_frame", "base_link")
-        self.declare_parameter("transform_timeout_sec", 0.05)
+    def __init__(self):
+        super().__init__('imu_base_link_adapter')
+
+        self.declare_parameter('input_topic', '/camera/camera/imu')
+        self.declare_parameter('output_topic', '/imu/base_link')
+        self.declare_parameter('target_frame', 'base_link')
+        self.declare_parameter('transform_timeout_sec', 0.05)
 
         # 정지 중 자이로 편향 보정. 0이면 끈다.
         #
@@ -106,8 +108,8 @@ class ImuBaseLinkAdapter(Node):
         # 정지 중 오탐이 나지 않는다.
         # 편향 표본 수. publish_rate_hz 로 스로틀하면 그만큼 표본이 느리게
         # 쌓이므로 함께 줄인다. 50 Hz x 1000개 = 20초로, 200 Hz x 4000개와 같다.
-        self.declare_parameter("gyro_bias_sample_count", 1000)
-        self.declare_parameter("gyro_bias_max_rate", 0.05)
+        self.declare_parameter('gyro_bias_sample_count', 1000)
+        self.declare_parameter('gyro_bias_max_rate', 0.05)
 
         # 출력 주파수 상한. 0 이하면 제한하지 않는다(입력 그대로).
         #
@@ -124,19 +126,19 @@ class ImuBaseLinkAdapter(Node):
         # 나타났다. 이 노드를 줄이면 그 줄이 짧아진다.
         #
         # 50 Hz 는 EKF 사용 주기(30 Hz)의 1.7배다. 더 낮추면 EKF 입력이 부족해진다.
-        self.declare_parameter("publish_rate_hz", 50.0)
+        self.declare_parameter('publish_rate_hz', 50.0)
 
-        input_topic = self.get_parameter("input_topic").value
-        output_topic = self.get_parameter("output_topic").value
-        self.target_frame = self.get_parameter("target_frame").value
+        input_topic = self.get_parameter('input_topic').value
+        output_topic = self.get_parameter('output_topic').value
+        self.target_frame = self.get_parameter('target_frame').value
 
         self.bias = GyroBiasEstimator(
-            sample_count=self.get_parameter("gyro_bias_sample_count").value,
-            max_abs_rate=self.get_parameter("gyro_bias_max_rate").value,
+            sample_count=self.get_parameter('gyro_bias_sample_count').value,
+            max_abs_rate=self.get_parameter('gyro_bias_max_rate').value,
         )
         self._bias_reported = False
 
-        rate = float(self.get_parameter("publish_rate_hz").value)
+        rate = float(self.get_parameter('publish_rate_hz').value)
         # monotonic 기준이다. 시스템 시계가 바뀌어도 간격 판정이 흔들리지 않는다.
         self._min_period_sec = (1.0 / rate) if rate > 0.0 else 0.0
         self._last_publish_monotonic = 0.0
@@ -154,7 +156,7 @@ class ImuBaseLinkAdapter(Node):
         self.sub = self.create_subscription(Imu, input_topic, self.imu_callback, qos)
 
         self.get_logger().info(
-            f"{input_topic} -> {output_topic} in {self.target_frame}"
+            f'{input_topic} -> {output_topic} in {self.target_frame}'
         )
 
     def imu_callback(self, msg: Imu):
@@ -167,7 +169,7 @@ class ImuBaseLinkAdapter(Node):
             self._last_publish_monotonic = now
 
         timeout = Duration(
-            seconds=float(self.get_parameter("transform_timeout_sec").value)
+            seconds=float(self.get_parameter('transform_timeout_sec').value)
         )
 
         try:
@@ -179,8 +181,8 @@ class ImuBaseLinkAdapter(Node):
             )
         except TransformException as exc:
             message = (
-                f"Waiting for TF {self.target_frame} "
-                f"<- {msg.header.frame_id}: {exc}"
+                f'Waiting for TF {self.target_frame} '
+                f'<- {msg.header.frame_id}: {exc}'
             )
             self.get_logger().warn(
                 message,
@@ -190,7 +192,7 @@ class ImuBaseLinkAdapter(Node):
 
         matrix = _quat_to_matrix(transform.transform.rotation)
         if matrix is None:
-            self.get_logger().warn("Received invalid TF rotation quaternion")
+            self.get_logger().warn('Received invalid TF rotation quaternion')
             return
 
         out = Imu()
@@ -233,16 +235,16 @@ class ImuBaseLinkAdapter(Node):
             bx, by, bz = self.bias.bias
             drift = math.degrees(bz) * 3600.0
             self.get_logger().info(
-                f"Gyro bias calibrated over {self.bias.collected} samples: "
-                f"({bx:+.6f}, {by:+.6f}, {bz:+.6f}) rad/s. "
-                f"Removed yaw drift of {drift:+.1f} deg/hour."
+                f'Gyro bias calibrated over {self.bias.collected} samples: '
+                f'({bx:+.6f}, {by:+.6f}, {bz:+.6f}) rad/s. '
+                f'Removed yaw drift of {drift:+.1f} deg/hour.'
             )
             self._bias_reported = True
         elif self.bias.aborted:
             self.get_logger().warn(
-                "Gyro bias calibration aborted: motion detected during startup. "
-                "Publishing uncorrected rates - yaw will drift. "
-                "Restart this node while the robot is stationary."
+                'Gyro bias calibration aborted: motion detected during startup. '
+                'Publishing uncorrected rates - yaw will drift. '
+                'Restart this node while the robot is stationary.'
             )
             self._bias_reported = True
 
@@ -258,5 +260,5 @@ def main():
     rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
