@@ -234,7 +234,7 @@ class MissionManagerNode(Node):
     def _on_intent(self, msg: VicaIntent) -> None:
         # 음성 취소·일시정지·재개는 service 와 같은 로직을 탄다.
         # 다만 취소는 바로 실행하지 않고 되물어 확인한 뒤에만 처리한다.
-        if msg.intent in ("cancel", "pause", "resume"):
+        if msg.intent in ("cancel", "cancel_keep", "pause", "resume"):
             self._on_voice_mission_command(msg)
             return
 
@@ -274,6 +274,17 @@ class MissionManagerNode(Node):
                 )
                 return
             actions, reason = self.logic.on_cancel_confirm_request(now)
+        elif msg.intent == "cancel_keep":
+            # "안내를 취소할까요?"에 대한 부정. 되묻는 중이 아니면 빈 목록이라
+            # 아무 일도 하지 않는다. 게이트가 없는 이유는 이 요청이 상태를
+            # 되돌리는 쪽(취소하지 않음)이라 거부할 것이 없기 때문이다.
+            actions = self.logic.on_cancel_confirm_answer(False, now)
+            if not actions:
+                self.get_logger().info("음성 cancel_keep 무시: 되묻는 중이 아니다")
+                return
+            self._run_actions(actions)
+            self.get_logger().info("음성 취소 철회: 안내를 이어간다")
+            return
         elif msg.intent == "pause":
             actions, reason = self.logic.on_pause_request(now)
         else:
