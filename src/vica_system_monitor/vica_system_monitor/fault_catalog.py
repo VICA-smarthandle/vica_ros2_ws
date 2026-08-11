@@ -136,6 +136,24 @@ CATALOG: Dict[str, FaultSpec] = {
         'Nav2가 active 상태가 아닙니다. 현재 상태: {state}',
         'Nav2 lifecycle 상태를 확인하고 필요하면 다시 실행해 주세요.',
     ),
+    # 주행 goal 하나가 실패한 것이다. Nav2 스택이 죽은 것과 구분해야 한다 —
+    # NAV2_NOT_ACTIVE 는 "스택이 없다", 이쪽은 "스택은 멀쩡한데 못 갔다"다.
+    # 그래서 이 결함은 navigation readiness 를 끌어내리지 않는다.
+    #
+    # 기본 등급이 DEGRADED 인 이유: 한 번의 실패로는 로봇이 새 goal 을 받을 수 있고
+    # 실제로 주행이 막힌 상태가 아니다. 다만 앱은 STOP(3) 이상만 알림 목록에 남기므로
+    # (fault_severity.dart:47 blocksDriving) 이대로는 관리자에게 알림이 뜨지 않는다.
+    # 반복될 때 STOP 으로 올리는 판정은 nav_failure.NavFailureTracker 가 한다 —
+    # 같은 자리에서 반복되는 실패가 곧 갇힘이기 때문이다.
+    #
+    # count 를 템플릿에 항상 넣는다. 1회에도 "(실패 1회)"가 읽히는 데 문제가 없고,
+    # 자리표시자를 조건부로 채우면 문구 정본이 이 파일 밖으로 새어 나간다.
+    'NAV_GOAL_FAILED': FaultSpec(
+        'navigation',
+        SEVERITY_DEGRADED,
+        '{name}까지 가지 못했습니다. 사유: {reason} (실패 {count}회)',
+        '로봇 주변에 장애물이 있는지 확인하고, 필요하면 앱에서 목적지를 다시 지정해 주세요.',
+    ),
     # --- lidar -------------------------------------------------------------
     'LIDAR_SCAN_STALE': FaultSpec(
         'lidar',

@@ -13,6 +13,7 @@ from vica_system_monitor.freshness import sec_to_ns
 from vica_system_monitor.health_logic import (
     ComponentProbe,
     evaluate,
+    Fault,
     NOT_READY,
     READY,
     SafetyInput,
@@ -585,3 +586,107 @@ def test_bare_bringup_reports_starting_not_stopped():
     )
     assert snap.state == STATE_STARTING
     assert snap.faults == []
+
+
+# ---------------------------------------------------------------------------
+# extra_faults — 진단 계열 밖에서 온 결함을 같은 판정에 얹는다
+# ---------------------------------------------------------------------------
+#
+# 주행 실패(goal_failed)는 /diagnostics_agg 계열이 아니다. 그것을 여기로 들이는 통로가
+# extra_faults다. 삽입 지점이 중요하다 — publish_health가 만든 observation 목록에
+# 그냥 덧붙이면 active_faults(dedup 출처)에는 들어가지만 highest_severity와
+# primary_fault_code(snapshot 출처)에는 반영되지 않아 **한 메시지 안에서 값이 어긋난다**
+# (docs/proposal_nav_failure_to_app.md 3.4절).
+
+
+def _nav_fault(severity=SEVERITY_DEGRADED):
+    """주행 실패 결함 하나. nav_failure.NavFailureTracker가 만드는 것과 같은 모양이다."""
+    return Fault(
+        component='navigation',
+        fault_code='NAV_GOAL_FAILED',
+        severity=severity,
+        detail='화장실까지 가지 못했습니다. 사유: Nav2 task failed (실패 1회)',
+        suggested_action='로봇 주변에 장애물이 있는지 확인해 주세요.',
+        latched=False,
+    )
+
+
+def _healthy_probes(now):
+    return [probe('motor', last_seen_ns=now), probe('safety', last_seen_ns=now)]
+
+
+def test_extra_faults_reach_the_summary_fields():
+    """highest_severity·primary_fault_code·active_fault_count에 모두 반영된다.
+
+    셋 중 하나라도 빠지면 앱 배너와 결함 목록이 서로 다른 말을 한다.
+    """
+    now = 100 * SEC
+    snap = evaluate(
+        probes=_healthy_probes(now),
+        safety=SafetyInput(state='IDLE', estop_latched=False, fresh=True, age_sec=0.0),
+        now_ns=now,
+        started_ns=0,
+        extra_faults=[_nav_fault()],
+    )
+    assert snap.highest_severity == SEVERITY_DEGRADED
+    assert snap.primary_fault_code == 'NAV_GOAL_FAILED'
+    assert snap.active_fault_count == 1
+    assert snap.state == STATE_DEGRADED
+
+
+def test_extra_faults_do_not_touch_readiness():
+    """주행 실패는 Nav2가 죽었다는 뜻이 아니다.
+
+    goal 하나가 실패해도 Nav2 lifecycle은 active이고 새 goal을 받을 수 있다.
+    readiness까지 끌어내리면 관리자가 '스택이 죽었다'로 오해한다.
+    """
+    now = 100 * SEC
+    snap = evaluate(
+        probes=[probe('navigation', last_seen_ns=now)],
+        safety=SafetyInput(state='IDLE', estop_latched=False, fresh=True, age_sec=0.0),
+        now_ns=now,
+        started_ns=0,
+        extra_faults=[_nav_fault()],
+    )
+    assert snap.readiness['navigation'] == READY
+
+
+def test_escalated_extra_fault_stops_the_robot_state():
+    """반복 실패로 STOP까지 오르면 전체 상태도 STOPPED가 된다."""
+    now = 100 * SEC
+    snap = evaluate(
+        probes=_healthy_probes(now),
+        safety=SafetyInput(state='IDLE', estop_latched=False, fresh=True, age_sec=0.0),
+        now_ns=now,
+        started_ns=0,
+        extra_faults=[_nav_fault(severity=SEVERITY_STOP)],
+    )
+    assert snap.state == STATE_STOPPED
+
+
+def test_extra_faults_are_sorted_with_the_others():
+    """더 심각한 결함이 있으면 그쪽이 primary다. 정렬 규칙이 하나여야 한다."""
+    now = 100 * SEC
+    snap = evaluate(
+        probes=[probe('motor', last_seen_ns=None, ok=False, severity=SEVERITY_STOP)],
+        safety=SafetyInput(state='IDLE', estop_latched=False, fresh=True, age_sec=0.0),
+        now_ns=now,
+        started_ns=0,
+        extra_faults=[_nav_fault()],
+    )
+    assert snap.highest_severity == SEVERITY_STOP
+    assert snap.primary_fault_code != 'NAV_GOAL_FAILED'
+    assert 'NAV_GOAL_FAILED' in [f.fault_code for f in snap.faults]
+
+
+def test_omitting_extra_faults_keeps_the_old_behaviour():
+    """기존 호출부는 인자를 넘기지 않는다. 기본값이 빈 목록이어야 한다."""
+    now = 100 * SEC
+    snap = evaluate(
+        probes=_healthy_probes(now),
+        safety=SafetyInput(state='IDLE', estop_latched=False, fresh=True, age_sec=0.0),
+        now_ns=now,
+        started_ns=0,
+    )
+    assert snap.faults == []
+    assert snap.state == STATE_READY

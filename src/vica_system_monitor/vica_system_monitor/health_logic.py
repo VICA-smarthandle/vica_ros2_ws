@@ -18,7 +18,7 @@ READY 판정은 vica_system_health_monitoring_draft.md 7.2절을 그대로 옮�
    (SmartHandleState.msg 주석의 경고와 같은 문제).
 """
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from .fault_catalog import (
     describe,
@@ -129,8 +129,22 @@ def evaluate(
     safety: SafetyInput,
     now_ns: int,
     started_ns: int,
+    extra_faults: Sequence[Fault] = (),
 ) -> HealthSnapshot:
-    """Compute readiness, faults and the overall state for this tick."""
+    """Compute readiness, faults and the overall state for this tick.
+
+    ``extra_faults`` 는 진단(/diagnostics_agg) 계열 밖에서 온 결함을 같은 판정에
+    얹는 통로다. 주행 실패(`nav_failure.NavFailureTracker`)가 여기로 들어온다.
+
+    호출부가 만든 observation 목록에 그냥 덧붙이면 안 되는 이유:
+    그렇게 하면 `active_faults`(dedup 출처)에는 들어가지만 `highest_severity`·
+    `primary_fault_code`(snapshot 출처)에는 반영되지 않아 **한 메시지 안에서 값이
+    어긋난다**(docs/proposal_nav_failure_to_app.md 3.4절).
+
+    probe 를 하나 더 만드는 방법도 쓰지 않는다 — 아래 ``readiness[item.name]`` 이
+    같은 이름을 덮어써 기존 `NAV2_NOT_ACTIVE` 판정을 망가뜨린다. **extra_faults 는
+    readiness 를 건드리지 않는다**: goal 하나가 실패해도 Nav2 는 살아 있다.
+    """
     in_grace_globally = False
     readiness: Dict[str, int] = {}
     faults: List[Fault] = []
@@ -152,6 +166,8 @@ def evaluate(
     )
     if safety_fault is not None:
         faults.append(safety_fault)
+
+    faults.extend(extra_faults)
 
     faults.sort(key=lambda f: (-f.severity, f.component, f.fault_code))
 

@@ -51,6 +51,7 @@ from .nav2_liveness import (
     POLL_FALLBACK,
     POLL_WAIT,
 )
+from .nav_failure import NavFailureTracker, parse_goal_failure
 
 
 # required_components.yaml에서 컴포넌트별로 읽을 필드.
@@ -97,6 +98,11 @@ class RobotHealthMonitorNode(Node):
         self.declare_parameter('diagnostics_timeout_sec', 5.0)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
+        # 주행 실패를 결함으로 붙들어 두는 시간. reminder_interval_sec(30.0)의 2배라
+        # 창 안에서 재알림이 정확히 한 번 끼어든다 — 관리자가 볼 기회가 RAISED와
+        # REMINDER 두 번이다. 0 이하로 두면 이 기능이 꺼진다(nav_failure 모듈 주석).
+        self.declare_parameter('nav_failure_hold_sec', 60.0)
+        self.declare_parameter('goal_event_topic', '/vica_goal_event')
         self.declare_parameter('component_names', [''])
 
         # 시각 판정은 Safety·motor와 같은 단일 STEADY_TIME clock을 쓴다.
@@ -117,6 +123,9 @@ class RobotHealthMonitorNode(Node):
         self.policies = self._read_component_policies()
         self.dedup = EventDeduplicator(
             reminder_interval_ns=self._timeout_ns('reminder_interval_sec')
+        )
+        self.nav_failures = NavFailureTracker(
+            hold_ns=self._timeout_ns('nav_failure_hold_sec')
         )
 
         # ---- 입력 상태 -------------------------------------------------
@@ -163,6 +172,14 @@ class RobotHealthMonitorNode(Node):
         self.create_subscription(String, '/safety_state', self.handle_safety_state, 10)
         self.create_subscription(
             RobotState, '/vica/robot_state', self.handle_robot_state, 10
+        )
+        # 주행 실패는 진단 계열이 아니다. 미션 매니저가 이 토픽으로만 내보내고
+        # 지금까지 앱으로 가는 갈래가 없었다(docs/proposal_nav_failure_to_app.md).
+        self.create_subscription(
+            String,
+            str(self.get_parameter('goal_event_topic').value),
+            self.handle_goal_event,
+            10,
         )
 
         self.tf_buffer = Buffer()
@@ -257,6 +274,16 @@ class RobotHealthMonitorNode(Node):
     def handle_robot_state(self, _msg: RobotState) -> None:
         """Track the mission heartbeat."""
         self.last_robot_state_ns = self.steady_clock.now().nanoseconds
+
+    def handle_goal_event(self, msg: String) -> None:
+        """Take a navigation failure from ``/vica_goal_event`` into the tracker.
+
+        정상 흐름 이벤트와 읽을 수 없는 payload 는 parse 단계에서 None 이 되어 그대로
+        버려진다. 판정은 전부 nav_failure 에 있고 여기서는 시각만 붙인다.
+        """
+        self.nav_failures.record(
+            parse_goal_failure(msg.data), self.steady_clock.now().nanoseconds
+        )
 
     def _nav2_state_by_diagnostic(self, now_ns: int) -> str:
         """Read Nav2 liveness from lifecycle_manager's own diagnostic.
@@ -372,7 +399,17 @@ class RobotHealthMonitorNode(Node):
             ever_fresh=self.last_safety_ns is not None,
         )
 
-        snapshot = evaluate(probes, safety, now_ns=now_ns, started_ns=self.started_ns)
+        # 보류 창이 열려 있는 동안만 결함이 나온다. 닫히면 None 이 되어 dedup 이
+        # CLEARED 를 한 번 낸다.
+        nav_fault = self.nav_failures.fault(now_ns)
+
+        snapshot = evaluate(
+            probes,
+            safety,
+            now_ns=now_ns,
+            started_ns=self.started_ns,
+            extra_faults=[nav_fault] if nav_fault is not None else (),
+        )
         self.last_snapshot = snapshot
 
         observations = [

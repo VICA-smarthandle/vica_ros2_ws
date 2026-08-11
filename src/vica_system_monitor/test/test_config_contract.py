@@ -524,3 +524,30 @@ def test_launch_uses_all_three_config_files():
         'required_components.yaml',
     ):
         assert name in text, f'{name}이 launch에 연결되지 않았습니다'
+
+
+def test_navigation_failure_hold_outlives_one_reminder():
+    """주행 실패를 붙들어 두는 시간이 재알림 간격보다 길어야 한다.
+
+    보류 창은 관리자가 볼 시간을 버는 장치다(nav_failure 모듈 주석). 창이
+    reminder_interval_sec 보다 짧으면 RAISED 한 번만 나가고 창이 닫힌다 — 관리자가
+    그 순간 앱을 보고 있지 않으면 놓친다.
+
+    창을 재알림 간격보다 길게 두면 RAISED 와 REMINDER 로 볼 기회가 두 번 생긴다.
+    """
+    params = load_monitor_params()
+
+    assert 'nav_failure_hold_sec' in params, 'nav_failure_hold_sec가 없습니다'
+    hold = float(params['nav_failure_hold_sec'])
+    reminder = float(params['reminder_interval_sec'])
+
+    assert hold > 0.0, '0 이하는 이 기능을 끄는 값이다'
+    assert hold > reminder, (
+        f'보류 {hold}s가 재알림 간격 {reminder}s보다 짧아 재알림이 끼어들 수 없다'
+    )
+
+
+def test_monitor_watches_the_goal_event_topic():
+    """주행 실패가 들어오는 입구다. 이 토픽을 놓치면 앱에 아무것도 뜨지 않는다."""
+    params = load_monitor_params()
+    assert params['goal_event_topic'] == '/vica_goal_event'

@@ -29,6 +29,33 @@ robot_health_monitor_node:
     # 같은 결함을 재알림하는 간격(초안 10.3절 규칙 3). ESTOP은 이 간격을 무시한다.
     reminder_interval_sec: 30.0
 
+    # -----------------------------------------------------------------------
+    # 주행 실패 중계 — 일회성 사건을 지속 상태로
+    # -----------------------------------------------------------------------
+    #
+    # 주행이 실패해도 관리자 앱에는 아무 표시가 없었다. 미션 매니저가 1 Hz로
+    # robot_state를 계속 보내 박동은 살아 있으므로 감시 계층이 "결함 없음"으로
+    # 판정했다. 로봇이 갇혀 몇 분째 못 움직여도 앱은 정상이었다.
+    # 근거와 설계: docs/proposal_nav_failure_to_app.md
+    goal_event_topic: /vica_goal_event
+
+    # goal_failed는 한 번 오고 끝나는 사건이다. 받은 tick에만 결함으로 넣으면 바로
+    # 다음 tick에 CLEARED가 나가(event_deduplicator 규칙 4) 관리자가 볼 틈이 없다.
+    # 그래서 이 시간만큼 붙들어 둔다.
+    #
+    # 60.0인 이유는 reminder_interval_sec(30.0)의 2배라 창 안에서 재알림이 정확히
+    # 한 번 끼어들기 때문이다 — 관리자가 볼 기회가 RAISED와 REMINDER 두 번이다.
+    # 짧으면 관리자가 앱을 보기 전에 사라지고, 길면 이미 해결된 실패가 남는다.
+    #
+    # 이 창은 "반복"의 정의이기도 하다. 창이 열려 있는 동안 또 실패하면 같은 곤경으로
+    # 보아 등급을 DEGRADED에서 STOP으로 올린다(nav_failure.NavFailureTracker).
+    # 앱은 STOP 이상만 알림 목록에 남기므로 승격 여부가 곧 알림 여부다.
+    #
+    # 0 이하로 두면 이 기능이 꺼져 주행 실패가 앱에 다시 보이지 않는다.
+    #
+    # [미검증] 실기에서 관리자가 실제로 보기까지 걸리는 시간을 재고 조정한다.
+    nav_failure_hold_sec: 60.0
+
     # Nav2 lifecycle 상태 폴링 주기. GetState 서비스를 부른다.
     nav2_state_poll_period_sec: 2.0
     nav2_lifecycle_node: /bt_navigator
