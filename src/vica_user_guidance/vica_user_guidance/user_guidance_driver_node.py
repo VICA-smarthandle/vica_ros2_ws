@@ -75,6 +75,26 @@ class UserGuidanceDriverNode(Node):
             ),
         )
 
+        # 터치센서 대체 입력. **enable_serial=false(mock 모드)에서만** 연다.
+        #
+        # 터치센서가 미장착이라 user_contact 가 False 하드코딩이었고, 그 탓에 모드
+        # 진입(터치 3초)·놓침(유예 0.5초)·재개를 하나도 시험할 수 없었다.
+        #
+        # 값을 고정하지 않고 토픽으로 받는 이유: true 고정은 vica_scenario.md 2-1.3 의
+        # fail-safe 를 뒤집는다. 그 절은 Normally Closed 배선으로 "단선 = 놓음 = 정지"를
+        # 정했는데, true 고정은 "모르면 잡고 있다"라 정반대이고 실기 경로에 남으면
+        # 손 놓음 정지가 영구히 발동하지 않는다. false 고정은 안전하지만 진입 자체가
+        # 안 돼 시험할 것이 없다. 무엇보다 판정 유예 0.5초와 재개 흐름은 **잡았다
+        # 놓는 시점**이 있어야 재현되므로 고정값으로는 만들 수 없다.
+        #
+        # 기본값은 False 다 — 모르면 놓은 것으로 본다(fail-safe 방향).
+        self._mock_user_contact = False
+        self._mock_contact_enabled = not enable_serial
+        if self._mock_contact_enabled:
+            self.create_subscription(
+                Bool, "/vica/mock_user_contact", self.handle_mock_user_contact, 10
+            )
+
         # 입력 스냅샷. 미수신은 None이며 0으로 초기화하지 않는다.
         self.estop_active = False
         self.estop_last_ns = None
@@ -111,6 +131,10 @@ class UserGuidanceDriverNode(Node):
         )
         if not enable_serial:
             self.get_logger().warn("enable_serial=false — mock mode, no serial write")
+            self.get_logger().warn(
+                "터치센서 mock 활성: /vica/mock_user_contact 로 user_contact 를 조작한다. "
+                "계측 전용이며 실기 운용에서는 enable_serial=true 라 열리지 않는다."
+            )
         if not self.estop_required:
             self.get_logger().warn(
                 "estop_required=false — stale /estop_state will NOT force ESTOP. "
@@ -151,6 +175,19 @@ class UserGuidanceDriverNode(Node):
         """중앙 래치 결과를 구독만 한다. 여기서 reset하지 않는다."""
         self.estop_active = bool(msg.data)
         self.estop_last_ns = self.now_ns()
+
+    def handle_mock_user_contact(self, msg: Bool) -> None:
+        """터치센서 대체 입력. mock 모드에서만 구독이 열려 있다.
+
+        상태가 바뀔 때만 로그를 남긴다 — 키보드 도구가 눌린 동안 주기 발행하므로
+        매번 찍으면 다른 로그가 묻힌다.
+        """
+        value = bool(msg.data)
+        if value != self._mock_user_contact:
+            self.get_logger().info(
+                f"[MOCK] user_contact {self._mock_user_contact} -> {value}"
+            )
+        self._mock_user_contact = value
 
     def cb_goal(self, msg: String) -> None:
         """goal_succeeded만 도착으로 본다.
@@ -221,7 +258,9 @@ class UserGuidanceDriverNode(Node):
 
         connected = self.link.connected
         msg.connected = connected
-        msg.user_contact = False    # 터치센서 미장착 확정
+        # 터치센서 미장착이라 실기에서는 항상 False 다. mock 모드에서만
+        # /vica/mock_user_contact 가 채운다(위 구독 참고).
+        msg.user_contact = self._mock_user_contact
         # 상향 통신이 없어 실제 관측이 아니다. connected와 같은 값이며 [미검증]이다.
         msg.servo_ok = connected
         msg.left_led_ok = connected

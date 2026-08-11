@@ -38,6 +38,9 @@ setup(
             "vica_user_guidance.user_guidance_driver_node:main",
             # 진단 도구. 로봇을 움직이지 않고 /odom을 구독만 한다.
             "yaw_drift_check = vica_user_guidance.yaw_drift_check:main",
+            # 계측 도구. 터치센서를 키보드로 흉내낸다. 실기 운용에서 띄우지 않는다.
+            "mock_touch_keyboard = "
+            "vica_user_guidance.mock_touch_keyboard_node:main",
         ],
     },
 )
