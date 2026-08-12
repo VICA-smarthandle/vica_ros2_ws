@@ -1,7 +1,10 @@
-"""복구 동작에 후진이 없는지 감시한다.
+"""복구 동작이 로봇을 움직이지 않는지 감시한다.
 
-실주행에서는 핸들 뒤에 사람이 따라온다(guideline/vica_scenario.md). 그런데
-2026-07-30 Hybrid 주행에서 로봇이 실제로 0.30 m 후진했다:
+2026-08-12 기준으로 복구는 ClearingActions와 Wait 둘뿐이다. 후진(BackUp)과
+회전(Spin)을 차례로 걷어낸 결과이며, 각각의 근거는 아래와 각 시험 docstring에 있다.
+
+후진 제거 — 실주행에서는 핸들 뒤에 사람이 따라온다(guideline/vica_scenario.md).
+그런데 2026-07-30 Hybrid 주행에서 로봇이 실제로 0.30 m 후진했다:
 
     /cmd_vel_safe 7346개 중 후진 173개, vx 정확히 -0.0500 고정, 연속 5.87 s
     behavior_server: "backup completed successfully"
@@ -16,7 +19,6 @@ BtActionNode::createActionClient가 액션 서버를 못 찾으면 예외를 던
 (throw std::runtime_error) BT 생성이 실패하고 주행 전체가 죽는다.
 """
 import importlib.util
-import math
 import re
 from pathlib import Path
 
@@ -51,9 +53,13 @@ NAV2_DEFAULT_BT = Path(
 )
 PLACEHOLDER = 'SET_BY_VICA_NAV2_LAUNCH'
 
-# Spin 회전각 상한 [rad]. nav2 기본값은 1.57(90도)이다.
-# 0.35 rad = 20도. 근거는 test_spin_angle_is_small_enough_to_limit_the_swept_arc.
-MAX_SPIN_DIST_RAD = 0.35
+# 복구가 버텨야 하는 최소 시간 [s]. 이보다 짧으면 사람이 비켜서기 전에 주행이
+# 실패로 끝난다. RoundRobin이 2주기이므로 (retries / 2) x wait_duration이다.
+#
+# 2026-08-12 1단계는 Spin 제거만 넣었고 대기 관련 값은 nav2 기본값 그대로다
+# (wait_duration 5, number_of_retries 6 -> 15 s). 2단계에서 그 둘을 재배분할 때
+# 재출발 지연 상한(wait_duration)을 이 옆에 추가한다.
+MIN_TOTAL_PATIENCE_S = 15
 
 
 def _pkg_dir():
@@ -71,21 +77,6 @@ def _params():
 
 def _strip_comments(xml_text):
     return re.sub(r'<!--.*?-->', '', xml_text, flags=re.DOTALL)
-
-
-def _spin_dists():
-    """BT에 있는 모든 Spin의 spin_dist를 순서대로 돌려준다.
-
-    속성 순서에 의존하지 않는다. 2026-07-31에 name 속성을 붙이면서
-    `<Spin spin_dist=` 고정 패턴이 깨진 적이 있다.
-    """
-    body = _strip_comments(_bt_path().read_text(encoding='utf-8'))
-    out = []
-    for tag in re.findall(r'<Spin\b[^>]*>', body):
-        m = re.search(r'spin_dist="(-?[0-9.]+)"', tag)
-        assert m is not None, f'Spin에 spin_dist가 없다: {tag}'
-        out.append(float(m.group(1)))
-    return out
 
 
 @pytest.mark.parametrize('bt_name', SHIPPED_BTS)
@@ -186,14 +177,16 @@ def test_active_bt_still_plans_and_follows_with_periodic_replanning():
     )
 
 
-def test_custom_bt_keeps_the_forward_only_recovery_actions():
-    """후진만 빼고 나머지 복구 수단은 남아 있어야 한다.
+def test_custom_bt_keeps_the_stationary_recovery_actions():
+    """로봇을 움직이지 않는 복구 수단은 남아 있어야 한다.
 
-    복구 수단을 다 없애면 한 번 갇혔을 때 빠져나올 방법이 사라진다.
-    RoundRobin은 ClearingActions -> Spin -> Wait를 순환해야 한다.
+    2026-08-12에 Spin을 뺐다(근거는 test_recovery_has_no_spin). 남는 복구는
+    ClearingActions와 Wait 둘뿐이고, RoundRobin은 그 2주기를 순환한다.
+    둘 다 없애면 갇혔을 때 빠져나올 방법이 사라진다 -- 2026-08-01 clearing_only
+    측정에서 "복구 없이는 장애물 앞에서 못 빠져나온다"가 확인됐다.
     """
     body = _strip_comments(_bt_path().read_text(encoding='utf-8'))
-    for keep in ('<Spin', '<Wait', '<ClearEntireCostmap',
+    for keep in ('<Wait', '<ClearEntireCostmap',
                  '<ComputePathToPose', '<FollowPath'):
         assert keep in body, f'{BT_NAME}에서 {keep}이 사라졌다'
 
@@ -221,82 +214,120 @@ def test_custom_bt_only_removes_backup_from_the_nav2_default():
     removed = [line for line in default if line not in ours]
     added = [line for line in ours if line not in default]
 
-    # 허용되는 변경은 Spin 계열과 BackUp 제거뿐이다.
-    #   (1) <BackUp/> 제거      -- 핸들 뒤 사람. 근거는 이 파일 상단.
-    #   (2) <Spin spin_dist> 값 -- 2026-07-30 의자 충돌. 근거는 BT 안 주석.
-    #   (3) <Spin> 우회전 추가  -- 2026-07-31. 좌만 있으면 막힌 쪽으로만 돈다.
-    #                              근거는 test_recovery_can_spin_both_ways.
-    # 그 밖에 줄이 추가되거나 제거되면 실패시킨다. 2026-07-28에 커스텀 BT로
-    # SmoothPath를 넣었다가 실주행이 악화되어 되돌린 이력이 있다.
-    added_non_spin = [l for l in added if not l.startswith('<Spin')]
-    removed_non_backup = [
-        l for l in removed
-        if not (l.startswith('<BackUp') or l.startswith('<Spin'))
-    ]
-    assert added_non_spin == [], (
-        f'BackUp 제거와 Spin 각 조정 외의 줄이 추가됐다: {added_non_spin}'
+    # 허용되는 변경 2가지. 그 밖에 줄이 추가되거나 제거되면 실패시킨다 --
+    # 2026-07-28에 커스텀 BT로 SmoothPath를 넣었다가 실주행이 악화되어 되돌린
+    # 이력이 있다.
+    #   (1) <BackUp/> 제거 -- 핸들 뒤 사람. 근거는 이 파일 상단.
+    #   (2) <Spin/> 제거   -- 2026-08-12. 근거는 test_recovery_has_no_spin.
+    #
+    # 2단계에서 wait_duration과 number_of_retries를 바꿀 때 그 두 줄을 여기
+    # 추가한다. 지금은 nav2 기본값과 같아서 diff에 나오지 않는다.
+    changeable = ('<BackUp', '<Spin')
+
+    added_unexpected = [l for l in added if not l.startswith(changeable)]
+    removed_unexpected = [l for l in removed if not l.startswith(changeable)]
+
+    assert added_unexpected == [], (
+        f'허용되지 않은 줄이 추가됐다: {added_unexpected}'
     )
-    assert removed_non_backup == [], (
-        f'BackUp 제거와 Spin 각 조정 외의 줄이 제거됐다: {removed_non_backup}'
+    assert removed_unexpected == [], (
+        f'허용되지 않은 줄이 제거됐다: {removed_unexpected}'
     )
     assert any(l.startswith('<BackUp') for l in removed), (
         f'BackUp 줄이 제거되지 않았다. 제거된 줄: {removed}'
     )
-
-
-def test_spin_angle_is_small_enough_to_limit_the_swept_arc():
-    """253 밴드에서 Spin이 도는 것을 파라미터로는 막을 수 없으므로 각을 줄인다.
-
-    Spin이 쓰는 CostmapTopicCollisionChecker::isCollisionFree는 254(LETHAL)에서만
-    거부하고 253(INSCRIBED)은 통과시킨다. 헤더에 임계값 인자가 없어 설정으로
-    바꿀 수 없다(costmap_topic_collision_checker.hpp: isCollisionFree(pose, fetch)).
-    253은 '벽에서 내접반경 0.277 m 이내'이고 그 자리에서 회전하면 후방 꼭짓점이
-    반경 0.675 m를 쓸어 거의 확실히 닿는다 -- 2026-07-30에 실제로 핸들이 의자에
-    부딪혔다.
-
-    inflation_radius 0.35 -> 0.40으로 253 진입을 줄여봤으나 회전 중 253 접촉
-    샘플이 18개 -> 18개로 동일했다. 진입 억제로는 막지 못한다.
-
-    각을 줄이면 쓸리는 각범위가 줄어든다. 기본값 1.57(90도)은 1/4바퀴다.
-    RoundRobin이 복구를 순환하므로 작은 각도 재시도마다 누적되어 복구 능력을
-    잃지 않는다.
-    """
-    dists = _spin_dists()
-    assert dists, 'BT에서 Spin spin_dist를 찾을 수 없다'
-    for spin_dist in dists:
-        mag = abs(spin_dist)
-        assert mag <= MAX_SPIN_DIST_RAD, (
-            f'spin_dist {spin_dist} rad({math.degrees(mag):.0f}도)가'
-            f' 상한 {MAX_SPIN_DIST_RAD} rad'
-            f'({math.degrees(MAX_SPIN_DIST_RAD):.0f}도)를 넘는다.'
-            ' 253 밴드에서 회전하면 후방 0.675 m가 쓸린다'
-        )
-        # 0이면 복구 수단을 잃는다. 누적을 쓰려면 한 번에 최소한은 돌아야 한다.
-        assert mag >= 0.15, (
-            f'spin_dist {spin_dist} rad이 너무 작아 자세 전환에 기여하지 못한다'
-        )
-
-
-def test_recovery_can_spin_both_ways():
-    """복구 회전은 좌·우 두 방향이 다 있어야 한다.
-
-    nav2 Spin은 BT가 준 부호대로만 돈다 -- onCycleUpdate가
-    copysign(vel, cmd_yaw)로 방향을 정한다(libnav2_spin_behavior.so 0x1e4bc의
-    bit v8.8b, v0.8b, v2.8b). "빈 쪽으로 돌기" 판단은 없다.
-
-    2026-07-30 12회차 화장실 구간에서 양수 하나뿐이던 Spin이 막힌 쪽으로만
-    돌았다. 첫 Spin이 yaw 64.4 -> 94.4도로 돌면서 footprint 안 LETHAL 겹침이
-    1 -> 4 -> 6개로 늘었고, 재시도 3회 모두 같은 방향으로 즉시 Collision Ahead가
-    났다. 19.4초 뒤 탈출한 첫 궤적은 wz -0.400, 곧 반대 방향이었다.
-
-    부호가 반대인 Spin이 하나라도 없으면 그 상황이 그대로 재발한다.
-    """
-    dists = _spin_dists()
-    assert any(d > 0 for d in dists), (
-        f'좌회전(양수) Spin이 없다: {dists}'
+    assert any(l.startswith('<Spin') for l in removed), (
+        f'Spin 줄이 제거되지 않았다. 제거된 줄: {removed}'
     )
-    assert any(d < 0 for d in dists), (
-        f'우회전(음수) Spin이 없다. 좌가 막힌 자리에서 대안이 사라진다: {dists}'
+
+
+@pytest.mark.parametrize('bt_name', SHIPPED_BTS)
+def test_recovery_has_no_spin(bt_name):
+    """복구에서 제자리 회전을 없앤 상태를 지킨다(2026-08-12). 근거 4가지.
+
+    1. 시간을 가장 많이 먹는다. 시뮬 12패스에서 복구가 시험 시간의 87~91 %였고
+       그중 Spin이 27.6 s로 최대 항목이었다(Wait는 26.2 s).
+
+    2. 위험하다. Spin이 쓰는 CostmapTopicCollisionChecker::isCollisionFree는
+       254(LETHAL)에서만 거부하고 253(INSCRIBED)은 통과시킨다. 헤더에 임계값
+       인자가 없어 설정으로 바꿀 수 없다. 253은 '벽에서 내접반경 0.2775 m 이내'
+       이고 그 자리에서 회전하면 후방 꼭짓점이 반경 0.651 m를 쓸어 거의 확실히
+       닿는다 -- 2026-07-30에 실제로 핸들이 의자에 부딪혔다. inflation_radius를
+       0.35 -> 0.40으로 올려도 253 접촉 샘플이 18개 -> 18개로 동일했다.
+
+    3. 효과가 없다. RoundRobin은 좌/우를 번갈아 내므로 각이 누적되지 않는다.
+       종전 4주기를 6회 돌면 순 회전은 +17.2도뿐이었다. 2026-07-30 12회차
+       화장실 구간 19.4초 정지가 Spin이 만든 것이다.
+
+    4. 전제가 성립하지 않는다. 제자리 회전에 1.31 m가 필요한데 건물 대표 통로는
+       1.0 m다(docs/nav2_backlog.md §9의 RotationShim 항목과 같은 근거).
+
+    되살리려면 이 시험이 아니라 위 근거부터 반박할 것.
+    """
+    body = _strip_comments(_bt_path(bt_name).read_text(encoding='utf-8'))
+    assert '<Spin' not in body, (
+        f'{bt_name}에 Spin이 되살아났다. 253 밴드에서 후방 0.651 m가 쓸린다'
+    )
+
+
+def _wait_durations(bt_name=BT_NAME):
+    """BT에 있는 모든 Wait의 wait_duration을 순서대로 돌려준다.
+
+    속성 순서에 의존하지 않는다. Spin에서 name 속성을 붙이며 고정 패턴이 깨진
+    이력이 있어 같은 방식을 쓰지 않는다.
+    """
+    body = _strip_comments(_bt_path(bt_name).read_text(encoding='utf-8'))
+    out = []
+    for tag in re.findall(r'<Wait\b[^>]*>', body):
+        m = re.search(r'wait_duration="([^"]+)"', tag)
+        assert m is not None, f'Wait에 wait_duration이 없다: {tag}'
+        out.append(m.group(1))
+    return out
+
+
+def test_wait_duration_is_an_integer():
+    """Humble의 WaitAction은 BT::InputPort<int>다.
+
+    nav2_behavior_tree/plugins/action/wait_action.hpp의 providedPorts가
+    InputPort<int>로 선언한다. 소수점을 쓰면 파싱이 어떻게 되든 의도한 값이
+    아니게 되므로 정수만 허용한다. main 브랜치에서 double로 바뀌었으니 nav2를
+    올릴 때 이 제약을 다시 확인할 것.
+
+    상한(재출발 지연)은 2단계에서 대기를 재배분할 때 여기 추가한다.
+    """
+    values = _wait_durations()
+    assert values, f'{BT_NAME}에 Wait가 없다. 동적 장애물을 기다릴 수단이 사라졌다'
+    for raw in values:
+        assert raw.lstrip('-').isdigit(), (
+            f'wait_duration "{raw}"가 정수가 아니다.'
+            ' Humble의 WaitAction 포트는 int라 소수점을 받지 못한다'
+        )
+        assert int(raw) > 0, f'wait_duration {raw}가 0 이하다'
+
+
+def test_recovery_patience_is_long_enough():
+    """총 인내 시간이 사람이 비켜설 만큼은 되어야 한다.
+
+    RoundRobin이 ClearingActions -> Wait 2주기이므로 Wait는 재시도 2회에 1번
+    돈다. 즉 총 대기 = (number_of_retries / 2) x wait_duration이다.
+
+    이 값이 짧으면 통과 불가능한 자리에서 사람이 비켜서기도 전에 주행이 실패로
+    끝난다. 길게 잡아도 안전한 이유는 Spin이 없어 로봇이 움직이지 않기 때문이다
+    -- 종전에 재시도 증가를 권장하지 않은 근거는 Spin 각 누적이었다
+    (devlog/2026-08-01-bt-recovery-and-spin-speed.md 120-144행).
+    """
+    body = _strip_comments(_bt_path().read_text(encoding='utf-8'))
+    m = re.search(r'<RecoveryNode[^>]*number_of_retries="(\d+)"[^>]*'
+                  r'name="NavigateRecovery"', body)
+    assert m is not None, 'NavigateRecovery의 number_of_retries를 찾을 수 없다'
+    retries = int(m.group(1))
+    wait_s = int(_wait_durations()[0])
+
+    patience = (retries / 2) * wait_s
+    assert patience >= MIN_TOTAL_PATIENCE_S, (
+        f'총 인내 {patience:.0f} s가 하한 {MIN_TOTAL_PATIENCE_S} s에 못 미친다'
+        f' (retries {retries}, wait {wait_s} s).'
+        ' 사람이 비켜서기 전에 주행이 실패로 끝난다'
     )
 
 
