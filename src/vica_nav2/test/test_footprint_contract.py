@@ -18,11 +18,21 @@ STL_SCALE = 0.001
 # URDF의 collision origin이 xyz="0 0 -body_center_z"로 z만 오프셋이므로
 # STL의 x/y는 base_link 좌표와 직접 대응한다. z 값이 바뀌어도 이 대응은 유지된다.
 #
-# 후방만은 STL을 신뢰하지 않는다. 2026-07-29 줄자 실측이 중심 -> 핸들 끝 56.5 cm인데
-# STL은 -0.505로 6 cm 짧다. 같은 날 핸들 기둥 위치도 CAD(-0.265~-0.305) 대비
-# 실측(-0.205)이 7~10 cm 어긋나, CAD 후방부가 실제 차체를 반영하지 못한다.
-# 따라서 후방 기준은 STL이 아니라 이 실측값이다.
-MEASURED_REAR = -0.565
+# 후방과 좌우는 STL을 신뢰하지 않는다. CAD 후방부가 실제 차체를 반영하지 못한다는
+# 것이 2026-07-29에 확인됐다 -- 줄자로 중심 -> 핸들 끝이 56.5 cm인데 STL은 -0.505로
+# 6 cm 짧았고, 핸들 기둥 위치도 CAD(-0.265~-0.305) 대비 실측(-0.205)이 7~10 cm
+# 어긋났다. 그래서 이 저장소는 CAD보다 줄자를 우선한다.
+#
+# 2026-08-13 하드웨어 최종 실측(사용자 확정):
+#   차체 61 cm (앞뒤 대칭이라 +-0.305) · 손잡이 19 cm 돌출 · 총 세로 80 cm
+#   반폭 0.225 · 손잡이 최대폭 7 cm
+# 후방은 -0.305 - 0.19 = -0.495 다. 2026-08-02 값(-0.595, 손잡이 29 cm)에서
+# 손잡이가 10 cm 짧아졌다.
+MEASURED_REAR = -0.495
+MEASURED_HALF_WIDTH = 0.225
+# STL과 실측이 이보다 더 벌어지면 둘 중 하나가 낡은 것이므로 사람이 봐야 한다.
+# 현재 차이는 반폭에서 1.5 mm(STL 0.2265 vs 실측 0.225)로, padding 5 cm 안에 묻힌다.
+STL_TOLERANCE = 0.01
 LASER_X = 0.185  # VICA.xacro laser_x
 CAMERA_X = 0.28683  # VICA.xacro camera_x
 
@@ -73,18 +83,25 @@ def test_footprint_covers_the_real_chassis(costmap):
     rear = min(p[0] for p in points)
     half_width = max(abs(p[1]) for p in points)
 
-    # 전방·좌우는 실제 차체를 반드시 덮어야 한다. 여기서 짧으면 범퍼가
-    # costmap상 free 공간을 쓸고 지나가 충돌한다.
+    # 전방은 STL과 줄자가 일치한다(+0.305). 여기서 짧으면 범퍼가 costmap상
+    # free 공간을 쓸고 지나가 충돌한다 -- 2026-07-27에 실제로 그랬다.
     assert front >= max_x, (
         f'{costmap} footprint 전방 {front}이 실제 차체 {max_x:.3f}보다 짧다'
     )
-    assert half_width >= max_abs_y, (
-        f'{costmap} footprint 반폭 {half_width}이 실제 차체 {max_abs_y:.3f}보다 좁다'
+    # 좌우·후방은 줄자 실측이 기준이다. CAD 후방부가 실물과 다르다는 것이
+    # 확인됐기 때문이다(위 상수 주석).
+    assert half_width >= MEASURED_HALF_WIDTH, (
+        f'{costmap} footprint 반폭 {half_width}이 실측 {MEASURED_HALF_WIDTH}보다 좁다'
     )
-    # 후방은 줄자 실측(-0.565)을 덮어야 한다. STL(-0.505)로 검사하면 6 cm 짧은
-    # footprint를 통과시켜, 2026-07-27 전방 충돌과 같은 종류의 결함을 놓친다.
     assert rear <= MEASURED_REAR, (
         f'{costmap} footprint 후방 {rear}이 실측 차체 {MEASURED_REAR}보다 짧다'
+    )
+    # 다만 STL을 아주 버리지는 않는다. 실측과 CAD가 크게 벌어지면 둘 중 하나가
+    # 낡은 것이고, 그걸 모르고 지나가면 2026-07-27 같은 충돌로 돌아온다.
+    assert max_abs_y - half_width <= STL_TOLERANCE, (
+        f'{costmap} 반폭 실측 {half_width}이 STL {max_abs_y:.4f}보다 '
+        f'{max_abs_y - half_width:.4f} m 작다. 허용 {STL_TOLERANCE} m를 넘었으니 '
+        'CAD와 실물 중 어느 쪽이 낡았는지 사람이 확인해야 한다'
     )
 
 
@@ -131,15 +148,37 @@ def test_padding_keeps_a_hard_clearance_margin(costmap):
     )
 
 
-# 맵 실측 통로 반폭(scratchpad/corridor_width.py): 중앙값 0.70 m, 10%tile 0.35 m.
+# 맵 실측 통로 반폭. 2026-08-13에 scripts/vica_corridor_measure.py로 새 지도
+# vica_map_0812_1을 다시 쟀다(free 셀마다 EDT로 가장 가까운 벽까지의 거리를 구하고,
+# 미탐색은 벽으로 친다). 로봇이 설 수 있는 곳의 10%tile 폭이 0.70 m라 반폭 0.35 m다.
+# 옛 건물 값(scratchpad/corridor_width.py)과 우연히 같아 숫자는 그대로 둔다.
 NARROWEST_CORRIDOR_HALF_WIDTH = 0.35
 # inflation_radius 상한. 이 값을 넘으면 협착부가 아니라 '보통 통로'에서도
 # 비용 0인 중앙선이 사라져, 우회가 아니라 전면 정체가 된다.
-CORRIDOR_HALF_WIDTH_MEDIAN = 0.70
+#
+# 2026-08-13: 0.70 -> 0.650. 0.70은 옛 건물의 지도에서 나온 값인데 로봇은 이미
+# 다른 건물에 있다. 새 값은 vica_map_0812_1(990 x 398 px, 0.05 m/px, free
+# 168.2 m2)에서 '로봇이 실제로 설 수 있는 곳'(여유 >= 내접 0.275 m)만 골라 낸
+# 여유의 중앙값이다. 전체 free로 세지 않는 이유는 넓은 방 한가운데가 분포를
+# 끌어올려 통로가 실제보다 넓게 나오기 때문이다.
+#
+# 이 갱신으로 판정은 바뀌지 않는다. inflation_radius는 이번에 0.55 -> 0.56이고
+# 0.56 < 0.650이라 옛 값에서도 새 값에서도 통과한다. 그런데도 고치는 이유는,
+# 통과하는 시험이 낡은 상수를 가장 잘 숨기기 때문이다. 다음 사람이 없는 건물의
+# 숫자를 근거로 삼지 않게 하려고 갱신한다.
+CORRIDOR_HALF_WIDTH_MEDIAN = 0.650
 
-# 로봇이 실제로 통과하는 경로의 최협 지점 여유(analysis/bottleneck_path.py,
-# 2026-07-30 Hybrid 주행). 방2 -> 화장실 우회로의 (1.66, 3.04) 지점이다.
-# 이 값보다 inflation_radius가 크면 그 통로에는 비용 0인 중앙선이 없다.
+# [미측정 -- 옛 장소 값] 로봇이 실제로 통과하는 경로의 최협 지점 여유
+# (analysis/bottleneck_path.py, 2026-07-30 Hybrid 주행). 옛 건물 방2 -> 화장실
+# 우회로의 (1.66, 3.04) 지점이다. 이 값보다 inflation_radius가 크면 그 통로에는
+# 비용 0인 중앙선이 없다.
+#
+# 2026-08-13: 새 장소에서는 아직 그 코스를 주행한 적이 없어 다시 잴 수 없다.
+# 지도 통계로 대신할 수도 없다 -- 이 값은 '좁은 곳이 어딘가 있다'가 아니라
+# '로봇이 실제로 지나간 경로의 최협 지점'이라 주행 bag이 있어야 나온다.
+# 그래서 옛 값을 그대로 둔다. 그럴 수 있는 것은 이 상수가 assert가 아니라 아래
+# print 경고에만 쓰여 시험을 깨뜨리지 않기 때문이다.
+# 새 장소 첫 주행 bag에서 같은 방식으로 다시 재고 이 표식을 지운다.
 DRIVEN_CORRIDOR_CLEARANCE = 0.412
 
 # 경로 추종 오차 실측(analysis/why_lethal_under_footprint.py, 2026-07-30
@@ -154,6 +193,30 @@ PATH_TRACKING_ERROR_P95 = 0.120
 
 # costmap 해상도. 완충이 1셀도 안 되면 벽에서 멀어지려는 경사가 아예 없다.
 COSTMAP_RESOLUTION = 0.05
+
+# ── 2026-08-13 외접반경 축소. 이번 회차를 가능하게 만든 사실이다 ───────────────
+# 줄자 실측에서 손잡이 돌출이 29 -> 19 cm로 줄어 footprint 후방이 -0.595 ->
+# -0.495가 됐고, padding 포함 외접반경이 0.6506 -> 0.5516 m로 줄었다. 내접반경은
+# 좌우 폭이 정하므로 0.275 m로 거의 그대로다(반폭 0.225 + padding 0.05).
+#
+# 이 10 cm가 막혀 있던 축을 열었다.
+#
+#   컨트롤러 교체 전제 :  inflation_radius >= 외접반경
+#      이전  0.651 필요  vs  통로 반폭 중앙값 0.65  ->  창이 없다. 불가능
+#      지금  0.552 필요  vs  통로 반폭 중앙값 0.65  ->  0.56 으로 충족. 여유 9 cm
+#
+# 전제인 이유: Smac의 GridCollisionChecker는 inflation_radius 바깥에서 footprint
+# 검사를 건너뛴다. 그래서 inflation_radius가 외접반경보다 짧으면 그 사이 폭이
+# planner의 사각지대가 된다 -- 외접이 0.651이던 때 inflation 0.55는 벽에서
+# 0.55~0.651 m(폭 10 cm)를 검사 없이 통과시켰다. 지금 그 구간을 막는 것은
+# DWB의 ObstacleFootprint critic 하나뿐이라, MPPI처럼
+# potential-field 최적화를 쓰는 controller로 바꾸면 방벽이 사라진다.
+# 그래서 이번에 inflation_radius를 0.55 -> 0.56으로 올려 외접반경 0.5516을 덮는다.
+# 상세: devlog/2026-08-05-inflation-외접반경-검증.md (5절 · 8절)
+#
+# 상한(CORRIDOR_HALF_WIDTH_MEDIAN 0.650)과 하한(내접 0.275 + 추종 오차 0.120 =
+# 0.395) 사이가 이제 [0.395, 0.650]이고, 0.56은 그 안이다. 외접반경이 0.651이던
+# 동안에는 상한 0.65 위에 있어 두 조건을 함께 만족시킬 수 없었다.
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
@@ -196,7 +259,9 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     #   경로 최소 여유 0.283 m는 내접 0.277 위로 0.6 cm뿐이라, 오차 16 cm가
     #   그것을 먹고 footprint 안에 lethal이 들어왔다(0.283 - 0.164 = 0.119).
     #   그러면 planner가 "Starting point in lethal space"로 아무 경로도 못 내고,
-    #   Spin은 외접 0.675 m를 쓸어야 해서 여유 0.180 m에서는 원리적으로 불가하다.
+    #   Spin은 외접반경을 쓸어야 해서 여유 0.180 m에서는 원리적으로 불가하다.
+    #   (당시 계산의 외접 0.675 m는 낡았다. 2026-08-13 실측은 0.5516 m다.
+    #    그래도 0.180 m 여유에서는 여전히 회전할 수 없어 결론은 그대로다.)
     #
     # 그래서 하한의 정체는 '경사의 존재'가 아니라 '추종 오차 완충'이다.
     # 비용 0 지대에서 planner는 경로 길이만 최소화하므로 경로 여유는
@@ -237,7 +302,10 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     # 회전을 시작해 핸들이 의자 등받이에, 좌측 후방 모서리가 의자 다리에 부딪혔다.
     # 회전 중 footprint 외곽선 최대값은 99(INSCRIBED)로 254에 닿지 않아
     # isCollisionFree를 통과했다. 253 밴드는 벽에서 내접반경 안쪽이고 회전하면
-    # 외접반경 0.675 m가 쓸리므로, 그 밴드 진입 자체를 줄이는 것이 유일한 방어다.
+    # 외접반경이 쓸리므로, 그 밴드 진입 자체를 줄이는 것이 유일한 방어다.
+    # (이 계산에 쓴 외접 0.675 m는 낡았다. 2026-08-13 손잡이 축소 실측으로
+    #  0.5516 m다. 내접 0.275 m 밴드 안에서 0.552 m를 쓰는 것은 마찬가지라
+    #  결론은 그대로고, 다만 회전 시 쓸리는 반경이 12 cm 줄었다.)
     assert inflation_radius - inscribed >= PATH_TRACKING_ERROR_P95, (
         f'{costmap} 완충 {inflation_radius - inscribed:.3f} m가 경로 추종 오차'
         f' p95 {PATH_TRACKING_ERROR_P95} m보다 작다. 오차가 내접반경을 먹어'
