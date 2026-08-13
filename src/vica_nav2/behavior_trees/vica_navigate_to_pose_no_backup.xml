@@ -31,10 +31,10 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- [A/B 시험 중] 2026-08-13. 지금은 A안이다.
+    <!-- [A/B 시험 중] 2026-08-13. 지금은 B안이다.
 
-           A안  10회 x 2 s -> 총 10 s, 재계획 10번, 재출발 지연 2 s   <- 지금
-           B안  30회 x 1 s -> 총 15 s, 재계획 30번, 재출발 지연 1 s
+           A안  10회 x 2 s -> 총 10 s, 재계획 10번, 재출발 지연 2 s
+           B안  30회 x 1 s -> 총 15 s, 재계획 30번, 재출발 지연 1 s   <- 지금
 
          총 인내 = (number_of_retries / 2) x wait_duration 이다. RoundRobin이
          ClearingActions -> Wait 2주기라 Wait는 재시도 2회에 한 번 돈다.
@@ -57,7 +57,7 @@
          궤적 419개가 전멸하고 0.3 s 뒤 controller가 손을 놓는다
          (failure_tolerance 0.3). planner도 "Starting point in lethal space"로
          실패한다. 그 뒤 복구가 15 s를 쓰고 Goal failed로 끝났다. 회차당 2회. -->
-    <RecoveryNode number_of_retries="10" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="30" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
@@ -113,14 +113,15 @@
 
                배경: devlog/2026-08-12-yolo-비전도입-검토와-동적장애물-정지.md
                제거 전 이력(spin_dist 1.57 -> 0.30, 좌/우 분리)은 git 로그에 있다. -->
-          <!-- 2026-08-12 [1단계]: 이 값은 아직 nav2 기본값 5다. 위 RecoveryNode
-               주석과 같은 이유로 2단계에서 number_of_retries 와 함께 바꾼다.
+          <!-- 이 값이 곧 재출발 지연이다. Wait 가 도는 동안에는 상황을 다시 보지
+               않으므로, 사람이 비켜나도 남은 시간을 다 채운다. number_of_retries
+               와 한 세트로 움직인다(위 주석).
 
-               2단계에서 바꿀 때 주의: Humble 의 WaitAction 은 BT::InputPort<int> 다
+               주의: Humble 의 WaitAction 은 BT::InputPort<int> 다
                (nav2_behavior_tree/plugins/action/wait_action.hpp). 소수점을 쓸 수
-               없고 해상도는 1초다. nav2 main 에서 double 로 바뀌었으므로 업그레이드
-               때 다시 확인한다. -->
-          <Wait wait_duration="2"/>
+               없고 해상도는 1초다. 즉 1 이 이 구조에서 가능한 최소값이다.
+               nav2 main 에서 double 로 바뀌었으므로 업그레이드 때 다시 확인한다. -->
+          <Wait wait_duration="1"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
