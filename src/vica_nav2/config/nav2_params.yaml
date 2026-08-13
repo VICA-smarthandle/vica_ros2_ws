@@ -31,8 +31,20 @@ amcl:
     sigma_hit: 0.2
     tf_broadcast: true
     transform_tolerance: 1.0
-    update_min_a: 0.2
-    update_min_d: 0.25
+    # NAV2-B1 1단계. 0.2 / 0.25 -> 0.10 / 0.10 (a 는 각도 rad, d 는 거리 m 다.
+    # 단위가 달라 뒤바꿔 적기 쉽다). "이만큼 움직이기 전에는 라이다를 보지
+    # 않는다"는 문턱이고, 문턱이 고쳐야 할 오차보다 크면 영영 못 고친다 —
+    # 2026-07-31 에 30 cm 어긋난 자세를 고치려고 25 cm 를 먼저 움직여야 했다.
+    #
+    # 2026-08-12 probe 측정으로 효과가 확인됐다(~/vica_amcl_logs, 21:01 -> 21:15):
+    #   1 m 당 갱신     4.83 -> 10.04 회   (2.08배)
+    #   무갱신 중앙값   1.05 -> 0.45 s     (0.43배)
+    #   무갱신 p95      1.40 -> 0.65 s     (0.47배)
+    # 다만 최악 무갱신은 2.75 -> 4.05 s 로 나빠졌고 8/11 기준(3 s 미만)에 못 미친다.
+    # 비교 스크립트가 "CPU 포화를 의심하라"를 찍었다. max_beams 를 60 으로 두는
+    # 이유가 이것이다 — CPU 를 더 얹기 전에 이 항목부터 갈라 봐야 한다.
+    update_min_a: 0.10
+    update_min_d: 0.10
     z_hit: 0.5
     z_max: 0.05
     z_rand: 0.5
@@ -180,11 +192,14 @@ controller_server:
       debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.26
+      # 2026-08-13: 0.26 -> 0.5. 사용자 요구다 — 안내 보행 0.8~1.1 m/s 에 비해
+      # 너무 느렸다. 회전(max_vel_theta)은 이번에 건드리지 않는다. 한 번에 한
+      # 축이고, 회전은 별도 병목으로 따로 잰다.
+      max_vel_x: 0.5
       max_vel_y: 0.0
       max_vel_theta: 0.4 # 1.0 회전 속도 줄임
       min_speed_xy: 0.0
-      max_speed_xy: 0.26
+      max_speed_xy: 0.5
       min_speed_theta: 0.0
       # Add high threshold velocity for turtlebot 3 issue.
       # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
@@ -195,7 +210,17 @@ controller_server:
       # 최대치를 유지한다. 도착 시 완만함은 velocity_smoother.max_decel에서만
       # 별도로 완화한다 (guideline/vica_scenario.md 참고). E-stop 0 출력은
       # Safety가 별도 처리한다.
-      decel_lim_x: -2.5
+      #
+      # 2026-08-13: -2.5 -> -1.5. 속도를 0.5 로 올리면서 smoother 와의 정합이
+      # 깨지기 때문이다. DWB 는 이 값으로 "여기서 설 수 있다"를 계산하는데,
+      # 실제 감속은 smoother 가 낸다. 낙관적으로 계획할수록 계획한 정지선을
+      # 넘는다:
+      #   0.5 m/s, DWB -2.5 / smoother -1.0  ->  초과 7.5 cm   padding 5 cm 넘음
+      #   0.5 m/s, DWB -1.5 / smoother -1.25 ->  초과 1.7 cm   덮인다
+      # 제동력을 줄인 것이 아니라 계획을 보수적으로 만든 것이다. 실제 제동은
+      # smoother 가 -1.25 로 이전보다 오히려 세다. 계약은
+      # test_velocity_smoother_linear_decel_matches_dwb 가 지킨다(하한 1.0 도 있다).
+      decel_lim_x: -1.5
       decel_lim_y: 0.0
       decel_lim_theta: -3.2
       vx_samples: 20
@@ -1468,8 +1493,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
+    # 2026-08-13: 직선 0.26 -> 0.5 (사용자 요구). 회전 1.0 은 그대로 둔다 —
+    # DWB 는 자체 max_vel_theta(0.4)를 갖고 있어 여기가 회전 상한이 아니다.
+    max_velocity: [0.5, 0.0, 1.0]
+    min_velocity: [-0.5, 0.0, -1.0]
     max_accel: [2.5, 0.0, 3.2]
     # [x] 직선(-2.5): 회전에서 고친 것과 같은 정합 문제가 직선에도 있었다.
     #   -1.0일 때 DWB의 decel_lim_x(-2.5)와 2.5배 어긋나, DWB는 0.104 s에
@@ -1498,8 +1525,16 @@ velocity_smoother:
     #   정지선을 실제로 넘지 않는다. test_nav2_params_contract가 그 관계를 지킨다.
     #   회전(-3.2)은 위 문단대로 DWB와 그대로 맞춘다.
     #
+    # [x] 직선 감속 2026-08-13: -1.0 -> -1.25. 속도를 0.5 로 올리면서 DWB 와의
+    #   정합이 깨졌기 때문이다(위 decel_lim_x 주석의 계산). 승차감 요구로 정한
+    #   -1.0 을 되돌리는 것이므로 대가가 있다 — **정지 충격이 25 % 커진다.**
+    #   그 대신 산 것은 정지거리 2.5 cm(감속 구간 12.5 -> 10.0 cm)와, DWB 가
+    #   계획한 정지선을 실제로 넘지 않는다는 보장이다. 핸들을 잡은 사람이 느끼는
+    #   충격이므로 **실기에서 사람 기준으로 다시 판정한다**(judge-by-human-not-robot).
+    #   되돌릴 때는 속도도 함께 내린다. 이 둘은 한 세트다.
+    #
     # planner 비교와 무관한 공통 항목이다. NavFn 쪽 브랜치와 같은 값을 쓴다.
-    max_decel: [-1.0, 0.0, -3.2]
+    max_decel: [-1.25, 0.0, -3.2]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
