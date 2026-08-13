@@ -225,12 +225,6 @@ def test_decay_actually_runs_on_what_the_robot_is_looking_at():
         )
 
 
-@pytest.mark.skip(
-    reason='2026-08-13 실기 판정 대기. tsdf_decay_factor 0.85(9.6 s)는 이 계약의 '
-           '하한 11.5 s 를 통과하지 못한다. 사용자 판정으로 10 초를 먼저 실기에서 '
-           '본다 — 낮은 장애물(책상다리) 회귀가 없으면 하한 근거를 다시 세우고, '
-           '있으면 0.90(14.9 s)으로 올리면서 이 표시를 뗀다.'
-)
 def test_ghost_clears_within_the_maneuver_budget():
     """유령 소멸 시간이 로봇이 지나칠 시간보다 지나치게 길면 안 된다.
 
@@ -239,9 +233,14 @@ def test_ghost_clears_within_the_maneuver_budget():
     0.1 미만 복셀을 아예 보지 않는다(esdf_integrator.cu:115).
       projective_integrator_max_weight 5.0 x factor^n <= 0.1
       n = ln(0.02)/ln(factor),  소요 = n / decay_tsdf_rate_hz
-    필요 기억은 90도 회전 1.571/0.4 = 3.93 s + 차체 통과 0.87/0.26 = 3.35 s
-    = 약 7.3 s다. 상한을 그 6배로 둔다 -- 2026-07-28에 decay 5.0 Hz(15.2 s)가
-    책상다리 충돌로 기록됐으므로 하한도 함께 건다.
+    필요 기억은 _maneuver_budget_s()가 실제 파라미터로 계산한다(회전 + 차체 통과).
+    하한을 그 2배, 상한을 6배로 둔다.
+
+    하한 근거는 실측이다. 2026-07-28에 소멸 15.2 s에서 X자 책상다리 충돌이
+    기록됐고, 2026-08-13에 9.6 s로 내렸다가 같은 종류가 재현됐다(사용자 판정:
+    "낮은 의자다리 같은 부분을 못 봐서 멈춘다"). 라이다는 그 높이를 보지 못하므로
+    nvblox만 잡는다. 게다가 그 회차는 복구 시간도 줄지 않았다 -- 지형 정보가
+    같이 사라지면 planner가 흔들려 복구를 새로 부르기 때문이다.
     """
     if not NVBLOX_OVERRIDES.is_file():
         pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
@@ -251,8 +250,9 @@ def test_ghost_clears_within_the_maneuver_budget():
     factor = p.get('static_mapper', {}).get('tsdf_decay_factor', 0.95)
     n = math.log(ESDF_MIN_WEIGHT / MAX_WEIGHT) / math.log(factor)
     seconds = n / rate
-    assert MANEUVER_BUDGET_S * 2 <= seconds <= MANEUVER_BUDGET_S * 6, (
-        f'유령 소멸 {seconds:.1f} s가 기동 예산 {MANEUVER_BUDGET_S} s의'
+    budget = _maneuver_budget_s()
+    assert budget * 2 <= seconds <= budget * 6, (
+        f'유령 소멸 {seconds:.1f} s가 기동 예산 {budget:.1f} s의'
         f' 2~6배 범위를 벗어난다 (rate {rate}, factor {factor})'
     )
 
