@@ -36,7 +36,24 @@ amcl:
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 60
+    # NAV2-B1 2단계. 60 -> 180. AMCL 이 한 번 갱신할 때 쓰는 라이다 빔 수다.
+    # 60 은 유효 반사의 일부만 보는 것이라 좁은 곳에서 지형 특징을 놓친다.
+    #
+    # 방향은 update_min 과 같은 쪽이다 — "더 잘 보게" 만든다. 실패한 alpha1 0.4
+    # 와는 성격이 다르다(그쪽은 "덜 확신하게" 만들어 planner 를 멈춰 세웠다).
+    #
+    # [미검증] 대가는 CPU 이고 이번 회차의 관건이 그것이다. 필터 갱신 비용이
+    # 빔 수에 비례하므로 amcl CPU 가 3배 가까이 오를 수 있다. 이미 여유가 넉넉한
+    # 편은 아니다:
+    #   1단계 회차 실측  전체 346 % / 800 %  ·  amcl 7.6 %  ·  load 최대 13.8
+    #   load average 13.8 은 코어 8개를 넘는다. 실행 대기 큐가 쌓였다는 뜻이다.
+    #   alpha1 회차에서 제어주기 놓침이 0 -> 2 로 늘었다.
+    #
+    # 되돌리는 신호는 완주 실패가 아니라 이 둘이다:
+    #   grep -c "missed its desired rate" ~/.ros/log/controller_server_*.log
+    #   vica_drive_compare.py 의 amcl CPU 평균 · load average 최대
+    # 되돌릴 때는 180 -> 120 -> 60 으로 내린다.
+    max_beams: 180
     max_particles: 2000
     min_particles: 500
     odom_frame_id: "odom"
