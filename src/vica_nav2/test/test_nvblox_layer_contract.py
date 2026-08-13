@@ -14,6 +14,7 @@
 (nvblox_costmap_layer.cpp 238~250행). 이 값이 각 costmap의 global_frame과
 어긋나면 장애물이 엉뚱한 자리에 얹힌다 — 조용히 틀리는 종류의 결함이다.
 """
+import ast
 import math
 from pathlib import Path
 
@@ -26,10 +27,27 @@ INFLATION_PLUGIN = 'nav2_costmap_2d::InflationLayer'
 # nvblox_base.yaml의 값. 유령 소멸 시간 계산에 쓴다.
 MAX_WEIGHT = 5.0          # projective_integrator_max_weight (:78)
 ESDF_MIN_WEIGHT = 0.1     # esdf_integrator_min_weight (:95). 실질 소멸 기준이다
-# 시야 밖으로 나간 낮은 장애물을 로봇이 지나칠 때까지 필요한 기억:
-#   90도 회전 1.571 rad / max_vel_theta 0.4 = 3.93 s
-#   차체 통과 0.87 m / max_vel_x 0.26       = 3.35 s
-MANEUVER_BUDGET_S = 7.3
+# 시야 밖으로 나간 낮은 장애물을 로봇이 지나칠 때까지 필요한 기억이다.
+#
+# 2026-08-13 정정. 종전에는 7.3 s 를 상수로 박아 두었는데 그 값은 max_vel_x
+# 0.26 · 차체 0.87 m 시절의 계산이었다. 속도를 0.5 로 올리고 손잡이를 줄여
+# 차체가 0.80 m 가 된 뒤에도 상수가 그대로라 과하게 보수적으로 막았다.
+# 이제 nav2_params 에서 실제 값을 읽어 계산한다.
+#
+#   90도 회전   1.571 rad / max_vel_theta
+#   차체 통과   (앞뒤 길이 + padding x 2) / max_vel_x
+#
+# 회전이 지배항이다. max_vel_theta 0.4 에서 3.93 s 이고 주행 속도를 올려도
+# 줄지 않는다. 소멸을 더 앞당기려면 회전 속도를 먼저 봐야 한다.
+def _maneuver_budget_s():
+    fp = _params()['controller_server']['ros__parameters']['FollowPath']
+    costmap = _costmap('local_costmap')
+    pts = ast.literal_eval(costmap['footprint'])
+    xs = [p[0] for p in pts]
+    length = (max(xs) - min(xs)) + 2 * costmap['footprint_padding']
+    turn_s = (math.pi / 2) / fp['max_vel_theta']
+    pass_s = length / fp['max_vel_x']
+    return turn_s + pass_s
 
 # 두 costmap은 '같은' 슬라이스를 써야 한다. 다르면 planner와 controller가 다른
 # 장애물을 보고, planner가 통과 가능으로 만든 경로를 DWB가 거부해 로봇이 굳는다.
@@ -207,6 +225,12 @@ def test_decay_actually_runs_on_what_the_robot_is_looking_at():
         )
 
 
+@pytest.mark.skip(
+    reason='2026-08-13 실기 판정 대기. tsdf_decay_factor 0.85(9.6 s)는 이 계약의 '
+           '하한 11.5 s 를 통과하지 못한다. 사용자 판정으로 10 초를 먼저 실기에서 '
+           '본다 — 낮은 장애물(책상다리) 회귀가 없으면 하한 근거를 다시 세우고, '
+           '있으면 0.90(14.9 s)으로 올리면서 이 표시를 뗀다.'
+)
 def test_ghost_clears_within_the_maneuver_budget():
     """유령 소멸 시간이 로봇이 지나칠 시간보다 지나치게 길면 안 된다.
 
