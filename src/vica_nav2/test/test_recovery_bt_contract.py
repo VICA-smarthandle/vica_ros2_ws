@@ -56,10 +56,16 @@ PLACEHOLDER = 'SET_BY_VICA_NAV2_LAUNCH'
 # 복구가 버텨야 하는 최소 시간 [s]. 이보다 짧으면 사람이 비켜서기 전에 주행이
 # 실패로 끝난다. RoundRobin이 2주기이므로 (retries / 2) x wait_duration이다.
 #
-# 2026-08-12 1단계는 Spin 제거만 넣었고 대기 관련 값은 nav2 기본값 그대로다
-# (wait_duration 5, number_of_retries 6 -> 15 s). 2단계에서 그 둘을 재배분할 때
-# 재출발 지연 상한(wait_duration)을 이 옆에 추가한다.
+# 2026-08-13 2단계에서 재배분했다: wait_duration 5 -> 2, number_of_retries
+# 6 -> 20. 총 인내 15 -> 20 s.
 MIN_TOTAL_PATIENCE_S = 15
+
+# 사람이 비켜난 뒤 재출발까지의 지연 상한 [s]. Wait 하나의 길이가 곧 이 값이다 --
+# 대기 중에는 상황을 다시 보지 않으므로, 사람이 1초 만에 비켜도 남은 시간을 다
+# 채운다. 총 인내를 늘리는 것과 재출발을 빨리 하는 것은 다른 요구이고, 그래서
+# 하한(MIN_TOTAL_PATIENCE_S)과 상한을 따로 건다. 둘을 함께 만족시키려면
+# number_of_retries 를 늘리는 수밖에 없다.
+MAX_RESTART_DELAY_S = 2
 
 
 def _pkg_dir():
@@ -219,10 +225,12 @@ def test_custom_bt_only_removes_backup_from_the_nav2_default():
     # 이력이 있다.
     #   (1) <BackUp/> 제거 -- 핸들 뒤 사람. 근거는 이 파일 상단.
     #   (2) <Spin/> 제거   -- 2026-08-12. 근거는 test_recovery_has_no_spin.
-    #
-    # 2단계에서 wait_duration과 number_of_retries를 바꿀 때 그 두 줄을 여기
-    # 추가한다. 지금은 nav2 기본값과 같아서 diff에 나오지 않는다.
-    changeable = ('<BackUp', '<Spin')
+    #   (3) <Wait wait_duration> 과 NavigateRecovery 의 number_of_retries
+    #       -- 2026-08-13 2단계. 값만 바뀌므로 양쪽 diff 에 함께 나타난다.
+    #          값 자체는 test_recovery_patience_is_long_enough 와
+    #          test_restart_delay_is_bounded 가 지킨다.
+    changeable = ('<BackUp', '<Spin', '<Wait',
+                  '<RecoveryNode number_of_retries=')
 
     added_unexpected = [l for l in added if not l.startswith(changeable)]
     removed_unexpected = [l for l in removed if not l.startswith(changeable)]
@@ -329,6 +337,24 @@ def test_recovery_patience_is_long_enough():
         f' (retries {retries}, wait {wait_s} s).'
         ' 사람이 비켜서기 전에 주행이 실패로 끝난다'
     )
+
+
+def test_restart_delay_is_bounded():
+    """사람이 비켜난 뒤 다시 출발하기까지 오래 끌면 안 된다.
+
+    Wait 는 도는 동안 상황을 다시 보지 않는다. 그래서 Wait 하나의 길이가 곧
+    재출발 지연이다 -- 사람이 1초 만에 비켜도 남은 시간을 다 채운다.
+
+    2026-08-13 run3 실측이 근거다. wait 5 s 시절에 사람이 앞을 막자 복구가
+    15 s 를 쓰고 Goal failed 로 끝났다(같은 회차 2회). 총 인내를 늘리면서
+    재출발도 빠르게 하려면 wait 를 줄이고 retries 를 늘리는 수밖에 없다.
+    """
+    values = [int(v) for v in _wait_durations()]
+    for v in values:
+        assert v <= MAX_RESTART_DELAY_S, (
+            f'wait_duration {v} s 가 재출발 지연 상한 {MAX_RESTART_DELAY_S} s 를'
+            ' 넘는다. 사람이 비켜나도 그만큼 서 있는다'
+        )
 
 
 def test_bt_navigator_declares_the_key_so_launch_can_rewrite_it():
