@@ -31,33 +31,41 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- [A/B 시험 중] 2026-08-13. 지금은 B안이다.
-
-           A안  10회 x 2 s -> 총 10 s, 재계획 10번, 재출발 지연 2 s
-           B안  30회 x 1 s -> 총 15 s, 재계획 30번, 재출발 지연 1 s   <- 지금
-
+    <!-- 2026-08-13 확정: 20회 x wait 1 s -> 총 10 s, 재계획 20번, 재출발 1 s.
          총 인내 = (number_of_retries / 2) x wait_duration 이다. RoundRobin이
          ClearingActions -> Wait 2주기라 Wait는 재시도 2회에 한 번 돈다.
 
-         왜 이 둘을 비교하나: 20회 x 2 s(총 20 s)로 Goal failed는 0이 됐지만
-         사람이 비켜난 뒤에도 대기를 거의 다 채웠다(사용자 판정). 그 대기를
-         줄이는 방법이 둘로 갈린다 - 예산 자체를 줄이거나(A), 예산은 두고 더
-         자주 다시 보거나(B).
+         하루 동안 네 조합을 실기로 쟀다.
 
-         A안은 계약 하한(15 s)에 못 미친다. Goal failed가 다시 날 수 있다는
-         뜻이므로 test_recovery_patience_is_long_enough에 skip을 걸어 두었다.
-         B안은 하한을 만족한다. 판정 뒤 값과 표시를 함께 정리한다.
+            6회 x 5 s = 15 s, 재계획  6번   Goal failed 회차당 2회
+           20회 x 2 s = 20 s, 재계획 20번   failed 0. 그러나 사람이 비켜난 뒤에도
+                                            대기를 거의 다 채운다(사용자 판정)
+           10회 x 2 s = 10 s, 재계획 10번   A안. No valid 160, 놓침 18, load 18.5
+           30회 x 1 s = 15 s, 재계획 30번   B안. No valid   7, 놓침  5, load 10.0
 
-         이 값들의 배경: 재시도 증가를 권장하지 않던 근거는 Spin 각 누적이었다
+         B안이 A안을 압도했다(궤적 실패 23배 차이). 갈린 것은 총 시간이 아니라
+         다시 보는 빈도다. Wait가 도는 동안에는 상황을 보지 않으므로 wait 값이
+         곧 재출발 지연이고, 1 s가 이 구조의 최소값이다(WaitAction은 int).
+
+         그래서 wait 1 s를 고정하고 재시도만 30 -> 20으로 줄인다. 30회는 통과
+         불가능한 자리에서 15 s를 다 쓰는데 사람에게는 그것이 길다(사용자 판정).
+         20회면 재계획 빈도는 그대로 두고 총 인내만 10 s가 된다.
+
+         [미검증] 이 조합은 실기 전이다. 총 10 s는 계약 하한 15 s에 못 미쳐
+         test_recovery_patience_is_long_enough에 skip을 걸어 두었다. 하한의 근거는
+         6회 x 5 s(15 s) 시절의 Goal failed 2회다. 다만 그때는 재계획이 6번뿐이라
+         같은 15 s가 아니다. 실기에서 failed가 나지 않으면 하한 근거를 재계획
+         횟수까지 포함하도록 다시 세우고, 나면 30회(15 s)로 되돌린다.
+
+         배경: 재시도 증가를 권장하지 않던 근거는 Spin 각 누적이었다
          (devlog/2026-08-01-bt-recovery-and-spin-speed.md 120-144행). Spin을
          제거해 그 전제가 사라졌다. 지금 복구는 costmap 초기화와 대기뿐이고
          둘 다 로봇을 움직이지 않는다.
 
-         6회 x 5 s(총 15 s)였을 때의 실패 기록(run3): 사람이 앞을 막으면 DWB
-         궤적 419개가 전멸하고 0.3 s 뒤 controller가 손을 놓는다
-         (failure_tolerance 0.3). planner도 "Starting point in lethal space"로
-         실패한다. 그 뒤 복구가 15 s를 쓰고 Goal failed로 끝났다. 회차당 2회. -->
-    <RecoveryNode number_of_retries="30" name="NavigateRecovery">
+         남은 정체는 이 예산이 정하지 않는다. B안의 두 정체 구간(34.7 s, 26.6 s)은
+         planner "Starting point in lethal space" 뒤 Mission Manager가 goal을
+         취소하고 재전송하는 사이클이었다. 다음 축은 그쪽이다. -->
+    <RecoveryNode number_of_retries="20" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
