@@ -5,7 +5,7 @@
   <version>0.0.0</version>
   <description>VICA Nav2 bringup and configuration</description>
   <maintainer email="2561110043@office.kopo.ac.kr">ji_w</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
