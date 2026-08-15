@@ -49,8 +49,32 @@ MAP_BUILDER.use_trajectory_builder_2d = true
 -- VICA currently maps with 2D LiDAR + wheel odometry, without IMU input.
 TRAJECTORY_BUILDER_2D.use_imu_data = false
 
--- YDLIDAR G2 indoor range limits.
-TRAJECTORY_BUILDER_2D.min_range = 0.15
+-- RPLIDAR(/dev/rplidar, scan_mode Express) 실측 0.15 ~ 12.00 m.
+-- 2026-08-15 이전 주석은 "YDLIDAR G2" 였는데 장비가 다르다.
+--
+-- min_range 0.15 -> 0.25 (2026-08-15)
+--   0.15 로 두면 차체 프레임이 장애물로 들어온다. /scan 30장 정밀 측정에서
+--   후방 좌우 대칭으로 근접 반사가 잡혔다.
+--     -147 ~ -138도  0.221~0.239 m  변동 0.023 m  검출률 89%
+--     +138 ~ +150도  0.220~0.273 m                검출률 98%
+--   손잡이를 분리한 상태와 부착한 상태에서 값이 거의 같아(차이 0~17 mm)
+--   차체 고정 구조물로 확정했다. 라이다가 로봇 중심보다 18.5 cm 앞에 있어
+--   중앙의 구조물이 뒤쪽으로 보이는 것이다. base_footprint 로 옮기면
+--   x +0.003 · y ±0.136 — 로봇 정중앙, 좌우 13~14 cm 다.
+--
+--   Nav2 에서는 문제가 안 된다. costmap 은 footprint_clearing_enabled 로
+--   매 주기 footprint 내부를 FREE_SPACE 로 덮으므로 이 반사가 지워진다
+--   (run12 bag 실측: local 509장 global 112장 모두 LETHAL 0건).
+--   **Cartographer 에는 그런 기능이 없다.** 걸러지지도 지워지지도 않고
+--   스캔당 약 46점(23도 ÷ 0.499도)이 그대로 들어간다.
+--
+--   0.25 인 이유: 구조물 최대 0.239 m 보다 크고, 로봇 내접반경 0.275 m
+--   보다 작다. 잃는 것은 라이다에서 0.15~0.25 m 구간인데 옆·뒤로는 로봇
+--   몸이고, 앞으로는 로봇 중심에서 0.335~0.435 m 다. 그 거리의 벽은 이미
+--   8 m 밖에서부터 관측된 뒤다.
+--
+--   근거와 실측: devlog/2026-08-15-복구예산-collision-monitor-자동재시도.md §9
+TRAJECTORY_BUILDER_2D.min_range = 0.25
 TRAJECTORY_BUILDER_2D.max_range = 8.0
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 8.5
 
