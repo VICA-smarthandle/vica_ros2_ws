@@ -1577,3 +1577,95 @@ velocity_smoother:
     # safety_supervisor_node의 cmd_timeout_sec(기본 0.5s)보다 짧게 유지해
     # controller_server 정지 시 감속 램프로 인한 Safety 탐지 공백을 줄인다.
     velocity_timeout: 0.4
+
+# ===========================================================================
+# collision_monitor (NAV2-B5) — 2026-08-15 dev(DWB) 에 도입
+# ===========================================================================
+#
+# 왜 넣는가. 2026-08-15 run9 실측이 근거다. 사람이 정면 0.36 m 까지 붙자 DWB
+# 궤적 419개가 전멸했고, 그 뒤 46초를 서 있었다. footprint 정면 경계가
+# 0.355 m 이므로 5 mm 차이로 닿기 직전이었다.
+#
+# 빠져나오지 못한 이유는 앞이 아니라 뒤였다. 같은 회차의 방향별 costmap 실측:
+#
+#     시각      전방      후방      측면
+#     199 s      63       100       100    사람이 지나가는 중
+#     202 s       0       100        99    앞은 뚫렸는데 뒤가 막힘
+#     241 s       0        99        99    46초 지속
+#     244 s       0        41        45    뒤가 풀리자 곧바로 출발
+#
+# 손잡이 때문에 후방 반경이 0.546 m 다(정면 0.355 m 의 1.5배). 방향을 틀려면
+# 손잡이가 그 반경을 쓸고 지나가므로, 뒤가 막히면 회전 궤적을 하나도 만들 수
+# 없다. Lattice planner 는 시작점부터 궤적 전체를 footprint 로 검사하므로
+# "Starting point in lethal space" 로 보고된다 — 로봇 바로 밑은 비어 있는데도.
+#
+# 갇힌 뒤에 푸는 수단은 이미 다 시험했고 전부 실패했다(복구 예산 다섯 조합,
+# nvblox decay 양쪽). 애초에 그 거리까지 붙지 않게 하는 편이 확실하다.
+#
+# 폴리곤은 nav2/rpp 브랜치와 같은 값을 쓴다. 컨트롤러만 다른 A/B 비교를 하려면
+# 나머지 조건이 같아야 한다.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+
+    # velocity_smoother 의 출력을 받아 Safety 입력으로 내보낸다. launch 에서
+    # cmd_vel_smoothed -> /cmd_vel_req remap 을 제거해야 이 경로가 성립한다.
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "/cmd_vel_req"
+    # [주의] state_topic 은 이 버전에 없다. 설치된 1.1.20 의
+    # libcollision_monitor_core.so 에 그 파라미터도 발행자 문자열도 없어서
+    # 적어 두면 조용히 무시된다. 발동 여부는 로그로만 알 수 있다:
+    #   grep -c "Robot to stop due to"      ~/.ros/log/collision_monitor_*.log
+    #   grep -c "Robot to slowdown for"     ~/.ros/log/collision_monitor_*.log
+    # 실주행 판정에서 이 두 숫자를 센다.
+
+    transform_tolerance: 0.2
+    # 이 시간 동안 관측이 없으면 소스를 stale 로 본다. /scan 은 12.5 Hz 다.
+    source_timeout: 1.0
+    # 관측 시점과 현재 사이의 로봇 이동을 odom 으로 보정한다.
+    base_shift_correction: True
+    # 정지 판정 뒤 이 시간 동안 0 을 계속 발행한다. Safety 의 cmd_timeout
+    # 0.5 s 보다 길지만, 그 동안 '명시적 0'이 나가므로 위험하지 않다.
+    stop_pub_timeout: 2.0
+
+    polygons: ["PolygonStop", "PolygonSlow"]
+
+    # points 는 [x1, y1, x2, y2, ...] 평면 배열이다(문자열이 아니다).
+    # base_footprint 기준이며 +x 가 진행 방향이다.
+    #
+    # padded footprint 앞단이 +0.355 m 이므로 0.36 부터 시작해 차체와 겹치지
+    # 않게 했다. 좌우 ±0.28 은 padded 반폭 0.275 에 5 mm 만 더한 값이라
+    # 벽과 나란히 갈 때 걸리지 않는다.
+    #
+    # max_points 는 '이 개수를 초과하면 발동'이다. 2 로 두어 점 3개 이상일 때
+    # 걸리게 했다 — 라이다 단발 노이즈로 급정지하지 않게 하는 값이다.
+    # (거리 1 m, 각분해능 0.5도 -> 호 길이 0.9 cm 이므로 실제 물체라면
+    #  10 cm 폭에 11개가 맞는다. 3개는 충분히 보수적이다.)
+    PolygonStop:
+      type: "polygon"
+      points: [0.60, 0.28, 0.60, -0.28, 0.36, -0.28, 0.36, 0.28]
+      action_type: "stop"
+      max_points: 2
+      visualize: True
+      polygon_pub_topic: "polygon_stop"
+      enabled: True
+
+    # 0.5 m/s 정지거리 25 cm 보다 멀리서 미리 줄인다. 앞 1.10 m 까지 본다.
+    # slowdown_ratio 0.4 = 상한의 40 % (0.5 -> 0.2 m/s).
+    PolygonSlow:
+      type: "polygon"
+      points: [1.10, 0.32, 1.10, -0.32, 0.36, -0.32, 0.36, 0.32]
+      action_type: "slowdown"
+      slowdown_ratio: 0.4
+      max_points: 2
+      visualize: True
+      polygon_pub_topic: "polygon_slowdown"
+      enabled: True
+
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "/scan"
+      enabled: True

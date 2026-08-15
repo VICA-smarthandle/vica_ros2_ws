@@ -10,7 +10,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import SetRemap
+from launch_ros.actions import Node, SetRemap
 from nav2_common.launch import RewrittenYaml
 
 
@@ -105,13 +105,27 @@ def generate_launch_description():
         ),
         GroupAction(
             actions=[
-                # Humble Nav2는 velocity_smoother의 출력을 기본적으로
-                # /cmd_vel로 remap한다. 모든 주행 명령이 VICA Safety Supervisor를
-                # 거치도록 최종 출력만 /cmd_vel_req로 변경한다.
-                SetRemap(
-                    src="cmd_vel_smoothed",
-                    dst="/cmd_vel_req",
-                ),
+                # 2026-08-15 [NAV2-B5]: velocity_smoother와 /cmd_vel_req 사이에
+                # collision_monitor를 끼운다. 배선은 아래와 같다.
+                #
+                #   velocity_smoother --cmd_vel_smoothed--> collision_monitor
+                #       --/cmd_vel_req--> Safety --> motor
+                #
+                # 종전의 SetRemap(cmd_vel_smoothed -> /cmd_vel_req)은 지운다.
+                # 남겨 두면 velocity_smoother가 monitor를 건너뛰고 /cmd_vel_req로
+                # 직접 발행해 감시가 통째로 무의미해진다. 입출력 토픽은 이제
+                # remap이 아니라 nav2_params.yaml의 collision_monitor 블록
+                # (cmd_vel_in_topic / cmd_vel_out_topic)이 정한다.
+                # /cmd_vel_req가 Safety Supervisor의 유일한 입력이라는 계약
+                # (CLAUDE.md)은 그대로다. 발행자만 바뀐다.
+                #
+                # 왜 필요한가: 2026-08-15 run9 에서 사람이 정면 0.36 m 까지 붙자
+                # DWB 궤적 419개가 전멸하고 24초를 복구에 썼다. footprint 정면
+                # 경계가 0.355 m 이므로 5 mm 차이로 닿기 직전이었다. 그 자리에서
+                # 빠져나오려면 회전해야 하는데, 손잡이 때문에 후방 반경이
+                # 0.546 m 라 뒤가 막히면 회전도 못 한다(같은 회차 실측: 전방 0,
+                # 후방·측면 100 이 46초 지속). 갇힌 뒤에 푸는 것보다 애초에
+                # 그 거리까지 붙지 않게 하는 편이 확실하다.
                 # behavior_server(Spin/BackUp/Wait/DriveOnHeading)는 Nav2
                 # navigation_launch.py에서 cmd_vel을 remap받지 못한다. controller만
                 # ('cmd_vel', 'cmd_vel_nav')를 받는다. 그래서 복구 동작은 /cmd_vel로
@@ -146,6 +160,41 @@ def generate_launch_description():
                         "use_composition": use_composition,
                         "use_respawn": "False",
                     }.items(),
+                ),
+                # collision_monitor는 nav2_bringup이 띄우지 않으므로 여기서 직접
+                # 띄운다. 파라미터는 위와 같은 configured_params를 쓴다 — 같은
+                # nav2_params.yaml의 collision_monitor 블록을 읽는다.
+                #
+                # GroupAction 안에 두지만 SetRemap의 영향은 받지 않는다. 남은
+                # remap은 노드 지정(behavior_server:cmd_vel) 하나뿐이고,
+                # collision_monitor의 입출력 토픽은 remap이 아니라 yaml
+                # 파라미터로 정하기 때문이다.
+                Node(
+                    package="nav2_collision_monitor",
+                    executable="collision_monitor",
+                    name="collision_monitor",
+                    output="screen",
+                    parameters=[configured_params],
+                    respawn=False,
+                ),
+                # 전용 lifecycle_manager. nav2_bringup의 lifecycle_nodes 목록
+                # (navigation_launch.py 43행)에 collision_monitor가 없어서 기존
+                # lifecycle_manager_navigation은 이 노드를 configure·activate하지
+                # 않는다. 관리자를 따로 붙이지 않으면 노드는 unconfigured로 남아
+                # 구독도 발행도 하지 않는다 — 살아 있는 것처럼 보이면서 아무 일도
+                # 안 하므로 알아채기 어렵다.
+                # lifecycle_manager_navigation은 건드리지 않는다.
+                Node(
+                    package="nav2_lifecycle_manager",
+                    executable="lifecycle_manager",
+                    name="lifecycle_manager_collision_monitor",
+                    output="screen",
+                    parameters=[
+                        {"use_sim_time": use_sim_time},
+                        {"autostart": True},
+                        {"node_names": ["collision_monitor"]},
+                    ],
+                    respawn=False,
                 ),
             ],
         ),
