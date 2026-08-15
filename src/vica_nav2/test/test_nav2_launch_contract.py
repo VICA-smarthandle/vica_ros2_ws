@@ -1,6 +1,8 @@
 import importlib.util
+import re
 from pathlib import Path
 
+import pytest
 import yaml
 from launch import LaunchContext
 from launch.actions import GroupAction, IncludeLaunchDescription
@@ -87,6 +89,40 @@ def _params():
     return yaml.safe_load(config)
 
 
+def _smoother_output_topic():
+    """velocity_smoother 가 '실제로' 발행하는 토픽 이름을 알아낸다.
+
+    노드 기본 출력은 cmd_vel_smoothed 지만 그 이름으로 나가지 않는다.
+    nav2_bringup 이 띄우면서 remap 을 걸기 때문이다.
+
+        navigation_launch.py:183
+        [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]
+
+    즉 입력이 cmd_vel_nav, 출력이 cmd_vel 이다. 이 값을 상수로 박아 두면
+    nav2 를 올릴 때 조용히 어긋난다. 그래서 그쪽 launch 파일에서 직접 읽는다.
+
+    2026-08-15 에 이 계약이 'cmd_vel_smoothed' 를 상수로 기대하고 있었고,
+    그 값을 monitor 입력에 넣었더니 시험은 통과했는데 실기에서 배선이 끊겼다.
+    controller 는 /cmd_vel_nav 로 23.8 Hz 를 내는데 monitor 는 아무것도 받지
+    못했고, /cmd_vel_req 와 /cmd_vel_safe 가 비어 로봇이 못 움직였다.
+    앱에는 '주행 중' 으로 보였다.
+    """
+    launch_file = Path(
+        '/opt/ros/humble/share/nav2_bringup/launch/navigation_launch.py'
+    )
+    if not launch_file.is_file():
+        pytest.skip(f'nav2_bringup launch 없음: {launch_file}')
+    text = launch_file.read_text(encoding='utf-8')
+    # ('cmd_vel_smoothed', '<출력이름>') 을 찾는다.
+    match = re.search(
+        r"\(\s*['\"]cmd_vel_smoothed['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", text
+    )
+    if not match:
+        # remap 이 없으면 노드 기본 이름 그대로 나간다.
+        return 'cmd_vel_smoothed'
+    return match.group(1)
+
+
 def test_velocity_smoother_output_reaches_safety_through_collision_monitor(
     monkeypatch,
     tmp_path,
@@ -123,10 +159,13 @@ def test_velocity_smoother_output_reaches_safety_through_collision_monitor(
         f'launch 가 collision_monitor 를 띄우지 않는다: {nodes}'
     )
 
+    expected_in = _smoother_output_topic()
     monitor = _params()['collision_monitor']['ros__parameters']
-    assert monitor['cmd_vel_in_topic'] == 'cmd_vel_smoothed', (
-        f'monitor 입력 {monitor["cmd_vel_in_topic"]} 이 velocity_smoother'
-        ' 출력이 아니다. 다른 토픽을 보면 아무것도 감시하지 못한다'
+    assert monitor['cmd_vel_in_topic'].lstrip('/') == expected_in.lstrip('/'), (
+        f'monitor 입력 {monitor["cmd_vel_in_topic"]} 이 velocity_smoother 의 실제'
+        f' 출력 /{expected_in} 과 다르다. 다른 토픽을 보면 아무것도 받지 못하고,'
+        ' 그러면 /cmd_vel_req 가 조용히 비어 로봇이 한 발도 못 움직인다'
+        ' (2026-08-15 실기에서 실제로 발생)'
     )
     assert monitor['cmd_vel_out_topic'] == '/cmd_vel_req', (
         f'monitor 출력 {monitor["cmd_vel_out_topic"]} 이 Safety 입력이 아니다.'

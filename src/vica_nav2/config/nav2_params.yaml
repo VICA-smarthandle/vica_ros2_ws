@@ -1612,7 +1612,19 @@ collision_monitor:
 
     # velocity_smoother 의 출력을 받아 Safety 입력으로 내보낸다. launch 에서
     # cmd_vel_smoothed -> /cmd_vel_req remap 을 제거해야 이 경로가 성립한다.
-    cmd_vel_in_topic: "cmd_vel_smoothed"
+    # [2026-08-15 실기에서 고침] cmd_vel_smoothed 가 아니라 /cmd_vel 이다.
+    # nav2_bringup 의 navigation_launch.py 가 velocity_smoother 를 띄우면서
+    # 이미 cmd_vel_smoothed -> cmd_vel 로 remap 한다. 그래서 노드가 실제로
+    # 발행하는 이름은 /cmd_vel 이고, 종전 launch 의
+    # SetRemap(cmd_vel_smoothed -> /cmd_vel_req) 은 그 remap 위에 한 번 더
+    # 얹혀 동작하던 것이었다.
+    #
+    # 처음에 "cmd_vel_smoothed" 로 적었다가 배선이 통째로 끊겼다. controller 는
+    # /cmd_vel_nav 로 23.8 Hz 를 내고 있는데 /cmd_vel_smoothed 는 발행자가 없어
+    # monitor 가 아무것도 못 받았고, /cmd_vel_req 와 /cmd_vel_safe 가 조용히
+    # 비었다. 앱에는 "주행 중" 으로 보이는데 로봇은 한 발도 못 움직였다.
+    # 확인법: ros2 node info /velocity_smoother 의 Publishers 를 직접 본다.
+    cmd_vel_in_topic: "/cmd_vel"
     cmd_vel_out_topic: "/cmd_vel_req"
     # [주의] state_topic 은 이 버전에 없다. 설치된 1.1.20 의
     # libcollision_monitor_core.so 에 그 파라미터도 발행자 문자열도 없어서
