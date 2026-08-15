@@ -31,7 +31,26 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- 2026-08-13 확정: 20회 x wait 1 s -> 총 10 s, 재계획 20번, 재출발 1 s.
+    <!-- 2026-08-15: nav2 기본값 6 x 5 s(총 15 s, 재계획 6번)로 되돌렸다.
+         사용자 판정 - 하루 동안 네 조합을 재고도 어느 쪽도 만족스럽지 않아
+         기준점으로 복귀한다. 아래 기록은 그 네 조합의 실측이므로 지우지 않는다.
+
+         2026-08-15 run7 이 마지막 시도였다: 20회 x 1 s(총 10 s)에서
+         Goal failed 가 다시 났다(82.2 s 지점). 20 s 였던 run4 에서는 0회였다.
+         복구 예산을 줄이는 방향은 여기서 닫힌다.
+
+         더 중요한 것은 예산으로 풀 문제가 아니라는 점이다. 같은 회차에서
+         30.8 s 정체가 관측됐고 이는 nvblox 소멸 30.6 s 와 일치한다 - 사람이
+         스쳐 지나간 뒤 지도에서 지워질 때까지 기다린 것이다. 즉
+
+           예산 10 s  ->  Goal failed. 사람 지워지는 30 s 를 못 기다린다
+           예산 30 s+ ->  실패는 없어지지만 30 s 를 서 있는다
+           decay 감축 ->  의자다리를 잃는다(2026-08-13 확인)
+
+         어느 쪽으로도 갈 수 없다. 사람만 골라 지우는 수단(YOLO, 4단계)이
+         없으면 이 셋 중 하나를 고르는 문제로 남는다.
+
+         [옛 기록] 2026-08-13 확정값이었던 20회 x wait 1 s -> 총 10 s.
          총 인내 = (number_of_retries / 2) x wait_duration 이다. RoundRobin이
          ClearingActions -> Wait 2주기라 Wait는 재시도 2회에 한 번 돈다.
 
@@ -65,7 +84,7 @@
          남은 정체는 이 예산이 정하지 않는다. B안의 두 정체 구간(34.7 s, 26.6 s)은
          planner "Starting point in lethal space" 뒤 Mission Manager가 goal을
          취소하고 재전송하는 사이클이었다. 다음 축은 그쪽이다. -->
-    <RecoveryNode number_of_retries="20" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
@@ -129,7 +148,7 @@
                (nav2_behavior_tree/plugins/action/wait_action.hpp). 소수점을 쓸 수
                없고 해상도는 1초다. 즉 1 이 이 구조에서 가능한 최소값이다.
                nav2 main 에서 double 로 바뀌었으므로 업그레이드 때 다시 확인한다. -->
-          <Wait wait_duration="1"/>
+          <Wait wait_duration="5"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
