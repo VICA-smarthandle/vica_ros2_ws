@@ -84,7 +84,7 @@
          남은 정체는 이 예산이 정하지 않는다. B안의 두 정체 구간(34.7 s, 26.6 s)은
          planner "Starting point in lethal space" 뒤 Mission Manager가 goal을
          취소하고 재전송하는 사이클이었다. 다음 축은 그쪽이다. -->
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="30" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
@@ -148,7 +148,7 @@
                (nav2_behavior_tree/plugins/action/wait_action.hpp). 소수점을 쓸 수
                없고 해상도는 1초다. 즉 1 이 이 구조에서 가능한 최소값이다.
                nav2 main 에서 double 로 바뀌었으므로 업그레이드 때 다시 확인한다. -->
-          <Wait wait_duration="5"/>
+          <Wait wait_duration="1"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
