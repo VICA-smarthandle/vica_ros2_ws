@@ -45,8 +45,22 @@ SHIPPED_BTS = (BT_NAME, CLEARING_ONLY_BT)
 # ClearEntireCostmap은 로봇을 움직이지 않으므로 여기 없다 -- 의도적으로 남겼다.
 MOTION_RECOVERY_NODES = ('Spin', 'Wait', 'BackUp',
                          'DriveOnHeading', 'AssistedTeleop')
-# 후진을 만들 수 있는 BT 노드. DriveOnHeading은 음수 거리를 받으면 후진한다.
-REVERSE_CAPABLE_NODES = ('BackUp', 'DriveOnHeading', 'AssistedTeleop')
+# 후진을 만들 수 있는 BT 노드.
+#
+# 2026-08-15: DriveOnHeading을 이 목록에서 뺐다. 대신 아래
+# test_drive_on_heading_never_reverses가 "dist_to_travel이 양수"를 감시한다.
+# 위험은 노드의 존재가 아니라 음수 거리이므로, 금지 범위를 그쪽으로 좁혔다.
+#
+# 왜 넣었나. 이 로봇은 뒤가 길어서 서 있을 때 planner가 요구하는 뒤 여유가
+# footprint 뒤끝 0.545 + inscribed_radius 0.275 = 0.820 m다. 안내 로봇이라
+# 이용자가 항상 0.4~0.7 m 뒤에 서므로 그 사람이 253을 만들어 출발이 거부된다.
+# run13(2026-08-15) 실측: 벽에서 1.78 m 떨어진 빈 공간인데 뒤 0.65 m 때문에
+# 33.1초를 굳었고, 앞은 3.11 m 비어 있었다. 남은 복구가 costmap 지우기와
+# 기다리기뿐이라 자세를 바꿀 수단이 없었다.
+#
+# BackUp과 AssistedTeleop은 그대로 금지다. 둘은 뒤로 갈 수 있고 이용자가
+# 거기 있다.
+REVERSE_CAPABLE_NODES = ('BackUp', 'AssistedTeleop')
 NAV2_DEFAULT_BT = Path(
     '/opt/ros/humble/share/nav2_bt_navigator/behavior_trees'
     '/navigate_to_pose_w_replanning_and_recovery.xml'
@@ -103,6 +117,40 @@ def test_custom_bt_has_no_reverse_capable_node(node_name, bt_name):
     assert f'<{node_name}' not in body, (
         f'{bt_name}에 {node_name} 노드가 있다. 핸들 뒤 사람에게 후진할 수 있다'
     )
+
+
+@pytest.mark.parametrize('bt_name', SHIPPED_BTS)
+def test_drive_on_heading_never_reverses(bt_name):
+    """DriveOnHeading이 있다면 dist_to_travel은 반드시 양수여야 한다.
+
+    이 노드는 음수 거리를 받으면 후진한다. 실주행에서는 핸들 뒤에 사람이
+    따라오므로(guideline/vica_scenario.md) 후진은 그 사람을 친다. BackUp을
+    뺀 것과 같은 근거다.
+
+    노드 자체는 금지하지 않는다. 전진은 이용자 반대 방향이고 카메라가 보는
+    쪽이라, 뒤가 막혀 갇혔을 때 빠져나오는 유일하게 안전한 수단이다.
+
+    주의: 복구 동작의 속도 명령은 collision_monitor를 거치지 않는다
+    (launch가 behavior_server:cmd_vel을 /cmd_vel_req로 직접 remap한다).
+    0.60 m 정지 폴리곤이 안 걸리므로 거리와 속도를 작게 유지한다.
+    """
+    body = _strip_comments(_bt_path(bt_name).read_text(encoding='utf-8'))
+    for tag in re.findall(r'<DriveOnHeading\b[^>]*>', body):
+        m = re.search(r'dist_to_travel="([^"]+)"', tag)
+        assert m is not None, f'{bt_name}: DriveOnHeading에 dist_to_travel이 없다: {tag}'
+        dist = float(m.group(1))
+        assert dist > 0, (
+            f'{bt_name}: DriveOnHeading의 dist_to_travel {dist}가 양수가 아니다.'
+            ' 핸들 뒤 사람에게 후진한다'
+        )
+        assert dist <= 0.30, (
+            f'{bt_name}: DriveOnHeading의 dist_to_travel {dist} m가 너무 길다.'
+            ' 복구 동작은 collision_monitor를 우회하므로 짧게 유지한다'
+        )
+        s = re.search(r'speed="([^"]+)"', tag)
+        assert s is not None and 0 < float(s.group(1)) <= 0.10, (
+            f'{bt_name}: DriveOnHeading의 speed가 없거나 0.10 m/s를 넘는다: {tag}'
+        )
 
 
 @pytest.mark.parametrize('node_name', MOTION_RECOVERY_NODES)
@@ -229,7 +277,10 @@ def test_custom_bt_only_removes_backup_from_the_nav2_default():
     #       -- 2026-08-13 2단계. 값만 바뀌므로 양쪽 diff 에 함께 나타난다.
     #          값 자체는 test_recovery_patience_is_long_enough 와
     #          test_restart_delay_is_bounded 가 지킨다.
-    changeable = ('<BackUp', '<Spin', '<Wait',
+    #   (4) <DriveOnHeading/> 추가 -- 2026-08-15. 뒤가 막혀 갇혔을 때 앞으로
+    #       빠져나오는 수단이다. 전진만 하며 dist_to_travel 양수는
+    #       test_drive_on_heading_never_reverses 가 지킨다.
+    changeable = ('<BackUp', '<Spin', '<Wait', '<DriveOnHeading',
                   '<RecoveryNode number_of_retries=')
 
     added_unexpected = [l for l in added if not l.startswith(changeable)]
@@ -278,6 +329,32 @@ def test_recovery_has_no_spin(bt_name):
     )
 
 
+def _round_robin_child_count(bt_name=BT_NAME):
+    """RecoveryActions RoundRobin의 직계 자식 수를 센다.
+
+    Wait가 도는 주기가 이 값이다. 고정 상수로 두면 자식을 늘렸을 때 총 인내가
+    조용히 줄어든다 -- 2026-08-15에 DriveOnHeading을 넣으며 실제로 그럴 뻔했다.
+    """
+    body = _strip_comments(_bt_path(bt_name).read_text(encoding='utf-8'))
+    m = re.search(r'<RoundRobin[^>]*name="RecoveryActions"[^>]*>(.*?)</RoundRobin>',
+                  body, re.S)
+    assert m is not None, f'{bt_name}에서 RecoveryActions RoundRobin을 찾을 수 없다'
+    inner = m.group(1)
+    # 직계 자식만 센다. Sequence 안의 ClearEntireCostmap은 세지 않는다.
+    depth = 0
+    count = 0
+    for tag in re.findall(r'<(/?)(\w+)([^>]*?)(/?)>', inner):
+        closing, name, attrs, selfclose = tag
+        if closing:
+            depth -= 1
+            continue
+        if depth == 0:
+            count += 1
+        if not selfclose:
+            depth += 1
+    return count
+
+
 def _wait_durations(bt_name=BT_NAME):
     """BT에 있는 모든 Wait의 wait_duration을 순서대로 돌려준다.
 
@@ -316,8 +393,12 @@ def test_wait_duration_is_an_integer():
 def test_recovery_patience_is_long_enough():
     """총 인내 시간이 사람이 비켜설 만큼은 되어야 한다.
 
-    RoundRobin이 ClearingActions -> Wait 2주기이므로 Wait는 재시도 2회에 1번
-    돈다. 즉 총 대기 = (number_of_retries / 2) x wait_duration이다.
+    RoundRobin의 자식 수만큼에 1번씩 Wait가 돈다.
+    즉 총 대기 = (number_of_retries / RoundRobin 자식수) x wait_duration이다.
+
+    2026-08-15: 자식이 2개(ClearingActions, Wait)에서 3개(+ DriveOnHeading)로
+    늘었다. 나눗수를 고정 2로 두면 총 인내를 15초로 착각한다 -- 실제로는 10초다.
+    그래서 자식 수를 XML에서 직접 센다. number_of_retries도 30 -> 45로 올렸다.
 
     이 값이 짧으면 통과 불가능한 자리에서 사람이 비켜서기도 전에 주행이 실패로
     끝난다. 길게 잡아도 안전한 이유는 Spin이 없어 로봇이 움직이지 않기 때문이다
@@ -331,7 +412,8 @@ def test_recovery_patience_is_long_enough():
     retries = int(m.group(1))
     wait_s = int(_wait_durations()[0])
 
-    patience = (retries / 2) * wait_s
+    children = _round_robin_child_count()
+    patience = (retries / children) * wait_s
     assert patience >= MIN_TOTAL_PATIENCE_S, (
         f'총 인내 {patience:.0f} s가 하한 {MIN_TOTAL_PATIENCE_S} s에 못 미친다'
         f' (retries {retries}, wait {wait_s} s).'
