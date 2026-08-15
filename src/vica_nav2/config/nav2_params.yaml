@@ -741,6 +741,22 @@ local_costmap:
         # 개선하지 못했다 -- 일시 LETHAL 셀 지속 p95가 47.0 s에서 43.0 s로 사실상
         # 그대로였다. mapping_type도 static_tsdf로 되돌리므로 combined는 발행되지
         # 않는다. 두 costmap이 같은 슬라이스를 쓴다.
+        #
+        # ===== 2026-08-15: human 모드에서도 이 값을 그대로 둔다 =====
+        # mapping_type 을 human_with_static_tsdf 로 바꿔도 **여기는 안 바꾼다.**
+        # human 모드에서는 마스크가 사람을 전경(사람 전용 mapper)으로 보내므로
+        # static_map_slice 에 사람이 애초에 들어가지 않는다. 즉 슬라이스를 나누지
+        # 않아도 nvblox 지도에서 사람이 빠진다 -- 이 시험이 노리는 것 자체다.
+        #
+        # combined_map_slice 로 옮기는 안도 있었으나 택하지 않았다. 그러면 local 만
+        # 사람을 보고 global 은 못 봐서 planner 와 DWB 의 장애물이 갈린다.
+        # planner 가 사람을 뚫고 경로를 내고 DWB 가 거부하는 형태로 굳을 수 있다
+        # (test_both_costmaps_use_the_same_slice 가 막는 결함이다).
+        #
+        # 사람이 안 보이게 되는 것이 아니다. 라이다(voxel_layer)가 계속 본다.
+        # laser_frame 이 0.382 m 라 사람 다리는 스캔 평면을 지나고, 레이트레이싱이
+        # 사람이 비키는 즉시 지운다. 오래 기억해야 하는 낮은 장애물만 nvblox 가
+        # 맡는 분업이 된다.
         nvblox_map_slice_topic: /nvblox_node/static_map_slice
         convert_to_binary_costmap: True
       voxel_layer:

@@ -58,6 +58,10 @@ def _maneuver_budget_s():
 #   일시 셀 수                26,270 -> 26,059
 # 유령의 원인은 mapping_type이 아니라 exclude_last_view_from_decay였다.
 # 그리고 분리 구성으로 완주한 회차가 없다(1/3). 3/3 완주한 조합은 통일 쪽이다.
+# 2026-08-15: mapping_type 을 human_with_static_tsdf 로 바꿔도 이 값은 그대로다.
+# human 모드에서는 마스크가 사람을 전경 mapper 로 보내므로 static_map_slice 에
+# 사람이 애초에 들어가지 않는다. 슬라이스를 나누지 않아도 nvblox 지도에서 사람이
+# 빠지므로, 아래 test_both_costmaps_use_the_same_slice 를 깨뜨릴 이유가 없다.
 EXPECTED_SLICE = {
     'local_costmap': '/nvblox_node/static_map_slice',
     'global_costmap': '/nvblox_node/static_map_slice',

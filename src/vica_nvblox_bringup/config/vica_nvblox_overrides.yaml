@@ -103,7 +103,31 @@
     # 주의: 되돌리면 combined_map_slice가 발행되지 않으므로 nav2_params.yaml의
     # local nvblox_map_slice_topic도 static_map_slice여야 한다. 짝이 어긋나면
     # nvblox_layer가 아무것도 받지 못한 채 조용히 무해해진다.
-    mapping_type: static_tsdf
+    #
+    # ===== 2026-08-15: human 모드 시험 =====
+    # static_tsdf -> human_with_static_tsdf. 사람만 골라 전경(빨리 잊는 쪽)으로
+    # 보낸다. dynamic 모드와 다르다 -- dynamic은 nvblox가 스스로 판정하다 사람이
+    # 배경에도 섞여 3회 실패했고, human은 밖에서 준 마스크로만 가른다
+    # (multi_mapper.cpp:244의 CHECK가 둘을 섞지 못하게 막는다).
+    #
+    # 마스크 공급자는 PeopleSemSegNet shuffleseg(TensorRT fp16)다. 실측:
+    #   0.45~0.60 m  검출 92 %  (다리만 보이는 거리인데도 잡는다)
+    #   1.70~2.40 m  검출 100 %
+    #   0.30~0.45 m  검출 19 %  <- 한계. 무릎 아래만 들어와 판정 근거가 사라진다
+    #   끊김은 최대 0.6초. 사람 없을 때 오검출 597장 중 0건.
+    #
+    # 한계를 알고 시작한다. 0.45 m 미만의 사람은 마스크에 안 잡혀 정적 지도로
+    # 들어간다. 이 시험의 목적은 "완전 해결"이 아니라 "얼마나 줄어드는가"다.
+    #
+    # [되돌리기] mapping_type을 static_tsdf로, use_segmentation을 false로 돌리고
+    # nav2_params.yaml의 local nvblox_map_slice_topic도 static_map_slice로
+    # 함께 되돌린다. 셋은 한 세트다.
+    mapping_type: human_with_static_tsdf
+    # 마스크 구독을 켠다. **켜면 깊이 단독 경로가 닫힌다**
+    # (nvblox_node.cpp:258의 if/else). 마스크가 안 오면 깊이도 통합되지 않아
+    # nvblox가 조용히 아무것도 안 하는 상태가 된다. 세그멘테이션이 죽으면
+    # 장애물 인식이 통째로 멈춘다는 뜻이라 감시가 필요하다.
+    use_segmentation: true
     # 정적 지도는 아주 천천히만 감쇠시킨다.
     #
     # 0.0(감쇠 없음)으로 두었더니 combined_map_slice에서 costmap이 두 배로

@@ -86,6 +86,25 @@ def generate_launch_description():
                 ("camera_0/depth/camera_info", "/camera/camera/depth/camera_info"),
                 ("camera_0/color/image", "/camera/camera/color/image_raw"),
                 ("camera_0/color/camera_info", "/camera/camera/color/camera_info"),
+                # 2026-08-15 human 모드. use_segmentation: true 일 때만 구독한다.
+                #
+                # nvblox 는 depth · depth/camera_info · mask · mask/camera_info
+                # **네 개를 시간 동기**시킨다(nvblox_node.cpp:269 의 4-way
+                # ApproximateTimeSynchronizer). 그래서 마스크만으로는 부족하고
+                # 짝이 되는 camera_info 가 반드시 있어야 한다.
+                #
+                # camera_info 는 리사이즈된 960x544 쪽이어야 한다. 마스크가 그
+                # 크기이기 때문이다. 원본 컬러(640x480)의 camera_info 를 물리면
+                # 투영이 틀어진다. 실측으로 짝을 확인했다:
+                #   people_mask          960x544  camera_color_optical_frame
+                #   camera_info_resized  960x544  camera_color_optical_frame
+                #
+                # 토픽 이름에 camera0 이 두 번 들어가는 것은 오타가 아니다.
+                # segmentation.launch.py 가 네임스페이스 안에서 이미 네임스페이스가
+                # 붙은 이름을 넘겨서 겹친 결과다. 실제로 그렇게 발행된다.
+                ("camera_0/mask/image", "/camera0/segmentation/people_mask"),
+                ("camera_0/mask/camera_info",
+                 "/camera0/camera0/segmentation/camera_info_resized"),
             ],
         ),
     ])
