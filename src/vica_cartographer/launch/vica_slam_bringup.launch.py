@@ -32,6 +32,7 @@ def generate_launch_description():
     start_localization = LaunchConfiguration('start_localization')
     start_encoder = LaunchConfiguration('start_encoder')
     can_iface = LaunchConfiguration('can_iface')
+    odom_topic = LaunchConfiguration('odom_topic')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -54,6 +55,21 @@ def generate_launch_description():
             default_value='false',
             description='실기기 false, rosbag 재생 시 true 로 설정합니다.'
         ),
+        # 2026-08-15: 전에는 아래 include 가 '/odom' 을 하드코딩해서, 명령줄의
+        # odom_topic:=... 이 경고 한 줄 없이 무시됐다. ROS 2 launch 는 선언 안 된
+        # 인자를 오류로 잡지 않는다(include_launch_description.py 의 raise 는
+        # '필수 인자 누락'에만 해당). 그래서 터미네이터 slam 칸이 오래
+        # odom_topic:=/wheel/odom 을 넘겼는데도 Cartographer 는 /odom 을 읽었다.
+        #
+        # 기본값은 /odom 을 유지한다. 2026-08-11~12 매핑 13회가 전부 /odom
+        # 이었고 그중 성공한 vica_map_0810 도 같은 값이었다. /wheel/odom 은
+        # 아직 한 번도 시험된 적이 없다 — 바꿀 때는 그 축 하나만 바꾼다.
+        DeclareLaunchArgument(
+            'odom_topic',
+            default_value='/odom',
+            description='Cartographer 가 읽을 오도메트리 토픽입니다. '
+                        '/odom 은 EKF 출력, /wheel/odom 은 엔코더 원본입니다.'
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(wheel_ekf_launch),
@@ -74,7 +90,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'use_sim_time': use_sim_time,
-                'odom_topic': '/odom',
+                'odom_topic': odom_topic,
             }.items(),
         ),
     ])
