@@ -84,12 +84,7 @@
          남은 정체는 이 예산이 정하지 않는다. B안의 두 정체 구간(34.7 s, 26.6 s)은
          planner "Starting point in lethal space" 뒤 Mission Manager가 goal을
          취소하고 재전송하는 사이클이었다. 다음 축은 그쪽이다. -->
-    <!-- 2026-08-15: 30 -> 45. RoundRobin 자식이 2개에서 3개로 늘어(아래
-         DriveOnHeading 추가) Wait 가 재시도 3회에 한 번만 돈다. 총 인내
-         = (number_of_retries / 자식수) x wait_duration 이므로 30 이면 10 초로
-         떨어져 하한 15 초에 미달한다. 45 로 올려 15 초를 유지한다.
-         재계획 빈도는 오히려 늘어난다(30회 -> 45회). -->
-    <RecoveryNode number_of_retries="45" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="30" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
@@ -154,42 +149,6 @@
                없고 해상도는 1초다. 즉 1 이 이 구조에서 가능한 최소값이다.
                nav2 main 에서 double 로 바뀌었으므로 업그레이드 때 다시 확인한다. -->
           <Wait wait_duration="1"/>
-          <!-- 2026-08-15 추가. 뒤가 막혀 갇혔을 때 앞으로 조금 나가 푼다.
-
-               왜 필요한가. 이 로봇은 뒤가 길다. 서 있을 때 planner 가 요구하는
-               뒤 여유는 footprint 뒤끝 0.545 + inscribed_radius 0.275 = 0.820 m 다.
-               그런데 안내 로봇이라 이용자가 항상 0.4~0.7 m 뒤에 선다. 라이다가
-               그 사람을 찍고 global costmap 에 253 이 생기면 footprint 가 그것을
-               밟아 planner 가 "Starting point in lethal space" 로 출발을 거부한다.
-
-               2026-08-15 run13 실측. 벽에서 1.78 m 떨어진 빈 공간인데도
-                 뒤 0.45 m  costmap  0 -> 43 -> 99
-                 뒤 0.65 m           0 ->  0 -> 100
-                 앞 0.45 m           내내 0
-               앞은 3.11 m 비어 있는데 뒤 0.65 m 때문에 33.1 초를 굳었다.
-
-               남은 복구가 ClearEntireCostmap 과 Wait 뿐이라 빠져나올 수 없었다.
-               지도를 지워도 라이다가 즉시 다시 채우고, 기다려도 기하는 안 변한다.
-               자세를 바꾸는 동작이 하나도 없었다.
-
-               왜 전진인가.
-                 BackUp 은 뒤로 간다. 이용자를 친다(2026-07-30 실측 0.30 m 후진).
-                 Spin 은 제자리 회전이라 손잡이가 반경 0.552 m 를 쓸고 간다.
-                 전진은 이용자 반대 방향이고 카메라가 보는 쪽이다.
-               0.15 m 만 나가면 뒤 여유가 0.65 -> 0.80 m 가 되어 곧바로 풀린다.
-
-               dist_to_travel 은 반드시 양수다. DriveOnHeading 은 음수를 받으면
-               후진한다. test_drive_on_heading_never_reverses 가 그것을 감시한다.
-
-               주의. 복구 동작의 속도 명령은 collision_monitor 를 거치지 않는다
-               (launch 가 behavior_server:cmd_vel 을 /cmd_vel_req 로 직접 remap
-               한다). 0.60 m 정지 폴리곤이 안 걸리므로 거리와 속도를 작게 둔다.
-               DriveOnHeading 자체의 costmap 충돌 검사는 동작한다.
-
-               RoundRobin 자식이 2개에서 3개가 되어 Wait 가 도는 횟수가 줄었다.
-               총 인내를 15 초로 유지하려고 number_of_retries 를 30 에서 45 로
-               올렸다(위 RecoveryNode 주석 참조). -->
-          <DriveOnHeading dist_to_travel="0.15" speed="0.05" time_allowance="10"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
