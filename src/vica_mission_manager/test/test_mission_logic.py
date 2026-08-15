@@ -475,6 +475,25 @@ class TestVoiceCancelConfirm:
         assert logic.state == State.NAVIGATING
         assert not any(isinstance(a, CancelNav) for a in actions)
 
+    def test_confirm_question_expects_a_reply(self):
+        """되묻기는 질문이다. expects_reply 로 표시해야 노드가
+        /vica/listen_request 를 발행하고, 사용자가 "비카야" 재호출 없이
+        "네/아니요"로 답할 수 있다."""
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_cancel_confirm_request(1.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].expects_reply is True
+
+    def test_plain_announcements_do_not_expect_a_reply(self):
+        """일반 안내 멘트("안내를 시작합니다")에 재청취가 걸리면, 말 끝날 때마다
+        마이크가 열려 주변 소음이 발화로 들어간다. 기본값은 반드시 False."""
+        logic = MissionLogic()
+        actions = start_navigation(logic)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says
+        assert all(s.expects_reply is False for s in says)
+
     def test_affirmative_answer_cancels(self):
         logic = MissionLogic()
         start_navigation(logic)

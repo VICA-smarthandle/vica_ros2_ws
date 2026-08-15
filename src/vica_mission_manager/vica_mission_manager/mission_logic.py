@@ -115,6 +115,10 @@ class Say:
     # ros_tts_node 큐 우선순위 (긴급 > 내레이션 > 응답).
     # 노드가 "{priority}:{text}" 접두어로 /vica/tts_request 에 발행한다.
     priority: str = "narration"  # emergency / narration / response
+    # 이 말이 '질문'이라 사용자 답을 기다리는가. true 면 노드가
+    # /vica/listen_request 를 함께 발행하고, 웨이크워드 노드가 질문 TTS 종료
+    # 직후 재청취 창을 연다 — "비카야" 재호출 없이 "네/아니요"로 답하게 한다.
+    expects_reply: bool = False
 
 
 @dataclass(frozen=True)
@@ -509,7 +513,9 @@ class MissionLogic:
             return [], reason
         self.cancel_confirm_pending = True
         self._cancel_confirm_deadline = now + self.confirm_timeout_sec
-        return [Say(MSG_CANCEL_CONFIRM, priority="response")], GateReason.OK
+        return [
+            Say(MSG_CANCEL_CONFIRM, priority="response", expects_reply=True)
+        ], GateReason.OK
 
     def on_cancel_confirm_answer(self, affirmative: bool, now: float) -> list:
         """취소 재확인에 대한 응답. 긍정이면 실제로 취소한다."""
