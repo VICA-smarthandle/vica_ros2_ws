@@ -77,6 +77,10 @@ class MissionManagerNode(Node):
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("confirm_timeout_sec", 30.0)
         self.declare_parameter("estop_release_grace_sec", 2.0)
+        # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
+        # 0 으로 두면 종전처럼 실패를 안내하고 끝낸다.
+        self.declare_parameter("nav_retry_limit", 2)
+        self.declare_parameter("nav_retry_delay_sec", 3.0)
         # 접근 감속 단계. ROS 2 파라미터에 쌍의 배열 타입이 없어 double 배열 둘로
         # 나눠 받는다. 같은 순번끼리 짝이며 개수가 다르면 기동 시 죽는다.
         # 기본값의 근거·위험은 approach_speed.py docstring 참조 — 특히 첫 감속
@@ -131,11 +135,21 @@ class MissionManagerNode(Node):
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"접근 감속 단계 파라미터가 잘못되었습니다: {exc}") from exc
 
+        retry_limit = int(self.get_parameter("nav_retry_limit").value)
+        retry_delay = float(self.get_parameter("nav_retry_delay_sec").value)
         self.logic = MissionLogic(
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
+            nav_retry_limit=retry_limit,
+            nav_retry_delay_sec=retry_delay,
         )
+        if retry_limit > 0:
+            self.get_logger().info(
+                f"주행 실패 시 자동 재시도: 최대 {retry_limit}회 · {retry_delay:.1f}초 간격"
+            )
+        else:
+            self.get_logger().info("주행 실패 시 자동 재시도: 꺼짐")
         if approach_stages:
             ladder = ", ".join(
                 f"{distance:.2f}m이하 {percent:.0f}%"

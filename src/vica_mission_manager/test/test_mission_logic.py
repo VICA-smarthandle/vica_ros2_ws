@@ -230,11 +230,61 @@ class TestTransitions:
         assert logic.state == State.IDLE
 
     def test_nav_failure_then_idle(self):
-        logic = MissionLogic(dwell_sec=2.0)
+        """재시도를 끄면 실패 뒤 dwell 만큼 머물고 IDLE 로 간다."""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=0)
         start_navigation(logic)
         actions = logic.on_tick(10.0, NavStatus.FAILED)
         assert logic.state == State.FAILED
         assert any(isinstance(a, Say) for a in actions)
+        logic.on_tick(12.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_nav_failure_retries_same_destination(self):
+        """실패하면 같은 목적지로 스스로 다시 나선다.
+
+        2026-08-15 실기에서 정체의 절반이 "사람이 앱을 다시 누르기까지 걸린
+        시간"이었다. run9 #6 은 Goal failed 뒤 20초를 아무도 아무것도 하지 않고
+        보냈다. 그 공백을 없앤다.
+        """
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=2, nav_retry_delay_sec=3.0)
+        started = start_navigation(logic)
+        dest = [a for a in started if isinstance(a, Navigate)][0].destination
+        logic.on_tick(10.0, NavStatus.FAILED)
+        assert logic.state == State.FAILED
+
+        # dwell(2 s)이 지나도 재시도 예약이 있으면 IDLE 로 내려가지 않는다.
+        # 이 순서가 뒤집히면 _to_idle 이 예약을 지워 재시도가 사라진다.
+        logic.on_tick(12.5, NavStatus.NONE)
+        assert logic.state == State.FAILED
+
+        actions = logic.on_tick(13.5, NavStatus.NONE)
+        assert logic.state == State.NAVIGATING
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.id == dest.id
+        assert logic.active_destination is not None
+
+    def test_nav_retry_stops_at_limit(self):
+        """한도를 넘으면 안내하고 멈춘다. 통과 불가능한 자리에서 영원히
+        시도하면 이용자가 상황을 알 수 없다."""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=1, nav_retry_delay_sec=1.0)
+        start_navigation(logic)
+        logic.on_tick(10.0, NavStatus.FAILED)
+        logic.on_tick(11.5, NavStatus.NONE)
+        assert logic.state == State.NAVIGATING  # 1회차 재시도
+
+        actions = logic.on_tick(20.0, NavStatus.FAILED)
+        assert logic.state == State.FAILED
+        assert any("실패" in a.text for a in actions if isinstance(a, Say))
+        logic.on_tick(22.5, NavStatus.NONE)
+        assert logic.state == State.IDLE  # 더 시도하지 않는다
+
+    def test_user_cancel_is_not_retried(self):
+        """사용자가 거둔 목표를 로봇이 되살리면 안 된다."""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=2, nav_retry_delay_sec=1.0)
+        start_navigation(logic)
+        logic.on_tick(10.0, NavStatus.CANCELED)
+        assert logic.state == State.FAILED
         logic.on_tick(12.5, NavStatus.NONE)
         assert logic.state == State.IDLE
 

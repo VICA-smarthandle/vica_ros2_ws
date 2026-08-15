@@ -188,6 +188,9 @@ MSG_ESTOP_REJECT = "지금은 비상 멈춤 상태입니다. 해제 후 다시 �
 MSG_CONFIRM_TIMEOUT = "안내 요청이 취소되었습니다."
 MSG_STALE_CONFIRM = "요청이 확인되지 않았습니다. 다시 말씀해 주세요."
 MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도해 주세요."
+# 자동 재시도 중임을 알린다. 로봇이 멈춰 있는 이유를 이용자가 알 수 있어야
+# 하고, 곧 다시 움직인다는 것도 알아야 놀라지 않는다.
+MSG_NAV_RETRY = "길이 막혀 잠시 기다렸다가 다시 가겠습니다."
 MSG_ESTOPPED = "안전을 위해 멈추겠습니다."
 MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
@@ -338,10 +341,26 @@ class MissionLogic:
         dwell_sec: float = 2.0,
         estop_release_grace_sec: float = 2.0,
         approach_stages: Optional[Sequence] = None,
+        nav_retry_limit: int = 2,
+        nav_retry_delay_sec: float = 3.0,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
         self.estop_release_grace_sec = estop_release_grace_sec
+        # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
+        #
+        # 왜 필요한가 - 2026-08-15 실기에서 정체의 절반이 "사람이 앱을 다시
+        # 누르기까지 걸린 시간" 이었다. run9 #6 구간 46초의 내역:
+        #   198.3~222.4 s (24 s)  Nav2 가 복구를 시도하다 Goal failed
+        #   222.4~242.6 s (20 s)  아무도 아무것도 안 함. 로봇은 실패 상태로 대기
+        #   242.6 s               사람이 앱에서 목적지를 다시 보냄
+        # 뒤의 20초는 Nav2 도 nvblox 도 아니다. 재시도가 없어서 생긴 공백이다.
+        #
+        # 무한 재시도는 하지 않는다. 통과 불가능한 자리(통로 1.0 m 에 사람이 서면
+        # 남는 0.55 m 로는 어떤 설정으로도 못 지나간다)에서 영원히 시도하면
+        # 이용자가 상황을 알 수 없다. 한도를 넘으면 안내하고 멈춘다.
+        self.nav_retry_limit = nav_retry_limit
+        self.nav_retry_delay_sec = nav_retry_delay_sec
         # 접근 감속 사다리. 단계 검증(거리 양수·비율 범위·단조 감소)은
         # ApproachSpeedLadder 가 하고 잘못된 값이면 여기서 ValueError 로 죽는다.
         self._approach = ApproachSpeedLadder(approach_stages)
@@ -361,6 +380,10 @@ class MissionLogic:
         self._dwell_until: Optional[float] = None
         self._estop_entered_at: Optional[float] = None
         self._estop_clear_since: Optional[float] = None
+        # 재시도 상태. 목적지가 바뀌거나 IDLE 로 돌아가면 초기화한다.
+        self._nav_retry_count: int = 0
+        self._retry_destination: Optional[Destination] = None
+        self._retry_at: Optional[float] = None
         self._announced_milestones: set = set()  # 이번 목적지에서 안내한 거리 지점
 
     # -- 접근 감속 조회 ---------------------------------------------------------
@@ -615,16 +638,64 @@ class MissionLogic:
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
                 # estop 경로의 취소는 이미 ESTOPPED 로 빠져나갔으므로,
                 # 여기 도달한 취소/실패는 주행 실패로 취급한다.
+                failed_dest = self.active_destination
                 self.state = State.FAILED
                 self._dwell_until = now + self.dwell_sec
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                # narration 은 큐 정원 초과 시 가장 먼저 버려진다(tts_queue._trim).
-                # 주행 실패는 사용자가 왜 멈췄는지 알 유일한 단서라 버려지면 안 된다.
-                actions.append(Say(MSG_NAV_FAILED, priority="response"))
+
+                # 사용자 취소(NavStatus.CANCELED)는 재시도하지 않는다. 목표를
+                # 거둔 것이 사용자의 뜻이므로 로봇이 되살리면 안 된다.
+                retryable = (
+                    nav_status == NavStatus.FAILED
+                    and failed_dest is not None
+                    and self._nav_retry_count < self.nav_retry_limit
+                )
+                if retryable:
+                    self._nav_retry_count += 1
+                    self._retry_destination = failed_dest
+                    self._retry_at = now + self.nav_retry_delay_sec
+                    actions.append(Say(MSG_NAV_RETRY, priority="response"))
+                else:
+                    self._retry_destination = None
+                    self._retry_at = None
+                    # narration 은 큐 정원 초과 시 가장 먼저 버려진다
+                    # (tts_queue._trim). 주행 실패는 사용자가 왜 멈췄는지 알
+                    # 유일한 단서라 버려지면 안 된다.
+                    actions.append(Say(MSG_NAV_FAILED, priority="response"))
 
         elif self.state in (State.ARRIVED, State.FAILED):
-            if self._dwell_until is None or now >= self._dwell_until:
+            # 재시도 예약이 있으면 그것이 dwell 보다 우선한다.
+            #
+            # [함정] dwell_sec(2.0)이 nav_retry_delay_sec(3.0)보다 짧다. 아래를
+            # elif 로 두면 재시도 시각이 오기 전에 dwell 이 먼저 끝나 IDLE 로
+            # 내려가고, _to_idle 이 예약을 지워 재시도가 영영 실행되지 않는다.
+            # 그래서 '예약이 있으면 기다린다'를 먼저 판정한다.
+            pending_retry = (
+                self.state == State.FAILED
+                and self._retry_at is not None
+                and self._retry_destination is not None
+            )
+            if pending_retry and self.estop_active:
+                # E-stop 중에는 되살리지 않는다. 예약을 버리고 평소 경로로 보낸다 —
+                # 이전 goal 자동 재개 금지 원칙(ESTOPPED 분기 주석)과 같은 이유다.
+                self._retry_at = None
+                self._retry_destination = None
+                pending_retry = False
+            if pending_retry:
+                if now >= self._retry_at:
+                    dest = self._retry_destination
+                    self._retry_at = None
+                    self._retry_destination = None
+                    self.state = State.NAVIGATING
+                    self.active_destination = dest
+                    self._dwell_until = None
+                    self._announced_milestones = set()
+                    self._approach.reset()
+                    actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
+                    actions.append(Navigate(dest))
+                # 아직 시각이 안 됐으면 FAILED 로 머물며 기다린다.
+            elif self._dwell_until is None or now >= self._dwell_until:
                 self._to_idle()
 
         elif self.state == State.ESTOPPED:
@@ -695,3 +766,9 @@ class MissionLogic:
         self._estop_clear_since = None
         self._announced_milestones = set()
         self._approach.reset()
+        # 재시도 예산은 목적지 하나당이다. IDLE 로 내려오면 이번 시도가 끝난
+        # 것이므로 비운다. 이것을 빠뜨리면 한 번 실패한 뒤로 영영 재시도가
+        # 안 되거나, 반대로 취소된 목적지가 되살아난다.
+        self._nav_retry_count = 0
+        self._retry_destination = None
+        self._retry_at = None
