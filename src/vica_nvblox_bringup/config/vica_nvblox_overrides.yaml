@@ -233,10 +233,11 @@
     #
     # [주의] run_d455.sh 의 프로파일을 바꾸면 이 값도 함께 본다. 비율 3:1 이
     # 기준이다. 30 Hz 로 되돌리면 10.0 으로 되돌린다.
-    # 2026-08-16: 5.0 -> 10.0. 카메라를 30 Hz 로 되돌렸으므로 3:1 비율도
-    # 함께 되돌린다. 관측(30 Hz)보다 감쇠가 빠르면 전경 블록이 해제되어
-    # dynamic_map_slice 가 0칸이 된다(deallocate_decayed_blocks: 1).
-    decay_dynamic_occupancy_rate_hz: 10.0
+    # 2026-08-16: 30 Hz 시험을 마치고 카메라를 15 Hz 로 되돌리면서 감쇠도
+    # 10.0 -> 5.0 으로 함께 되돌린다. 관측보다 감쇠가 빠르면 전경 블록이
+    # 해제되어 dynamic_map_slice 가 0칸이 된다(deallocate_decayed_blocks: 1).
+    # 카메라 15 Hz · 감쇠 5 Hz 로 3:1 을 유지한다. **둘은 한 세트다.**
+    decay_dynamic_occupancy_rate_hz: 5.0
     static_mapper:
       esdf_slice_min_height: 0.05
       esdf_slice_max_height: 0.9
