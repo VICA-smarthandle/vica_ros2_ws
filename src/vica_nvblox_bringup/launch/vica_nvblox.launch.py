@@ -84,8 +84,32 @@ def generate_launch_description():
             remappings=[
                 ("camera_0/depth/image", "/camera/camera/depth/image_rect_raw"),
                 ("camera_0/depth/camera_info", "/camera/camera/depth/camera_info"),
-                ("camera_0/color/image", "/camera/camera/color/image_raw"),
-                ("camera_0/color/camera_info", "/camera/camera/color/camera_info"),
+                # [2026-08-15 human 모드] 컬러도 리사이즈된 것을 물린다.
+                #
+                # 원본(640x480)을 물리면 nvblox 가 4초 만에 SIGABRT 로 죽는다:
+                #   image_masker.cu:258  Check failed:
+                #     (input.rows() == mask.rows()) && (input.cols() == mask.cols())
+                #   호출 경로 NvbloxNode::processColorImage()
+                #
+                # 깊이 경로는 마스크 카메라 모델로 투영해 자르므로(splitImageOnGPU 에
+                # T_CM_CD 가 들어간다) 크기가 달라도 된다. 그런데 컬러 경로는 픽셀 대
+                # 픽셀로 겹치는 방식이라 마스크(960x544)와 크기가 같아야 한다.
+                #
+                # 세그멘테이션 파이프라인이 리사이즈한 컬러를 그대로 발행하므로 그것을
+                # 쓴다. 크기뿐 아니라 타임스탬프도 같은 파이프라인에서 나와 4개 동기가
+                # 더 잘 맞는다.
+                #
+                # [대가] nvblox 의 컬러가 세그멘테이션에 매인다. 세그멘테이션이 죽으면
+                # 마스크와 컬러가 함께 끊긴다. 그리고 리사이즈 발행 주기가 원본보다
+                # 낮다(실측 4.9 Hz vs 15.9 Hz) — 컬러는 시각화·메시 색칠용이라
+                # 장애물 판단에는 영향이 없지만, 지도 색이 성기게 채워진다.
+                #
+                # [static_tsdf 로 되돌릴 때] 이 두 줄도 원본 카메라로 되돌린다.
+                #   /camera/camera/color/image_raw · /camera/camera/color/camera_info
+                ("camera_0/color/image",
+                 "/camera0/camera0/segmentation/image_resized"),
+                ("camera_0/color/camera_info",
+                 "/camera0/camera0/segmentation/camera_info_resized"),
                 # 2026-08-15 human 모드. use_segmentation: true 일 때만 구독한다.
                 #
                 # nvblox 는 depth · depth/camera_info · mask · mask/camera_info
