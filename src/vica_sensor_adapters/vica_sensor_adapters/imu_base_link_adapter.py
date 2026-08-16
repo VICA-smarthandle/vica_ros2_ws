@@ -126,7 +126,21 @@ class ImuBaseLinkAdapter(Node):
         # 나타났다. 이 노드를 줄이면 그 줄이 짧아진다.
         #
         # 50 Hz 는 EKF 사용 주기(30 Hz)의 1.7배다. 더 낮추면 EKF 입력이 부족해진다.
-        self.declare_parameter('publish_rate_hz', 50.0)
+        #
+        # 2026-08-15: 50 -> 40. 여전히 EKF(30 Hz)의 1.33배라 입력이 모자라지
+        # 않는다. 그날 주행 실측에서 이 노드가 32.6 %로 3위였고, 실제 출력은
+        # 41.3 Hz 여서 상한 50 은 사실상 걸리지도 않고 있었다. 40 으로 내리면
+        # 상한이 실제로 작동한다.
+        #
+        # 30 으로 더 내리지 않는 이유: EKF 주기와 같아져 여유가 사라진다.
+        # 지터 때문에 어떤 주기는 표본 0개, 어떤 주기는 2개를 받게 된다.
+        #
+        # [더 큰 절감이 남아 있다] 비용의 대부분인 lookup_transform 은 이 경우
+        # **정적 변환**이다(base_link <- camera_imu_optical_frame 은 URDF 고정).
+        # 한 번 조회해 캐시하면 주기와 무관하게 거의 0 이 된다. 다만 변환이
+        # 동적으로 바뀌는 구성으로 옮길 때 조용히 틀리므로, 캐시를 넣을 때는
+        # frame_id 가 바뀌면 다시 조회하는 안전장치를 함께 둔다. 별도 과제다.
+        self.declare_parameter('publish_rate_hz', 40.0)
 
         input_topic = self.get_parameter('input_topic').value
         output_topic = self.get_parameter('output_topic').value
