@@ -1117,7 +1117,35 @@ global_costmap:
       # nvblox_layer 블록은 남겨 둔다. plugins에 없으면 로드되지 않아 무해하고
       # 한 줄로 되돌릴 수 있다. local에는 그대로 있다(LiDAR 평면 0.382 m 아래를
       # 볼 유일한 수단).
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # ===== 2026-08-16: nvblox_layer 를 global 에 다시 넣는다 =====
+      #
+      # 위 주석이 예고한 증상이 그대로 재현됐다. run22 를 odom 이동거리로 재니
+      # (로그가 아니라 바퀴가 실제로 간 거리 기준, 1초에 3 cm 미만 = 멈춤)
+      # 주행 중 정체가 6건이었고 가장 긴 두 건이 이것이었다:
+      #
+      #   +256~286  30.0초  앞 0.52~1.56 m  경로재작성 29회
+      #             GridBased: ... Starting point in lethal space
+      #   +204~225  21.0초  앞 1.08~3.12 m  경로재작성 19회   (같은 문구)
+      #
+      # **앞이 1.5~3.1 m 나 비어 있는데 못 간다.** 위 기전 그대로다 - global 이
+      # 늦게 알아서 planner 가 그 자리로 경로를 냈고, 도착하니 이미 lethal 이었다.
+      #
+      # 2026-07-30 에 뺀 진짜 이유는 nvblox static 에 사람이 유령으로 남는
+      # 것이었다. **그 전제가 2026-08-16 에 무너졌다.** human 모드 실측:
+      #
+      #   1 m    검출 100 %  -> dynamic 행 (static 에 안 들어감)
+      #   0.6 m  검출  93 %  -> dynamic 행
+      #   코앞    검출   0 %  -> static 행. 다만 비킨 뒤 1.1초면 지워진다
+      #
+      # 유령이 안 남으므로 반대 근거가 사라졌다. 그래서 되돌린다.
+      #
+      # [지켜볼 것] 기록상 평균 LETHAL 칸이 2.4배로 는다. planner 가 더 넓게
+      # 돈다는 뜻이고, 1.5 m 복도에서 통과를 막을 수 있다. 실주행에서 그것만
+      # 본다. 막히면 이 한 줄에서 "nvblox_layer" 를 빼면 원래대로다.
+      #
+      # [순서] inflation_layer 앞에 둔다. 뒤에 두면 nvblox 가 찍은 칸에 부풀리기가
+      # 적용되지 않는다. local_costmap 도 같은 순서다.
+      plugins: ["static_layer", "obstacle_layer", "nvblox_layer", "inflation_layer"]
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
@@ -1126,7 +1154,8 @@ global_costmap:
         # tf_buffer_->lookupTransform(nav2_costmap_global_frame, slice_frame)으로
         # 변환한다(nvblox_costmap_layer.cpp 238~250행). map<-odom은 AMCL이 발행한다.
         nav2_costmap_global_frame: map
-        # local_costmap과 같은 슬라이스를 쓴다. mapping_type: static_tsdf와 짝이다.
+        # local_costmap과 같은 슬라이스를 쓴다. human 모드에서는 마스크가 사람을
+        # 전경(사람 전용 mapper)으로 보내므로 이 슬라이스에 사람이 거의 안 들어간다.
         nvblox_map_slice_topic: /nvblox_node/static_map_slice
         convert_to_binary_costmap: True
       obstacle_layer:
