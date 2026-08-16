@@ -196,6 +196,9 @@ class MissionManagerNode(Node):
         )
 
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
+        # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
+        # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
+        self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
         self.pub_state = self.create_publisher(RobotState, "/vica/robot_state", 10)
         self.pub_goal_event = self.create_publisher(String, "/vica_goal_event", 10)
         self.pub_speed_limit = self.create_publisher(
@@ -523,6 +526,9 @@ class MissionManagerNode(Node):
                 out.data = f"{action.priority}:{action.text}"
                 self.pub_tts.publish(out)
                 self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
+                if getattr(action, "expects_reply", False):
+                    self.pub_listen_request.publish(Bool(data=True))
+                    self.get_logger().info("질문 발화 — 재청취 요청 발행")
             elif isinstance(action, CancelNav):
                 self._cancel_nav(action.destination, action.event)
             elif isinstance(action, Navigate):
