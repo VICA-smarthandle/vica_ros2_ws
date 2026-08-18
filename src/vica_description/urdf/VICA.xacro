@@ -51,17 +51,18 @@
     <mass value="90.84709962539795"/>
     <inertia ixx="2.402108" iyy="3.622523" izz="4.166828" ixy="0.0" iyz="-0.0" ixz="0.343284"/>
   </inertial>
-  <!-- 2026-08-18 마스트 미리보기 - **visual 만** 교체한다.
-       base_link_mast_preview.stl 은 base_link.stl 의 사본에서 지면 0.5 m 위
-       정점만 +212 mm 올린 것이다. 그 높이 위에는 기둥·손잡이뿐이라(실측:
-       다른 부위 최고 0.385 m) 손잡이 형태는 그대로 두고 기둥 길이만 늘어난다.
-       손잡이 꼭대기 0.863 -> 1.075 m (카메라 높이).
+  <!-- 2026-08-18 마스트 재설계 형상 - **visual 만** 교체한다(사용자 확정).
+       base_link_mast.stl 은 base_link.stl 을 이렇게 가공한 것이다:
+         - 뒤끝 전폭 레일(0.248~0.363)과 치마 삭제
+         - 손잡이 기둥을 카메라 상자 뒤면(-0.238)에 밀착, 밑동은 차체 안까지
+         - 그립은 형태 그대로 지면 1.045~1.075 (카메라 높이)
        collision 은 base_link.stl 원본 그대로다 - footprint·계약 시험의 실측
-       기준이라 건드리지 않는다. 실물 CAD 가 나오면 이 메시를 교체한다. -->
+       기준이라 실물 완성 후 재실측 전에는 바꾸지 않는다.
+       실물 CAD 가 나오면 이 메시를 교체한다. -->
   <visual>
     <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="package://vica_description/meshes/base_link_mast_preview.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://vica_description/meshes/base_link_mast.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="body_blue"/>
   </visual>
