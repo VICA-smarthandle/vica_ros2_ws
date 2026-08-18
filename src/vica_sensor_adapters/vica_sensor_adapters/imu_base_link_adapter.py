@@ -43,14 +43,6 @@ def _quat_to_matrix(q):
     ]]
 
 
-def _copy_vector(vector):
-    out = Vector3()
-    out.x = vector.x
-    out.y = vector.y
-    out.z = vector.z
-    return out
-
-
 def _rotate_vector(matrix, vector):
     values = [vector.x, vector.y, vector.z]
     rotated = [
@@ -135,11 +127,14 @@ class ImuBaseLinkAdapter(Node):
         # 30 으로 더 내리지 않는 이유: EKF 주기와 같아져 여유가 사라진다.
         # 지터 때문에 어떤 주기는 표본 0개, 어떤 주기는 2개를 받게 된다.
         #
-        # [더 큰 절감이 남아 있다] 비용의 대부분인 lookup_transform 은 이 경우
-        # **정적 변환**이다(base_link <- camera_imu_optical_frame 은 URDF 고정).
-        # 한 번 조회해 캐시하면 주기와 무관하게 거의 0 이 된다. 다만 변환이
-        # 동적으로 바뀌는 구성으로 옮길 때 조용히 틀리므로, 캐시를 넣을 때는
-        # frame_id 가 바뀌면 다시 조회하는 안전장치를 함께 둔다. 별도 과제다.
+        # 2026-08-18: 스로틀을 '버리기'에서 '평균 내기'로 바꿨다. 카메라(와 그
+        # 안의 IMU)가 핸들 기둥 마스트(지면 1.075 m)로 올라가면서 진동 잡음이
+        # 늘 것이기 때문이다. 200 Hz 표본을 버리지 않고 발행 주기(40 Hz)마다
+        # 평균 내면 5표본 평균이 되어 40 Hz 성분은 완전 상쇄, 백색잡음은
+        # sqrt(5)=2.2배 감쇠한다. **수 Hz 의 느린 흔들림은 평균으로 못 지운다**
+        # - 자이로에게 그건 진짜 회전이다. 그쪽은 기구 강성이 담당한다.
+        # 비용은 콜백당 덧셈 6개다. 콜백 깨움·역직렬화는 구독하는 이상 어차피
+        # 200 Hz 로 일어나므로 버리기 대비 추가 비용이 사실상 없다.
         self.declare_parameter('publish_rate_hz', 40.0)
 
         input_topic = self.get_parameter('input_topic').value
@@ -156,6 +151,19 @@ class ImuBaseLinkAdapter(Node):
         # monotonic 기준이다. 시스템 시계가 바뀌어도 간격 판정이 흔들리지 않는다.
         self._min_period_sec = (1.0 / rate) if rate > 0.0 else 0.0
         self._last_publish_monotonic = 0.0
+
+        # 발행 사이에 도착한 원본 표본의 합. 발행 시점에 평균 내고 비운다.
+        self._acc_n = 0
+        self._acc_gyro = [0.0, 0.0, 0.0]
+        self._acc_lin = [0.0, 0.0, 0.0]
+
+        # TF 캐시. base_link <- IMU frame 은 URDF 고정 변환이라 한 번만
+        # 조회하면 된다. lookup_transform 이 이 노드 비용의 대부분이었다
+        # (주행 실측 25~33 %). frame_id 가 바뀌면 다시 조회한다 - 변환이
+        # 동적으로 바뀌는 구성으로 옮겼을 때 조용히 틀리는 것을 막는
+        # 안전장치다.
+        self._tf_matrix = None
+        self._tf_frame_id = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -174,39 +182,34 @@ class ImuBaseLinkAdapter(Node):
         )
 
     def imu_callback(self, msg: Imu):
-        # 스로틀은 TF 조회보다 **먼저** 한다. lookup_transform 이 이 노드 비용의
-        # 대부분이므로, 뒤에 두면 CPU 를 아끼지 못한다.
+        # 모든 표본을 합산에 넣는다(평균 내기). 스로틀에 걸려도 버리지 않는다.
+        self._acc_gyro[0] += msg.angular_velocity.x
+        self._acc_gyro[1] += msg.angular_velocity.y
+        self._acc_gyro[2] += msg.angular_velocity.z
+        self._acc_lin[0] += msg.linear_acceleration.x
+        self._acc_lin[1] += msg.linear_acceleration.y
+        self._acc_lin[2] += msg.linear_acceleration.z
+        self._acc_n += 1
+
+        # 스로틀은 TF·회전보다 **먼저** 한다. 뒤에 두면 CPU 를 아끼지 못한다.
         if self._min_period_sec > 0.0:
             now = time.monotonic()
             if now - self._last_publish_monotonic < self._min_period_sec:
                 return
             self._last_publish_monotonic = now
 
-        timeout = Duration(
-            seconds=float(self.get_parameter('transform_timeout_sec').value)
-        )
+        # 평균을 꺼내고 합산을 비운다. TF 실패로 이번 발행을 건너뛰더라도
+        # 비운다 - 기동 초기 TF 대기 동안 쌓인 낡은 표본이 첫 발행에 한꺼번에
+        # 평균되는 것을 막는다.
+        n = self._acc_n
+        avg_gyro = [v / n for v in self._acc_gyro]
+        avg_lin = [v / n for v in self._acc_lin]
+        self._acc_n = 0
+        self._acc_gyro = [0.0, 0.0, 0.0]
+        self._acc_lin = [0.0, 0.0, 0.0]
 
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                self.target_frame,
-                msg.header.frame_id,
-                msg.header.stamp,
-                timeout,
-            )
-        except TransformException as exc:
-            message = (
-                f'Waiting for TF {self.target_frame} '
-                f'<- {msg.header.frame_id}: {exc}'
-            )
-            self.get_logger().warn(
-                message,
-                throttle_duration_sec=2.0,
-            )
-            return
-
-        matrix = _quat_to_matrix(transform.transform.rotation)
+        matrix = self._matrix_for(msg.header.frame_id, msg.header.stamp)
         if matrix is None:
-            self.get_logger().warn('Received invalid TF rotation quaternion')
             return
 
         out = Imu()
@@ -216,7 +219,10 @@ class ImuBaseLinkAdapter(Node):
         out.orientation = msg.orientation
         out.orientation_covariance = list(msg.orientation_covariance)
 
-        out.angular_velocity = _copy_vector(msg.angular_velocity)
+        out.angular_velocity = Vector3()
+        out.angular_velocity.x = avg_gyro[0]
+        out.angular_velocity.y = avg_gyro[1]
+        out.angular_velocity.z = avg_gyro[2]
         _rotate_vector(matrix, out.angular_velocity)
 
         # 편향은 회전 뒤 base_link 기준으로 다룬다. EKF가 쓰는 축이 그것이다.
@@ -228,7 +234,10 @@ class ImuBaseLinkAdapter(Node):
             msg.angular_velocity_covariance,
         )
 
-        out.linear_acceleration = _copy_vector(msg.linear_acceleration)
+        out.linear_acceleration = Vector3()
+        out.linear_acceleration.x = avg_lin[0]
+        out.linear_acceleration.y = avg_lin[1]
+        out.linear_acceleration.z = avg_lin[2]
         _rotate_vector(matrix, out.linear_acceleration)
         out.linear_acceleration_covariance = _rotate_covariance(
             matrix,
@@ -236,6 +245,37 @@ class ImuBaseLinkAdapter(Node):
         )
 
         self.pub.publish(out)
+
+    def _matrix_for(self, frame_id, stamp):
+        """캐시된 회전 행렬을 준다. frame_id 가 바뀌면 다시 조회한다."""
+        if self._tf_matrix is not None and frame_id == self._tf_frame_id:
+            return self._tf_matrix
+
+        timeout = Duration(
+            seconds=float(self.get_parameter('transform_timeout_sec').value)
+        )
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                frame_id,
+                stamp,
+                timeout,
+            )
+        except TransformException as exc:
+            self.get_logger().warn(
+                f'Waiting for TF {self.target_frame} <- {frame_id}: {exc}',
+                throttle_duration_sec=2.0,
+            )
+            return None
+
+        matrix = _quat_to_matrix(transform.transform.rotation)
+        if matrix is None:
+            self.get_logger().warn('Received invalid TF rotation quaternion')
+            return None
+
+        self._tf_matrix = matrix
+        self._tf_frame_id = frame_id
+        return matrix
 
     def _apply_gyro_bias(self, gyro):
         """정지 중 추정한 편향을 뺀다. 확정 전이면 원값이 그대로 나간다."""
