@@ -53,7 +53,7 @@ Visualization Manager:
       Value: true
     - Alpha: 0.800000011920929
       Class: rviz_default_plugins/RobotModel
-      Collision Enabled: true
+      Collision Enabled: false
       Description File: ""
       Description Source: Topic
       Description Topic:
