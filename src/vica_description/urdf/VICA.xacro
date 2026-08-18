@@ -12,9 +12,19 @@
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
-<xacro:property name="camera_x" value="0.28683" />
+<!-- 2026-08-18 카메라 마스트 이설(설계값 — 실측 대기).
+     핸들 기둥 위, 지면에서 렌즈 중심 1075 mm, 몸통 뒤끝(-305)에서 앞으로 80 mm.
+       camera_x  0.28683 -> -0.225   (뒤로 51.2 cm)
+       camera_z  0.130   ->  0.885   (지면 1.075 - base_link 0.190. 위로 75.5 cm)
+     장착 후 지면->렌즈 중심을 줄자로 실측해 이 두 값을 확정한다.
+     footprint 때 도면과 실측이 달랐다(손잡이 29->19 cm).
+     기울여 달면 camera_joint 의 rpy 도 함께 바꾼다(아래 주석).
+     ** 이 값은 하드웨어가 실제로 이설된 뒤에만 유효하다. 옛 위치(앞 0.287/0.320)에
+     카메라가 달린 채 이 URDF 로 주행하면 nvblox 가 깊이를 75 cm 어긋난 높이로
+     투영한다. 이설 전 주행은 이 브랜치(feat/camera-mast)가 아니라 dev 로 한다. -->
+<xacro:property name="camera_x" value="-0.225" />
 <xacro:property name="camera_y" value="0.0" />
-<xacro:property name="camera_z" value="0.130" />
+<xacro:property name="camera_z" value="0.885" />
 <!-- Drive wheel / caster geometry. Single source for every y coordinate. -->
 <!-- 줄자 실측(바퀴 중심 사이). CAD 0.3618과 2.2 mm 차이.
      encoder.yaml의 wheel_base_m 0.37은 회전 시험으로 맞춘 오도메트리 보정 상수라
@@ -263,6 +273,13 @@
   <child link="laser_frame"/>
 </joint>
 
+<!-- 마스트 장착 기울기. 지금은 수평(rpy 0 0 0)으로 둔다.
+     아래로 기울여 달면 pitch(가운데 값)만 바꾼다. URDF 는 pitch 양수 = 아래.
+       아래 15도(권장): rpy="0 0.262 0"  바닥 사각 앞끝 1.17 -> 0.46 m,
+                        0.35 m 앞 사람의 허벅지~가슴이 화면에 들어온다
+       아래 20도(한계): 앞쪽 0.385 m 구조물(x 0.1~0.3, STL 실측)이 화면
+                        하단에 걸리기 시작한다. 이 위로 기울이지 말 것.
+     기울기를 바꿔도 IMU 어댑터 파라미터는 안 바꾼다 - TF 회전을 자동으로 읽는다. -->
 <joint name="camera_joint" type="fixed">
   <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
