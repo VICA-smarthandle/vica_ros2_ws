@@ -267,7 +267,7 @@ controller_server:
       # 축이고, 회전은 별도 병목으로 따로 잰다.
       max_vel_x: 0.5
       max_vel_y: 0.0
-      max_vel_theta: 0.5 # 1.0 회전 속도 줄임
+      max_vel_theta: 0.4 # 1.0 회전 속도 줄임
       min_speed_xy: 0.0
       max_speed_xy: 0.5
       min_speed_theta: 0.0
