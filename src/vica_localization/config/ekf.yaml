@@ -57,17 +57,28 @@ ekf_filter_node:
     odom0_differential: false
     odom0_relative: false
 
-    imu0: /imu/base_link
-    imu0_config: [
-      false, false, false,
-      false, false, false,
-      false, false, false,
-      false, false, true,
-      false, false, false
-    ]
-    imu0_differential: false
-    imu0_relative: false
-    imu0_remove_gravitational_acceleration: true
+    # [2026-08-19 임시 비활성] 카메라(IMU 내장)가 마스트(지면 1.075 m)로
+    # 올라간 뒤 기둥 진동이 자이로 vyaw 에 섞여 yaw 가 크게 틀어진다.
+    # 기구를 완전히 고정하기 전까지 IMU 융합을 끄고 바퀴 오도메트리만 쓴다.
+    # odom0 이 vx·vy·vyaw 를 전부 공급하므로 구멍은 없다.
+    #
+    # 대가: 자이로가 잡아 주던 회전 정밀도를 잃는다(바퀴 yaw 는 미끄러짐에
+    # 약하고, 장기 표류는 AMCL 이 지도로 보정). 제자리 회전 정확도가 다소
+    # 떨어질 수 있다. 부수 효과로 기동 시 25초 자이로 정지 보정은 주행에
+    # 영향이 없어진다(어댑터는 계속 돌지만 EKF 가 안 읽는다).
+    #
+    # [되돌리기] 마스트 강성 확보 후 아래 6줄의 주석을 푼다.
+    # imu0: /imu/base_link
+    # imu0_config: [
+    #   false, false, false,
+    #   false, false, false,
+    #   false, false, false,
+    #   false, false, true,
+    #   false, false, false
+    # ]
+    # imu0_differential: false
+    # imu0_relative: false
+    # imu0_remove_gravitational_acceleration: true
 
 
 # ekf_filter_node:
