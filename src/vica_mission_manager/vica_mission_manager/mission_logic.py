@@ -269,9 +269,13 @@ MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
 # 각 지점은 목적지 하나당 한 번만 안내한다.
 #
+# 3 m 하나뿐이다. 10 m 지점은 2026-08-20 에 없앴다 — 목적지 간 거리가 3~7 m 인
+# 지도에서 출발하자마자 "10미터 남았습니다" 오보가 반복됐다(사용자 결정).
+# 출발 거리가 지점 이하면 그 지점은 침묵한다 (_crossed_milestone 의 출발 기준).
+#
 # 감속 단계(approach_speed.DEFAULT_APPROACH_STAGES)와는 별개다. 안내는 3 m 에서
 # 하고 감속은 1.5 m 부터 시작한다 — 사용자가 먼저 듣고, 그 다음 몸으로 느낀다.
-DISTANCE_MILESTONES_M = (10.0, 3.0)
+DISTANCE_MILESTONES_M = (3.0,)
 
 # ---- 사람 접근 값 (설계 6.2절) -----------------------------------------------
 
@@ -596,6 +600,7 @@ class MissionLogic:
         self._retry_destination: Optional[Destination] = None
         self._retry_at: Optional[float] = None
         self._announced_milestones: set = set()  # 이번 목적지에서 안내한 거리 지점
+        self._distance_baseline: Optional[float] = None  # 이번 목적지의 출발 거리
         # 접근 대상. 안내 사용자가 없는 구간이라 "어디로" 뿐 아니라 "누구에게"
         # 가는 중인지를 따로 들고 있어야 재접근 억제를 걸 수 있다.
         self.approach_track_id: Optional[int] = None
@@ -673,6 +678,7 @@ class MissionLogic:
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
@@ -717,6 +723,7 @@ class MissionLogic:
         self._cancel_confirm_deadline = None
         # 재개하면 새 goal 이므로 거리 안내도 처음부터 다시 한다.
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         actions.append(Say(MSG_PAUSED, priority="response"))
         return actions, GateReason.OK
@@ -735,6 +742,7 @@ class MissionLogic:
         self.active_destination = destination
         self.paused_destination = None
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         return (
             [
@@ -818,6 +826,7 @@ class MissionLogic:
         self.approach_goal_pose = request.goal
         self._response_deadline = None
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         return (
             [
@@ -1090,6 +1099,7 @@ class MissionLogic:
                     self.active_destination = dest
                     self._dwell_until = None
                     self._announced_milestones = set()
+                    self._distance_baseline = None
                     self._approach.reset()
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(Navigate(dest))
@@ -1125,6 +1135,15 @@ class MissionLogic:
         """
         if distance_remaining is None or distance_remaining <= 0.0:
             return None
+
+        if self._distance_baseline is None:
+            # 첫 양수 거리 = 출발 거리. 출발점보다 먼 지점은 지난 것으로 접어
+            # "4 m 남았는데 10미터"류 오보를 막는다. 출발이 지점 이하면 그
+            # 지점은 침묵한다 — 곧 도착 멘트가 나올 참이라 겹치면 소음이다.
+            self._distance_baseline = distance_remaining
+            self._announced_milestones.update(
+                m for m in DISTANCE_MILESTONES_M if m >= distance_remaining
+            )
 
         crossed = [
             m
@@ -1168,6 +1187,7 @@ class MissionLogic:
         self.approach_goal_pose = None
         self._response_deadline = None
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if self.return_destination is not None:
@@ -1214,6 +1234,7 @@ class MissionLogic:
         self._estop_entered_at = now
         self._estop_clear_since = None
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         # 접근도 함께 버린다. 목적지를 보관하지 않으므로 해제 뒤 자동 재개는
         # 없고, 사람에게 다시 가려면 탐지부터 다시 해야 한다(설계 4절).
@@ -1238,6 +1259,7 @@ class MissionLogic:
         self._estop_clear_since = None
         self._turn_deadline = None
         self._announced_milestones = set()
+        self._distance_baseline = None
         self._approach.reset()
         # 재시도 예산은 목적지 하나당이다. IDLE 로 내려오면 이번 시도가 끝난
         # 것이므로 비운다. 이것을 빠뜨리면 한 번 실패한 뒤로 영영 재시도가
