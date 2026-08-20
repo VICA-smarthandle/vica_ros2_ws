@@ -798,19 +798,7 @@ local_costmap:
         enabled: True
         publish_voxel_map: True
         origin_z: 0.0
-        # [2026-08-19] 격자 천장을 0.8 -> 1.2 m 로 올린다. 광선 청소는 센서
-        # 위치에서 출발하는데, 카메라가 마스트(지면 1.075)에 있어 0.8 짜리
-        # 격자 밖이었다. 그러면 "sensor origin out of map bounds ... cannot
-        # raytrace" 가 뜨며 청소만 통째로 꺼지고 마킹은 계속되어, flying
-        # pixel 까지 영구 축적 -> 전방이 까맣게 차서 무주행 (실측 재현).
-        #
-        # 층수(z_voxels)는 16 이 하드 상한이다 - nav2_voxel_grid 가 열 하나를
-        # uint32 에 2비트씩 담는 구조라 "only sizes <= 16 are supported"
-        # (voxel_grid.hpp:72). 24 를 줬더니 파라미터는 받고 격자는 조용히
-        # 16 으로 돌았다(voxel_grid 토픽 size_z 로 실측). 그래서 층수 대신
-        # 층 두께를 0.05 -> 0.075 로 올린다. 16 x 0.075 = 1.2 m,
-        # 카메라 1.075 에 12.5 cm 여유. 라이다 평면(0.382)은 5번째 층.
-        z_resolution: 0.075
+        z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 2.0
         # [근거 없음] nav2 기본값 0에서 1로 바꾼 경위가 기록돼 있지 않다
@@ -818,13 +806,7 @@ local_costmap:
         # 표시한다. LiDAR가 단일 평면(0.382 m)이라 컬럼당 복셀이 많지 않으므로
         # 이 값을 올리면 표시가 사라질 수 있다. 되돌릴 때는 0으로.
         mark_threshold: 1
-        # [2026-08-19 시험] depth_cloud 추가. D455 깊이를 라이다와 같은 규칙
-        # (마킹 + 광선청소)으로 넣는다. nvblox(TSDF 30.6초 감쇠) 대체 시험 -
-        # 잔상의 구조적 제거가 목적이다. 이 시험에서는 세그멘테이션·nvblox 를
-        # 띄우지 않으며, 카메라는 run_d455_cloud.sh(pointcloud + decimation 4)로
-        # 띄운다. 판정 기준·되돌리기는 계획서(2026-08-19 voxel_layer 전환) 참고.
-        # 되돌리기: 이 줄을 scan 으로, 아래 depth_cloud 블록 삭제.
-        observation_sources: scan depth_cloud
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -869,32 +851,6 @@ local_costmap:
           #     raytrace 소거에 쓴다. false면 빈 공간이 지워지지 않는다.
           expected_update_rate: 0.2
           inf_is_valid: true
-        # [2026-08-19 시험] D455 깊이 포인트클라우드. 위 observation_sources 주석 참고.
-        depth_cloud:
-          topic: /camera/camera/depth/color/points
-          data_type: "PointCloud2"
-          marking: True
-          clearing: True
-          # 바닥 차단. 카메라(지면 1.075, 수평)는 로봇 앞끝 기준 약 1.5 m 밖
-          # 바닥을 본다. 원거리 깊이 잡음 + TF 오차 여유로 0.10 - 의자다리
-          # (높이 > 0.1 m)는 안 잘린다. 책상 관문 ①(바닥 오검출)이 이 값을
-          # 판정하며, 부족하면 0.15 로 올린다.
-          min_obstacle_height: 0.10
-          # voxel 격자 상한 = origin_z 0 + z_voxels 16 x z_resolution 0.05 = 0.8.
-          # 그 위는 격자 밖이라 넣어도 버려진다.
-          max_obstacle_height: 0.80
-          # raytrace(소거) > obstacle(표시) 관계 유지 - scan 블록 주석과 같은 근거.
-          obstacle_max_range: 3.0
-          obstacle_min_range: 0.3
-          raytrace_max_range: 3.5
-          raytrace_min_range: 0.3
-          # 0.0 = 최신 구름만 유지. 라이다(0.5)를 따라하면 15 Hz x 0.5 s = 7장이
-          # 버퍼링되어 마킹 비용이 7배가 된다. 깊이는 한 장에 점이 충분히 많아
-          # (160x120 = 19.2k) 라이다처럼 보관할 이유가 없다.
-          observation_persistence: 0.0
-          # 15 Hz 발행이지만 2 Hz(0.5초)까지 허용 - 일시 지연으로 stale 판정이
-          # 나는 것을 막는다.
-          expected_update_rate: 0.5
 
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
