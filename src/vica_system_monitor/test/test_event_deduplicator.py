@@ -412,3 +412,88 @@ def test_latched_flag_is_carried_through():
 
     assert events[0].fault.latched is True
     assert active[0].latched is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-21 추가 — 래치 전용 간격과 해소 확정 지연
+# ---------------------------------------------------------------------------
+
+
+LATCHED_REMINDER = 10 * SEC
+
+
+def make_tuned(clear_confirm_ticks=2):
+    """Build a deduplicator with the values shipped in required_components.yaml."""
+    return EventDeduplicator(
+        reminder_interval_ns=REMINDER,
+        latched_reminder_interval_ns=LATCHED_REMINDER,
+        clear_confirm_ticks=clear_confirm_ticks,
+    )
+
+
+def test_latched_fault_still_reminds_every_tick_by_default():
+    """기본값은 종전 동작이다. 규칙 6을 인자 없이 바꾸지 않는다."""
+    dedup = make()
+    dedup.update([obs(latched=True)], 0, 0.0)
+    events, _ = dedup.update([obs(latched=True)], SEC, 1.0)
+    assert [event.transition for event in events] == [TRANSITION_REMINDER]
+
+
+def test_latched_fault_honours_its_own_interval_when_given():
+    """전용 간격을 주면 매 tick이 아니라 그 간격으로 재알림한다."""
+    dedup = make_tuned()
+    dedup.update([obs(latched=True)], 0, 0.0)
+
+    # 1초 뒤 — 아직 10초가 안 지났다.
+    events, _ = dedup.update([obs(latched=True)], SEC, 1.0)
+    assert events == []
+
+    # 10초 뒤 — 재알림한다.
+    events, _ = dedup.update([obs(latched=True)], 10 * SEC, 10.0)
+    assert [event.transition for event in events] == [TRANSITION_REMINDER]
+
+
+def test_latched_interval_is_shorter_than_the_normal_one():
+    """래치는 일반 결함보다 자주 알려야 한다. 값을 뒤바꿔 넣는 것을 막는다."""
+    assert LATCHED_REMINDER < REMINDER
+
+
+def test_clear_waits_for_confirmation_ticks():
+    """해소는 연속 미관측이 확정 tick 수에 도달해야 발행한다."""
+    dedup = make_tuned(clear_confirm_ticks=3)
+    dedup.update([obs()], 0, 0.0)
+
+    for tick in range(1, 3):
+        events, active = dedup.update([], tick * SEC, float(tick))
+        assert events == [], f'tick {tick}에서 성급히 해소로 봤다'
+        assert len(active) == 1, '확정 전에는 활성 목록에 남아 있어야 한다'
+
+    events, active = dedup.update([], 3 * SEC, 3.0)
+    assert [event.transition for event in events] == [TRANSITION_CLEARED]
+    assert active == []
+
+
+def test_flapping_observation_produces_no_event_churn():
+    """임계값 근처에서 한 tick 걸렀다가 돌아오면 아무 이벤트도 나오지 않는다.
+
+    이것이 '같은 알람이 자주 뜬다'의 실제 기전이다. 확정 지연이 없으면 이 패턴이
+    tick마다 해소 -> 발생 두 건을 만들어 이력을 같은 항목으로 채운다.
+    """
+    dedup = make_tuned()
+    dedup.update([obs()], 0, 0.0)
+
+    transitions = []
+    for tick in range(1, 11):
+        observations = [] if tick % 2 else [obs()]
+        events, _ = dedup.update(observations, tick * SEC, float(tick))
+        transitions.extend(event.transition for event in events)
+
+    assert transitions == [], f'churn 이 남았다: {transitions}'
+
+
+def test_clear_confirm_ticks_below_one_is_treated_as_one():
+    """0이나 음수를 넣어도 해소가 영영 안 나오는 상태가 되지 않게 한다."""
+    dedup = EventDeduplicator(reminder_interval_ns=REMINDER, clear_confirm_ticks=0)
+    dedup.update([obs()], 0, 0.0)
+    events, _ = dedup.update([], SEC, 1.0)
+    assert [event.transition for event in events] == [TRANSITION_CLEARED]

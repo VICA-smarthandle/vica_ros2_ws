@@ -84,7 +84,9 @@ class RobotHealthMonitorNode(Node):
 
         self.declare_parameter('diagnostics_topic', '/diagnostics_agg')
         self.declare_parameter('publish_period_sec', 1.0)
-        self.declare_parameter('reminder_interval_sec', 30.0)
+        self.declare_parameter('reminder_interval_sec', 300.0)
+        self.declare_parameter('latched_reminder_interval_sec', 10.0)
+        self.declare_parameter('clear_confirm_ticks', 2)
         self.declare_parameter('nav2_state_poll_period_sec', 2.0)
         self.declare_parameter('nav2_lifecycle_node', '/bt_navigator')
         # get_state 호출을 포기하는 시한. 2026-08-01에 이 호출이 10분간 반환되지 않았다.
@@ -116,7 +118,13 @@ class RobotHealthMonitorNode(Node):
 
         self.policies = self._read_component_policies()
         self.dedup = EventDeduplicator(
-            reminder_interval_ns=self._timeout_ns('reminder_interval_sec')
+            reminder_interval_ns=self._timeout_ns('reminder_interval_sec'),
+            latched_reminder_interval_ns=self._timeout_ns(
+                'latched_reminder_interval_sec'
+            ),
+            clear_confirm_ticks=int(
+                self.get_parameter('clear_confirm_ticks').value
+            )
         )
 
         # ---- 입력 상태 -------------------------------------------------

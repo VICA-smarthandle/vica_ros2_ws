@@ -79,6 +79,8 @@ class _Record:
         self.first_seen_sec = wall_sec
         self.last_seen_sec = wall_sec
         self.last_notified_ns = now_ns
+        # 연속으로 관측되지 않은 tick 수. clear_confirm_ticks 에 도달해야 해소로 본다.
+        self.missed_ticks = 0
 
     def snapshot(self, active: bool) -> ActiveFault:
         """Build an immutable view for publishing."""
@@ -99,9 +101,24 @@ class _Record:
 class EventDeduplicator:
     """Turn per-tick fault observations into a minimal event stream."""
 
-    def __init__(self, reminder_interval_ns: int) -> None:
-        """Store the re-notification interval in integer nanoseconds."""
+    def __init__(
+        self,
+        reminder_interval_ns: int,
+        latched_reminder_interval_ns: Optional[int] = None,
+        clear_confirm_ticks: int = 1,
+    ) -> None:
+        """Store the re-notification interval in integer nanoseconds.
+
+        latched_reminder_interval_ns 는 래치된 결함 전용 간격이다. None 이면 종전
+        동작(매 tick 재알림)을 유지한다. 기본값을 바꾸지 않은 이유는 기존 시험이
+        그 동작을 계약으로 잡고 있기 때문이다.
+
+        clear_confirm_ticks 는 "해소"를 확정하기까지 결함이 연속으로 관측되지
+        않아야 하는 tick 수다. 1 이면 종전대로 한 tick만에 해소로 본다.
+        """
         self._reminder_interval_ns = reminder_interval_ns
+        self._latched_reminder_interval_ns = latched_reminder_interval_ns
+        self._clear_confirm_ticks = max(1, int(clear_confirm_ticks))
         self._records: Dict[Tuple[str, str], _Record] = {}
 
     def update(
@@ -136,6 +153,7 @@ class EventDeduplicator:
             record.latched = observation.latched
             record.occurrence_count += 1
             record.last_seen_sec = wall_sec
+            record.missed_ticks = 0
 
             if observation.severity > previous_severity:
                 # 규칙 5: 등급 상승은 rate limit과 무관하게 즉시 알린다.
@@ -152,10 +170,23 @@ class EventDeduplicator:
                 )
 
         # 규칙 4: 이번 tick에 관측되지 않은 fault는 해소된 것으로 보고 한 번만 알린다.
+        #
+        # 다만 곧바로 해소로 보면 임계값 근처에서 오르내리는 관측이 매 초 "발생 ->
+        # 해소"를 반복해 이력을 같은 항목으로 채운다. 실제로 /odom 프로브는
+        # min_hz 20 인데 CPU 가 모자랄 때 15.5 Hz 까지 떨어진 기록이 있다
+        # (devlog/2026-08-01-drive-tuning-and-duplicate-stack.md).
+        #
+        # 그래서 clear_confirm_ticks 만큼 연속으로 안 보여야 해소로 확정한다.
+        # 지연시키는 쪽은 '해소'뿐이고 '발생'은 종전대로 즉시 알린다 — 결함을
+        # 늦게 지우는 것은 안전한 방향, 늦게 알리는 것은 위험한 방향이다.
         for key in list(self._records):
             if key in seen_keys:
                 continue
-            record = self._records.pop(key)
+            record = self._records[key]
+            record.missed_ticks += 1
+            if record.missed_ticks < self._clear_confirm_ticks:
+                continue
+            self._records.pop(key)
             record.last_seen_sec = wall_sec
             events.append(Event(record.snapshot(active=False), TRANSITION_CLEARED))
 
@@ -164,8 +195,15 @@ class EventDeduplicator:
     def _reminder_due(self, record: _Record, now_ns: int) -> bool:
         """Return True when the re-notification interval has elapsed.
 
-        규칙 6: **래치된 결함**은 간격을 무시하고 매 tick 재알림한다. 관리자 reset이
-        있어야 풀리는 상태를 놓치지 않는 것이 폭주 억제보다 우선이다.
+        규칙 6: **래치된 결함**은 일반 결함보다 짧은 전용 간격을 쓴다
+        (latched_reminder_interval_ns). 관리자 reset이 있어야 풀리는 상태를
+        놓치지 않는 것이 폭주 억제보다 우선이기 때문이다.
+
+        [2026-08-21] 원래는 간격을 무시하고 **매 tick**(1 Hz) 재알림했다. 앱은
+        reminder 를 화면에 쌓지 않으므로 화면이 넘치지는 않았지만, 그 메시지가
+        전부 rosbridge 를 지나간다. rosbridge 는 supervisor_bringup 에서 서비스
+        호출과 같은 흐름을 쓰므로 초당 한 건의 군더더기가 그대로 비용이 된다.
+        None 을 주면 종전 동작(매 tick)으로 되돌아간다.
 
         기준이 등급이 아니라 latched인 이유: 등급으로 판정하면 "가장 심각한 등급"이
         곧 "가장 시끄러워야 할 상태"라는 뜻이 되는데 둘은 다르다. 실제로 모터 진단이
@@ -176,7 +214,12 @@ class EventDeduplicator:
         시끄러워지는 방향이 안전하다.
         """
         if record.latched:
-            return True
+            if self._latched_reminder_interval_ns is None:
+                return True
+            elapsed_ns = now_ns - record.last_notified_ns
+            if elapsed_ns < 0:
+                return True
+            return elapsed_ns >= self._latched_reminder_interval_ns
         elapsed_ns = now_ns - record.last_notified_ns
         if elapsed_ns < 0:
             return True

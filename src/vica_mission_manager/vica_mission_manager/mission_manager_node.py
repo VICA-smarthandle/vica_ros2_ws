@@ -167,6 +167,9 @@ class MissionManagerNode(Node):
             raise RuntimeError("nav2_simple_commander 를 import 할 수 없습니다")
         self.navigator = BasicNavigator("vica_mission_navigator")
         self._nav_lock = threading.Lock()
+        # _cancel_nav_blocking 이 이 lock 을 잡고 Nav2 응답을 기다릴 수 있다.
+        # 콜백에서 무한히 기다리면 고치려던 문제가 그대로 돌아오므로 시한을 둔다.
+        self._nav_lock_timeout_sec = 2.0
         self._nav_active = False  # goToPose 수락 후 완료 전까지 True
 
         # emergency 계열은 전용 callback group — intent/tick 처리가
@@ -559,9 +562,23 @@ class MissionManagerNode(Node):
         goal.pose.orientation.z = qz
         goal.pose.orientation.w = qw
 
-        with self._nav_lock:
+        # 앞선 취소가 아직 Nav2 응답을 기다리는 중이면 여기서 영원히 기다리지
+        # 않는다. 못 보낸 것을 실패로 처리하는 편이 콜백을 막는 것보다 낫다.
+        if not self._nav_lock.acquire(timeout=self._nav_lock_timeout_sec):
+            self._publish_goal_event(
+                "goal_rejected", dest, "이전 goal 취소가 아직 처리 중입니다."
+            )
+            self.get_logger().error(
+                f"NavigateToPose 전송 보류: 이전 취소가 "
+                f"{self._nav_lock_timeout_sec:.1f}초 안에 끝나지 않았다 ({dest.id})"
+            )
+            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+            return
+        try:
             accepted = self.navigator.goToPose(goal)
             self._nav_active = bool(accepted)
+        finally:
+            self._nav_lock.release()
         if accepted:
             self._publish_goal_event("goal_sent", dest)
             self._publish_goal_event("goal_accepted", dest)
@@ -576,10 +593,33 @@ class MissionManagerNode(Node):
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
     def _cancel_nav(self, destination=None, event: str = "goal_canceled") -> None:
-        with self._nav_lock:
-            if self._nav_active:
-                self.navigator.cancelTask()
-                self._nav_active = False
+        """goal 취소를 알리고, Nav2 취소 호출은 별도 스레드에 맡긴다.
+
+        [2026-08-21] 종전에는 이 함수가 콜백 안에서 navigator.cancelTask() 를 직접
+        불렀다. humble 의 nav2_simple_commander 는 이렇게 되어 있다.
+
+            def cancelTask(self):
+                if self.result_future:
+                    future = self.goal_handle.cancel_goal_async()
+                    rclpy.spin_until_future_complete(self, future)   # 시한 없음
+
+        같은 파일의 isTaskComplete() 에는 timeout_sec=0.10 이 있는데 여기에만 없다.
+        Nav2 가 취소에 응답하지 않으면 이 호출이 영영 돌아오지 않고, 그러면 세 가지가
+        한꺼번에 일어났다.
+
+          1. 아래 _publish_goal_event 에 도달하지 못한다 -> 앱이 '일시정지'를 모른다.
+             앱의 '다시 출발' 버튼이 뜰 때도 있고 안 뜰 때도 있던 이유가 이것이다.
+          2. pause/resume/cancel/목적지요청이 모두 같은 _main_group(MutuallyExclusive)
+             이라 그 뒤로 줄을 선다 -> 무엇을 눌러도 반응이 없다.
+          3. supervisor_bringup 의 rosbridge 가 call_services_in_new_thread=false,
+             default_call_service_timeout=0.0 이라 그 호출 하나가 rosbridge 전체를
+             막는다 -> 앱 재연결도 비상정지도 안 통하고 rosbridge 재시작만이 답이었다.
+
+        그래서 순서를 뒤집고 블로킹 호출을 콜백 밖으로 내보낸다. 이벤트를 먼저 내므로
+        앱 표시는 Nav2 응답 여부와 무관해진다. 모터 정지 권위는 원래 이 호출이 아니라
+        Safety 래치 체인에 있으므로 취소가 늦어져도 안전 경로는 그대로다.
+        """
+        # 1) 알림이 먼저다. Nav2 응답을 기다리지 않는다.
         if destination is not None:
             reason = (
                 "일시정지 요청으로 목적지를 보관하고 멈췄습니다."
@@ -587,7 +627,32 @@ class MissionManagerNode(Node):
                 else "비상정지 또는 Mission 요청으로 목적지가 취소되었습니다."
             )
             self._publish_goal_event(event, destination, reason)
-        self.get_logger().warn("Nav2 goal 취소 (보조 경로 — 모터 정지 권위는 래치 체인)")
+
+        # 2) 보낼 goal 이 없으면 여기서 끝난다.
+        if not self._nav_active:
+            return
+        self._nav_active = False
+
+        # 3) 시한 없는 취소 호출은 별도 스레드로 보낸다. _nav_lock 을 그 스레드가
+        #    잡으므로 _start_nav 는 아래에서 시한부로 기다린다.
+        threading.Thread(
+            target=self._cancel_nav_blocking,
+            name="vica_nav_cancel",
+            daemon=True,
+        ).start()
+        self.get_logger().warn(
+            "Nav2 goal 취소 요청 (보조 경로 — 모터 정지 권위는 래치 체인)"
+        )
+
+    def _cancel_nav_blocking(self) -> None:
+        """콜백 밖에서 navigator.cancelTask() 를 부른다. 예외를 삼키지 않고 남긴다."""
+        with self._nav_lock:
+            try:
+                self.navigator.cancelTask()
+            except Exception as exc:  # noqa: BLE001 - 스레드가 조용히 죽지 않게 한다
+                self.get_logger().error(f"Nav2 goal 취소 호출 실패: {exc}")
+            else:
+                self.get_logger().info("Nav2 goal 취소 완료")
 
     def _poll_nav_status(self) -> NavStatus:
         if not self._nav_active:
