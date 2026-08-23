@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_perception</name>
+  <version>0.1.0</version>
+  <description>
+    VICA 사람 인지 계층. YOLO 세그멘테이션 탐지 결과의 시계열을 보고
+    stable(오탐 거르기) 과 approachable(지나가는 사람 거르기) 을 판정한다.
+    판정 결과는 요청일 뿐이며 goal 권한은 Mission Manager 가 독점한다.
+  </description>
+  <maintainer email="mjw41177@gmail.com">minsmart</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Phase A 는 순수 판정 로직과 pytest 뿐이다. rclpy 에 의존하지 않으며,
+       ROS 배선(person_detector_node)과 vica_interfaces 의존은 Phase A5 에서
+       추가한다. devlog/2026-08-23-사람접근-구현설계.md §9 참조. -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
