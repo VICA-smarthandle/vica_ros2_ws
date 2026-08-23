@@ -1,0 +1,32 @@
+# person_detector_node 가 Mission Manager 에 보내는 사람 접근 요청.
+#   /vica/mission/request_approach
+#
+# 탐지 결과는 요청이지 goal 이 아니다. 이 서비스가 goal 권한의 경계이며, 좌표를
+# 계산해 Nav2 로 보내는 것은 Mission Manager 뿐이다(설계 3절).
+# 요청은 approachable 이 true 인 탐지에 대해서만 보낸다. Mission Manager 는 탐지
+# 이력을 쌓지 않으므로 시계열 판정을 다시 하지 않는다(설계 6.1절).
+#
+# 접근 취소는 이 서비스가 아니라 기존 MissionCommand.srv 를 재사용한다.
+#   /vica/mission/cancel_approach
+#
+# 허용 여부는 Mission Manager 가 판정한다. 요청자는 결과만 받는다.
+
+# 요청 식별자. MissionCommand·RequestDestination 과 같은 규약으로 canonical UUID
+# 여야 하며, Mission Manager 가 형식을 검증하고 어긋나면 거절한다
+# (mission_manager_node.py 의 UUID 검사). 응답을 요청과 짝지어 로그를 남기는 데 쓴다.
+string request_id
+
+# 접근 대상. target.pose 는 map 변환이 끝난 값이다.
+PersonDetection target
+
+# target.track_id 와 같은 값이다. 재접근 억제(60초) 판정과 로그가 이 값만 보므로
+# 요청 상위에도 둔다. 두 값이 다르면 Mission Manager 는 요청을 거절한다.
+uint32 track_id
+---
+# 승인 여부. 상태 기계가 IDLE 이 아니거나(APPROACHING·AWAITING_USER·RETURNING),
+# E-stop 래치가 걸려 있거나, 같은 track_id 가 60초 억제 중이면 false 다(설계 4절).
+bool accepted
+
+# 판정 사유. 거절이면 왜 거절했는지를 담고, 승인이면 빈 문자열이거나 부가 설명이다.
+# 이름은 MissionCommand·RequestDestination 의 응답과 같은 message 로 맞춘다.
+string message
