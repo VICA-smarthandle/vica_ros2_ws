@@ -3,6 +3,11 @@ build/
 install/
 log/
 
+# 매핑 미리보기(map_preview_node)와 현재 지도 표식. 둘 다 실행 중에 생긴다.
+# maps/ 자체는 추적하므로 이것만 따로 제외한다.
+maps/_live/
+maps/CURRENT_MAP
+
 # Runtime generated TF trees
 tf_trees/
 frames.pdf

@@ -27,6 +27,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'map_preview_node ='
+            ' vica_cartographer.map_preview_node:main',
+            'mapping_supervisor_node ='
+            ' vica_cartographer.mapping_supervisor_node:main',
         ],
     },
 )
