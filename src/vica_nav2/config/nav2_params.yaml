@@ -740,7 +740,32 @@ local_costmap:
       # nvblox_node가 odom frame으로 발행하므로 nav2_costmap_global_frame(odom)과
       # 정합해 TF 없이 병합된다. Host에 nvblox_nav2 plugin이 없으면 이 layer 때문에
       # local costmap configure가 실패한다(test_nvblox_dependency_contract가 감시).
-      plugins: ["voxel_layer", "nvblox_layer", "inflation_layer"]
+      # [2026-08-24] nvblox_layer 를 목록에서 뺀다 (블록은 아래에 남겨 둔다 —
+      # 되돌리려면 이 줄에 "nvblox_layer" 만 다시 넣으면 된다).
+      #
+      # 이유: **"카메라를 켜면 주변이 까맣게 차서 못 간다"는 증상을 끊는다.**
+      # 원인은 카메라 자체가 아니라 카메라가 만든 지도를 costmap 에 넣는 것이다.
+      # 이 줄에서 빼면 카메라는 그대로 돌면서(YOLO 세그멘테이션이 쓴다) 주행만
+      # 라이다로 한다.
+      #
+      # 그동안 확인된 것 — 사람이 코앞(1.2 m 안)에 오면 세그멘테이션 검출률이
+      # 10~21 % 로 떨어져(그 밖은 68~83 %) static 으로 새고, static decay 는
+      # 낮은 의자다리 때문에 못 줄인다(15.2 s·9.6 s 에서 충돌 재현). 카메라를
+      # 기울여 그 고리를 끊으려 했으나 27도에서 로봇 자기 앞부분이 화면에 걸려
+      # 되돌렸다. 즉 **하드웨어 위치·각도가 확정되기 전에는 nvblox 를 costmap 에
+      # 넣어도 값이 의미를 갖지 못한다**(사용자 판단).
+      #
+      # 다시 넣을 때 — 카메라 높이·rpy 를 줄자와 IMU 로 확정하고, URDF 를 맞춘 뒤
+      # **nvblox 를 재시작**한다(TSDF 는 누적이라 TF 만 고치면 옛 지도가 남는다).
+      # 그 상태에서 기록을 켜고 주행해 잔상을 재측정한 뒤 decay 를 조정한다.
+      #
+      # [2026-08-24 재투입 결과: 실패. 다시 뺀다]
+      # decay 6.5(소멸 11.7 s)를 **실제로 적용한 상태로** 9분 21초 주행했다.
+      # costmap 은 절반으로 줄었으나(INSCRIBED 4561 -> 2438 칸) **사용자 체감은
+      # "여전히 주변 잔상 때문에 주행이 매끄럽지 못하다"였다.** decay 를 계약
+      # 한계(11.4 s)까지 올려도 해결되지 않는다는 뜻이다.
+      # 하드웨어 카메라 고정 위치가 확정되면 다시 켠다(사용자 결정).
+      plugins: ["voxel_layer", "inflation_layer"]
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
