@@ -75,8 +75,30 @@ TRAJECTORY_BUILDER_2D.use_imu_data = false
 --
 --   근거와 실측: devlog/2026-08-15-복구예산-collision-monitor-자동재시도.md §9
 TRAJECTORY_BUILDER_2D.min_range = 0.25
-TRAJECTORY_BUILDER_2D.max_range = 8.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 8.5
+
+-- [CM-1] max_range 8.0 -> 11.0, missing_data_ray_length 8.5 -> 11.5 (2026-08-21)
+--
+-- 라이다는 12 m 를 보는데 8 m 에서 자르고 있었다. RPLIDAR 드라이버 신고값이
+-- 0.15~12.00 m 이고 실내 실측 최대 반사가 9.04 m 였다.
+--
+-- 왜 중요한가 — 복도에서 앞뒤 위치를 알려 주는 것은 **멀리 있는 것들**이다.
+-- 복도 끝, 문, 교차로. 8 m 에서 자르면 그걸 버리고 양옆 벽만 남는데, 양옆 벽은
+-- 앞뒤에 대해 아무 말도 하지 않는다. 2026-08-12 에 44 m 복도에서 최대 7.01 m 가
+-- 어긋난 것이 바로 그 앞뒤 미끄러짐이다(회전은 0.031 로 멀쩡했다).
+--
+-- 12.0 이 아니라 11.0 인 이유: 12.00 은 드라이버가 신고한 **상한**이고 실제로
+-- 반사가 돌아오는 최대는 9 m 근처다. 12.0 으로 두면 아무것도 안 맞은 빔이 유효한
+-- 것처럼 섞인다.
+--
+-- 대가: 계산량이 는다. 원거리 점은 각해상도가 성겨(0.499도 -> 11 m 에서 9.6 cm
+-- 간격) 잡음이 섞인다.
+--
+-- 판정: cartographer_node 로그의 `differs by translation` 최대값과 1 m 초과 건수.
+-- 합격선은 최대 1 m 미만 · 1 m 초과 0건이다.
+-- 되돌릴 때는 두 값을 함께 8.0 / 8.5 로 내린다.
+-- 근거: docs/cartographer_corridor_mapping.md CM-1
+TRAJECTORY_BUILDER_2D.max_range = 11.0
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 11.5
 
 -- Keep online scan matching enabled to compensate small wheel odom errors.
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
