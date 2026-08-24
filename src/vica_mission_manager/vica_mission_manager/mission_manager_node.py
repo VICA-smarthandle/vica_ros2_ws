@@ -31,7 +31,7 @@ from nav2_msgs.msg import SpeedLimit
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
@@ -268,11 +268,20 @@ class MissionManagerNode(Node):
         # 이 노드에 tf2 리스너를 새로 들이는 것보다 싸고, goal 의 후퇴 방향을
         # 정하는 용도라 AMCL 갱신 주기(이동 시에만) 수준의 신선도면 충분하다.
         self._robot_pose = None
+        # AMCL 은 /amcl_pose 를 transient_local(보관) + 이동 시에만 발행한다.
+        # 일반(volatile) 구독은 이 노드가 나중에 켜지면 보관본을 못 받아,
+        # 로봇이 움직이기 전까지 접근 요청이 전부 "위치 없음"으로 거절된다
+        # (2026-08-24 B5 실기에서 Mission 재시작 직후 실제로 났다).
+        amcl_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.create_subscription(
             PoseWithCovarianceStamped,
             "/amcl_pose",
             self._on_amcl_pose,
-            10,
+            amcl_qos,
             callback_group=self._main_group,
         )
 

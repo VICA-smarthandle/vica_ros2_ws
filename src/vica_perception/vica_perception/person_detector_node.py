@@ -80,7 +80,11 @@ class PersonDetectorNode(Node):
         self._approach_cli = self.create_client(
             RequestApproach, "/vica/mission/request_approach")
         self._throttle = ApproachRequestThrottle()
-        self._pending_response = False
+        # 미응답 재호출 방지 플래그 + 그 시각. 서비스가 죽으면 call_async 의
+        # future 가 영영 안 끝나 플래그가 True 로 굳는다(2026-08-24 실기 -
+        # Mission 재시작 사이에 보낸 호출이 그랬다). 2초 지나면 버린 것으로
+        # 보고 다시 보낸다.
+        self._pending_since_ns: int | None = None
         self.create_subscription(Image, "/camera/camera/color/image_raw",
                                  self._on_color, qos_profile_sensor_data)
         self.create_subscription(Image, "/camera/camera/depth/image_rect_raw",
@@ -169,8 +173,12 @@ class PersonDetectorNode(Node):
         동기 대기하면 5 Hz 콜백이 서비스 왕복에 볼모로 잡히므로 비동기로 보내고,
         직전 응답이 안 왔으면 이번 건은 건너뛴다 — 요청은 다음 프레임에 또 온다.
         """
-        if self._pending_response:
-            return
+        now_ns = time.monotonic_ns()
+        if self._pending_since_ns is not None:
+            if now_ns - self._pending_since_ns < 2_000_000_000:
+                return
+            self.get_logger().warning("접근 요청 응답 2초 무소식 — 버린 것으로 본다")
+            self._pending_since_ns = None
         if not self._approach_cli.service_is_ready():
             self.get_logger().warning(
                 "request_approach 서비스가 없다 — Mission Manager 미기동?",
@@ -181,12 +189,12 @@ class PersonDetectorNode(Node):
         req.request_id = str(uuid.uuid4())
         req.track_id = detection.track_id
         req.target = detection
-        self._pending_response = True
+        self._pending_since_ns = now_ns
         future = self._approach_cli.call_async(req)
         track = detection.track_id
 
         def _done(fut) -> None:
-            self._pending_response = False
+            self._pending_since_ns = None
             try:
                 res = fut.result()
             except Exception as e:                     # noqa: BLE001 — 로그 후 계속
