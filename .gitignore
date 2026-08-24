@@ -8,6 +8,14 @@ log/
 maps/_live/
 maps/CURRENT_MAP
 
+# Cartographer 원본 상태. pgm·png·yaml 과 달리 수십 MB 급 이진 파일이라 git 에
+# 넣으면 저장소가 급격히 무거워진다. 주행에는 필요 없고(map_server 는 pgm 을 읽는다)
+# 나중에 pure localization 을 검토할 때만 쓴다.
+#
+# **젯슨에만 남는다는 뜻이다.** 재설치하면 사라지므로, 쓸 일이 생기면 bag 과 함께
+# 따로 백업해 둔다.
+maps/*.pbstream
+
 # Runtime generated TF trees
 tf_trees/
 frames.pdf
