@@ -286,6 +286,12 @@ class MissionManagerNode(Node):
         if msg.intent in ("cancel", "pause", "resume"):
             self._on_voice_mission_command(msg)
             return
+        # 접근 질문의 짧은 답(계약: VicaIntent.msg 의 affirm/deny 절).
+        # 어느 질문의 답인지는 여기의 상태가 정한다 — AWAITING_USER 가 아니면
+        # on_approach_answer 가 빈 목록을 돌려주고, 그때는 무시가 정답이다.
+        if msg.intent in ("affirm", "deny"):
+            self._on_voice_answer(msg.intent == "affirm")
+            return
 
         intent = IntentData(
             intent=msg.intent,
@@ -302,6 +308,20 @@ class MissionManagerNode(Node):
             f"confirm={msg.need_confirm} -> state={self.logic.state.value}"
         )
         self._run_actions(actions)
+
+    def _on_voice_answer(self, affirmative: bool) -> None:
+        before = self.logic.state
+        actions = self.logic.on_approach_answer(affirmative, self._now())
+        if not actions:
+            self.get_logger().info(
+                f"affirm/deny 무시: state={before.value} (접근 질문 대기 중이 아님)"
+            )
+            return
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"접근 응답 {'긍정' if affirmative else '부정'}: "
+            f"{before.value} -> {self.logic.state.value}"
+        )
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
