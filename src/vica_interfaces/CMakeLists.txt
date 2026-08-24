@@ -20,6 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotHealth.msg"
   "srv/RequestDestination.srv"
   "srv/MissionCommand.srv"
+  "srv/DeleteMap.srv"
   "srv/SaveMap.srv"
   DEPENDENCIES std_msgs builtin_interfaces
 )

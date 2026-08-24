@@ -1,0 +1,16 @@
+# 저장된 지도를 지운다. VICA_Supervisor 의 map_list_node 가 처리한다.
+#
+# 지우는 것은 되돌릴 수 없다. "지도 한 장은 사람이 로봇을 끌고 다닌 시간"이므로
+# (scripts/vica_map_save.sh 주석) 아래 안전장치를 노드가 강제한다.
+#
+#   - map_id 는 ^[A-Za-z0-9_-]+$ 만 허용한다. 경로 문자를 막아 maps/ 밖을 못 건드리게 한다
+#   - maps/CURRENT_MAP 이 가리키는 지도는 거부한다. 지금 쓰는 지도다
+#   - 목적지 카탈로그는 delete_destinations 가 true 일 때만 함께 지운다.
+#     지도를 다시 그려 같은 이름으로 저장할 생각이면 카탈로그는 남겨 두는 편이 낫다
+string map_id
+bool delete_destinations
+---
+bool accepted
+string message
+# 실제로 지운 경로들. 사람이 무엇이 사라졌는지 확인할 수 있어야 한다.
+string[] removed
