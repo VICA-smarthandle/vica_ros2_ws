@@ -1,0 +1,218 @@
+"""person_detector_node — YOLO(seg) 로 시각장애인을 찾아 `/vica/person_detection` 발행.
+
+Phase A5 골격. 계약은 `vica_interfaces/msg/PersonDetection.msg` 가 정본이다:
+
+    - frame_id "map". **이 노드가 TF 변환을 끝내고** 발행한다. 소비자는 변환하지 않는다.
+    - 5 Hz. CPU 병목이라 그 이상 올리지 않는다(설계 §6.2).
+    - distance_m 은 몸통 depth 중앙값 기반. 못 재면 NaN (0.0 은 오독되므로 금지).
+    - stable / approachable 판정은 detection_gate(A3) 가 한다. 시계열 이력을 가진
+      쪽이 판정한다는 계약이다.
+    - track_id 는 Ultralytics 내장 추적기의 것이다. id 가 없으면 TRACK_ID_NONE=0
+      이고 이때 approachable 은 항상 false 다.
+
+이 노드는 Isaac ROS 컨테이너 안에서 돈다(추론 위치 결정, 핸드오프 §1.1).
+엔진(.engine)은 만든 기기에만 묶이므로 경로 기본값은 컨테이너 기준이다.
+
+알려진 한계 [미검증]:
+    - depth 가 color 에 정렬되지 않았다(run_d455.sh align_depth:=false). color bbox
+      를 depth 이미지에 그대로 쓰므로 시차(수 cm)가 남는다. 문제가 되면
+      align_depth 를 켜고 이 주석을 갱신할 것.
+    - 검출률 실측(2026-08-24, 정지 2.1 m): 프레임 45~48 %, conf 는 잡히면 0.77.
+      놓침의 절반은 conf 0 이라 문턱 조정으로 안 오른다. stable 창 통과 ~50 % —
+      방아쇠는 몇 초 안에 당겨진다. 근본 개선은 로봇 시점 재학습이다.
+"""
+from __future__ import annotations
+
+import math
+import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PointStamped
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CameraInfo, Image
+from tf2_geometry_msgs import do_transform_point
+from tf2_ros import Buffer, TransformException, TransformListener
+
+from vica_interfaces.msg import PersonDetection
+from vica_perception.detection_gate import DetectionGate, DetectionSample, Point2D
+from vica_perception.person_geometry import (
+    bbox_center,
+    body_depth_median_m,
+    pixel_to_camera,
+)
+
+DEFAULT_ENGINE = "/workspaces/isaac_ros-dev/models/v6-blur-640/weights/best.engine"
+
+
+class PersonDetectorNode(Node):
+    """배선만 갖는다 — 판정은 detection_gate, 기하는 person_geometry."""
+
+    def __init__(self, model) -> None:
+        super().__init__("person_detector_node")
+        self.declare_parameter("engine_path", DEFAULT_ENGINE)
+        self.declare_parameter("conf_threshold", 0.25)
+        self.declare_parameter("publish_rate_hz", 5.0)
+        self.declare_parameter("target_frame", "map")
+
+        self._model = model
+        self._conf = float(self.get_parameter("conf_threshold").value)
+        self._period_s = 1.0 / float(self.get_parameter("publish_rate_hz").value)
+        self._target_frame = str(self.get_parameter("target_frame").value)
+
+        self._gate = DetectionGate()
+        self._tf = Buffer()
+        self._tf_listener = TransformListener(self._tf, self)
+
+        self._depth: Image | None = None
+        self._depth_info: CameraInfo | None = None
+        # 5 Hz 조절용. 벽시계가 아니라 단조 시계다 — 시간이 뒤로 가면 안 된다.
+        self._last_infer_mono = 0.0
+
+        self._pub = self.create_publisher(PersonDetection, "/vica/person_detection", 10)
+        self.create_subscription(Image, "/camera/camera/color/image_raw",
+                                 self._on_color, qos_profile_sensor_data)
+        self.create_subscription(Image, "/camera/camera/depth/image_rect_raw",
+                                 self._on_depth, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, "/camera/camera/depth/camera_info",
+                                 self._on_depth_info, qos_profile_sensor_data)
+        self.get_logger().info(
+            "person_detector_node 시작 (conf %.2f, %.1f Hz, frame %s)"
+            % (self._conf, 1.0 / self._period_s, self._target_frame))
+
+    # ── 입력 보관 ──────────────────────────────────────────────────────────
+    def _on_depth(self, msg: Image) -> None:
+        self._depth = msg
+
+    def _on_depth_info(self, msg: CameraInfo) -> None:
+        self._depth_info = msg
+
+    # ── 본 처리 ────────────────────────────────────────────────────────────
+    def _on_color(self, msg: Image) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self._last_infer_mono < self._period_s:
+            return                       # 5 Hz 로 솎는다
+        self._last_infer_mono = now_mono
+
+        img = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+        img = img.reshape(msg.height, msg.width, -1)
+        if msg.encoding == "rgb8":
+            img = img[:, :, ::-1]        # 모델은 BGR 를 기대한다
+
+        result = self._model.track(
+            img, device=0, conf=self._conf, persist=True, verbose=False)[0]
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
+            return                       # 발행 없음 = 사람 없음. 소비자는 수신
+            #                              시각(STEADY)으로 stale 을 판정한다.
+
+        depth_m, depth_info = self._depth_frame()
+        steady_ns = time.monotonic_ns()
+
+        ids = boxes.id
+        for i in range(len(boxes)):
+            bbox = tuple(float(v) for v in boxes.xyxy[i].tolist())
+            conf = float(boxes.conf[i])
+            track_id = int(ids[i]) if ids is not None else PersonDetection.TRACK_ID_NONE
+
+            dist_m, map_pt = self._locate(bbox, depth_m, depth_info, msg)
+
+            out = PersonDetection()
+            out.header.stamp = msg.header.stamp      # 이미지 취득 시각(표시 전용)
+            out.header.frame_id = self._target_frame
+            out.confidence = conf
+            out.track_id = track_id
+            out.distance_m = dist_m
+            out.pose.orientation.w = 1.0             # 방향은 판정하지 않는다(계약)
+
+            if map_pt is not None:
+                out.pose.position.x = map_pt[0]
+                out.pose.position.y = map_pt[1]
+                out.pose.position.z = 0.0            # 사람은 바닥에 서 있다
+
+            # 시계열 판정. 위치·id 가 온전할 때만 이력에 넣는다 — 결손 표본으로
+            # stable 을 세우면 가짜 방아쇠가 된다.
+            out.stable = False
+            out.approachable = False
+            if (track_id != PersonDetection.TRACK_ID_NONE
+                    and map_pt is not None and math.isfinite(dist_m)):
+                verdict = self._gate.observe(DetectionSample(
+                    stamp_ns=steady_ns,
+                    track_id=track_id,
+                    confidence=conf,
+                    position=Point2D(map_pt[0], map_pt[1]),
+                    distance_m=dist_m,
+                ))
+                out.stable = verdict.stable
+                out.approachable = verdict.approachable
+
+            self._pub.publish(out)
+
+    # ── 보조 ──────────────────────────────────────────────────────────────
+    def _depth_frame(self):
+        """보관된 depth 를 미터 배열로. 없으면 (None, None)."""
+        if self._depth is None or self._depth_info is None:
+            return None, None
+        d = self._depth
+        if d.encoding not in ("16UC1", "mono16"):
+            return None, None
+        arr = np.frombuffer(bytes(d.data), dtype=np.uint16)
+        arr = arr.reshape(d.height, d.width).astype(np.float32) / 1000.0
+        return arr, self._depth_info
+
+    def _locate(self, bbox, depth_m, depth_info, color_msg):
+        """bbox → (distance_m, map 좌표 (x, y)) — 못 재면 (NaN, None)."""
+        if depth_m is None:
+            return math.nan, None
+        # color bbox 를 depth 픽셀로. 해상도가 다르면 비율로 맞춘다.
+        sx = depth_m.shape[1] / color_msg.width
+        sy = depth_m.shape[0] / color_msg.height
+        dbox = (bbox[0] * sx, bbox[1] * sy, bbox[2] * sx, bbox[3] * sy)
+        z = body_depth_median_m(depth_m, dbox)
+        k = depth_info.k
+        u, v = bbox_center(dbox)
+        cam = pixel_to_camera(u, v, z, k[0], k[4], k[2], k[5])
+        if cam is None:
+            return math.nan, None
+
+        pt = PointStamped()
+        pt.header.frame_id = self._depth.header.frame_id
+        pt.header.stamp = color_msg.header.stamp
+        pt.point.x, pt.point.y, pt.point.z = cam
+        try:
+            # 최신 TF 사용(Time()) — 이미지 시각의 과거 TF 를 기다리다 5 Hz 를
+            # 놓치는 것보다 수십 ms 의 자세 오차가 싸다.
+            to_map = self._tf.transform(pt, self._target_frame,
+                                        timeout=rclpy.duration.Duration(seconds=0.1))
+            to_base = self._tf.transform(pt, "base_link",
+                                         timeout=rclpy.duration.Duration(seconds=0.1))
+        except TransformException as e:
+            self.get_logger().warning("TF 변환 실패: %s" % e, throttle_duration_sec=5.0)
+            return math.nan, None
+        dist = math.hypot(to_base.point.x, to_base.point.y)
+        return dist, (to_map.point.x, to_map.point.y)
+
+
+def main(args=None) -> None:
+    # ultralytics 는 무겁다 — rclpy 초기화 전에, 실패는 일찍 드러낸다.
+    from ultralytics import YOLO
+    rclpy.init(args=args)
+    # 파라미터로 engine 경로를 받으려면 노드가 먼저 필요해 닭-달걀이 된다.
+    # 골격에서는 기본 경로로 로드하고, 바꾸려면 환경변수로 준다.
+    import os
+    engine = os.environ.get("VICA_YOLO_ENGINE", DEFAULT_ENGINE)
+    model = YOLO(engine)
+    model.predict(np.zeros((480, 640, 3), dtype=np.uint8), device=0, verbose=False)
+    node = PersonDetectorNode(model)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -18,7 +18,8 @@ setup(
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
-        # person_detector_node 는 Phase A5 에서 붙인다.
-        "console_scripts": [],
+        "console_scripts": [
+            "person_detector_node = vica_perception.person_detector_node:main",
+        ],
     },
 )
