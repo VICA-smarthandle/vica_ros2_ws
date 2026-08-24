@@ -36,6 +36,8 @@ from tf2_geometry_msgs import do_transform_point
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from vica_interfaces.msg import PersonDetection
+from vica_interfaces.srv import RequestApproach
+from vica_perception.approach_request_policy import ApproachRequestThrottle
 from vica_perception.detection_gate import DetectionGate, DetectionSample, Point2D
 from vica_perception.person_geometry import (
     bbox_center,
@@ -71,6 +73,14 @@ class PersonDetectorNode(Node):
         self._last_infer_mono = 0.0
 
         self._pub = self.create_publisher(PersonDetection, "/vica/person_detection", 10)
+        # ── 접근 요청 (Phase B3) ─────────────────────────────────────────
+        # approachable 인 탐지만 Mission Manager 에 요청한다(srv 계약).
+        # 접근 중의 재요청은 goal 갱신으로 쓰이므로 끊지 않되, 호출 자체는
+        # track 당 초 1건으로 줄인다(approach_request_policy).
+        self._approach_cli = self.create_client(
+            RequestApproach, "/vica/mission/request_approach")
+        self._throttle = ApproachRequestThrottle()
+        self._pending_response = False
         self.create_subscription(Image, "/camera/camera/color/image_raw",
                                  self._on_color, qos_profile_sensor_data)
         self.create_subscription(Image, "/camera/camera/depth/image_rect_raw",
@@ -148,6 +158,48 @@ class PersonDetectorNode(Node):
                 out.approachable = verdict.approachable
 
             self._pub.publish(out)
+
+            if out.approachable and self._throttle.should_send(track_id, steady_ns):
+                self._request_approach(out)
+
+    def _request_approach(self, detection: PersonDetection) -> None:
+        """Mission Manager 에 접근을 요청한다. 응답은 로그로만 소비한다.
+
+        승인·거절 판단은 전적으로 Mission Manager 몫이다(goal 권한의 경계).
+        동기 대기하면 5 Hz 콜백이 서비스 왕복에 볼모로 잡히므로 비동기로 보내고,
+        직전 응답이 안 왔으면 이번 건은 건너뛴다 — 요청은 다음 프레임에 또 온다.
+        """
+        if self._pending_response:
+            return
+        if not self._approach_cli.service_is_ready():
+            self.get_logger().warning(
+                "request_approach 서비스가 없다 — Mission Manager 미기동?",
+                throttle_duration_sec=10.0)
+            return
+        import uuid
+        req = RequestApproach.Request()
+        req.request_id = str(uuid.uuid4())
+        req.track_id = detection.track_id
+        req.target = detection
+        self._pending_response = True
+        future = self._approach_cli.call_async(req)
+        track = detection.track_id
+
+        def _done(fut) -> None:
+            self._pending_response = False
+            try:
+                res = fut.result()
+            except Exception as e:                     # noqa: BLE001 — 로그 후 계속
+                self.get_logger().warning("접근 요청 실패: %s" % e)
+                return
+            if res.accepted:
+                self.get_logger().info("접근 승인 (track %d): %s" % (track, res.message))
+            else:
+                self.get_logger().info(
+                    "접근 거절 (track %d): %s" % (track, res.message),
+                    throttle_duration_sec=5.0)
+
+        future.add_done_callback(_done)
 
     # ── 보조 ──────────────────────────────────────────────────────────────
     def _depth_frame(self):
