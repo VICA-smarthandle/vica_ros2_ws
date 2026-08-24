@@ -8,6 +8,7 @@
 from vica_cartographer.mapping_session import (
     blocking_reason,
     duplicated_names,
+    is_motor_up,
     is_stack_up,
     MappingState,
     missing_prerequisites,
@@ -121,3 +122,17 @@ def test_too_long_name_is_rejected():
     name, error = normalise_map_name('a' * 60, '0821')
     assert name is None
     assert '깁니다' in error
+
+
+def test_motor_detection_ignores_namespace():
+    """Motor 가 이미 떠 있으면 launch 에 start_motor:=false 를 넘겨야 한다."""
+    assert is_motor_up(['/mdrobot_can_keyboard_knob_node']) is True
+    assert is_motor_up(['/robot1/mdrobot_can_keyboard_knob_node']) is True
+    assert is_motor_up(['/cartographer_node']) is False
+
+
+def test_motor_alone_does_not_block_start():
+    """Motor 는 두 스택이 공유한다. 떠 있다고 매핑을 막을 이유가 없다."""
+    assert blocking_reason(
+        MappingState.IDLE, ['/mdrobot_can_keyboard_knob_node']
+    ) is None

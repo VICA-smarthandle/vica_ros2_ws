@@ -39,6 +39,13 @@ MAPPING_NODES = ('cartographer_node', 'occupancy_grid_node')
 # 어느 쪽 스택인지는 가르지 못하므로 '떴는지' 판정에는 쓰지 않는다.
 SHARED_NODES = ('ekf_filter_node', 'encoder_feedback')
 
+# motor node. 매핑 launch 가 띄울 수도 있고 사람이 터미널에서 띄울 수도 있어서,
+# 시작 전에 이미 떠 있는지 보고 중복을 피한다.
+#
+# 터미네이터 vica_map 레이아웃에서 motor 칸은 HOLD(사람이 엔터를 눌러야 실행)라
+# 자동으로 겹치지는 않는다. 하지만 사람이 먼저 눌렀을 수 있다.
+MOTOR_NODES = ('mdrobot_can_keyboard_knob_node',)
+
 
 def _bare(name: str) -> str:
     """Strip the namespace so '/ns/amcl' and 'amcl' compare equal."""
@@ -100,6 +107,15 @@ def missing_prerequisites(node_names, required):
     """
     bare = {_bare(name) for name in node_names}
     return [name for name in required if _bare(name) not in bare]
+
+
+def is_motor_up(node_names) -> bool:
+    """Tell whether the motor node is already running.
+
+    떠 있으면 매핑 launch 에 start_motor:=false 를 넘겨 두 벌이 되는 것을 막는다.
+    """
+    bare = {_bare(name) for name in node_names}
+    return any(name in bare for name in MOTOR_NODES)
 
 
 def is_stack_up(node_names) -> bool:

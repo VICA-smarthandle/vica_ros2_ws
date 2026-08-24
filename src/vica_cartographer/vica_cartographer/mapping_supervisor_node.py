@@ -8,11 +8,15 @@
 **무엇을 띄우고 무엇을 안 띄우는가.** `scripts/vica_terminator_layout.py` 의 vica_map
 프로파일은 칸이 13개고 순서가 있다. 그중 앱이 대신할 수 있는 것만 launch 로 묶었다.
 
-    앱이 띄운다   safety -> motor -> slam        (vica_mapping_bringup.launch.py)
-    사람이 한다   전원·CAN, d455(Docker), imu 자이로 보정 20초 정지, teleop 조작
+    앱이 띄운다   motor -> slam -> preview      (vica_mapping_bringup.launch.py)
+    사람이 한다   전원·CAN, safety, d455(Docker), imu 자이로 보정 20초 정지
 
 motor 를 뺄 수 없는 이유는 프로파일 설명에 있다 — "엔코더 피드백을 요청하는 쪽이
-motor node 라서, 없으면 /wheel/odom 이 나오지 않는다".
+motor node 라서, 없으면 /wheel/odom 이 나오지 않는다". 다만 그 칸은 HOLD 라 사람이
+먼저 눌렀을 수 있어서, 시작할 때 그래프를 보고 start_motor 인자를 정한다.
+
+safety 는 아예 띄우지 않는다. 터미네이터의 safety 칸이 AUTO 라 창을 띄우는 순간
+자동 실행되므로, 여기서 또 띄우면 항상 두 벌이 된다.
 
 **저장은 콜백에서 기다리지 않는다.** vica_map_save.sh 는 map_saver 제한시간이
 기본 120초라 그만큼 걸릴 수 있다. 콜백에서 기다리면 같은 콜백 그룹의 다른 요청이
@@ -46,6 +50,7 @@ from vica_interfaces.srv import SaveMap
 from .mapping_session import (
     blocking_reason,
     duplicated_names,
+    is_motor_up,
     is_stack_up,
     MappingState,
     missing_prerequisites,
@@ -216,6 +221,13 @@ class MappingSupervisorNode(Node):
                 return response
 
             command = list(self.get_parameter('launch_command').value)
+            # motor 가 이미 떠 있으면 launch 가 또 띄우지 않게 한다. 터미네이터의
+            # motor 칸은 HOLD 라 사람이 먼저 눌렀을 수 있다. (safety 는 그 칸이
+            # AUTO 라 항상 떠 있으므로 launch 에서 아예 뺐다.)
+            motor_already_up = is_motor_up(self._node_names())
+            command.append(
+                f'start_motor:={"false" if motor_already_up else "true"}'
+            )
             try:
                 # start_new_session=True 로 자식에게 새 프로세스 그룹을 준다.
                 # 그래야 launch 가 띄운 손자 노드들까지 한 번에 정리할 수 있다.

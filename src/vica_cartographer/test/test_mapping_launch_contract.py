@@ -32,17 +32,25 @@ def test_nav2_is_never_included():
         assert forbidden not in text, f'{forbidden} 이 들어 있습니다.'
 
 
-def test_safety_comes_before_motor():
-    """docs/vica_robot_bringup_manual.md 4절: motor 보다 먼저 띄운다."""
+def test_safety_is_never_included():
+    """Safety 칸은 터미네이터에서 AUTO 라 창을 띄우는 순간 이미 떠 있다.
+
+    여기서 또 띄우면 **항상** 두 벌이 된다. safety 가 motor 보다 먼저여야 한다는
+    순서(bringup manual 4절)는 그대로 유효하고, 그 순서를 지키는 주체가 이 파일이
+    아니라 터미네이터 레이아웃이 된 것뿐이다.
+    """
+    assert 'safety_bringup.launch.py' not in source()
+
+
+def test_motor_is_included_but_switchable():
+    """엔코더 피드백을 요청하는 쪽이 motor node 라 없으면 /wheel/odom 이 안 나온다.
+
+    다만 motor 칸은 HOLD 라 사람이 먼저 눌렀을 수 있어 끌 수 있어야 한다.
+    """
     text = source()
-    safety = text.index('safety_bringup.launch.py')
-    motor = text.index('motor_bringup.launch.py')
-    assert safety < motor, 'safety 를 motor 보다 먼저 두어야 합니다.'
-
-
-def test_motor_is_included():
-    """엔코더 피드백을 요청하는 쪽이 motor node 라 없으면 /wheel/odom 이 안 나온다."""
-    assert 'motor_bringup.launch.py' in source()
+    assert 'motor_bringup.launch.py' in text
+    assert "'start_motor'" in text, 'start_motor 인자로 끌 수 있어야 합니다.'
+    assert 'IfCondition(start_motor)' in text
 
 
 def test_slam_and_preview_are_included():
