@@ -10,6 +10,8 @@ LLM(VicaIntent)은 어디까지나 제안이다.
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Sequence, Union
@@ -40,6 +42,9 @@ class State(str, Enum):
     # 질문을 던지고 답을 기다린다. 주도권은 음성 쪽에 있고 Mission 은 타임아웃만
     # 센다 — 여기서 말을 알아듣는 일은 이 모듈의 몫이 아니다.
     AWAITING_USER = "awaiting_user"
+    # 수락 후 180도 제자리 회전 - 핸들(로봇 뒤)을 사람 쪽으로 낸다.
+    # 정지 거리 1.1 m 가 이 회전의 반경 기준으로 설계돼 있다(설계 6.3절).
+    TURNING = "turning"
     RETURNING = "returning"
 
 
@@ -172,6 +177,17 @@ class CancelNav:
 
 
 @dataclass(frozen=True)
+class SpinInPlace:
+    """제자리 회전. 노드는 BasicNavigator.spin() 으로 실행한다.
+
+    Navigate 가 아니다 - goal 을 만들지 않고 behavior server 의 Spin 을 탄다.
+    Spin 은 회전 중 costmap 충돌을 스스로 검사한다. 양수 = 반시계.
+    """
+
+    yaw_rad: float
+
+
+@dataclass(frozen=True)
 class SetNavSpeedLimit:
     """Nav2 controller 최대속도 제한율. 0.0은 제한 해제다."""
 
@@ -262,6 +278,9 @@ DISTANCE_MILESTONES_M = (10.0, 3.0)
 # 질문 뒤 답을 기다리는 시간. STT 검증 1.84초를 포함한 값이며, 재생이 끝난
 # 시점부터 센다(on_approach_question_spoken).
 APPROACH_RESPONSE_TIMEOUT_SEC = 8.0
+# 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
+# 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
+APPROACH_TURN_TIMEOUT_SEC = 15.0
 # 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
 # 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
 REAPPROACH_SUPPRESS_SEC = 60.0
@@ -287,9 +306,13 @@ APPROACH_DESTINATION_PREFIX = "approach:"
 APPROACH_DESTINATION_NAME = "접근 대상"
 
 # 접근 세 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이 이 셋이다.
-_APPROACH_STATES = (State.APPROACHING, State.AWAITING_USER, State.RETURNING)
+_APPROACH_STATES = (
+    State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING
+)
 # Nav2 goal 이 살아 있는 상태. E-stop·긴급어가 goal 을 취소해야 하는 구간이다.
-_GOAL_ACTIVE_STATES = (State.NAVIGATING, State.APPROACHING, State.RETURNING)
+_GOAL_ACTIVE_STATES = (
+    State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING
+)
 
 _REJECT_MESSAGES = {
     GateReason.BUSY_NAVIGATING: MSG_BUSY,
@@ -518,6 +541,7 @@ class MissionLogic:
         person_approach_speed_percent: float = PERSON_APPROACH_SPEED_PERCENT,
         approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
         return_destination: Optional[Destination] = None,
+        approach_turn_yaw_rad: float = math.pi,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -548,6 +572,9 @@ class MissionLogic:
         # 접근을 마치고 돌아갈 대기 위치. 지도상 좌표는 아직 [미정] 이라(설계
         # 12절) None 을 허용하며, 없으면 제자리에서 접근만 끝낸다.
         self.return_destination = return_destination
+        # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
+        self.approach_turn_yaw_rad = approach_turn_yaw_rad
+        self._turn_deadline: Optional[float] = None
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -843,13 +870,22 @@ class MissionLogic:
             return []
 
         if affirmative:
-            # 이번 범위는 여기까지다. 회전·핸들 접촉·목적지 안내는 다음 사이클이라
-            # 인계할 상태가 아직 없어 IDLE 로 내린다. 다만 방금 수락한 사람에게
-            # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 똑같이 건다.
+            # 수락 -> 180도 돌아 핸들(로봇 뒤)을 사람 쪽으로 낸다(2026-08-24 확장).
+            # 핸들 접촉·목적지 안내는 여전히 다음 사이클이다. 방금 수락한 사람에게
+            # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 회전 전에 건다.
             track_id = self.approach_track_id
-            self._to_idle()
             self._suppress_track(track_id, now)
-            return [Say(MSG_APPROACH_ACCEPTED, priority="response")]
+            if self.approach_turn_yaw_rad == 0.0:
+                self._to_idle()
+                return [Say(MSG_APPROACH_ACCEPTED, priority="response")]
+            self.state = State.TURNING
+            self.active_destination = None
+            self._response_deadline = None
+            self._turn_deadline = now + APPROACH_TURN_TIMEOUT_SEC
+            return [
+                Say(MSG_APPROACH_ACCEPTED, priority="response"),
+                SpinInPlace(self.approach_turn_yaw_rad),
+            ]
 
         actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
         actions.extend(self._enter_returning(now))
@@ -997,6 +1033,17 @@ class MissionLogic:
                 # 3초 뒤 그 자리에 없다. 실패하면 돌아가서 다시 탐지하는 편이
                 # 빠르고, 같은 자리로 되풀이 진입하면 통행에 방해가 된다.
                 actions.extend(self._enter_returning(now))
+
+        elif self.state == State.TURNING:
+            if nav_status in (NavStatus.SUCCEEDED, NavStatus.FAILED,
+                              NavStatus.CANCELED):
+                # 회전 실패는 안내 실패가 아니다 - 핸들 방향만 어긋난 채 끝난다.
+                # 억제는 수락 시점에 이미 걸었으므로 여기서는 정리만 한다.
+                self._to_idle()
+            elif (self._turn_deadline is not None
+                  and now >= self._turn_deadline):
+                # spin 이 시작조차 안 됐다(노드 결함 등). 시계로 탈출한다.
+                self._to_idle()
 
         elif self.state == State.AWAITING_USER:
             # 여기서 하는 일은 시계를 보는 것뿐이다. 말을 알아듣는 쪽은 음성이다.
@@ -1189,6 +1236,7 @@ class MissionLogic:
         self._dwell_until = None
         self._estop_entered_at = None
         self._estop_clear_since = None
+        self._turn_deadline = None
         self._announced_milestones = set()
         self._approach.reset()
         # 재시도 예산은 목적지 하나당이다. IDLE 로 내려오면 이번 시도가 끝난

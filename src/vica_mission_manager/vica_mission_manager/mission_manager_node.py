@@ -81,6 +81,8 @@ class MissionManagerNode(Node):
         self.declare_parameter("map_id", "")
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("confirm_timeout_sec", 30.0)
+        # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
+        self.declare_parameter("approach_turn_yaw_deg", 180.0)
         self.declare_parameter("estop_release_grace_sec", 2.0)
         # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
         # 0 으로 두면 종전처럼 실패를 안내하고 끝낸다.
@@ -144,6 +146,8 @@ class MissionManagerNode(Node):
         retry_delay = float(self.get_parameter("nav_retry_delay_sec").value)
         self.logic = MissionLogic(
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
+            approach_turn_yaw_rad=math.radians(
+                float(self.get_parameter("approach_turn_yaw_deg").value)),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -704,6 +708,8 @@ class MissionManagerNode(Node):
                 self._cancel_nav(action.destination, action.event)
             elif isinstance(action, Navigate):
                 self._start_nav(action)
+            elif isinstance(action, SpinInPlace):
+                self._start_spin(action)
             elif isinstance(action, SetNavSpeedLimit):
                 self._publish_nav_speed_limit(action.percent)
 
@@ -744,6 +750,25 @@ class MissionManagerNode(Node):
             self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
             # goal 거부 → 다음 tick 에서 FAILED 처리되도록 상태를 만든다.
             self.get_logger().error(f"NavigateToPose goal 거부됨: {dest.id}")
+            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+
+    def _start_spin(self, action: SpinInPlace) -> None:
+        """제자리 회전. BasicNavigator.spin() 은 behavior server 의 Spin 을 부른다.
+
+        goToPose 와 같은 isTaskComplete/getResult 로 끝나므로 상태 감시는
+        _poll_nav_status 를 그대로 탄다. 거부되면 다음 tick 의 FAILED 로 흘려
+        로직이 TURNING 에서 스스로 내려오게 한다(별도 복구 없음 - 회전 실패는
+        안내 실패가 아니다).
+        """
+        with self._nav_lock:
+            accepted = self.navigator.spin(spin_dist=action.yaw_rad)
+            self._nav_active = bool(accepted)
+        if accepted:
+            self.get_logger().info(
+                f"제자리 회전 시작: {action.yaw_rad:.2f} rad (핸들을 사람 쪽으로)"
+            )
+        else:
+            self.get_logger().error("Spin 거부됨 - 회전 없이 접근을 끝낸다")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
     def _cancel_nav(self, destination=None, event: str = "goal_canceled") -> None:

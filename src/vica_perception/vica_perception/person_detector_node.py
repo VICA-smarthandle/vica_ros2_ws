@@ -230,7 +230,11 @@ class PersonDetectorNode(Node):
 
         pt = PointStamped()
         pt.header.frame_id = self._depth.header.frame_id
-        pt.header.stamp = color_msg.header.stamp
+        # stamp 0 = "가장 최신 TF". 이미지 시각을 넣으면 그 시각의 TF 가 아직
+        # 안 와서 extrapolation into the future 로 매번 실패한다(B5 실기에서
+        # 실측 5~90 ms 차). 단일 스레드 실행기 안에서는 timeout 대기 중에 TF
+        # 콜백이 돌지 못하므로 기다려도 해결되지 않는다 — 최신값이 정답이다.
+        pt.header.stamp = rclpy.time.Time().to_msg()
         pt.point.x, pt.point.y, pt.point.z = cam
         try:
             # 최신 TF 사용(Time()) — 이미지 시각의 과거 TF 를 기다리다 5 Hz 를

@@ -4,6 +4,8 @@ import math
 import pytest
 
 from vica_mission_manager.mission_logic import (
+    APPROACH_TURN_TIMEOUT_SEC,
+    SpinInPlace,
     MSG_APPROACH_QUESTION,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -759,14 +761,80 @@ class TestApproachTransitions:
         limits = [a for a in actions if isinstance(a, SetNavSpeedLimit)]
         assert limits and limits[0].percent == 0.0
 
-    def test_yes_ends_this_scope(self):
+    def test_yes_turns_handle_toward_person(self):
+        """수락하면 180도 돌아 핸들을 사람 쪽으로 낸다 (2026-08-24 범위 확장).
+
+        정지 거리 1.1 m 는 애초에 이 회전의 반경 기준으로 설계됐다(설계 6.3절).
+        """
         logic = MissionLogic()
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         actions = logic.on_approach_answer(True, 6.0)
-        assert logic.state == State.IDLE
+        assert logic.state == State.TURNING
         assert any(isinstance(a, Say) for a in actions)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        # 회전은 Navigate 가 아니다 — goal 을 새로 만들지 않는다.
         assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_yes_suppresses_track_before_turn(self):
+        # 수락한 사람에게 로봇이 곧바로 다시 다가가면 안 된다 — 회전과 무관하게.
+        logic = MissionLogic()
+        start_approach(logic, request=make_approach(track_id=7))
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)      # 회전 완료 -> IDLE
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=7), BOUNDS, True, 9.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    def test_turn_done_goes_idle(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        actions = logic.on_tick(14.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_turn_failed_is_not_fatal(self):
+        # 회전 실패(장애물 감지 등)는 안내 실패가 아니다. 조용히 끝낸다.
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(14.0, NavStatus.FAILED)
+        assert logic.state == State.IDLE
+
+    def test_turn_stuck_times_out(self):
+        # spin 이 시작조차 안 되면(노드 결함) TURNING 에 갇힌다. 시계로 탈출한다.
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        assert logic.on_tick(6.0 + APPROACH_TURN_TIMEOUT_SEC - 0.1,
+                             NavStatus.NONE) == []
+        assert logic.state == State.TURNING
+        logic.on_tick(6.0 + APPROACH_TURN_TIMEOUT_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_turn_disabled_keeps_old_behavior(self):
+        logic = MissionLogic(approach_turn_yaw_rad=0.0)
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(True, 6.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_estop_during_turn_cancels_spin(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        actions = logic.on_estop(True, 7.0)
+        assert any(isinstance(a, CancelNav) for a in actions)
+        assert logic.state != State.TURNING
 
     def test_no_returns_to_standby(self):
         logic = MissionLogic(return_destination=make_home())
@@ -917,7 +985,11 @@ class TestReapproachSuppression:
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         logic.on_approach_answer(True, 6.0)
-        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 7.0)
+        # 회전 중에는 busy 로 거절된다. 억제는 회전이 끝난 뒤부터 판정한다.
+        _, busy = logic.on_approach_request(make_approach(), BOUNDS, True, 7.0)
+        assert busy != GateReason.OK
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)      # 회전 완료 -> IDLE
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 9.0)
         assert reason == GateReason.TRACK_SUPPRESSED
 
 
