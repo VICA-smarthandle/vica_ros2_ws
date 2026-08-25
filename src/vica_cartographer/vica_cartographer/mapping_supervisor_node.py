@@ -50,7 +50,6 @@ from vica_interfaces.srv import SaveMap
 from .mapping_session import (
     blocking_reason,
     duplicated_names,
-    is_motor_up,
     is_stack_up,
     MappingState,
     missing_prerequisites,
@@ -67,7 +66,15 @@ DEFAULT_LAUNCH = [
 #   imu   띄운 뒤 20초 완전 정지해야 'Gyro bias calibrated' 가 뜬다
 #         (docs/cartographer_corridor_mapping.md 3절: 편향 -85 deg/hour 는
 #          14.2분 주행에서 20도다 — 회차의 유효·무효를 가른다)
-DEFAULT_PREREQUISITES = ['camera/camera', 'imu_base_link_adapter']
+#   motor 터미네이터 ⑤ 칸 소유로 고정했다 (2026-08-25 실기 결정). E-stop 해제가
+#         motor 생존을 요구하므로 어차피 시작 전에 떠 있어야 하고, 매핑 중에
+#         죽었을 때의 복구 경로도 터미네이터뿐이다. 감독이 반쪽만 소유하면
+#         그 두 상황의 규칙이 갈라진다 — 그래서 감독은 검사만 한다.
+DEFAULT_PREREQUISITES = [
+    'camera/camera',
+    'imu_base_link_adapter',
+    'mdrobot_can_keyboard_knob_node',
+]
 
 
 class MappingSupervisorNode(Node):
@@ -221,13 +228,11 @@ class MappingSupervisorNode(Node):
                 return response
 
             command = list(self.get_parameter('launch_command').value)
-            # motor 가 이미 떠 있으면 launch 가 또 띄우지 않게 한다. 터미네이터의
-            # motor 칸은 HOLD 라 사람이 먼저 눌렀을 수 있다. (safety 는 그 칸이
-            # AUTO 라 항상 떠 있으므로 launch 에서 아예 뺐다.)
-            motor_already_up = is_motor_up(self._node_names())
-            command.append(
-                f'start_motor:={"false" if motor_already_up else "true"}'
-            )
+            # motor 는 터미네이터 소유로 고정이다 (2026-08-25 실기 결정) —
+            # 위 DEFAULT_PREREQUISITES 주석 참고. 필수 노드 검사가 이미 motor
+            # 생존을 보장했으므로 launch 는 절대 다시 띄우지 않는다. 이래야
+            # 중복 실행 가능성이 원천적으로 없다.
+            command.append('start_motor:=false')
             try:
                 # start_new_session=True 로 자식에게 새 프로세스 그룹을 준다.
                 # 그래야 launch 가 띄운 손자 노드들까지 한 번에 정리할 수 있다.
