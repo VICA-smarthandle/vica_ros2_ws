@@ -263,6 +263,21 @@ class PoseBootstrapNode(Node):
             return response
         grid, field, beams, sensor = bundle
 
+        # AMCL 이 안 듣고 있으면 발행해 봐야 허공이다. 2026-08-25 실기에서 Nav2 를
+        # 내린 채 확정했더니 "반영했습니다"라고 답해 관리자를 헷갈리게 했다.
+        # 지도·스캔은 캐시로 살아 있어서 위의 검사(_inputs)로는 못 잡는다.
+        if self.initial_pose_pub.get_subscription_count() == 0:
+            response.accepted = False
+            response.message = '주행(Nav2)이 꺼져 있어 반영할 수 없습니다. Nav2 를 켠 뒤 다시 확정하세요.'
+            self.get_logger().warning('확정 거부: /initialpose 구독자가 없다 (Nav2 꺼짐).')
+            return response
+
+        # 재검은 확정 **이후에 새로 온** AMCL 자세로만 한다. 캐시를 안 비우면
+        # 죽은 회차의 마지막 자세와 비교하게 된다 — 2026-08-25 실기에서 실패한
+        # 주행이 믿던 자리를 기준으로 "308 cm 차이"라는 유령 오보를 냈다.
+        with self._lock:
+            self._amcl_pose = None
+
         self.initial_pose_pub.publish(
             self._initial_pose_msg(float(request.x), float(request.y), float(request.yaw))
         )
