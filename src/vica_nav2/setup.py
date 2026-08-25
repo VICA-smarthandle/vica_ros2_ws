@@ -27,6 +27,8 @@ setup(
     license="TODO: License declaration",
     tests_require=["pytest"],
     entry_points={
-        "console_scripts": [],
+        "console_scripts": [
+            "pose_bootstrap_node = vica_nav2.pose_bootstrap_node:main",
+        ],
     },
 )

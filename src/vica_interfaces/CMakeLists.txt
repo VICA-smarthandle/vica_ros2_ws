@@ -22,6 +22,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MissionCommand.srv"
   "srv/DeleteMap.srv"
   "srv/SaveMap.srv"
+  "srv/PoseCheck.srv"
+  "srv/PoseCommit.srv"
   DEPENDENCIES std_msgs builtin_interfaces
 )
 

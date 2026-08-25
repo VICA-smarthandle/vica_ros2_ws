@@ -1,0 +1,22 @@
+# 확인이 끝난 자세를 AMCL 에 반영한다. pose_bootstrap_node 가 처리한다.
+#
+# 노드가 하는 일은 셋이다.
+#   1) /initialpose 발행
+#   2) 0.5초 뒤 /request_nomotion_update 호출
+#      update_min_d 가 0.10 이라 로봇이 10 cm 움직이기 전에는 AMCL 이 갱신하지 않는다.
+#      서 있는 채로 확정하면 아무 일도 안 일어난 것처럼 보인다.
+#   3) 2초 뒤 /amcl_pose 를 같은 잣대로 다시 채점해서 verify_score 로 돌려준다
+#      1·2 는 요청이고 3 이 검증이다.
+float64 x
+float64 y
+float64 yaw
+---
+bool accepted
+string message
+
+# 반영 뒤 AMCL 이 내놓은 자세를 PoseCheck 와 같은 방식으로 채점한 값이다.
+# 반영 전 점수보다 크게 떨어졌으면 AMCL 이 다른 곳으로 갔다는 뜻이다.
+float64 verify_score
+float64 amcl_x
+float64 amcl_y
+float64 amcl_yaw

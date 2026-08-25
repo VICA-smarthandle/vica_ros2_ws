@@ -15,6 +15,17 @@
   <!-- planner_server가 런타임에 로드하는 GridBased plugin. -->
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>vica_localization</exec_depend>
+  <!-- pose_bootstrap_node. 앱에서 Nav2 초기 위치를 잡는다. -->
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- 거리표 계산. 없으면 pose_score 가 numpy 만으로 하는 대비책으로 넘어간다. -->
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>vica_interfaces</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
