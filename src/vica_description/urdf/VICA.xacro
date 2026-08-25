@@ -30,7 +30,9 @@
      TF·footprint·nvblox 어디에도 안 물린다 - 화면 그림일 뿐이다. -->
 <xacro:property name="camera_x" value="-0.225" />
 <xacro:property name="camera_y" value="0.0" />
-<xacro:property name="camera_z" value="0.720" />
+<!-- 2026-08-25 재고정: 지면 1.05 m (사용자 고정 + depth 바닥 실측 1.03~1.05 로 확인).
+     camera_z = 1.05 - base_link 0.190 = 0.860. 수평(rpy 0 0 0)도 같은 실측으로 유지 확인. -->
+<xacro:property name="camera_z" value="0.860" />
 <!-- Drive wheel / caster geometry. Single source for every y coordinate. -->
 <!-- 줄자 실측(바퀴 중심 사이). CAD 0.3618과 2.2 mm 차이.
      encoder.yaml의 wheel_base_m 0.37은 회전 시험으로 맞춘 오도메트리 보정 상수라
