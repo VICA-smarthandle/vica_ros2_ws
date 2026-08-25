@@ -252,7 +252,29 @@ controller_server:
       stateful: False
       plugin: "nav2_controller::StoppedGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      # yaw_goal_tolerance 0.25 -> 0.15 (2026-08-25)
+      #
+      # 도착한 뒤 로봇이 바라보는 방향을 더 정확하게 맞추려는 것이다. 0.25 rad 는
+      # 14.3도라 안내 로봇이 "저쪽입니다" 하고 선 방향이 눈에 띄게 어긋난다.
+      # 0.15 rad 는 8.6도다.
+      #
+      # xy 는 건드리지 않는다. 한 번에 한 축만 움직인다.
+      #
+      # 대가는 도착까지 걸리는 시간이다. stateful 이 False 라 매 주기 yaw 를
+      # 다시 보고, StoppedGoalChecker 라 rot_stopped_velocity 0.05 아래로
+      # 느려질 때까지 기다린다. 남은 0.10 rad 를 RotateToGoal 이 줄여 놓은
+      # 회전 속도(max_vel_theta 0.4 / slowing_factor 5.0 = 약 0.08 rad/s)로
+      # 닫으면 대략 1~2초가 더 붙는다. progress checker 의
+      # movement_time_allowance 20.0 s 에는 여유가 있다.
+      #
+      # [미검증] 위 1~2초는 계산이고 실기로 확인해야 한다.
+      #
+      # 되돌리는 신호는 '도착이 느리다'가 아니라 이 둘이다.
+      #   - 도착 지점에서 좌우로 흔들리며 못 멈춘다(회전 진동)
+      #   - progress checker 가 도착 직전에 주행을 실패로 끝낸다
+      #     grep "Failed to make progress" ~/.ros/log/controller_server_*.log
+      # 되돌릴 때는 0.15 -> 0.20 -> 0.25 로 올린다.
+      yaw_goal_tolerance: 0.15
       # 위치·방향뿐 아니라 실제 저속 상태까지 확인한 뒤 도착으로 판정한다.
       trans_stopped_velocity: 0.03
       rot_stopped_velocity: 0.05
