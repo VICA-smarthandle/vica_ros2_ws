@@ -420,8 +420,31 @@ def search_pose(
     score = float(fine_score[top] * 100.0)
 
     turned = 0.0 if yaw_hint is None else _angle_diff(got_yaw, float(yaw_hint))
+
+    # 판정용 격차는 탐색 창 안의 2등 기준이다. 사람이 방향을 알려줬다는 것이
+    # 대칭 복도에서 뒤집힘을 가르는 유일한 정보라는 설계 계약을 지킨다
+    # (test_direction_hint_resolves_the_flip).
+    window_margin = score - runner_up
+
+    if yaw_hint is not None:
+        # 다만 힌트 창(±45도)은 진짜 방향을 아예 못 본다 — 2026-08-25 실기에서
+        # 대칭 복도의 반대 방향 힌트가 77점·격차 41로 자신만만하게 통과했다.
+        # 찾은 자세의 180도 뒤집힌 쌍을 직접 채점해 **보고용** 2등에 넣는다.
+        # 그러면 앱이 '헷갈릴 방향 있음(차이 2점)' 을 보여주고, 노드가 경고
+        # 문구를 붙일 수 있다. 확정 가능 여부(ok)는 바꾸지 않는다 — 사람이
+        # 최종 판단한다.
+        flipped = max(
+            score_pose(
+                field, grid, beams, got_x, got_y, got_yaw + math.pi + d,
+                sensor=sensor, sigma_hit=sigma_hit, max_dist=max_dist,
+            )
+            for d in (-FINE_YAW_RADIUS, 0.0, FINE_YAW_RADIUS)
+        )
+        runner_up = max(runner_up, flipped)
+
     margin = score - runner_up
-    ok, reason = judge(score, beams.used, margin, min_score, min_beams, min_margin)
+    judge_margin = window_margin if yaw_hint is not None else margin
+    ok, reason = judge(score, beams.used, judge_margin, min_score, min_beams, min_margin)
 
     return MatchResult(
         ok=ok,

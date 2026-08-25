@@ -270,6 +270,39 @@ def test_direction_hint_resolves_the_flip():
     assert abs(math.degrees(got.yaw)) < 5.0
 
 
+def test_flipped_hint_passes_but_reports_a_collapsed_margin():
+    """대칭 복도에서 반대 힌트도 통과는 한다 — 사람이 최종 판단하는 설계 계약.
+
+    다만 격차(margin)에는 창 밖의 뒤집힌 자세를 채점해 넣으므로 무너진 값이
+    보고되고, 앱이 '헷갈릴 방향 있음' 과 경고 문구를 띄울 재료가 된다.
+    2026-08-25 실기에서 반대 방향이 77점·격차 41로 조용히 통과한 것의 수리다.
+    """
+    grid = straight_map()
+    field = build_likelihood_field(grid)
+    beams = beams_at(grid, 20.0, 9.0, 0.0)  # 실제 로봇은 0도를 본다
+    got = search_pose(
+        field, grid, beams, 20.0, 9.0, yaw_hint=math.pi, sensor=LASER_OFFSET,
+    )
+    assert got.ok                        # 확정 가능 여부는 사람 몫 그대로
+    assert abs(abs(math.degrees(got.yaw)) - 180.0) < 5.0
+    assert got.margin < 10.0             # 진짜 방향(창 밖)이 격차를 무너뜨린다
+
+
+def test_correct_hint_in_an_asymmetric_spot_keeps_a_wide_margin():
+    """비대칭한 자리에서는 올바른 힌트의 격차가 넓게 유지된다 — 경고 오발 방지.
+
+    자리는 끝벽 2 m 앞이다. 뒤집힌 해석은 그 벽을 반대쪽(11 m 밖)에 둬야 해서
+    수십 개 빔이 통째로 어긋난다. 복도 순수 중앙(대칭)과 달리 여기서는 경고가
+    나면 안 된다.
+    """
+    grid = cross_map()
+    field = build_likelihood_field(grid)
+    beams = beams_at(grid, 3.0, 9.0, 0.0)
+    got = search_pose(field, grid, beams, 3.0, 9.0, yaw_hint=0.0, sensor=LASER_OFFSET)
+    assert got.ok
+    assert got.margin >= 10.0
+
+
 def test_hint_window_covers_the_worst_90_degree_input():
     """4 방향 버튼의 최대 오차 45도가 탐색 창과 딱 맞물린다는 것."""
     grid = cross_map()

@@ -60,6 +60,10 @@ MESSAGES = {
     'ambiguous': '앞뒤가 비슷해 구분이 안 됩니다. 문이나 교차로가 보이는 곳에서 다시 잡으세요.',
 }
 YAW_EDGE_NOTE = ' 고른 방향의 끝자락입니다. 옆 방향으로도 확인해 보세요.'
+# 대칭 복도에서 방향 힌트를 주면 뒤집힌 자세도 비슷하게 맞는다. 확정은 사람이
+# 하되(설계 계약), 그 사실은 알려야 한다 — 2026-08-25 실기에서 반대 방향이
+# 조용히 통과한 것이 이 문구의 이유다.
+FLIP_NOTE = ' 반대 방향도 비슷하게 맞는 자리입니다. 로봇이 보는 쪽이 맞는지 다시 확인하세요.'
 
 
 class PoseBootstrapNode(Node):
@@ -236,6 +240,8 @@ class PoseBootstrapNode(Node):
         response.message = MESSAGES.get(got.reason, got.reason)
         if got.at_yaw_edge:
             response.message += YAW_EDGE_NOTE
+        if got.ok and got.margin < self.min_margin:
+            response.message += FLIP_NOTE
         response.score = got.score
         response.x, response.y, response.yaw = got.x, got.y, got.yaw
         response.used_beams = int(got.used_beams)
@@ -311,8 +317,12 @@ class PoseBootstrapNode(Node):
         response.verify_score = verify
         response.amcl_x, response.amcl_y, response.amcl_yaw = got_x, got_y, got_yaw
         drift = math.hypot(got_x - request.x, got_y - request.y)
+        # '차이'는 짚어 준 자세와 AMCL 사이다. 실제 물리 위치와의 차이가 아니다 —
+        # 2026-08-25 실기에서 3 m 틀린 자리를 확정해도 "2 cm"가 나와 관리자가
+        # "실제와 맞다"로 읽었다. 복도 앞뒤 밀림은 이 검사로 잡을 수 없다.
         response.message = (
-            '반영했습니다. AMCL 자세 재검 %.0f%%, 요청한 자리에서 %.0f cm 차이입니다.'
+            '반영했습니다. AMCL 재검 %.0f%%, 짚어 준 자세 대비 %.0f cm '
+            '(짚은 자리가 틀렸으면 그대로 틀립니다).'
             % (verify, drift * 100.0)
         )
         self.get_logger().info(response.message)
