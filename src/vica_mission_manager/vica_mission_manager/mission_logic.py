@@ -10,6 +10,8 @@ LLM(VicaIntent)은 어디까지나 제안이다.
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Sequence, Union
@@ -31,6 +33,19 @@ class State(str, Enum):
     # 목적지를 기억한 채 멈춘 상태. 사용자가 다시 출발을 요청하면 그 목적지로
     # 새 goal 을 만든다. E-stop 과 달리 래치도 reset 도 없다.
     PAUSED = "paused"
+    # ---- 사람 접근 (devlog/2026-08-23-사람접근-구현설계.md 4절) ----------------
+    #
+    # 아래 셋은 모두 "안내를 받는 사용자가 아직 없는" 구간이다. 시각장애인을
+    # 탐지해 1.1 m 앞까지 다가가(APPROACHING) 안내가 필요한지 묻고
+    # (AWAITING_USER), 끝나면 대기 위치로 돌아온다(RETURNING).
+    APPROACHING = "approaching"
+    # 질문을 던지고 답을 기다린다. 주도권은 음성 쪽에 있고 Mission 은 타임아웃만
+    # 센다 — 여기서 말을 알아듣는 일은 이 모듈의 몫이 아니다.
+    AWAITING_USER = "awaiting_user"
+    # 수락 후 180도 제자리 회전 - 핸들(로봇 뒤)을 사람 쪽으로 낸다.
+    # 정지 거리 1.1 m 가 이 회전의 반경 기준으로 설계돼 있다(설계 6.3절).
+    TURNING = "turning"
+    RETURNING = "returning"
 
 
 class NavStatus(str, Enum):
@@ -59,6 +74,11 @@ class GateReason(str, Enum):
     # 취소·일시정지·재개 요청 전용 사유.
     NOT_NAVIGATING = "not_navigating"
     NOT_PAUSED = "not_paused"
+    # 사람 접근 요청 전용 사유.
+    NO_TRACK_ID = "no_track_id"
+    TRACK_SUPPRESSED = "track_suppressed"
+    BUSY_APPROACHING = "busy_approaching"
+    NOT_APPROACHING = "not_approaching"
 
 
 @dataclass(frozen=True)
@@ -106,6 +126,28 @@ class IntentData:
     safety_flag: str
 
 
+@dataclass(frozen=True)
+class ApproachRequest:
+    """RequestApproach.srv 한 건 중 게이트 판단에 쓰는 값만.
+
+    `goal` 은 **이미 계산이 끝난 접근 goal** 이다 — 사람 위치가 아니다. 사람
+    위치에서 로봇 쪽으로 1.1 m 물러난 지점을 구하는 계산은
+    `approach_geometry.approach_goal(person, robot)` 이 하고, 노드가 그 결과를
+    여기에 넣는다. 이 모듈이 rclpy 를 물지 않는 것과 같은 이유로 기하 계산도
+    물지 않는다 — 판단과 계산을 따로 두어야 각각을 따로 시험할 수 있다.
+
+    사람과 로봇이 겹쳐 방향을 정할 수 없으면 그 계산이 None 을 돌려주므로
+    `goal` 도 Optional 이며, None 이면 이 요청은 거부된다.
+    """
+
+    goal: Optional[Pose2D]
+    track_id: int
+    # 시계열 판정(신뢰도 1초 연속 + 3초 정지)은 person_detector_node 몫이다.
+    # Mission 은 탐지 이력을 쌓지 않지만, 실려 온 판정 결과가 false 면 그대로
+    # 거부한다 — 요청자를 믿기만 하지는 않는다는 뜻이다.
+    approachable: bool = True
+
+
 # ---- Actions: 노드가 실행할 일 ---------------------------------------------
 
 
@@ -132,6 +174,17 @@ class CancelNav:
     # 노드가 /vica_goal_event 로 알릴 이벤트 이름. 일시정지도 Nav2 goal 을 취소하지만
     # 목적지를 기억하므로 취소와 구분해서 알려야 앱이 "주행 끝"으로 오해하지 않는다.
     event: str = "goal_canceled"
+
+
+@dataclass(frozen=True)
+class SpinInPlace:
+    """제자리 회전. 노드는 BasicNavigator.spin() 으로 실행한다.
+
+    Navigate 가 아니다 - goal 을 만들지 않고 behavior server 의 Spin 을 탄다.
+    Spin 은 회전 중 costmap 충돌을 스스로 검사한다. 양수 = 반시계.
+    """
+
+    yaw_rad: float
 
 
 @dataclass(frozen=True)
@@ -205,6 +258,12 @@ MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
 MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
 MSG_NOT_NAVIGATING = "지금은 안내 중이 아닙니다."
 MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
+# 사람 접근. 질문은 되묻기와 같은 이유로 expects_reply 를 달아 내보낸다.
+MSG_APPROACH_QUESTION = "안내가 필요하신가요?"
+MSG_APPROACH_ACCEPTED = "네, 제가 도와드리겠습니다."
+MSG_APPROACH_DECLINED = "알겠습니다. 필요하시면 언제든 불러 주세요."
+MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
+MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
 
 # 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
@@ -213,6 +272,47 @@ MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # 감속 단계(approach_speed.DEFAULT_APPROACH_STAGES)와는 별개다. 안내는 3 m 에서
 # 하고 감속은 1.5 m 부터 시작한다 — 사용자가 먼저 듣고, 그 다음 몸으로 느낀다.
 DISTANCE_MILESTONES_M = (10.0, 3.0)
+
+# ---- 사람 접근 값 (설계 6.2절) -----------------------------------------------
+
+# 질문 뒤 답을 기다리는 시간. STT 검증 1.84초를 포함한 값이며, 재생이 끝난
+# 시점부터 센다(on_approach_question_spoken).
+APPROACH_RESPONSE_TIMEOUT_SEC = 8.0
+# 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
+# 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
+APPROACH_TURN_TIMEOUT_SEC = 15.0
+# 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
+# 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
+REAPPROACH_SUPPRESS_SEC = 60.0
+# 사람에게 다가가는 구간의 최대속도 상한. 주행 상한 0.5 m/s 의 60 % = 0.3 m/s 다.
+# 마지막 1.1 m 는 collision_monitor 의 PolygonSlow 가 0.12 m/s 로 한 번 더
+# 줄인다(설계 6.4절).
+#
+# [이름 주의] 이 파일에서 "접근"은 두 가지를 뜻한다. approach_speed.py 의
+# ApproachSpeedLadder 와 MissionLogic.approach_speed_limit_percent 는 **등록
+# 목적지에 가까워질 때의 감속**이고, 여기 PERSON_* 은 **사람에게 다가가는 구간의
+# 고정 상한**이다. 사람 접근에는 사다리를 쓰지 않는다 — 처음부터 끝까지 느리다.
+PERSON_APPROACH_SPEED_PERCENT = 60.0
+# goal 재전송 임계(m). NavigateToPose 는 preempt 되지만 그때마다 BT 가 처음부터
+# 다시 시작한다. 사람이 조금 흔들릴 때마다 goal 을 바꾸면 재계획만 반복하고 한
+# 발도 못 뗀다(설계 5절).
+APPROACH_GOAL_UPDATE_M = 0.5
+# PersonDetection.TRACK_ID_NONE. 추적 id 가 없으면 재접근 억제를 걸 수 없어
+# 같은 사람에게 무한히 다가갈 수 있으므로 요청 자체를 받지 않는다.
+TRACK_ID_NONE = 0
+# 접근 goal 을 감싼 Destination 의 이름·id 접두어. 로그에서 등록 목적지와
+# 구분하고 어느 사람을 향한 goal 이었는지 남기려는 것이다.
+APPROACH_DESTINATION_PREFIX = "approach:"
+APPROACH_DESTINATION_NAME = "접근 대상"
+
+# 접근 세 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이 이 셋이다.
+_APPROACH_STATES = (
+    State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING
+)
+# Nav2 goal 이 살아 있는 상태. E-stop·긴급어가 goal 을 취소해야 하는 구간이다.
+_GOAL_ACTIVE_STATES = (
+    State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING
+)
 
 _REJECT_MESSAGES = {
     GateReason.BUSY_NAVIGATING: MSG_BUSY,
@@ -322,6 +422,91 @@ def check_resume_gate(
     return GateReason.OK
 
 
+def approach_destination(request: ApproachRequest) -> Destination:
+    """접근 goal 을 Navigate 가 받는 Destination 모양으로 감싼다.
+
+    Nav2 에게 이 goal 은 등록된 목적지로 갈 때와 완전히 같은 NavigateToPose 다 —
+    **Nav2 는 그것이 사람인지 모른다**(설계 5절). 그래서 접근 전용 Action 을 새로
+    만들지 않고 기존 Navigate 를 그대로 쓴다.
+
+    `calibrated=True` 는 "실측으로 등록한 좌표"라는 뜻이 아니라 `pose_valid` 의
+    미캘리브레이션 검사 대상이 아니라는 뜻이다. 이 좌표는 destinations.yaml 이
+    아니라 방금 센서에서 계산된 값이라 캘리브레이션 개념 자체가 없다. (0,0)
+    검사와 지도 경계·frame 검사는 그대로 받는다.
+    """
+    assert request.goal is not None  # 호출부가 None 을 먼저 걸러야 한다
+    return Destination(
+        id=f"{APPROACH_DESTINATION_PREFIX}{request.track_id}",
+        name=APPROACH_DESTINATION_NAME,
+        pose=request.goal,
+        calibrated=True,
+        arrival_message="",
+    )
+
+
+def check_approach_gate(
+    request: ApproachRequest,
+    state: State,
+    active_track_id: Optional[int],
+    bounds: Optional[MapBounds],
+    estop_active: bool,
+    nav_ready: bool,
+    suppressed: bool,
+) -> GateReason:
+    """사람 접근 요청 게이트. 첫 번째 실패 사유를 돌려준다.
+
+    check_gate 와 같은 순서로 읽는다 — 요청 자체의 흠 → 안전 → 문맥 → 좌표 →
+    Nav2 준비. 다른 점 하나는 이 게이트의 거절이 **말이 되어 나가지 않는다**는
+    것이다. 요청자는 사람이 아니라 person_detector_node 이고 사유는 서비스
+    응답으로만 돌아간다. 아직 아무 관계도 없는 사람 앞에서 로봇이 거절 사유를
+    혼잣말하면 그것이 더 이상한 동작이다.
+
+    탐지 결과는 요청이지 goal 이 아니다. 승인하는 곳은 여기 하나뿐이다.
+    """
+    if not request.approachable:
+        return GateReason.NOT_APPROACHABLE
+    if request.track_id == TRACK_ID_NONE:
+        return GateReason.NO_TRACK_ID
+    if estop_active or state == State.ESTOPPED:
+        return GateReason.ESTOP_ACTIVE
+    if state == State.APPROACHING:
+        # 같은 사람이면 goal 갱신이고 다른 사람이면 거절이다. 접근 중에 대상을
+        # 갈아타면 두 사람 모두에게 이상한 동작이 된다.
+        if request.track_id != active_track_id:
+            return GateReason.BUSY_APPROACHING
+    elif state in (State.AWAITING_USER, State.RETURNING):
+        return GateReason.BUSY_APPROACHING
+    elif state != State.IDLE:
+        # 안내를 받고 있는 사용자가 우선이다. 접근은 IDLE 에서만 시작한다.
+        return GateReason.BUSY_NAVIGATING
+    if suppressed:
+        return GateReason.TRACK_SUPPRESSED
+    if request.goal is None:
+        # approach_geometry 가 방향을 정하지 못한 경우(사람과 로봇이 겹침).
+        return GateReason.POSE_INVALID
+    if not pose_valid(approach_destination(request), bounds):
+        return GateReason.POSE_INVALID
+    if not nav_ready:
+        return GateReason.NAV_NOT_READY
+    return GateReason.OK
+
+
+def check_approach_cancel_gate(state: State, estop_active: bool) -> GateReason:
+    """접근 취소 게이트(/vica/mission/cancel_approach).
+
+    이탈·포기 판정(최초 탐지 위치에서 2.0 m·3초)은 시계열을 보는 판정이라
+    person_detector_node 가 하고, 여기서는 그 통보를 받아 상태만 옮긴다.
+
+    복귀 중(RETURNING)에는 취소할 접근이 이미 없으므로 거부한다. E-stop 중
+    거부는 check_cancel_gate 와 같은 이유다 — E-stop 이 상위 상태다.
+    """
+    if estop_active or state == State.ESTOPPED:
+        return GateReason.ESTOP_ACTIVE
+    if state not in (State.APPROACHING, State.AWAITING_USER):
+        return GateReason.NOT_APPROACHING
+    return GateReason.OK
+
+
 def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
     """도(deg) yaw → 쿼터니언 (x, y, z, w). 변환은 goal 생성 시에만 (함정 2번)."""
     import math
@@ -334,7 +519,11 @@ def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
 
 
 class MissionLogic:
-    """상태 6종(idle/confirming/navigating/arrived/failed/estopped) 상태 머신.
+    """상태 머신. 안내 7종 + 사람 접근 3종.
+
+        안내:      idle / confirming / navigating / arrived / failed /
+                   estopped / paused
+        사람 접근: approaching / awaiting_user / returning
 
     시간은 전부 인자(now: float 초)로 받는다 — 테스트에서 시계를 주입하기 위함.
     """
@@ -347,6 +536,12 @@ class MissionLogic:
         approach_stages: Optional[Sequence] = None,
         nav_retry_limit: int = 2,
         nav_retry_delay_sec: float = 3.0,
+        approach_response_timeout_sec: float = APPROACH_RESPONSE_TIMEOUT_SEC,
+        reapproach_suppress_sec: float = REAPPROACH_SUPPRESS_SEC,
+        person_approach_speed_percent: float = PERSON_APPROACH_SPEED_PERCENT,
+        approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
+        return_destination: Optional[Destination] = None,
+        approach_turn_yaw_rad: float = math.pi,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -369,6 +564,18 @@ class MissionLogic:
         # ApproachSpeedLadder 가 하고 잘못된 값이면 여기서 ValueError 로 죽는다.
         self._approach = ApproachSpeedLadder(approach_stages)
 
+        # 사람 접근 값. 근거는 위 상수 정의에 있다.
+        self.approach_response_timeout_sec = approach_response_timeout_sec
+        self.reapproach_suppress_sec = reapproach_suppress_sec
+        self.person_approach_speed_percent = person_approach_speed_percent
+        self.approach_goal_update_m = approach_goal_update_m
+        # 접근을 마치고 돌아갈 대기 위치. 지도상 좌표는 아직 [미정] 이라(설계
+        # 12절) None 을 허용하며, 없으면 제자리에서 접근만 끝낸다.
+        self.return_destination = return_destination
+        # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
+        self.approach_turn_yaw_rad = approach_turn_yaw_rad
+        self._turn_deadline: Optional[float] = None
+
         self.state: State = State.IDLE
         self.estop_active: bool = False
         self.active_destination: Optional[Destination] = None
@@ -389,6 +596,13 @@ class MissionLogic:
         self._retry_destination: Optional[Destination] = None
         self._retry_at: Optional[float] = None
         self._announced_milestones: set = set()  # 이번 목적지에서 안내한 거리 지점
+        # 접근 대상. 안내 사용자가 없는 구간이라 "어디로" 뿐 아니라 "누구에게"
+        # 가는 중인지를 따로 들고 있어야 재접근 억제를 걸 수 있다.
+        self.approach_track_id: Optional[int] = None
+        self.approach_goal_pose: Optional[Pose2D] = None
+        self._response_deadline: Optional[float] = None
+        # track_id -> 재접근을 다시 허용할 시각. 사람마다 따로 센다.
+        self._suppressed_tracks: dict = {}
 
     # -- 접근 감속 조회 ---------------------------------------------------------
 
@@ -422,6 +636,12 @@ class MissionLogic:
         if self.state == State.NAVIGATING:
             # v1 정책: 주행 중 새 목적지는 거부 (소프트 취소는 v2, TODOS.md #4)
             return [Say(MSG_BUSY, priority="response")]
+
+        if self.state in _APPROACH_STATES:
+            # 접근·질문·복귀 중에는 새 목적지를 받지 않는다. 특히
+            # AWAITING_USER 는 방금 던진 질문의 답을 기다리는 구간이라, 그 자리에
+            # 다른 목적지를 끼워 넣으면 누구의 요청인지 알 수 없게 된다(설계 4절).
+            return [Say(MSG_APPROACH_BUSY, priority="response")]
 
         if intent.need_confirm:
             # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
@@ -551,6 +771,126 @@ class MissionLogic:
         actions, _ = self.on_cancel_request(now)
         return actions
 
+    # -- 사람 접근 --------------------------------------------------------------
+    #
+    # 탐지 → 접근 → 질문 → 응답분기까지가 이번 범위다. 회전·핸들 접촉·목적지
+    # 안내는 다음 사이클이며, "네"를 받으면 여기서 손을 뗀다.
+
+    def on_approach_request(
+        self,
+        request: ApproachRequest,
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+        now: float,
+    ) -> tuple:
+        """사람 접근 요청. (actions, GateReason) 을 돌려준다.
+
+        같은 track_id 로 접근 중에 다시 오면 goal 갱신으로 받는다 — 사람이
+        움직이면 goal 도 따라가야 하기 때문이다. 다만 갱신 임계(0.5 m)보다 덜
+        움직였으면 아무것도 하지 않고 승인만 돌려준다.
+        """
+        self._prune_suppressed(now)
+        reason = check_approach_gate(
+            request,
+            self.state,
+            self.approach_track_id,
+            bounds,
+            self.estop_active,
+            nav_ready,
+            self._is_suppressed(request.track_id, now),
+        )
+        if reason != GateReason.OK:
+            return [], reason
+
+        destination = approach_destination(request)
+
+        if self.state == State.APPROACHING:
+            if not self._approach_goal_moved(request.goal):
+                # 재계획 폭주 억제. 승인은 하되 goal 은 그대로 둔다.
+                return [], GateReason.OK
+            self.approach_goal_pose = request.goal
+            self.active_destination = destination
+            return [Navigate(destination)], GateReason.OK
+
+        self.state = State.APPROACHING
+        self.active_destination = destination
+        self.approach_track_id = request.track_id
+        self.approach_goal_pose = request.goal
+        self._response_deadline = None
+        self._announced_milestones = set()
+        self._approach.reset()
+        return (
+            [
+                # 접근 구간 전체를 0.3 m/s 로 묶는다. 목적지 접근 감속 사다리와
+                # 달리 거리에 따라 내려가지 않는다 — 사람에게 다가가는 동안은
+                # 처음부터 끝까지 느려야 한다.
+                SetNavSpeedLimit(self.person_approach_speed_percent),
+                Navigate(destination),
+            ],
+            GateReason.OK,
+        )
+
+    def on_approach_cancel_request(self, now: float) -> tuple:
+        """접근 포기·대상 이탈 통보(/vica/mission/cancel_approach).
+
+        안내 주행용 on_cancel_request 와 경로를 나눈 이유는 대상이 다르기
+        때문이다. 접근 취소가 안내를 끊어서는 안 되고, 안내 취소가 접근을
+        끊어서도 안 된다.
+        """
+        reason = check_approach_cancel_gate(self.state, self.estop_active)
+        if reason != GateReason.OK:
+            return [], reason
+
+        actions: list = []
+        if self.state == State.APPROACHING:
+            actions.append(CancelNav(self.active_destination))
+        actions.extend(self._enter_returning(now))
+        return actions, GateReason.OK
+
+    def on_approach_question_spoken(self, now: float) -> list:
+        """질문 재생이 끝났다. 응답 대기 8초는 여기서부터 센다(설계 6.2절).
+
+        재생에 몇 초가 걸리는지는 TTS 만 알 수 있어 노드가 알려준다. 알려주지
+        않아도 동작은 한다 — 그때는 질문을 만든 시각부터 세므로, 어긋나더라도
+        사람에게 불리한 쪽(더 짧게 기다리는 쪽)으로만 어긋난다.
+        """
+        if self.state != State.AWAITING_USER:
+            return []
+        self._response_deadline = now + self.approach_response_timeout_sec
+        return []
+
+    def on_approach_answer(self, affirmative: bool, now: float) -> list:
+        """접근 질문에 대한 사람의 답. 여기서는 갈래만 만든다.
+
+        말을 알아듣는 일은 STT·LLM 몫이고, 이 모듈은 "네/아니오"로 정리된
+        결과만 받는다. 판정 권한은 그대로 Mission 에 있다 — LLM 이 goal 을
+        만들지 않는다.
+        """
+        if self.state != State.AWAITING_USER:
+            return []
+
+        if affirmative:
+            # 수락 -> 180도 돌아 핸들(로봇 뒤)을 사람 쪽으로 낸다(2026-08-24 확장).
+            # 핸들 접촉·목적지 안내는 여전히 다음 사이클이다. 방금 수락한 사람에게
+            # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 회전 전에 건다.
+            track_id = self.approach_track_id
+            self._suppress_track(track_id, now)
+            if self.approach_turn_yaw_rad == 0.0:
+                self._to_idle()
+                return [Say(MSG_APPROACH_ACCEPTED, priority="response")]
+            self.state = State.TURNING
+            self.active_destination = None
+            self._response_deadline = None
+            self._turn_deadline = now + APPROACH_TURN_TIMEOUT_SEC
+            return [
+                Say(MSG_APPROACH_ACCEPTED, priority="response"),
+                SpinInPlace(self.approach_turn_yaw_rad),
+            ]
+
+        actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
+        actions.extend(self._enter_returning(now))
+        return actions
+
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
 
@@ -561,7 +901,9 @@ class MissionLogic:
             return []
 
         actions: list = []
-        if self.state == State.NAVIGATING:
+        # 접근·복귀 중에도 goal 이 살아 있다. 로봇이 사람을 향해 움직이는 구간이
+        # 있으므로 여기서 취소가 빠지면 긴급어 경로가 죽는다(설계 7절).
+        if self.state in _GOAL_ACTIVE_STATES:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
@@ -577,7 +919,7 @@ class MissionLogic:
             self._estop_clear_since = None
             if self.state != State.ESTOPPED:
                 actions: list = []
-                if self.state == State.NAVIGATING:
+                if self.state in _GOAL_ACTIVE_STATES:
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(CancelNav(self.active_destination))
                 self._enter_estopped(now)
@@ -596,6 +938,7 @@ class MissionLogic:
     ) -> list:
         """주기 처리. distance_remaining 은 Nav2 feedback 의 남은 거리(m)다."""
         actions: list = []
+        self._prune_suppressed(now)
 
         if self.state == State.CONFIRMING:
             if self._confirm_deadline is not None and now >= self._confirm_deadline:
@@ -669,6 +1012,56 @@ class MissionLogic:
                     # (tts_queue._trim). 주행 실패는 사용자가 왜 멈췄는지 알
                     # 유일한 단서라 버려지면 안 된다.
                     actions.append(Say(MSG_NAV_FAILED, priority="response"))
+
+        elif self.state == State.APPROACHING:
+            if nav_status == NavStatus.SUCCEEDED:
+                # 사람 앞 1.1 m 에 섰다. 여기서부터 주도권은 음성 쪽으로 넘어가고
+                # Mission 은 타임아웃만 센다(설계 4절).
+                self.state = State.AWAITING_USER
+                self._response_deadline = now + self.approach_response_timeout_sec
+                self._approach.reset()
+                actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
+                actions.append(
+                    Say(
+                        MSG_APPROACH_QUESTION,
+                        priority="response",
+                        expects_reply=True,
+                    )
+                )
+            elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
+                # 접근은 재시도하지 않는다. 등록 목적지는 제자리에 있지만 사람은
+                # 3초 뒤 그 자리에 없다. 실패하면 돌아가서 다시 탐지하는 편이
+                # 빠르고, 같은 자리로 되풀이 진입하면 통행에 방해가 된다.
+                actions.extend(self._enter_returning(now))
+
+        elif self.state == State.TURNING:
+            if nav_status in (NavStatus.SUCCEEDED, NavStatus.FAILED,
+                              NavStatus.CANCELED):
+                # 회전 실패는 안내 실패가 아니다 - 핸들 방향만 어긋난 채 끝난다.
+                # 억제는 수락 시점에 이미 걸었으므로 여기서는 정리만 한다.
+                self._to_idle()
+            elif (self._turn_deadline is not None
+                  and now >= self._turn_deadline):
+                # spin 이 시작조차 안 됐다(노드 결함 등). 시계로 탈출한다.
+                self._to_idle()
+
+        elif self.state == State.AWAITING_USER:
+            # 여기서 하는 일은 시계를 보는 것뿐이다. 말을 알아듣는 쪽은 음성이다.
+            if self._response_deadline is not None and now >= self._response_deadline:
+                # 오탐이라 답할 이유가 없었을 수도, 답할 수 없는 상황일 수도 있다.
+                # 어느 쪽이든 계속 서서 기다리면 사람 앞을 막는 셈이 된다.
+                actions.append(Say(MSG_APPROACH_NO_ANSWER, priority="response"))
+                actions.extend(self._enter_returning(now))
+
+        elif self.state == State.RETURNING:
+            # 복귀 실패도 완료로 친다. 대기 위치에 못 갔다고 접근 상태에 갇히면
+            # 다음 사람을 아예 못 본다 — 복귀는 안전 사건이 아니다.
+            if self.return_destination is None or nav_status in (
+                NavStatus.SUCCEEDED,
+                NavStatus.FAILED,
+                NavStatus.CANCELED,
+            ):
+                self._finish_returning(now)
 
         elif self.state in (State.ARRIVED, State.FAILED):
             # 재시도 예약이 있으면 그것이 dwell 보다 우선한다.
@@ -744,6 +1137,70 @@ class MissionLogic:
         self._announced_milestones.update(crossed)
         return min(crossed)
 
+    def _approach_goal_moved(self, goal: Optional[Pose2D]) -> bool:
+        """접근 goal 을 다시 보낼 만큼 사람이 움직였는가.
+
+        NavigateToPose 는 preempt 되므로 취소·재전송이 필요 없지만, 새 goal 마다
+        BT 가 처음부터 다시 시작한다. 임계를 두지 않으면 5 Hz 로 들어오는 탐지가
+        그대로 재계획 요청이 되어 한 발도 못 뗀다(설계 5절).
+        """
+        import math
+
+        if goal is None or self.approach_goal_pose is None:
+            return True
+        moved = math.hypot(
+            goal.x - self.approach_goal_pose.x, goal.y - self.approach_goal_pose.y
+        )
+        return moved >= self.approach_goal_update_m
+
+    def _enter_returning(self, now: float) -> list:
+        """접근을 끝내고 대기 위치로 돌아간다.
+
+        복귀는 접근이 아니므로 0.3 m/s 제한을 여기서 푼다. 대기 위치 좌표는 아직
+        [미정] 이라(설계 12절) 없을 수 있고, 없으면 제자리에서 접근만 끝낸다 —
+        상태만 지나가고 다음 tick 에 IDLE 로 내려간다.
+
+        track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
+        세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
+        """
+        self.state = State.RETURNING
+        self.active_destination = self.return_destination
+        self.approach_goal_pose = None
+        self._response_deadline = None
+        self._announced_milestones = set()
+        self._approach.reset()
+        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+        if self.return_destination is not None:
+            actions.append(Navigate(self.return_destination))
+        return actions
+
+    def _finish_returning(self, now: float) -> None:
+        """복귀 완료. 이 시점부터 같은 사람에 대한 재접근 억제를 센다."""
+        track_id = self.approach_track_id
+        self._to_idle()
+        self._suppress_track(track_id, now)
+
+    def _suppress_track(self, track_id: Optional[int], now: float) -> None:
+        """이 사람에게 당분간 다시 다가가지 않는다.
+
+        거절했거나 답하지 않은 사람을 로봇이 계속 쫓아다니는 것이 이 기능의 가장
+        나쁜 실패 방식이다. 억제는 IDLE 로 내려가도 남아 있어야 하므로
+        _to_idle 에서 지우지 않는다.
+        """
+        if track_id is None or track_id == TRACK_ID_NONE:
+            return
+        self._suppressed_tracks[track_id] = now + self.reapproach_suppress_sec
+
+    def _is_suppressed(self, track_id: int, now: float) -> bool:
+        until = self._suppressed_tracks.get(track_id)
+        return until is not None and now < until
+
+    def _prune_suppressed(self, now: float) -> None:
+        """지난 억제를 버린다. 하루 종일 서 있으면 track_id 가 계속 쌓인다."""
+        expired = [t for t, until in self._suppressed_tracks.items() if now >= until]
+        for track_id in expired:
+            del self._suppressed_tracks[track_id]
+
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
         self.active_destination = None
@@ -758,6 +1215,15 @@ class MissionLogic:
         self._estop_clear_since = None
         self._announced_milestones = set()
         self._approach.reset()
+        # 접근도 함께 버린다. 목적지를 보관하지 않으므로 해제 뒤 자동 재개는
+        # 없고, 사람에게 다시 가려면 탐지부터 다시 해야 한다(설계 4절).
+        #
+        # 억제까지 거는 것은 설계에 없는 판단이다. 방금 비상 정지가 걸린 그
+        # 사람에게 해제 직후 로봇이 다시 다가가는 것이 더 나쁘다고 봤다.
+        self._suppress_track(self.approach_track_id, now)
+        self.approach_track_id = None
+        self.approach_goal_pose = None
+        self._response_deadline = None
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -770,6 +1236,7 @@ class MissionLogic:
         self._dwell_until = None
         self._estop_entered_at = None
         self._estop_clear_since = None
+        self._turn_deadline = None
         self._announced_milestones = set()
         self._approach.reset()
         # 재시도 예산은 목적지 하나당이다. IDLE 로 내려오면 이번 시도가 끝난
@@ -778,3 +1245,8 @@ class MissionLogic:
         self._nav_retry_count = 0
         self._retry_destination = None
         self._retry_at = None
+        # 접근 대상도 비운다. _suppressed_tracks 는 남긴다 — 재접근 억제는
+        # IDLE 로 돌아온 뒤에 효력을 내야 하는 값이라 여기서 지우면 무의미해진다.
+        self.approach_track_id = None
+        self.approach_goal_pose = None
+        self._response_deadline = None

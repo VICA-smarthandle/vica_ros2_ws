@@ -19,26 +19,30 @@ mission_logic.py(순수 함수/상태 머신)에 있고, 이 파일은 ROS 배�
 from __future__ import annotations
 
 import json
+import math
 import threading
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav2_msgs.msg import SpeedLimit
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
-from vica_interfaces.srv import MissionCommand, RequestDestination
+from vica_interfaces.msg import PersonDetection
+from vica_interfaces.srv import MissionCommand, RequestApproach, RequestDestination
 
 from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_map_bounds
+from .approach_geometry import approach_goal
 from .mission_logic import (
+    ApproachRequest,
     CancelNav,
     GateReason,
     IntentData,
@@ -47,6 +51,8 @@ from .mission_logic import (
     NavStatus,
     Say,
     SetNavSpeedLimit,
+    SpinInPlace,
+    Pose2D,
     State,
     _REJECT_MESSAGES,
     check_gate,
@@ -76,6 +82,8 @@ class MissionManagerNode(Node):
         self.declare_parameter("map_id", "")
         self.declare_parameter("map_yaml", "")
         self.declare_parameter("confirm_timeout_sec", 30.0)
+        # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
+        self.declare_parameter("approach_turn_yaw_deg", 180.0)
         self.declare_parameter("estop_release_grace_sec", 2.0)
         # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
         # 0 으로 두면 종전처럼 실패를 안내하고 끝낸다.
@@ -139,6 +147,8 @@ class MissionManagerNode(Node):
         retry_delay = float(self.get_parameter("nav_retry_delay_sec").value)
         self.logic = MissionLogic(
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
+            approach_turn_yaw_rad=math.radians(
+                float(self.get_parameter("approach_turn_yaw_deg").value)),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -242,6 +252,42 @@ class MissionManagerNode(Node):
             self._on_resume_request,
             callback_group=self._main_group,
         )
+        # ── 사람 접근 (Phase B, 설계 3·5절) ────────────────────────────────
+        # goal 권한의 경계다. person_detector_node 는 요청만 보내고, 좌표를
+        # 계산해 Nav2 로 보내는 것은 여기뿐이다.
+        self.create_service(
+            RequestApproach,
+            "/vica/mission/request_approach",
+            self._on_approach_request,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/cancel_approach",
+            self._on_approach_cancel,
+            callback_group=self._main_group,
+        )
+        # 접근 goal 계산(approach_goal)은 "사람에게서 로봇 쪽으로 1.1 m" 라
+        # 로봇의 map 위치가 필요하다. TF 조회 대신 /amcl_pose 를 구독한다 —
+        # 이 노드에 tf2 리스너를 새로 들이는 것보다 싸고, goal 의 후퇴 방향을
+        # 정하는 용도라 AMCL 갱신 주기(이동 시에만) 수준의 신선도면 충분하다.
+        self._robot_pose = None
+        # AMCL 은 /amcl_pose 를 transient_local(보관) + 이동 시에만 발행한다.
+        # 일반(volatile) 구독은 이 노드가 나중에 켜지면 보관본을 못 받아,
+        # 로봇이 움직이기 전까지 접근 요청이 전부 "위치 없음"으로 거절된다
+        # (2026-08-24 B5 실기에서 Mission 재시작 직후 실제로 났다).
+        amcl_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(
+            PoseWithCovarianceStamped,
+            "/amcl_pose",
+            self._on_amcl_pose,
+            amcl_qos,
+            callback_group=self._main_group,
+        )
 
         tick_hz = float(self.get_parameter("tick_hz").value)
         self.create_timer(1.0 / tick_hz, self._tick, callback_group=self._main_group)
@@ -256,6 +302,12 @@ class MissionManagerNode(Node):
         # 다만 취소는 바로 실행하지 않고 되물어 확인한 뒤에만 처리한다.
         if msg.intent in ("cancel", "pause", "resume"):
             self._on_voice_mission_command(msg)
+            return
+        # 접근 질문의 짧은 답(계약: VicaIntent.msg 의 affirm/deny 절).
+        # 어느 질문의 답인지는 여기의 상태가 정한다 — AWAITING_USER 가 아니면
+        # on_approach_answer 가 빈 목록을 돌려주고, 그때는 무시가 정답이다.
+        if msg.intent in ("affirm", "deny"):
+            self._on_voice_answer(msg.intent == "affirm")
             return
 
         intent = IntentData(
@@ -273,6 +325,20 @@ class MissionManagerNode(Node):
             f"confirm={msg.need_confirm} -> state={self.logic.state.value}"
         )
         self._run_actions(actions)
+
+    def _on_voice_answer(self, affirmative: bool) -> None:
+        before = self.logic.state
+        actions = self.logic.on_approach_answer(affirmative, self._now())
+        if not actions:
+            self.get_logger().info(
+                f"affirm/deny 무시: state={before.value} (접근 질문 대기 중이 아님)"
+            )
+            return
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"접근 응답 {'긍정' if affirmative else '부정'}: "
+            f"{before.value} -> {self.logic.state.value}"
+        )
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
@@ -371,6 +437,125 @@ class MissionManagerNode(Node):
         response.message = f"{command} 요청을 처리했습니다."
         self.get_logger().info(
             f"{command} 처리: {before.value} -> {self.logic.state.value}"
+        )
+        return response
+
+    # -- 사람 접근 service (Phase B) ---------------------------------------------
+
+    def _on_amcl_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        q = msg.pose.pose.orientation
+        yaw_deg = math.degrees(
+            math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                       1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+        self._robot_pose = Pose2D(
+            x=msg.pose.pose.position.x,
+            y=msg.pose.pose.position.y,
+            yaw_deg=yaw_deg,
+            frame_id=msg.header.frame_id or "map",
+        )
+
+    def _on_approach_request(
+        self,
+        request: RequestApproach.Request,
+        response: RequestApproach.Response,
+    ) -> RequestApproach.Response:
+        """사람 접근 요청. 검증 -> goal 계산 -> 상태 기계 순서로 거른다.
+
+        판단(60초 억제·상태·E-stop)은 mission_logic, 기하(1.1 m goal)는
+        approach_geometry 가 한다. 여기는 srv 계약의 형식 검증과 배선만 한다.
+        """
+        try:
+            request_id = str(UUID(request.request_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+
+        target = request.target
+        # srv 계약: 상위 track_id 와 target.track_id 가 다르면 거절한다.
+        if request.track_id != target.track_id:
+            response.accepted = False
+            response.message = "track_id가 target.track_id와 다릅니다."
+            return response
+        if target.track_id == PersonDetection.TRACK_ID_NONE:
+            response.accepted = False
+            response.message = "추적 id가 없는 탐지는 접근 대상이 아닙니다."
+            return response
+
+        px, py = target.pose.position.x, target.pose.position.y
+        if not (math.isfinite(px) and math.isfinite(py)):
+            # NaN 좌표로 approach_goal 을 부르면 NaN goal 이 나온다(None 이
+            # 아니라). 기하에 들어가기 전에 여기서 자른다.
+            response.accepted = False
+            response.message = "탐지 좌표가 유효하지 않습니다."
+            return response
+        if self._robot_pose is None:
+            response.accepted = False
+            response.message = "로봇 위치(/amcl_pose)를 아직 받지 못했습니다."
+            return response
+
+        person = Pose2D(x=px, y=py, yaw_deg=0.0,
+                        frame_id=target.header.frame_id or "map")
+        goal = approach_goal(person, self._robot_pose)
+        approach = ApproachRequest(
+            goal=goal,                      # None 이면 게이트가 거부한다
+            track_id=target.track_id,
+            approachable=target.approachable,
+        )
+
+        before = self.logic.state
+        actions, reason = self.logic.on_approach_request(
+            approach, self.map_bounds, self._nav2_ready(), self._now()
+        )
+        if reason != GateReason.OK:
+            response.accepted = False
+            response.message = f"접근 요청 거부: {reason.value}"
+            self.get_logger().warn(
+                f"접근 거부: track={target.track_id} state={before.value} "
+                f"reason={reason.value}"
+            )
+            return response
+
+        self._run_actions(actions)
+        response.accepted = True
+        response.message = "접근을 시작합니다."
+        self.get_logger().info(
+            f"접근 승인: track={target.track_id} dist={target.distance_m:.2f}m "
+            f"{before.value} -> {self.logic.state.value}"
+        )
+        return response
+
+    def _on_approach_cancel(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        try:
+            request_id = str(UUID(request.request_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+
+        before = self.logic.state
+        actions, reason = self.logic.on_approach_cancel_request(self._now())
+        if reason != GateReason.OK:
+            response.accepted = False
+            response.message = f"접근 취소 거부: {reason.value}"
+            return response
+        self._run_actions(actions)
+        response.accepted = True
+        response.message = "접근을 취소했습니다."
+        self.get_logger().info(
+            f"접근 취소: {before.value} -> {self.logic.state.value}"
         )
         return response
 
@@ -536,6 +721,8 @@ class MissionManagerNode(Node):
                 self._cancel_nav(action.destination, action.event)
             elif isinstance(action, Navigate):
                 self._start_nav(action)
+            elif isinstance(action, SpinInPlace):
+                self._start_spin(action)
             elif isinstance(action, SetNavSpeedLimit):
                 self._publish_nav_speed_limit(action.percent)
 
@@ -590,6 +777,25 @@ class MissionManagerNode(Node):
             self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
             # goal 거부 → 다음 tick 에서 FAILED 처리되도록 상태를 만든다.
             self.get_logger().error(f"NavigateToPose goal 거부됨: {dest.id}")
+            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+
+    def _start_spin(self, action: SpinInPlace) -> None:
+        """제자리 회전. BasicNavigator.spin() 은 behavior server 의 Spin 을 부른다.
+
+        goToPose 와 같은 isTaskComplete/getResult 로 끝나므로 상태 감시는
+        _poll_nav_status 를 그대로 탄다. 거부되면 다음 tick 의 FAILED 로 흘려
+        로직이 TURNING 에서 스스로 내려오게 한다(별도 복구 없음 - 회전 실패는
+        안내 실패가 아니다).
+        """
+        with self._nav_lock:
+            accepted = self.navigator.spin(spin_dist=action.yaw_rad)
+            self._nav_active = bool(accepted)
+        if accepted:
+            self.get_logger().info(
+                f"제자리 회전 시작: {action.yaw_rad:.2f} rad (핸들을 사람 쪽으로)"
+            )
+        else:
+            self.get_logger().error("Spin 거부됨 - 회전 없이 접근을 끝낸다")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
     def _cancel_nav(self, destination=None, event: str = "goal_canceled") -> None:
