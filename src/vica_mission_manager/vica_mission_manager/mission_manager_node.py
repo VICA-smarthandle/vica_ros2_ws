@@ -51,6 +51,7 @@ from .mission_logic import (
     NavStatus,
     Say,
     SetNavSpeedLimit,
+    SpinInPlace,
     Pose2D,
     State,
     _REJECT_MESSAGES,
