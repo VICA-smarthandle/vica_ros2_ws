@@ -7,7 +7,6 @@ import pytest
 
 from vica_mission_manager.mission_logic import (
     DISTANCE_MILESTONES_M,
-    MSG_DISTANCE_REMAINING,
     Destination,
     IntentData,
     MapBounds,
@@ -161,42 +160,10 @@ def test_slowdown_can_be_disabled():
     assert _speed_limits(logic.on_tick(1.0, NavStatus.RUNNING, 0.1)) == []
 
 
-def test_announces_once_when_crossing_three_meters(navigating):
-    """3 m 지점을 지날 때 한 번만 말한다. 10 m 안내는 없앴다 (2026-08-20 사용자 결정).
-
-    이 지도의 목적지 간 거리가 대부분 3~7 m 라, 출발하자마자 "10미터
-    남았습니다"가 나오는 오보가 반복됐다.
-    """
-    assert _spoken(navigating.on_tick(1.0, NavStatus.RUNNING, 12.0)) == []
-    assert _spoken(navigating.on_tick(2.0, NavStatus.RUNNING, 9.5)) == []
-    assert _spoken(navigating.on_tick(3.0, NavStatus.RUNNING, 2.9)) == [
-        MSG_DISTANCE_REMAINING.format(meters=3)
-    ]
-    assert _spoken(navigating.on_tick(4.0, NavStatus.RUNNING, 1.0)) == []
-
-
-def test_short_trip_stays_silent(navigating):
-    """출발부터 3 m 이하면 거리 안내를 아예 하지 않는다.
-
-    곧 도착 멘트가 나올 텐데 "3미터 남았습니다"까지 겹치면 소음이다.
-    """
-    assert _spoken(navigating.on_tick(1.0, NavStatus.RUNNING, 2.0)) == []
-    assert _spoken(navigating.on_tick(2.0, NavStatus.RUNNING, 1.0)) == []
-
-
-def test_baseline_uses_first_positive_distance(navigating):
-    """None/0.0 은 출발 거리로 치지 않는다 — 첫 양수 거리가 출발 거리다."""
-    navigating.on_tick(1.0, NavStatus.RUNNING, None)
-    navigating.on_tick(2.0, NavStatus.RUNNING, 0.0)
-    assert _spoken(navigating.on_tick(3.0, NavStatus.RUNNING, 2.5)) == []
-
-
-def test_replanning_does_not_reannounce(navigating):
-    """재계획으로 남은 거리가 다시 늘어도 같은 Goal 에서는 한 번만 말한다."""
-    navigating.on_tick(1.0, NavStatus.RUNNING, 5.0)
-    navigating.on_tick(2.0, NavStatus.RUNNING, 2.5)  # 3 m 안내 소진
-    assert _spoken(navigating.on_tick(3.0, NavStatus.RUNNING, 6.0)) == []
-    assert _spoken(navigating.on_tick(4.0, NavStatus.RUNNING, 2.0)) == []
+def test_distance_narration_is_disabled(navigating):
+    """거리 안내는 전면 제거됐다 (2026-08-26 사용자 결정 — 소음 > 정보)."""
+    for t, d in [(1.0, 12.0), (2.0, 9.5), (3.0, 2.9), (4.0, 1.0)]:
+        assert _spoken(navigating.on_tick(t, NavStatus.RUNNING, d)) == []
 
 
 def test_ignores_missing_or_zero_distance(navigating):
@@ -206,24 +173,8 @@ def test_ignores_missing_or_zero_distance(navigating):
     assert _spoken(navigating.on_tick(3.0, NavStatus.RUNNING, -1.0)) == []
 
 
-def test_new_goal_resets_milestones(navigating):
-    navigating.on_tick(1.0, NavStatus.RUNNING, 2.0)  # 짧은 출발 — 침묵으로 소진
-    navigating.on_tick(2.0, NavStatus.SUCCEEDED)
-    navigating.on_tick(10.0, NavStatus.NONE)  # dwell 경과 -> idle
-
-    navigating.on_intent(_intent(), _destination(), _bounds(), True, now=11.0)
-
-    assert _spoken(navigating.on_tick(12.0, NavStatus.RUNNING, 9.0)) == []
-    assert _spoken(navigating.on_tick(13.0, NavStatus.RUNNING, 2.8)) == [
-        MSG_DISTANCE_REMAINING.format(meters=3)
-    ]
-
-
-def test_distance_is_narration_priority(navigating):
-    navigating.on_tick(1.0, NavStatus.RUNNING, 9.0)
-    actions = navigating.on_tick(2.0, NavStatus.RUNNING, 2.5)
-    says = [a for a in actions if isinstance(a, Say)]
-    assert says and all(a.priority == "narration" for a in says)
+def test_milestones_are_empty():
+    assert DISTANCE_MILESTONES_M == ()
 
 
 def test_no_announcement_when_not_navigating():
@@ -231,7 +182,3 @@ def test_no_announcement_when_not_navigating():
     logic = MissionLogic()
     assert _spoken(logic.on_tick(1.0, NavStatus.RUNNING, 5.0)) == []
 
-
-def test_milestone_is_three_meters_only():
-    """지점은 3 m 하나뿐이다 (2026-08-20 사용자 결정 — 10 m 안내 폐기)."""
-    assert DISTANCE_MILESTONES_M == (3.0,)
