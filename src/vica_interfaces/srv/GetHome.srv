@@ -1,0 +1,27 @@
+# 지도별 홈 위치를 읽는다. mission_manager_node 가 처리한다.
+#
+# 앱이 장소 저장 화면과 원격 주행 화면에서 각각 부른다. 홈이 없으면
+# exists=false 로 돌려주며 이것은 오류가 아니다 — 아직 지정하지 않은 정상 상태다.
+string map_id
+---
+bool exists
+string message
+
+float64 x
+float64 y
+float64 yaw
+
+string source
+float64 score
+string label
+
+# 실제로 가서 도착해 봤는가. **이 파일에서 가장 중요한 값이다.**
+#
+# 나머지 필드는 "어떻게 정했나"를 적은 것이고, 이 하나만이 "실제로 갈 수 있는
+# 자리임을 확인했나"를 답한다. 앱이 "아직 가 본 적이 없습니다" 경고를 띄우는
+# 근거이며, 지도를 새로 저장하면 false 로 되돌아간다 — 좌표는 그대로인데
+# 지도가 달라져 홈이 벽 속에 들어갈 수 있기 때문이다.
+bool visited_ok
+
+# ISO 8601 문자열. 사람에게 보여줄 시각이며 만료 판정에는 쓰지 않는다.
+string saved_at

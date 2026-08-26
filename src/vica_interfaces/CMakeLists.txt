@@ -29,6 +29,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/PoseCheck.srv"
   "srv/PoseCommit.srv"
   "srv/RequestApproach.srv"
+  "srv/SaveHome.srv"
+  "srv/GetHome.srv"
+  "srv/DeleteHome.srv"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 
