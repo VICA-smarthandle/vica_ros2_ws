@@ -36,14 +36,23 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.msg import PersonDetection
-from vica_interfaces.srv import MissionCommand, RequestApproach, RequestDestination
+from vica_interfaces.srv import (
+    DeleteHome,
+    GetHome,
+    MissionCommand,
+    RequestApproach,
+    RequestDestination,
+    SaveHome,
+)
 
 from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_map_bounds
 from .approach_geometry import approach_goal
+from .home_storage import HomeStorage, build_home
 from .mission_logic import (
     ApproachRequest,
     CancelNav,
+    Destination,
     GateReason,
     IntentData,
     MissionLogic,
@@ -58,6 +67,13 @@ from .mission_logic import (
     check_gate,
     yaw_deg_to_quaternion,
 )
+
+#: 홈에 붙이는 고정 id.
+#:
+#: 목적지 id 는 UUID v4 인데 홈은 일부러 그 형식을 쓰지 않는다. 그래야 앱이나
+#: 음성이 이 id 로 `/vica/mission/request_destination` 을 불러도 UUID 검증에서
+#: 먼저 걸린다 — **홈을 목적지처럼 요청하는 길을 형식 수준에서 막는 것**이다.
+HOME_DESTINATION_ID = "__home__"
 
 try:
     from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
@@ -122,6 +138,10 @@ class MissionManagerNode(Node):
                 f"목적지 catalog가 없어 빈 목록으로 시작합니다: {self._destinations_path}"
             )
 
+        # 홈은 목적지 카탈로그와 같은 폴더의 home.yaml 이다. 지도별 자료가
+        # 흩어지지 않도록 목적지 경로의 부모를 그대로 쓴다.
+        self._home_storage = HomeStorage(Path(self._destinations_path).parent.parent)
+
         map_yaml = str(self.get_parameter("map_yaml").value)
         if map_yaml:
             self.map_bounds = load_map_bounds(map_yaml)
@@ -153,7 +173,18 @@ class MissionManagerNode(Node):
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
             nav_retry_delay_sec=retry_delay,
+            return_destination=self._load_home_destination(),
         )
+        if self.logic.return_destination is not None:
+            self.get_logger().info(
+                f"홈 위치: {self.logic.return_destination.pose.x:.2f}, "
+                f"{self.logic.return_destination.pose.y:.2f}, "
+                f"{self.logic.return_destination.pose.yaw_deg:.0f}도"
+            )
+        else:
+            self.get_logger().info(
+                "홈 위치 미지정 — 자동 복귀는 꺼진 상태로 시작합니다(안내는 정상)."
+            )
         if retry_limit > 0:
             self.get_logger().info(
                 f"주행 실패 시 자동 재시도: 최대 {retry_limit}회 · {retry_delay:.1f}초 간격"
@@ -265,6 +296,41 @@ class MissionManagerNode(Node):
             MissionCommand,
             "/vica/mission/cancel_approach",
             self._on_approach_cancel,
+            callback_group=self._main_group,
+        )
+        # ── 홈 위치 (2026-08-26) ───────────────────────────────────────────
+        # 홈은 목적지가 아니라 로봇의 설정값이라 destinations.yaml 에 넣지 않고
+        # 같은 폴더의 home.yaml 하나로 관리한다. 파일이 하나이므로 "지도당 1개"가
+        # 저절로 지켜진다.
+        #
+        # 홈 복귀를 별도 서비스로 두는 것이 **사용자와 관리자를 가르는 방법**이다.
+        # 목적지 요청은 UUID 로 지목하는데 홈에는 UUID 가 없고, 음성 LLM 은
+        # 토픽만 발행할 뿐 서비스 클라이언트가 없다. 즉 권한을 검사해서 막는
+        # 것이 아니라 **사용자 쪽에 문이 없게** 만든 것이다. 목적지에 is_home
+        # 플래그를 두면 "홈이면 거른다"를 모든 진입점마다 넣어야 하고 한 곳만
+        # 빠뜨려도 조용히 샌다.
+        self.create_service(
+            SaveHome,
+            "/vica/home/save",
+            self._on_save_home,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            GetHome,
+            "/vica/home/get",
+            self._on_get_home,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            DeleteHome,
+            "/vica/home/delete",
+            self._on_delete_home,
+            callback_group=self._main_group,
+        )
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/return_home",
+            self._on_return_home,
             callback_group=self._main_group,
         )
         # 접근 goal 계산(approach_goal)은 "사람에게서 로봇 쪽으로 1.1 m" 라
@@ -437,6 +503,202 @@ class MissionManagerNode(Node):
         response.message = f"{command} 요청을 처리했습니다."
         self.get_logger().info(
             f"{command} 처리: {before.value} -> {self.logic.state.value}"
+        )
+        return response
+
+    # -- 홈 위치 service (2026-08-26) --------------------------------------------
+    #
+    # 홈은 로봇의 설정값이라 목적지 카탈로그와 분리한다. 이 네 서비스가 홈에
+    # 닿는 유일한 길이며, 음성(LLM)은 토픽만 발행하므로 여기 들어올 수 없다.
+
+    def _load_home_destination(self):
+        """home.yaml 을 읽어 MissionLogic 이 쓸 Destination 으로 만든다.
+
+        홈이 없으면 None 이다. 이것은 오류가 아니라 아직 지정하지 않은 정상
+        상태이며, 그때는 자동 복귀만 꺼지고 안내는 그대로 동작한다.
+
+        ``visited_ok`` 가 False 여도 좌표는 그대로 쓴다. 확인 여부는 관리자에게
+        보여줄 정보이지 로봇이 갈지 말지를 정하는 값이 아니다 — 오히려 가 봐야
+        확인이 되므로, 여기서 막으면 영영 확인할 수 없다.
+        """
+        map_yaml = str(self.get_parameter("map_yaml").value)
+        if map_yaml:
+            # 같은 map_id 로 지도만 바뀌었으면 확인 상태를 되돌린다. 좌표는
+            # 그대로인데 벽 위치가 옮겨져 홈이 벽 속에 들어갈 수 있다.
+            before = self._home_storage.read(self._map_id)
+            home = self._home_storage.invalidate_if_map_is_newer(
+                self._map_id, map_yaml
+            )
+            if (
+                before is not None
+                and home is not None
+                and before.visited_ok
+                and not home.visited_ok
+            ):
+                self.get_logger().warn(
+                    "지도가 홈보다 새로 저장되어 홈 확인 상태를 되돌렸습니다. "
+                    "앱에서 '홈으로 가보기'로 다시 확인하세요."
+                )
+        else:
+            home = self._home_storage.read(self._map_id)
+        if home is None:
+            return None
+        return Destination(
+            id=HOME_DESTINATION_ID,
+            name=home.label or "홈",
+            pose=Pose2D(x=home.x, y=home.y, yaw_deg=home.yaw, frame_id="map"),
+        )
+
+    def _refresh_home(self) -> None:
+        """저장·삭제 직후 MissionLogic 이 쓰는 홈을 새로 읽어 맞춘다."""
+        self.logic.return_destination = self._load_home_destination()
+
+    def _on_save_home(
+        self,
+        request: SaveHome.Request,
+        response: SaveHome.Response,
+    ) -> SaveHome.Response:
+        if request.map_id != self._map_id:
+            response.accepted = False
+            response.visited_ok = False
+            response.message = (
+                f"다른 지도의 홈은 저장할 수 없습니다. "
+                f"현재={self._map_id}, 요청={request.map_id}"
+            )
+            return response
+
+        try:
+            home = build_home(
+                map_id=request.map_id,
+                x=request.x,
+                y=request.y,
+                yaw=request.yaw,
+                source=request.source,
+                score=request.score,
+                label=request.label,
+            )
+            saved = self._home_storage.write(home)
+        except (ValueError, OSError) as exc:
+            response.accepted = False
+            response.visited_ok = False
+            response.message = f"홈 저장 실패: {exc}"
+            self.get_logger().warn(response.message)
+            return response
+
+        self._refresh_home()
+        response.accepted = True
+        response.visited_ok = saved.visited_ok
+        response.message = (
+            "홈을 저장했습니다. 아직 가 본 적이 없으니 '홈으로 가보기'로 확인하세요."
+        )
+        self.get_logger().info(
+            f"홈 저장: ({saved.x:.2f}, {saved.y:.2f}, {saved.yaw:.0f}도) "
+            f"source={saved.source} score={saved.score:.1f}"
+        )
+        return response
+
+    def _on_get_home(
+        self,
+        request: GetHome.Request,
+        response: GetHome.Response,
+    ) -> GetHome.Response:
+        map_id = request.map_id or self._map_id
+        try:
+            home = self._home_storage.read(map_id)
+        except ValueError as exc:
+            response.exists = False
+            response.message = f"map_id 오류: {exc}"
+            return response
+
+        if home is None:
+            response.exists = False
+            response.message = "홈이 아직 지정되지 않았습니다."
+            return response
+
+        response.exists = True
+        response.message = ""
+        response.x = home.x
+        response.y = home.y
+        response.yaw = home.yaw
+        response.source = home.source
+        response.score = home.score
+        response.label = home.label
+        response.visited_ok = home.visited_ok
+        response.saved_at = home.saved_at
+        return response
+
+    def _on_delete_home(
+        self,
+        request: DeleteHome.Request,
+        response: DeleteHome.Response,
+    ) -> DeleteHome.Response:
+        if request.map_id != self._map_id:
+            response.accepted = False
+            response.message = (
+                f"다른 지도의 홈은 지울 수 없습니다. "
+                f"현재={self._map_id}, 요청={request.map_id}"
+            )
+            return response
+
+        try:
+            removed = self._home_storage.delete(request.map_id)
+        except (ValueError, OSError) as exc:
+            response.accepted = False
+            response.message = f"홈 삭제 실패: {exc}"
+            return response
+
+        self._refresh_home()
+        response.accepted = True
+        response.message = (
+            "홈을 지웠습니다. 자동 복귀가 꺼집니다."
+            if removed
+            else "지울 홈이 없었습니다."
+        )
+        self.get_logger().info(response.message)
+        return response
+
+    def _on_return_home(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """관리자가 앱에서 홈 복귀를 눌렀다.
+
+        '홈으로 가보기'(장소 저장 화면)와 '홈으로 복귀'(원격 주행 화면)가
+        **같은 서비스**를 부른다. 하는 일이 같기 때문이며, 다른 것은 관리자가
+        그 결과를 무엇으로 쓰느냐뿐이다 — 지정 확인이냐 운영 호출이냐.
+        """
+        try:
+            request_id = str(UUID(request.request_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+
+        before = self.logic.state
+        accepted, reason, actions = self.logic.on_return_home_request(
+            self._nav2_ready(), self._now()
+        )
+        if not accepted:
+            response.accepted = False
+            response.message = f"홈 복귀 거부: {reason.value}"
+            self.get_logger().warn(
+                f"홈 복귀 거부: state={before.value} reason={reason.value}"
+            )
+            return response
+
+        self._run_actions(actions)
+        home = self.logic.return_destination
+        if home is not None:
+            self._publish_goal_event("return_home_sent", home)
+        response.accepted = True
+        response.message = "홈으로 복귀합니다."
+        self.get_logger().info(
+            f"홈 복귀 시작: {before.value} -> {self.logic.state.value}"
         )
         return response
 
@@ -868,25 +1130,43 @@ class MissionManagerNode(Node):
                 return NavStatus.RUNNING
             self._nav_active = False
             result = self.navigator.getResult()
+        # 복귀 중이면 목적지가 홈이다. 도착 여부가 곧 "이 홈에 갈 수 있는가"의
+        # 답이므로 여기서 home.yaml 의 visited_ok 를 기록한다.
+        returning = self.logic.state == State.RETURNING
         if result == TaskResult.SUCCEEDED:
+            if returning:
+                self._record_home_visit(True)
             if self.logic.active_destination is not None:
                 self._publish_goal_event(
-                    "goal_succeeded", self.logic.active_destination
+                    "return_home_succeeded" if returning else "goal_succeeded",
+                    self.logic.active_destination,
                 )
             return NavStatus.SUCCEEDED
         if result == TaskResult.CANCELED:
             if self.logic.active_destination is not None:
                 self._publish_goal_event(
-                    "goal_canceled", self.logic.active_destination
+                    "return_home_canceled" if returning else "goal_canceled",
+                    self.logic.active_destination,
                 )
             return NavStatus.CANCELED
+        if returning:
+            # 실패도 기록한다. 한 번 확인된 홈이라도 가구가 놓이거나 문이
+            # 잠기면 못 가는 자리가 된다 — 좌표는 그대로인데 도달할 수 없다.
+            self._record_home_visit(False)
         if self.logic.active_destination is not None:
             self._publish_goal_event(
-                "goal_failed",
+                "return_home_failed" if returning else "goal_failed",
                 self.logic.active_destination,
                 "Nav2 task failed",
             )
         return NavStatus.FAILED
+
+    def _record_home_visit(self, visited_ok: bool) -> None:
+        """복귀 결과를 home.yaml 에 남긴다. 실패해도 주행 판정을 막지 않는다."""
+        try:
+            self._home_storage.mark_visited(self._map_id, visited_ok)
+        except (ValueError, OSError) as exc:
+            self.get_logger().warn(f"홈 확인 상태를 기록하지 못했습니다: {exc}")
 
     def _nav_distance_remaining(self):
         """Nav2 feedback 의 남은 거리(m). 아직 없으면 None.

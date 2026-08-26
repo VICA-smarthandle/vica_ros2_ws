@@ -79,6 +79,9 @@ class GateReason(str, Enum):
     TRACK_SUPPRESSED = "track_suppressed"
     BUSY_APPROACHING = "busy_approaching"
     NOT_APPROACHING = "not_approaching"
+    # 홈 복귀 요청 전용 사유.
+    NO_HOME = "no_home"
+    ALREADY_HOME_BOUND = "already_home_bound"
 
 
 @dataclass(frozen=True)
@@ -491,6 +494,42 @@ def check_approach_gate(
     return GateReason.OK
 
 
+def check_return_home_gate(
+    state: State,
+    home: Optional[Destination],
+    estop_active: bool,
+    nav_ready: bool,
+) -> GateReason:
+    """홈 복귀 게이트(`/vica/mission/return_home`). **관리자 전용 요청이다.**
+
+    사용자(음성)에게는 이 문이 아예 없다. 홈은 `destinations.yaml` 에 없어서
+    UUID 가 없고, 음성 경로는 목적지를 UUID 로 지목하므로 **지목할 대상 자체가
+    존재하지 않는다.** 전화번호부에 없는 번호로는 전화를 걸 수 없는 것과 같다.
+
+    안내 주행 중에는 거부한다. 사용자가 핸들을 잡고 따라 걷는 중에 로봇이 홈으로
+    방향을 틀면 **사용자는 자기가 어디로 끌려가는지 모른다** — 눈으로 확인할 수
+    없고 로봇이 목적지 변경을 말해 주지도 않는다. 관리자는 먼저 주행을 취소해
+    사용자에게 안내 종료를 알린 뒤 보내면 된다. 막는 것이 아니라 **알린 뒤 하게**
+    만드는 것이다.
+
+    일시정지 중에도 거부한다. 사용자가 돌아와 재개할 목적지가 살아 있기 때문이다.
+    """
+    if estop_active or state == State.ESTOPPED:
+        return GateReason.ESTOP_ACTIVE
+    if home is None:
+        return GateReason.NO_HOME
+    if state == State.RETURNING:
+        return GateReason.ALREADY_HOME_BOUND
+    if state in (State.APPROACHING, State.AWAITING_USER, State.TURNING):
+        return GateReason.BUSY_APPROACHING
+    if state != State.IDLE:
+        # NAVIGATING·PAUSED·CONFIRMING·ARRIVED·FAILED 가 여기 걸린다.
+        return GateReason.BUSY_NAVIGATING
+    if not nav_ready:
+        return GateReason.NAV_NOT_READY
+    return GateReason.OK
+
+
 def check_approach_cancel_gate(state: State, estop_active: bool) -> GateReason:
     """접근 취소 게이트(/vica/mission/cancel_approach).
 
@@ -569,9 +608,19 @@ class MissionLogic:
         self.reapproach_suppress_sec = reapproach_suppress_sec
         self.person_approach_speed_percent = person_approach_speed_percent
         self.approach_goal_update_m = approach_goal_update_m
-        # 접근을 마치고 돌아갈 대기 위치. 지도상 좌표는 아직 [미정] 이라(설계
-        # 12절) None 을 허용하며, 없으면 제자리에서 접근만 끝낸다.
+        # 접근을 마치고 돌아갈 대기 위치이자 안내를 끝내고 돌아갈 홈이다.
+        # 노드가 home.yaml 을 읽어 넣어 준다(2026-08-26). 지정되지 않았으면
+        # None 이며, 그때는 제자리에서 접근만 끝낸다 — 홈이 없어도 안내는
+        # 정상 동작하고 자동 복귀만 꺼진다.
         self.return_destination = return_destination
+        # 지금 복귀가 '접근 뒤 복귀'인가 '관리자가 부른 홈 복귀'인가.
+        #
+        # 두 복귀는 가는 곳이 같아서 State.RETURNING 을 함께 쓰지만 **끝낼 때
+        # 할 일이 다르다.** 접근 뒤 복귀는 방금 거절한 사람에게 다시 다가가지
+        # 않도록 재접근 억제를 걸어야 하는데, 관리자 홈 복귀에는 억제할 사람이
+        # 없다. 이 플래그가 없으면 엉뚱한 track_id 를 억제해 **다음에 만나는
+        # 사람을 이유 없이 무시하게 된다.**
+        self._returning_home: bool = False
         # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
         self.approach_turn_yaw_rad = approach_turn_yaw_rad
         self._turn_deadline: Optional[float] = None
@@ -1153,17 +1202,42 @@ class MissionLogic:
         )
         return moved >= self.approach_goal_update_m
 
-    def _enter_returning(self, now: float) -> list:
-        """접근을 끝내고 대기 위치로 돌아간다.
+    def on_return_home_request(self, nav_ready: bool, now: float) -> tuple:
+        """관리자가 앱에서 홈 복귀를 요청했다(`/vica/mission/return_home`).
 
-        복귀는 접근이 아니므로 0.3 m/s 제한을 여기서 푼다. 대기 위치 좌표는 아직
-        [미정] 이라(설계 12절) 없을 수 있고, 없으면 제자리에서 접근만 끝낸다 —
-        상태만 지나가고 다음 tick 에 IDLE 로 내려간다.
+        **사용자(음성)는 이 경로로 들어올 수 없다.** 홈은 목적지 카탈로그에
+        없어서 UUID 가 없고, 음성은 목적지를 UUID 로 지목하기 때문이다.
+
+        게이트를 통과하면 접근 뒤 복귀와 **같은 상태·같은 좌표**로 간다.
+        가는 곳이 같으므로 상태를 새로 만들지 않고, 끝낼 때 할 일만
+        `_returning_home` 플래그로 가른다.
+
+        Returns:
+            (허용 여부, 사유, 실행할 동작 목록)
+        """
+        reason = check_return_home_gate(
+            self.state, self.return_destination, self.estop_active, nav_ready
+        )
+        if reason is not GateReason.OK:
+            return False, reason, []
+        return True, reason, self._enter_returning(now, is_home=True)
+
+    def _enter_returning(self, now: float, is_home: bool = False) -> list:
+        """대기 위치(= 홈)로 돌아간다.
+
+        들어오는 길이 둘이다.
+          - 접근을 거절당했거나 답을 못 들었을 때 (`is_home=False`)
+          - 관리자가 앱에서 홈 복귀를 눌렀을 때 (`is_home=True`)
+
+        가는 곳은 같다. 복귀는 접근이 아니므로 0.3 m/s 제한을 여기서 푼다.
+        홈이 지정되지 않았으면 제자리에서 끝낸다 — 상태만 지나가고 다음 tick 에
+        IDLE 로 내려간다.
 
         track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
         세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
         """
         self.state = State.RETURNING
+        self._returning_home = is_home
         self.active_destination = self.return_destination
         self.approach_goal_pose = None
         self._response_deadline = None
@@ -1175,10 +1249,17 @@ class MissionLogic:
         return actions
 
     def _finish_returning(self, now: float) -> None:
-        """복귀 완료. 이 시점부터 같은 사람에 대한 재접근 억제를 센다."""
+        """복귀 완료.
+
+        접근 뒤 복귀였다면 이 시점부터 같은 사람에 대한 재접근 억제를 센다.
+        관리자 홈 복귀였다면 **억제하지 않는다** — 억제할 사람이 없고, 그냥
+        걸면 마지막에 만났던 track_id 가 걸려 **다음 사람을 이유 없이 무시한다.**
+        """
         track_id = self.approach_track_id
+        was_home = self._returning_home
         self._to_idle()
-        self._suppress_track(track_id, now)
+        if not was_home:
+            self._suppress_track(track_id, now)
 
     def _suppress_track(self, track_id: Optional[int], now: float) -> None:
         """이 사람에게 당분간 다시 다가가지 않는다.
@@ -1248,5 +1329,8 @@ class MissionLogic:
         # 접근 대상도 비운다. _suppressed_tracks 는 남긴다 — 재접근 억제는
         # IDLE 로 돌아온 뒤에 효력을 내야 하는 값이라 여기서 지우면 무의미해진다.
         self.approach_track_id = None
+        # 복귀 종류 표시도 함께 비운다. 남겨 두면 다음 접근 뒤 복귀가 홈 복귀로
+        # 오인되어 재접근 억제가 걸리지 않는다.
+        self._returning_home = False
         self.approach_goal_pose = None
         self._response_deadline = None
