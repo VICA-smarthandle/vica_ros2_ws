@@ -580,6 +580,7 @@ class MissionLogic:
         person_approach_speed_percent: float = PERSON_APPROACH_SPEED_PERCENT,
         approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
         return_destination: Optional[Destination] = None,
+        auto_return_home: bool = False,
         approach_turn_yaw_rad: float = math.pi,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
@@ -613,6 +614,17 @@ class MissionLogic:
         # None 이며, 그때는 제자리에서 접근만 끝낸다 — 홈이 없어도 안내는
         # 정상 동작하고 자동 복귀만 꺼진다.
         self.return_destination = return_destination
+        # 접근을 마쳤을 때 홈까지 **스스로** 돌아갈 것인가.
+        #
+        # 기본값 False 는 사람이 부르지 않았는데 로봇이 혼자 달리는 일을 막는다.
+        # 홈 복귀는 2026-08-27 현재 실기로 한 번도 확인되지 않았고, 확인되기 전에
+        # 자동 주행부터 켜면 **아무도 안 보는 사이에 처음 달려 보게 된다.**
+        # 관리자가 앱에서 부르는 복귀는 이 값과 무관하게 늘 동작하므로, 실기
+        # 확인은 그쪽으로 먼저 한다.
+        #
+        # False 이면 접근을 마친 자리에 그대로 선다 — 홈 좌표를 넣기 전의 원래
+        # 동작이다. 실기 확인이 끝나면 True 로 바꿔 '제자리 = 홈'으로 만든다.
+        self.auto_return_home = auto_return_home
         # 지금 복귀가 '접근 뒤 복귀'인가 '관리자가 부른 홈 복귀'인가.
         #
         # 두 복귀는 가는 곳이 같아서 State.RETURNING 을 함께 쓰지만 **끝낼 때
@@ -1105,7 +1117,12 @@ class MissionLogic:
         elif self.state == State.RETURNING:
             # 복귀 실패도 완료로 친다. 대기 위치에 못 갔다고 접근 상태에 갇히면
             # 다음 사람을 아예 못 본다 — 복귀는 안전 사건이 아니다.
-            if self.return_destination is None or nav_status in (
+            #
+            # active_destination 을 본다. return_destination 이 아니다 —
+            # auto_return_home 이 꺼져 있으면 홈이 지정돼 있어도 이번 복귀는
+            # 목적지가 없고, 그때 return_destination 을 보면 오지 않을 주행
+            # 결과를 영영 기다린다.
+            if self.active_destination is None or nav_status in (
                 NavStatus.SUCCEEDED,
                 NavStatus.FAILED,
                 NavStatus.CANCELED,
@@ -1236,16 +1253,23 @@ class MissionLogic:
         track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
         세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
         """
+        # 관리자가 부른 복귀는 늘 홈으로 간다. 접근 뒤 복귀는 auto_return_home 이
+        # 켜져 있을 때만 간다 — 꺼져 있으면 그 자리에 선 채로 상태만 정리한다.
+        destination = (
+            self.return_destination
+            if is_home or self.auto_return_home
+            else None
+        )
         self.state = State.RETURNING
         self._returning_home = is_home
-        self.active_destination = self.return_destination
+        self.active_destination = destination
         self.approach_goal_pose = None
         self._response_deadline = None
         self._announced_milestones = set()
         self._approach.reset()
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
-        if self.return_destination is not None:
-            actions.append(Navigate(self.return_destination))
+        if destination is not None:
+            actions.append(Navigate(destination))
         return actions
 
     def _finish_returning(self, now: float) -> None:

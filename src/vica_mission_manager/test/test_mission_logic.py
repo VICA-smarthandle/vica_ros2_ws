@@ -837,7 +837,9 @@ class TestApproachTransitions:
         assert logic.state != State.TURNING
 
     def test_no_returns_to_standby(self):
-        logic = MissionLogic(return_destination=make_home())
+        # auto_return_home 을 켠 경우다. 기본값은 꺼짐이며 그때는 제자리에
+        # 선다 - test_default_does_not_drive_home_after_approach 참고.
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         actions = logic.on_approach_answer(False, 6.0)
@@ -873,7 +875,7 @@ class TestApproachTransitions:
         assert logic.state == State.RETURNING
 
     def test_returning_completion_goes_idle(self):
-        logic = MissionLogic(return_destination=make_home())
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         logic.on_approach_answer(False, 6.0)
@@ -884,12 +886,42 @@ class TestApproachTransitions:
     @pytest.mark.parametrize("status", [NavStatus.FAILED, NavStatus.CANCELED])
     def test_returning_finishes_even_if_it_fails(self, status):
         # 복귀에 실패해도 접근 상태에 갇히면 안 된다. 다음 요청을 받아야 한다.
-        logic = MissionLogic(return_destination=make_home())
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         logic.on_approach_answer(False, 6.0)
         logic.on_tick(20.0, status)
         assert logic.state == State.IDLE
+
+    def test_default_does_not_drive_home_after_approach(self):
+        """기본값은 자동 홈 복귀가 꺼져 있다.
+
+        홈 복귀는 2026-08-27 현재 실기 [미검증] 이다. 확인 전에 자동 주행부터
+        켜면 아무도 안 보는 사이에 로봇이 처음 달려 보게 된다. 관리자가 앱에서
+        부르는 복귀는 이 값과 무관하게 늘 동작하므로 실기 확인은 그쪽으로 한다.
+        """
+        logic = MissionLogic(return_destination=make_home())
+        assert logic.auto_return_home is False
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(False, 6.0)
+        # 홈이 지정돼 있어도 이번 복귀에는 주행이 없다.
+        assert not any(isinstance(a, Navigate) for a in actions)
+        assert logic.active_destination is None
+        assert logic.state == State.RETURNING
+        # 갈 곳이 없으므로 곧바로 끝난다.
+        logic.on_tick(6.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_admin_return_home_works_even_when_auto_is_off(self):
+        """관리자가 부르는 복귀는 auto_return_home 과 무관하게 동작한다."""
+        logic = MissionLogic(return_destination=make_home())
+        accepted, reason, actions = logic.on_return_home_request(True, 0.0)
+        assert accepted is True
+        assert reason is GateReason.OK
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.id == "standby"
 
     def test_returning_without_standby_pose_finishes(self):
         """대기 위치는 아직 [미정] 이다. 좌표가 없으면 제자리에서 접근만 끝낸다."""

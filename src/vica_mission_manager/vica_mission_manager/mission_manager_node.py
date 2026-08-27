@@ -97,6 +97,16 @@ class MissionManagerNode(Node):
         self.declare_parameter("destinations_yaml", "")
         self.declare_parameter("map_id", "")
         self.declare_parameter("map_yaml", "")
+        # 접근을 마쳤을 때 홈까지 스스로 돌아갈 것인가.
+        #
+        # 기본값 false 는 사람이 부르지 않았는데 로봇이 혼자 달리는 일을 막는다.
+        # 홈 복귀는 2026-08-27 현재 실기 [미검증] 이고, 확인 전에 자동 주행부터
+        # 켜면 아무도 안 보는 사이에 처음 달려 보게 된다. 관리자가 앱에서 부르는
+        # 복귀(/vica/mission/return_home)는 이 값과 무관하게 늘 동작하므로
+        # 실기 확인은 그쪽으로 먼저 한다.
+        #
+        # 확인이 끝나면 true 로 바꿔 '접근을 마친 자리 = 홈'으로 만든다.
+        self.declare_parameter("auto_return_home", False)
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
@@ -174,6 +184,7 @@ class MissionManagerNode(Node):
             nav_retry_limit=retry_limit,
             nav_retry_delay_sec=retry_delay,
             return_destination=self._load_home_destination(),
+            auto_return_home=bool(self.get_parameter("auto_return_home").value),
         )
         if self.logic.return_destination is not None:
             self.get_logger().info(
@@ -181,6 +192,15 @@ class MissionManagerNode(Node):
                 f"{self.logic.return_destination.pose.y:.2f}, "
                 f"{self.logic.return_destination.pose.yaw_deg:.0f}도"
             )
+            if self.logic.auto_return_home:
+                self.get_logger().warn(
+                    "접근 뒤 자동 홈 복귀: 켜짐 — 사람이 부르지 않아도 로봇이 홈까지 달립니다."
+                )
+            else:
+                self.get_logger().info(
+                    "접근 뒤 자동 홈 복귀: 꺼짐(기본) — 접근을 마친 자리에 섭니다. "
+                    "앱의 홈 복귀 버튼은 그대로 동작합니다."
+                )
         else:
             self.get_logger().info(
                 "홈 위치 미지정 — 자동 복귀는 꺼진 상태로 시작합니다(안내는 정상)."
