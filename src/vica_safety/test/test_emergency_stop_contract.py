@@ -80,3 +80,40 @@ def test_latched_with_no_active_source_waits_for_reset():
 
 def test_unlatched_with_no_active_source_is_cleared():
     assert classify_latch_state(snapshot([], latched=False)) == "CLEARED"
+
+
+# ===========================================================================
+# 부팅 대기 (WAITING_INPUT)
+# ===========================================================================
+#
+# `*_waiting`은 고장이 아니라 "아직 첫 신호를 못 받았다"이다. FAULT로 찍으면
+# 관리자가 없는 고장을 찾는다 -- stale을 FAULT로 분리한 것과 같은 이유다.
+
+
+def test_waiting_input_is_not_reported_as_fault():
+    assert classify_latch_state(snapshot(["physical_waiting"])) == "WAITING_INPUT"
+    assert (
+        classify_latch_state(snapshot(["motor_can_waiting"])) == "WAITING_INPUT"
+    )
+
+
+def test_waiting_mixed_with_stale_is_still_a_fault():
+    # 한쪽이 유예를 넘겨 고장이면 전체는 고장이다. 대기가 고장을 가리면 안 된다.
+    state = classify_latch_state(
+        snapshot(["motor_can_waiting", "physical_stale"])
+    )
+
+    assert state == "FAULT"
+
+
+def test_waiting_mixed_with_pressed_button_is_estop_active():
+    state = classify_latch_state(snapshot(["motor_can_waiting", "physical_f1"]))
+
+    assert state == "ESTOP_ACTIVE"
+
+
+def test_waiting_input_transition_is_info_level():
+    assert describe_latch_transition("IDLE", "WAITING_INPUT") == (
+        "info",
+        "[WAITING INPUT]",
+    )

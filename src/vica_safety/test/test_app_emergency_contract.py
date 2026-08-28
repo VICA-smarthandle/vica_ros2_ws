@@ -216,3 +216,37 @@ def test_app_state_marks_cleared_waiting_supervisor_as_resettable():
     )
 
     assert payload["reset_allowed"] is True
+
+
+# ---------------------------------------------------------------------------
+# 자동 복구 표시
+# ---------------------------------------------------------------------------
+#
+# 앱은 원인 문자열을 보지 않는다. 이 JSON이 앱의 유일한 창구이므로, 로봇이
+# 스스로 풀렸다는 사실도 여기에 실어야 관리자가 화면에서 알 수 있다.
+
+
+def test_app_state_reports_automatic_recovery():
+    payload = build_app_state(
+        app_active=False,
+        emergency_active=False,
+        safety_state="READY_TO_GO",
+        message="통신 복구로 자동 해제",
+        timestamp="2026-08-28T00:00:00+00:00",
+        auto_recovered=True,
+    )
+
+    assert payload["auto_recovered"] is True
+
+
+def test_app_state_defaults_to_manual_recovery():
+    # 기존 호출부(인자 5개)는 그대로 동작해야 한다.
+    payload = build_app_state(
+        app_active=False,
+        emergency_active=False,
+        safety_state="READY_TO_GO",
+        message="관리자 reset",
+        timestamp="2026-08-28T00:00:00+00:00",
+    )
+
+    assert payload["auto_recovered"] is False
