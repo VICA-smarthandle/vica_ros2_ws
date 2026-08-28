@@ -15,14 +15,42 @@ motor node는 E-stop 래치, `/estop_reset`, reset 오케스트레이션을 소�
 
 다음 중 하나라도 발생하면 `/emergency_stop=true`를 중앙 래치한다.
 
-- CAN F1 물리 버튼 활성
-- `/app_emergency_stop=true`
-- `/voice_emergency_stop=true`
-- F1 상태가 아직 없거나 timeout으로 stale
+| 원인 이름 | 성격 | 감지 대상 |
+| --- | --- | --- |
+| `physical_f1` | 사람 개입 | CAN F1 물리 버튼 활성 |
+| `app` | 사람 개입 | `/app_emergency_stop=true` |
+| `voice` | 사람 개입 | `/voice_emergency_stop=true` |
+| `motor_can` | 통신 | motor node가 CAN 소켓 예외를 직접 받음 (`/motor/can_ok=false`) |
+| `motor_can_stale` | 통신 | motor node의 보고 자체가 timeout으로 끊김 (사망·지연) |
+| `physical_stale` | 통신 | F1 방송이 timeout으로 끊김 (드라이버 무응답) |
+| `physical_waiting` · `motor_can_waiting` | 부팅 대기 | 아직 첫 수신 전이며 `input_grace_sec` 안 |
+
+`motor_can`은 CAN **소켓·인터페이스 오류만** 잡는다. socketcan은 상대 드라이버가
+없어도 bind·send가 성공하므로 드라이버 전원 차단은 `physical_stale`로 나타난다.
+그 상태에서 물리 버튼을 찾으면 헛수고다.
+
+F1 방송을 켜는 주체는 motor node다(`CMD_PNT_IO_MON_ON`). 안전 노드는 CAN을 읽기만
+한다. 기동 순서(드라이버 전원 → can1 up → motor node)를 어기면 `physical_stale`이다.
+
+### 부팅 유예
+
+`*_waiting`은 래치를 새로 걸지 않고 상태 이름도 `WAITING_INPUT`으로 따로 쓴다.
+미수신은 고장이 아니라 아직 오지 않은 것이다. 유예는 **첫 수신 전에만** 있고,
+한 번 받은 뒤의 단절은 유예와 무관하게 즉시 `*_stale`이다. `input_grace_sec=0`이면
+종전 동작(즉시 stale)으로 돌아간다.
+
+### 해제
 
 물리 버튼을 놓거나 앱·음성 입력이 false가 되어도 래치는 자동 해제되지 않는다. 내부
 `/vica_safety/internal/estop_reset`은 모든 source가 false이고 F1이 fresh할 때만 래치를
 해제한다. 이 서비스는 공개 운영 인터페이스가 아니다.
+
+예외는 **통신 원인만으로 걸린 래치**다. `AutoRecoveryPolicy`가 (1) 원인이 통신
+계열뿐이고 (2) 주행 중(`RUNNING`) 끊김이 아니며 (3) `auto_recover_settle_sec` 동안
+원인이 비어 있고 (4) 수동 reset과 경합하지 않을 때, `app_emergency_node`가 아래
+공개 reset 절차를 **그대로** 한 번 대신 호출한다. 절차·순서·fail-closed 성질은
+바뀌지 않으며, 바뀌는 것은 누가 시작하느냐뿐이다. 사람 개입 원인이 한 번이라도
+섞이면 그 사건 동안 자동 복구는 막힌다.
 
 ## 공개 reset 절차
 
