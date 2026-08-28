@@ -274,7 +274,9 @@ controller_server:
       #   - progress checker 가 도착 직전에 주행을 실패로 끝낸다
       #     grep "Failed to make progress" ~/.ros/log/controller_server_*.log
       # 되돌릴 때는 0.15 -> 0.20 -> 0.25 로 올린다.
-      yaw_goal_tolerance: 0.15
+      # 2026-08-28 사용자 결정: 0.15 는 실기 검증 전이므로 0.25 를 유지한다.
+      # 낮추는 실험은 위 절차(신호·되돌리기 경로)대로 별도 회차에서 한다.
+      yaw_goal_tolerance: 0.25
       # 위치·방향뿐 아니라 실제 저속 상태까지 확인한 뒤 도착으로 판정한다.
       trans_stopped_velocity: 0.03
       rot_stopped_velocity: 0.05
