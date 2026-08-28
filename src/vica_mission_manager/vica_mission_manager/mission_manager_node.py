@@ -42,6 +42,7 @@ from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_map_bounds
 from .approach_geometry import approach_goal
 from .mission_logic import (
+    MSG_APPROACH_QUESTION,
     ApproachRequest,
     CancelNav,
     GateReason,
@@ -205,6 +206,18 @@ class MissionManagerNode(Node):
             callback_group=self._emergency_group,
         )
 
+        # 접근 질문의 "재생 종료" 시점. 응답 대기 8초를 여기서부터 세도록
+        # mission_logic.on_approach_question_spoken 이 설계돼 있었는데(6.2절)
+        # 배선이 없었다 — 그래서 질문 생성 시각부터 세어, 재생 2초 + STT 자동
+        # 녹음 4초 + 변환 2초가 8초와 경주하게 됐다(2026-08-28 실기).
+        self.create_subscription(
+            String,
+            "/vica/tts_done",
+            self._on_tts_done,
+            10,
+            callback_group=self._main_group,
+        )
+
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
@@ -322,6 +335,15 @@ class MissionManagerNode(Node):
             f"confirm={msg.need_confirm} -> state={self.logic.state.value}"
         )
         self._run_actions(actions)
+
+    def _on_tts_done(self, msg: String) -> None:
+        """TTS 가 끊기지 않고 끝까지 재생한 문장. 접근 질문일 때만 시계를 켠다.
+
+        다른 멘트(수락·도착 등)의 재생 완료는 응답 대기와 무관하고, 로직 쪽이
+        AWAITING_USER 가 아니면 무시하므로 이중 방어다.
+        """
+        if MSG_APPROACH_QUESTION in msg.data:
+            self.logic.on_approach_question_spoken(self._now())
 
     def _on_voice_answer(self, affirmative: bool) -> None:
         before = self.logic.state
