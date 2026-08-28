@@ -770,7 +770,29 @@ local_costmap:
       # 시험 구역에서 그 높이의 물체를 치우고 운용한다.
       # 복귀는 이 리스트에 "nvblox_layer" 한 줄을 되살리면 된다 — 아래 블록은
       # 그대로 남겨 둔다 (test_nvblox_layer_contract 가 블록 존재를 감시한다).
-      plugins: ["voxel_layer", "inflation_layer"]
+      # 2026-08-28 추가 판정: voxel_layer 는 라이다를 받아 내부 3D 격자엔
+      # 장애물을 실시간으로 찍으면서(실측 226~264 기둥) 2D costmap 출력은
+      # 항상 0 이었다 — 3D→2D 투영 단계 고장. 2D 라이다 단독에는 global 이
+      # 쓰는 obstacle_layer 가 정석이라 그것으로 교체한다. voxel_layer 블록은
+      # 카메라 3D 복귀 대비로 남긴다.
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.05
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.12
+          observation_persistence: 0.5
+          expected_update_rate: 0.2
+          inf_is_valid: true
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
