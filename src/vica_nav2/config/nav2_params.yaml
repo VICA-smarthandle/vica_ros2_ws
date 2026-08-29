@@ -1616,7 +1616,16 @@ planner_server:
       # (실험 당시 inflation 0.50 · sim_time 2.5 · ObstacleFootprint.scale 0.15).
       # 주의: inflation 은 같은 날 늦게 0.50 -> 0.55 로 확정됐다. 현재 값은
       # 0.55 이며 이 문단의 0.50 은 1m 격자 실험 시점의 기록이다.
-      lattice_filepath: "/opt/ros/humble/share/nav2_smac_planner/sample_primitives/5cm_resolution/0.5m_turning_radius/diff/output.json"
+      # ── 2026-08-29: 격자를 R 0.30 diff 로 바꾼다 ──
+      # 설치본 격자는 R 0.5 라 유턴에 1.705 m 가 필요한데 화장실 구간 통로가
+      # 1.40 m 다(지도 실측). Nav2 제공 격자는 0.5 / 1.0 뿐이라 생성기로 직접
+      # 만들었다. R 0.30 이면 유턴 1.352 m 로 들어간다.
+      # **제자리 회전 32개와 직진 16개는 설치본과 동일**하고 대각선 방향 곡선만
+      # 4 -> 2 로 준다. 출처·생성 방법·비교표는 config/lattice/README.md 참고.
+      # 되돌리려면 아래 한 줄을 원래 경로로 바꾼다:
+      #   /opt/ros/humble/share/nav2_smac_planner/sample_primitives/5cm_resolution/0.5m_turning_radius/diff/output.json
+      # [실주행 미검증]
+      lattice_filepath: "/home/ji_w/VICA-smarthandle/vica_ros2_ws/install/vica_nav2/share/vica_nav2/config/lattice/output_r030_diff.json"
 
       # 후진 primitive로 확장하지 않는다. 위 DUBIN과 같은 이유다.
       allow_reverse_expansion: false
