@@ -7,6 +7,9 @@ from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
     SpinInPlace,
     MSG_APPROACH_QUESTION,
+    MSG_APPROACH_ACCEPTED,
+    MSG_APPROACH_DECLINED,
+    MSG_APPROACH_ONBOARDING,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
     CancelNav,
@@ -1123,3 +1126,50 @@ class TestApproachSafety:
         _, reason = getattr(logic, command)(3.0)
         assert reason == GateReason.NOT_NAVIGATING
         assert logic.state == State.APPROACHING
+
+
+class TestApproachVoiceHooks:
+    """계획 문서(voice docs/approach-voice-flow.md)의 남은 두 조각.
+
+    문구 정본은 voice replies.py·ment_cache — 글자까지 일치해야 사전 녹음이
+    재생된다(갈라지면 캐시가 빗나가 매번 합성). 여기 하드코딩된 기대 문구가
+    그 계약의 사본이다.
+    """
+
+    def _accept_with_turn(self, logic):
+        start_approach(logic)
+        arrive_and_ask(logic)
+        logic.on_approach_answer(True, 6.0)          # 수락 -> TURNING
+        assert logic.state == State.TURNING
+
+    def test_question_is_the_recorded_long_greeting(self):
+        assert MSG_APPROACH_QUESTION.startswith("안녕하세요? 저는 시각장애인")
+        assert MSG_APPROACH_QUESTION.endswith("안내를 받으시겠어요?")
+
+    def test_accept_speaks_turn_notice(self):
+        """수락 멘트 = 회전 예고 — 예고 없는 움직임 금지(2026-08-25 결정)."""
+        assert MSG_APPROACH_ACCEPTED == "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
+
+    def test_decline_speaks_farewell(self):
+        assert MSG_APPROACH_DECLINED == "알겠습니다. 이만 물러납니다."
+
+    def test_turn_success_speaks_done_then_onboarding(self):
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        actions = logic.on_tick(7.0, NavStatus.SUCCEEDED)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [
+            "회전이 완료되었습니다.", MSG_APPROACH_ONBOARDING]
+        assert says[1].expects_reply is True         # 온보딩 끝 = 재청취 창
+        assert logic.state == State.IDLE
+
+    def test_turn_failure_skips_done_but_still_onboards(self):
+        """회전 실패에 '완료되었습니다'는 거짓말 — 생략. 다만 수락한 사람을
+        침묵 속에 버려두지 않도록 온보딩은 한다."""
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        actions = logic.on_tick(7.0, NavStatus.FAILED)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_APPROACH_ONBOARDING]
+        assert says[0].expects_reply is True
+        assert logic.state == State.IDLE

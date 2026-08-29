@@ -259,9 +259,21 @@ MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
 MSG_NOT_NAVIGATING = "지금은 안내 중이 아닙니다."
 MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # 사람 접근. 질문은 되묻기와 같은 이유로 expects_reply 를 달아 내보낸다.
-MSG_APPROACH_QUESTION = "안내가 필요하신가요?"
-MSG_APPROACH_ACCEPTED = "네, 제가 도와드리겠습니다."
-MSG_APPROACH_DECLINED = "알겠습니다. 필요하시면 언제든 불러 주세요."
+# ⚠️ 문구 정본은 voice replies.py·ment_cache (approach-voice-flow.md 확정 흐름).
+# 글자까지 일치해야 사전 녹음이 재생된다 — 바꾸려면 양쪽을 함께 고치고
+# 재녹음한다(voice scripts/make_cue_wavs.py). 수락 멘트가 회전 예고인 이유:
+# 시각장애인에게 예고 없는 움직임 금지(2026-08-25 결정).
+MSG_APPROACH_QUESTION = (
+    "안녕하세요? 저는 시각장애인 안내로봇 비카입니다! "
+    "저와 함께 목적지까지 동행해보시는건 어떠세요? 안내를 받으시겠어요?"
+)
+MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
+MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
+MSG_APPROACH_TURN_DONE = "회전이 완료되었습니다."
+MSG_APPROACH_ONBOARDING = (
+    "안녕하세요? 반갑습니다! 저를 부르시려면 '비카야'라고 불러주시면 됩니다! "
+    "자, 이제 어디로 가고싶으신가요?"
+)
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
 MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
 
@@ -883,8 +895,11 @@ class MissionLogic:
             track_id = self.approach_track_id
             self._suppress_track(track_id, now)
             if self.approach_turn_yaw_rad == 0.0:
+                # 회전이 없으면 회전 예고는 거짓말 — 온보딩으로 바로 간다.
+                # 온보딩 끝은 질문이라 expects_reply 로 재청취 창이 열린다.
                 self._to_idle()
-                return [Say(MSG_APPROACH_ACCEPTED, priority="response")]
+                return [Say(MSG_APPROACH_ONBOARDING, priority="response",
+                            expects_reply=True)]
             self.state = State.TURNING
             self.active_destination = None
             self._response_deadline = None
@@ -1042,11 +1057,22 @@ class MissionLogic:
                 actions.extend(self._enter_returning(now))
 
         elif self.state == State.TURNING:
-            if nav_status in (NavStatus.SUCCEEDED, NavStatus.FAILED,
-                              NavStatus.CANCELED):
-                # 회전 실패는 안내 실패가 아니다 - 핸들 방향만 어긋난 채 끝난다.
-                # 억제는 수락 시점에 이미 걸었으므로 여기서는 정리만 한다.
+            if nav_status == NavStatus.SUCCEEDED:
+                # 회전 완료 훅 (approach-voice-flow.md 확정 흐름): 완료를 알리고
+                # 온보딩을 말한다. 온보딩 끝은 질문 -> expects_reply 로 재청취
+                # 창이 열리고, 회전으로 사용자가 핸들 방향에 정렬됐으므로
+                # DOA 방향 관문도 자연히 유효해진다.
                 self._to_idle()
+                actions.append(Say(MSG_APPROACH_TURN_DONE, priority="response"))
+                actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
+                                   expects_reply=True))
+            elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
+                # 회전 실패에 "완료되었습니다"는 거짓말 - 생략한다. 다만 방금
+                # 수락한 사람을 침묵 속에 버려두지 않도록 온보딩은 한다.
+                # (핸들 방향은 어긋났을 수 있다 - 안내 실패는 아니다.)
+                self._to_idle()
+                actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
+                                   expects_reply=True))
             elif (self._turn_deadline is not None
                   and now >= self._turn_deadline):
                 # spin 이 시작조차 안 됐다(노드 결함 등). 시계로 탈출한다.
