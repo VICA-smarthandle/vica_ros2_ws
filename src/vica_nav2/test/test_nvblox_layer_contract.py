@@ -259,6 +259,14 @@ def test_ghost_clears_within_the_maneuver_budget():
     """
     if not NVBLOX_OVERRIDES.is_file():
         pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
+    # nvblox_layer 가 plugins 에서 빠져 있으면 유령이 costmap 에 들어오지 않으므로
+    # 소멸 시간이 주행에 영향을 주지 않는다(2026-08-28 사용자 판정, 라이다 단독).
+    # 다시 켜면 이 계약이 되살아난다. **그때 함께 볼 것**: 2026-08-29 에
+    # max_vel_theta 를 0.4 -> 0.5 로 올려 기동 예산이 5.57 -> 4.78 s 가 됐고,
+    # 현재 소멸 30.5 s 는 그 6배 상한(28.7 s)을 넘는다. nvblox 재투입 시
+    # decay_tsdf_rate_hz 를 올리거나 이 상한을 다시 계산해야 한다.
+    if 'nvblox_layer' not in _costmap('local_costmap')['plugins']:
+        pytest.skip('local_costmap plugins 에 nvblox_layer 가 없다 - 위 주석 참고')
     p = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
     p = p['/**']['ros__parameters']
     rate = p['decay_tsdf_rate_hz']
