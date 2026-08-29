@@ -30,9 +30,12 @@
      TF·footprint·nvblox 어디에도 안 물린다 - 화면 그림일 뿐이다. -->
 <xacro:property name="camera_x" value="-0.225" />
 <xacro:property name="camera_y" value="0.0" />
-<!-- 2026-08-25 재고정: 지면 1.05 m (사용자 고정 + depth 바닥 실측 1.03~1.05 로 확인).
-     camera_z = 1.05 - base_link 0.190 = 0.860. 수평(rpy 0 0 0)도 같은 실측으로 유지 확인. -->
-<xacro:property name="camera_z" value="0.860" />
+<!-- 2026-08-29 재고정: 지면 1.025 m (줄자 실측, 사용자 확정).
+     camera_z = 1.025 - base_link 0.190 = 0.835. 2026-08-25 값(지면 1.05 / 0.860)에서
+     2.5 cm 내려왔다. 같은 회차에 차체 세로가 80 -> 72 cm 로 줄었지만 그쪽은 이 값과
+     무관하다 - nav2_params.yaml 의 footprint 후방(-0.495 -> -0.415)이 받는다.
+     수평(rpy 0 0 0)은 이번에 바꾸지 않았다. -->
+<xacro:property name="camera_z" value="0.835" />
 <!-- Drive wheel / caster geometry. Single source for every y coordinate. -->
 <!-- 줄자 실측(바퀴 중심 사이). CAD 0.3618과 2.2 mm 차이.
      encoder.yaml의 wheel_base_m 0.37은 회전 시험으로 맞춘 오도메트리 보정 상수라
