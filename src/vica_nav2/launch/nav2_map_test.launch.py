@@ -103,6 +103,57 @@ def generate_launch_description():
                 "can_iface": can_iface,
             }.items(),
         ),
+        # ===== D455 깊이를 2D 스캔으로 눌러 costmap 에 넣는다 (2026-08-29) =====
+        # 왜 3D 가 아니라 2D 인가:
+        #   깊이를 voxel_layer 에 포인트클라우드로 그대로 넣었더니 **찍은 칸을
+        #   지우지 못했다.** bag 실측(run2017, 846초)에서 깊이가 찍는 구간
+        #   0.9~1.8 m 의 칸 수명이 중앙 21.6초(최대 191초)였고, 라이다 구간은
+        #   0.6초였다.
+        #   원인은 카메라 높이다. 지면 1.025 m 에서 그보다 낮은 칸을 지우려면
+        #   그 칸을 스치는 광선이 훨씬 먼 바닥까지 닿아야 하는데(1.8 m·0.75 m
+        #   칸이면 6.7 m), 실내에서는 3~4 m 앞 벽에 막혀 그만한 바닥이 안 보인다.
+        #   라이다가 잘 지워지는 이유는 **자기와 같은 높이를 보기 때문**이다.
+        #   그래서 깊이도 한 평면으로 눌러 같은 성질을 갖게 한다.
+        #
+        # GroupAction 밖에 둔다. 안쪽 SetRemap(148행)이 이 노드의 scan 출력을
+        # 건드리면 라이다의 /scan 과 충돌할 수 있다.
+        #
+        # 카메라가 없어도 이 노드는 조용히 기다린다. 그때 costmap 의 depth_scan
+        # 소스는 아무 일도 하지 않고 라이다만으로 돌아간다.
+        Node(
+            package="pointcloud_to_laserscan",
+            executable="pointcloud_to_laserscan_node",
+            name="depth_band_to_scan",
+            output="screen",
+            remappings=[
+                ("cloud_in", "/camera/camera/depth/color/points"),
+                ("scan", "/camera/depth_scan"),
+            ],
+            parameters=[{
+                "use_sim_time": use_sim_time,
+                # 지면 기준으로 스캔을 만든다. 아래 min/max_height 도 지면 기준이
+                # 되어 nav2_params.yaml 의 설명과 단위가 맞는다.
+                "target_frame": "base_footprint",
+                "transform_tolerance": 0.05,
+                # 볼 높이 띠. 근거는 nav2_params.yaml 의 depth_scan 주석에 있다.
+                #   0.30  차체가 흔들려도 바닥이 안 걸리는 선(3 m 에서 5.7도)
+                #   1.05  로봇 최고점(카메라 마스트). 그 위는 로봇을 넘어간다
+                "min_height": 0.30,
+                "max_height": 1.05,
+                # D455 수평 시야 87도(+-43.5도)에서 가장자리를 조금 던다.
+                "angle_min": -0.75,
+                "angle_max": 0.75,
+                "angle_increment": 0.0087,   # 0.5도. 빔 173개
+                "scan_time": 0.0667,          # 15 Hz
+                "range_min": 0.30,
+                "range_max": 4.0,
+                # 아무것도 없는 방향을 inf 로 낸다. costmap 의 inf_is_valid 가
+                # 그것을 최대거리로 바꿔 빈 공간 청소에 쓴다.
+                "use_inf": True,
+                "queue_size": 1,
+            }],
+            respawn=False,
+        ),
         GroupAction(
             actions=[
                 # 2026-08-15 [NAV2-B5]: velocity_smoother와 /cmd_vel_req 사이에
