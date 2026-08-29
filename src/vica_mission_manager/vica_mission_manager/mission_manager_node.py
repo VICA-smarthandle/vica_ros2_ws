@@ -205,6 +205,15 @@ class MissionManagerNode(Node):
             10,
             callback_group=self._emergency_group,
         )
+        # 원인 목록(쉼표 분리). "원인은 다 해제됐고 관리자 reset 만 남은"
+        # 구간을 음성으로 알리는 재료다 (mission_logic.on_estop_sources).
+        self.create_subscription(
+            String,
+            "/estop_sources",
+            self._on_estop_sources,
+            10,
+            callback_group=self._emergency_group,
+        )
 
         # 접근 질문의 "재생 종료" 시점. 응답 대기 8초를 여기서부터 세도록
         # mission_logic.on_approach_question_spoken 이 설계돼 있었는데(6.2절)
@@ -705,6 +714,10 @@ class MissionManagerNode(Node):
                 f"중앙 estop={self._estop_active} -> state={self.logic.state.value}"
             )
         self._run_actions(actions)
+
+    def _on_estop_sources(self, msg: String) -> None:
+        sources = [part for part in msg.data.split(",") if part]
+        self._run_actions(self.logic.on_estop_sources(sources, self._now()))
 
     def _tick(self) -> None:
         status = self._poll_nav_status()

@@ -1173,3 +1173,58 @@ class TestApproachVoiceHooks:
         assert [s.text for s in says] == [MSG_APPROACH_ONBOARDING]
         assert says[0].expects_reply is True
         assert logic.state == State.IDLE
+
+
+class TestEstopStateNarration:
+    """E-stop 전이 음성 안내 (2026-08-29 사용자 확정 문구).
+
+    "관리자를 호출했습니다"는 통신 순단(정지 중)에는 거짓이 된다 — 그 경우는
+    1.4초 만에 자동 복구되므로(AutoRecoveryPolicy) 자동 복구 예고로 갈린다.
+    원인 판별 정본은 vica_safety/auto_recovery.py 의 COMM_SOURCES.
+    """
+
+    def test_human_cause_calls_admin(self):
+        logic = MissionLogic()
+        logic.on_estop_sources(["voice"], 0.5)
+        actions = logic.on_estop(True, 1.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
+
+    def test_comm_only_while_stopped_promises_auto_recovery(self):
+        logic = MissionLogic()
+        logic.on_estop_sources(["motor_can_stale"], 0.5)
+        actions = logic.on_estop(True, 1.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["연결 문제로 잠시 섰습니다. 곧 자동으로 복구됩니다."]
+        # 자동 복구가 올 상황 — 원인이 비어도 관리자 대기 멘트는 내지 않는다
+        assert logic.on_estop_sources([], 2.0) == []
+
+    def test_comm_only_while_driving_calls_admin(self):
+        """주행 중 끊김은 자동 복구 대상이 아니다 — 관리자 문구가 맞다."""
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_estop_sources(["motor_can_stale"], 1.5)
+        actions = logic.on_estop(True, 2.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
+
+    def test_wait_admin_announced_once_when_causes_clear(self):
+        """원인 전부 해제 = reset 대기 진입. 1회만 알리고 반복하지 않는다."""
+        logic = MissionLogic()
+        logic.on_estop_sources(["voice"], 0.5)
+        logic.on_estop(True, 1.0)
+        actions = logic.on_estop_sources([], 3.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == [
+            "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."]
+        assert logic.on_estop_sources([], 4.0) == []       # 반복 없음
+        logic.on_estop_sources(["button"], 5.0)            # 원인 재점화
+        actions = logic.on_estop_sources([], 6.0)          # 다시 비면 다시 1회
+        assert [a.text for a in actions if isinstance(a, Say)] == [
+            "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."]
+
+    def test_sources_alone_do_not_speak_without_latch(self):
+        """래치가 없을 때의 원인 잔불(순단 회복 등)은 침묵한다."""
+        logic = MissionLogic()
+        logic.on_estop_sources(["motor_can_stale"], 0.5)
+        assert logic.on_estop_sources([], 1.0) == []

@@ -248,8 +248,24 @@ MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도�
 # 자동 재시도 중임을 알린다. 로봇이 멈춰 있는 이유를 이용자가 알 수 있어야
 # 하고, 곧 다시 움직인다는 것도 알아야 놀라지 않는다.
 MSG_NAV_RETRY = "길이 막혀 잠시 기다렸다가 다시 가겠습니다."
-MSG_ESTOPPED = "안전을 위해 멈추겠습니다."
+# E-stop 안내 3종 (2026-08-29 사용자 확정 문구). 통신 순단(정지 중)은 자동
+# 복구되므로(AutoRecoveryPolicy) "관리자를 호출했습니다"가 거짓이 된다 —
+# 그 경우만 자동 복구 예고로 갈린다. 원인 판별 정본은
+# vica_safety/auto_recovery.py 의 COMM_SOURCES (갈라지면 판별이 어긋난다).
+MSG_ESTOPPED = "안전을 위해 멈추겠습니다. 관리자를 호출했습니다."
+MSG_ESTOP_COMM = "연결 문제로 잠시 섰습니다. 곧 자동으로 복구됩니다."
+MSG_ESTOP_WAIT_ADMIN = (
+    "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."
+)
 MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
+
+_COMM_ESTOP_SOURCES = frozenset({
+    "motor_can",
+    "physical_stale",
+    "motor_can_stale",
+    "physical_waiting",
+    "motor_can_waiting",
+})
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
 MSG_CANCELED = "안내를 취소했습니다."
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
@@ -589,6 +605,12 @@ class MissionLogic:
         # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
         self.approach_turn_yaw_rad = approach_turn_yaw_rad
         self._turn_deadline: Optional[float] = None
+        # E-stop 안내용: 마지막으로 본 원인 목록과 "관리자 개입이 필요한
+        # 래치인가" 판정. 판정은 걸리는 순간 확정한다 — 원인은 곧 해제돼
+        # 사라지므로 나중엔 알 수 없다.
+        self._estop_sources: frozenset = frozenset()
+        self._estop_admin_needed = True
+        self._estop_wait_announced = False
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -913,6 +935,27 @@ class MissionLogic:
         actions.extend(self._enter_returning(now))
         return actions
 
+    def on_estop_sources(self, sources: list, now: float) -> list:
+        """/estop_sources (원인 목록, 쉼표 분리 전 상태). reset 대기를 알린다.
+
+        원인이 전부 해제됐는데 래치가 남아 있으면 관리자 reset 만 남은
+        구간이다 — 시각장애인에게는 "말없이 안 움직이는 시간"이라 1회
+        알린다. 자동 복구가 올 상황(통신 원인·정지 중)이면 침묵한다.
+        """
+        new = frozenset(s for s in sources if s)
+        actions: list = []
+        if (self.estop_active
+                and self._estop_sources and not new
+                and self._estop_admin_needed
+                and not self._estop_wait_announced):
+            self._estop_wait_announced = True
+            actions.append(Say(MSG_ESTOP_WAIT_ADMIN, priority="response"))
+        if new:
+            # 원인이 다시 켜졌다 — 다음에 비면 다시 1회 알릴 수 있게 한다.
+            self._estop_wait_announced = False
+        self._estop_sources = new
+        return actions
+
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
 
@@ -931,6 +974,8 @@ class MissionLogic:
         already_estopped = self.state == State.ESTOPPED
         self._enter_estopped(now)
         if not already_estopped:
+            self._estop_admin_needed = True      # 긴급어 = 사람 개입 원인
+            self._estop_wait_announced = False
             actions.append(Say(MSG_ESTOPPED, priority="emergency"))
         return actions
 
@@ -944,8 +989,17 @@ class MissionLogic:
                 if self.state in _GOAL_ACTIVE_STATES:
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(CancelNav(self.active_destination))
+                # 통신 원인뿐이고 정지 중이면 자동 복구가 온다(1.4초 실측) —
+                # "관리자 호출"은 거짓이 된다. 주행 중 끊김은 관리자 몫.
+                comm_only = (bool(self._estop_sources)
+                             and self._estop_sources <= _COMM_ESTOP_SOURCES)
+                auto_expected = comm_only and self.state != State.NAVIGATING
+                self._estop_admin_needed = not auto_expected
+                self._estop_wait_announced = False
                 self._enter_estopped(now)
-                actions.append(Say(MSG_ESTOPPED, priority="emergency"))
+                actions.append(Say(
+                    MSG_ESTOP_COMM if auto_expected else MSG_ESTOPPED,
+                    priority="emergency"))
                 return actions
         else:
             if self.state == State.ESTOPPED and self._estop_clear_since is None:
