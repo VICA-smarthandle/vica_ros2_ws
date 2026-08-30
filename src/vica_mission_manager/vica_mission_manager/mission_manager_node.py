@@ -106,9 +106,9 @@ class MissionManagerNode(Node):
         # RobotState 층/건물 값 소스는 미결 사항 #5 — 일단 파라미터.
         self.declare_parameter("current_floor", -1)
         self.declare_parameter("current_building", "")
-        # 도착 후 대화(arrival-dialog-flow). 실기 검증 전 기본 off — 켜면 도착
-        # 후 유형별 질문·대기·홈 복귀가 동작한다.
-        self.declare_parameter("arrival_dialog", False)
+        # 도착 후 대화(arrival-dialog-flow). 기본 on (2026-08-30 사용자 결정) —
+        # 도착 후 유형별 질문·대기·홈 복귀가 동작한다. 끄려면 :=false.
+        self.declare_parameter("arrival_dialog", True)
 
         dest_path = str(self.get_parameter("destinations_yaml").value)
         if not dest_path:
