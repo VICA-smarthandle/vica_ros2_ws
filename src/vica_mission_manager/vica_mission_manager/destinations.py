@@ -54,6 +54,7 @@ def load_destinations(path: str) -> Dict[str, Destination]:
             calibrated=None if calibrated is None else bool(calibrated),
             confirm_prompt=str(entry.get("confirm_prompt", "") or ""),
             arrival_message=str(entry.get("arrival_message", "") or ""),
+            category=str(entry.get("category2", "") or "").strip().lower(),
         )
     return result
 

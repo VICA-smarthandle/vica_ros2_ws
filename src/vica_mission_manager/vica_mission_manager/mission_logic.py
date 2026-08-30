@@ -46,6 +46,18 @@ class State(str, Enum):
     # 정지 거리 1.1 m 가 이 회전의 반경 기준으로 설계돼 있다(설계 6.3절).
     TURNING = "turning"
     RETURNING = "returning"
+    # ---- 목적지 도착 후 대화 (2026-08-30, arrival-dialog-flow) ------------------
+    #
+    # 도착하면 유형별로 묻고(ASKING_NEXT), 대기를 고르면 시간을 묻고
+    # (ASKING_WAIT_TIME), 그 자리에 서서 기다린다(WAITING). 답이 없으면 결국
+    # 홈으로 복귀한다. AWAITING_USER 와 같은 모양이다 — 질문을 던지고, 재생이
+    # 끝난 시점부터 시한을 세고, 답이 오면 갈래를 만든다.
+    ASKING_NEXT = "asking_next"
+    # "몇 분쯤?" 답 대기 (restroom·entrance 가 아닌 곳에서 대기를 골랐을 때만).
+    ASKING_WAIT_TIME = "asking_wait_time"
+    # 제자리 대기. 사람접근 OFF(기다리라 해놓고 행인을 쫓지 않게). "비카야"로
+    # 깨어나거나 시간이 초과되면 나간다.
+    WAITING = "waiting"
 
 
 class NavStatus(str, Enum):
@@ -103,6 +115,9 @@ class Destination:
     calibrated: Optional[bool] = None
     confirm_prompt: str = ""
     arrival_message: str = ""
+    # destinations.yaml 의 category2. 도착 후 질문을 유형별로 고른다
+    # (restroom=대기 제안, entrance=종료 제안, 그 외=대기 여부). 없으면 "".
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,6 +139,8 @@ class IntentData:
     matched_destination_id: str
     need_confirm: bool
     safety_flag: str
+    # 도착 후 대화의 wait 요청 시간(분). 없거나 무관하면 -1 (2026-08-30).
+    wait_minutes: int = -1
 
 
 @dataclass(frozen=True)
@@ -268,6 +285,27 @@ _COMM_ESTOP_SOURCES = frozenset({
 })
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
 MSG_CANCELED = "안내를 취소했습니다."
+
+# ---- 도착 후 대화 (2026-08-30, arrival-dialog-flow) --------------------------
+# 유형별 첫 질문. category(destinations.yaml category2)로 고른다. "네"의 뜻이
+# 유형마다 뒤집히므로 질문을 던질 때 종료형인지(_asking_is_finish)를 함께
+# 기억한다. 문구 정본은 이 상수들 — 캐시가 구운 판을 재생한다(글자 일치).
+MSG_ASK_RESTROOM = "다녀오시는 동안 여기서 기다릴까요?"          # 대기형
+MSG_ASK_ENTRANCE = "여기까지 안내를 마칠까요?"                  # 종료형
+MSG_ASK_GENERIC = "이제 괜찮으신가요? 아니면 여기서 대기할까요?"  # 종료형
+MSG_ASK_WAIT_TIME = "몇 분쯤 걸리실까요?"
+# 대기 확정. {minutes} 는 코드가 채운다 — 캐시엔 넣지 않는다(가변).
+MSG_WAIT_CONFIRM = "{minutes}분 대기하겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
+MSG_WAIT_DEFAULT = "네, 최대 30분까지 여기서 기다리겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
+MSG_WAIT_RESUME_ASK = "다시 안내를 시작할까요?"
+MSG_FINISH = "안내를 종료합니다."
+# 무응답 사다리 (3절): 못 알아들으면 재질문 1회, 그 뒤/침묵이면 떠나기 예고.
+MSG_ARRIVAL_RETRY = "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해 주세요."
+MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아가겠습니다."
+MSG_GOING_HOME = "홈으로 복귀중입니다."
+
+WAIT_MINUTES_CAP = 30
+LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유예
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
@@ -572,6 +610,7 @@ class MissionLogic:
         approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
         return_destination: Optional[Destination] = None,
         approach_turn_yaw_rad: float = math.pi,
+        arrival_dialog: bool = False,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -611,6 +650,14 @@ class MissionLogic:
         self._estop_sources: frozenset = frozenset()
         self._estop_admin_needed = True
         self._estop_wait_announced = False
+
+        # 도착 후 대화 (arrival-dialog-flow). 꺼져 있으면 도착 후 기존 dwell→
+        # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
+        self.arrival_dialog = arrival_dialog
+        self._asking_is_finish = False   # 방금 던진 질문이 종료형인가("네"=끝)
+        self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
+        self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
+        self._wait_until: Optional[float] = None         # WAITING 만료 시각
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -956,6 +1003,128 @@ class MissionLogic:
         self._estop_sources = new
         return actions
 
+    # -- 도착 후 대화 (arrival-dialog-flow) ------------------------------------
+    def _ask_arrival(self, dest: Optional[Destination], now: float) -> list:
+        """유형별 질문을 던지고 ASKING_NEXT 로 들어간다. "네"의 뜻(_asking_is_finish)
+        을 함께 기억한다 — restroom 은 대기형(네=대기), 나머지는 종료형(네=끝)."""
+        category = (dest.category if dest else "") or ""
+        if category == "restroom":
+            question, is_finish = MSG_ASK_RESTROOM, False
+        elif category == "entrance":
+            question, is_finish = MSG_ASK_ENTRANCE, True
+        else:
+            question, is_finish = MSG_ASK_GENERIC, True
+        self.state = State.ASKING_NEXT
+        self.active_destination = None
+        self._asking_is_finish = is_finish
+        self._arrival_retried = False
+        self._leaving_deadline = None
+        self._response_deadline = None   # 재생완료(on_arrival_question_spoken)에서 시작
+        return [Say(question, priority="response", expects_reply=True)]
+
+    def on_arrival_question_spoken(self, now: float) -> list:
+        """도착 후 질문 재생이 끝났다. 응답 대기 8초는 여기서부터 센다
+        (AWAITING_USER 와 같은 방식). 재생시간을 TTS 만 아므로 노드가 알려준다."""
+        if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            self._response_deadline = now + self.approach_response_timeout_sec
+        return []
+
+    def on_wake(self, now: float) -> list:
+        """WAITING 중 "비카야" — 다시 안내를 시작할지 묻는다 (제자리 대기 각성)."""
+        if self.state != State.WAITING:
+            return []
+        self._wait_until = None
+        self._asking_is_finish = False   # "네" = 계속 (대기형처럼 다룬다)
+        self.state = State.ASKING_NEXT
+        self._arrival_retried = False
+        self._response_deadline = None
+        return [Say(MSG_WAIT_RESUME_ASK, priority="response", expects_reply=True)]
+
+    def on_arrival_answer(self, intent: "IntentData", now: float,
+                          next_dest: Optional[Destination] = None) -> list:
+        """도착 후 질문에 대한 답. 정리된 intent 만 받아 갈래를 만든다.
+
+        next_dest 는 navigate 답일 때 노드가 게이트 통과시킨 다음 목적지다.
+        """
+        if self.state not in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            return []
+        kind = intent.intent
+
+        # 다음 목적지 — 도착 후에도 새 안내로 이어간다.
+        if kind == "navigate" and next_dest is not None:
+            self.state = State.NAVIGATING
+            self.active_destination = next_dest
+            self._reset_arrival_dialog()
+            return [SetNavSpeedLimit(NO_SPEED_LIMIT), Navigate(next_dest)]
+
+        # 종료: finish, 도착 후 cancel(=finish, 2026-08-30), 종료형 질문의 affirm.
+        if (kind in ("finish", "cancel")
+                or (kind == "affirm" and self._asking_is_finish)):
+            self._reset_arrival_dialog()
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
+
+        # 대기: wait, 또는 대기형(restroom) 질문의 affirm.
+        if kind == "wait" or (kind == "affirm" and not self._asking_is_finish):
+            minutes = intent.wait_minutes if kind == "wait" else -1
+            # restroom·entrance(질문 태그로 왔거나 시간이 실림): 시간 안 묻고 대기.
+            # 그 외에서 시간 없이 대기만 원하면 "몇 분쯤?" 후속 질문.
+            if minutes is None or minutes < 0:
+                if self.state == State.ASKING_NEXT and not self._asking_is_finish:
+                    return self._enter_waiting(WAIT_MINUTES_CAP, now,
+                                               default_msg=True)
+                self.state = State.ASKING_WAIT_TIME
+                self._response_deadline = None
+                return [Say(MSG_ASK_WAIT_TIME, priority="response",
+                            expects_reply=True)]
+            return self._enter_waiting(min(minutes, WAIT_MINUTES_CAP), now)
+
+        # deny: 종료형이면 "안 끝났다"=대기, 대기형이면 "대기 싫다"=종료.
+        if kind == "deny":
+            if self._asking_is_finish:
+                return self._enter_waiting(WAIT_MINUTES_CAP, now,
+                                           default_msg=True)
+            self._reset_arrival_dialog()
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
+
+        # 못 알아들음(unknown 등): 무응답 사다리 ①.
+        return self._arrival_no_answer(now)
+
+    def _enter_waiting(self, minutes: int, now: float,
+                       default_msg: bool = False) -> list:
+        """WAITING 진입 + 대기 확정 멘트. 사람접근은 WAITING 상태값으로 자연히 꺼진다."""
+        self.state = State.WAITING
+        self._wait_until = now + minutes * 60.0
+        self._response_deadline = None
+        self._leaving_deadline = None
+        msg = (MSG_WAIT_DEFAULT if default_msg
+               else MSG_WAIT_CONFIRM.format(minutes=minutes))
+        return [Say(msg, priority="response")]
+
+    def _arrival_no_answer(self, now: float) -> list:
+        """무응답 사다리: 못 알아들으면 1회 재질문, 그 뒤엔 떠나기 예고."""
+        if not self._arrival_retried:
+            self._arrival_retried = True
+            self._response_deadline = None
+            return [Say(MSG_ARRIVAL_RETRY, priority="response", expects_reply=True)]
+        return self._leaving_notice(now)
+
+    def _leaving_notice(self, now: float) -> list:
+        """떠나기 예고 + 유예. 유예 안에 답이 오면 산다(on_arrival_answer)."""
+        self._leaving_deadline = now + LEAVING_GRACE_SEC
+        self._response_deadline = None
+        return [Say(MSG_LEAVING_NOTICE, priority="response")]
+
+    def _go_home(self, now: float) -> list:
+        """홈 복귀 진입. 홈이 없으면 _enter_returning 이 제자리로 처리한다."""
+        return self._enter_returning(now)
+
+    def _reset_arrival_dialog(self) -> None:
+        self._asking_is_finish = False
+        self._arrival_retried = False
+        self._leaving_deadline = None
+        self._wait_until = None
+        self._response_deadline = None
+
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
 
@@ -1039,11 +1208,15 @@ class MissionLogic:
                     if dest and dest.arrival_message
                     else MSG_ARRIVED_FALLBACK.format(name=dest.name if dest else "목적지")
                 )
-                self.state = State.ARRIVED
-                self._dwell_until = now + self.dwell_sec
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                 actions.append(Say(text))
+                if self.arrival_dialog:
+                    # 도착 멘트 뒤에 유형별 질문을 붙이고 답을 기다린다.
+                    actions.extend(self._ask_arrival(dest, now))
+                else:
+                    self.state = State.ARRIVED
+                    self._dwell_until = now + self.dwell_sec
             elif nav_status == NavStatus.RUNNING:
                 # 접근 감속: 목적지에 가까워질수록 최대속도 상한을 한 단계씩 내려
                 # 도착 순간의 속도 낙차(Δv)를 줄인다. 근거와 단계 값의 뜻은
@@ -1139,6 +1312,29 @@ class MissionLogic:
                 # 어느 쪽이든 계속 서서 기다리면 사람 앞을 막는 셈이 된다.
                 actions.append(Say(MSG_APPROACH_NO_ANSWER, priority="response"))
                 actions.extend(self._enter_returning(now))
+
+        elif self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            # 무응답 사다리 (arrival-dialog 3절). 떠나기 예고 후면 유예를 세고,
+            # 아니면 8초 침묵을 센다. 완전 침묵은 재질문 없이 바로 예고로 간다
+            # (자리를 뜬 신호). 말을 알아듣는 쪽은 음성이다.
+            if self._leaving_deadline is not None and now >= self._leaving_deadline:
+                self._reset_arrival_dialog()
+                actions.append(Say(MSG_GOING_HOME, priority="response"))
+                actions.extend(self._go_home(now))
+            elif (self._leaving_deadline is None
+                  and self._response_deadline is not None
+                  and now >= self._response_deadline):
+                actions.extend(self._leaving_notice(now))
+
+        elif self.state == State.WAITING:
+            # 제자리 대기. 사람접근은 이 상태값으로 자연히 꺼진다(_GOAL_ACTIVE
+            # 아님·IDLE 아님). 시간이 다 되면 예고 없이 홈으로 — 이미 대기
+            # 안내에서 "돌아오면 비카야"를 말했고, 30분을 채운 자리라 예고보다
+            # 복귀가 자연스럽다.
+            if self._wait_until is not None and now >= self._wait_until:
+                self._reset_arrival_dialog()
+                actions.append(Say(MSG_GOING_HOME, priority="response"))
+                actions.extend(self._go_home(now))
 
         elif self.state == State.RETURNING:
             # 복귀 실패도 완료로 친다. 대기 위치에 못 갔다고 접근 상태에 갇히면
