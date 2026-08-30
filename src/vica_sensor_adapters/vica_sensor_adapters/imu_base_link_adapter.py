@@ -103,6 +103,35 @@ class ImuBaseLinkAdapter(Node):
         self.declare_parameter('gyro_bias_sample_count', 1000)
         self.declare_parameter('gyro_bias_max_rate', 0.05)
 
+        # ── ZUPT: 정차할 때마다 편향을 다시 잰다 (2026-08-30) ──────────────
+        #
+        # 편향은 온도에 따라 변한다. 기동 시 한 번 잰 값이 30분 뒤에는 안 맞는다.
+        # bag 실측(run1139)에서 wheel_base 를 고쳐 회전 스케일을 맞춘 뒤에도 AMCL
+        # yaw 보정 추세가 -1.16 도/분 남았고, 그 정체가 이 편향(+0.013 도/초)이다.
+        # 스케일 오차는 회전한 양에, 편향은 시간에 비례하므로 따로 잡아야 한다.
+        #
+        #   sample_count 120  40 Hz 에서 3초.  실주행 bag 에서 3초 넘는 정지가
+        #                     10건 있었으므로 현실적인 길이다. 표준오차는
+        #                     sigma/sqrt(N) = 0.0018/11 = 0.00016 rad/s
+        #                     (0.009 도/초)로 지금 편향 0.013 도/초 를 충분히 잰다.
+        #   alpha 0.2         한 번에 20 %만 옮긴다. 잘못 잰 한 회차가 전체를
+        #                     망치지 않게 한다. 다섯 번쯤 정차하면 새 값이 된다.
+        #   max_dev 0.02      **가장 중요한 값이다.** 직진을 정차로 착각하지 않게
+        #                     막는다. 직진 중에도 자이로 평균은 0 에 가까워 크기만
+        #                     으로는 구별되지 않지만, 흔들림 폭이 다르다:
+        #                         정지 sigma 0.0018 / 직진 sigma 0.0939  (52배)
+        #                     정지 중 최대 절대값이 0.0091 이었으므로 첫 표본
+        #                     기준 편차는 넉넉히 잡아도 0.02 안이다.
+        #   max_jump 0.01     옛 편향과 이보다 크게 차이 나면 그 회차를 버린다.
+        #                     편향은 온도로 천천히 변하지 정차 한 번에 뛰지 않는다.
+        #                     0.01 rad/s = 0.57 도/초 로, 지금 편향의 40배다.
+        #
+        # 끄려면 gyro_bias_refresh_count 를 0 으로 준다(종전 동작 — 기동 시 한 번).
+        self.declare_parameter('gyro_bias_refresh_count', 120)
+        self.declare_parameter('gyro_bias_refresh_alpha', 0.2)
+        self.declare_parameter('gyro_bias_max_dev', 0.02)
+        self.declare_parameter('gyro_bias_max_jump', 0.01)
+
         # 출력 주파수 상한. 0 이하면 제한하지 않는다(입력 그대로).
         #
         # 2026-08-02 주행 중 CPU 실측에서 이 노드가 **1위(34.7 %)** 였다. 하는 일은
@@ -144,8 +173,14 @@ class ImuBaseLinkAdapter(Node):
         self.bias = GyroBiasEstimator(
             sample_count=self.get_parameter('gyro_bias_sample_count').value,
             max_abs_rate=self.get_parameter('gyro_bias_max_rate').value,
+            refresh_sample_count=self.get_parameter(
+                'gyro_bias_refresh_count').value,
+            refresh_alpha=self.get_parameter('gyro_bias_refresh_alpha').value,
+            max_abs_dev=self.get_parameter('gyro_bias_max_dev').value,
+            max_refresh_jump=self.get_parameter('gyro_bias_max_jump').value,
         )
         self._bias_reported = False
+        self._bias_refresh_seen = 0
 
         rate = float(self.get_parameter('publish_rate_hz').value)
         # monotonic 기준이다. 시스템 시계가 바뀌어도 간격 판정이 흔들리지 않는다.
@@ -281,6 +316,18 @@ class ImuBaseLinkAdapter(Node):
         """정지 중 추정한 편향을 뺀다. 확정 전이면 원값이 그대로 나간다."""
         self.bias.add(gyro.x, gyro.y, gyro.z)
         gyro.x, gyro.y, gyro.z = self.bias.correct(gyro.x, gyro.y, gyro.z)
+
+        # ZUPT 갱신은 조용히 일어나므로 로그로 확인할 길을 둔다. 실주행에서
+        # "정차를 잡고 있는가"를 보는 유일한 창이다. 정차마다 찍히지만 로봇이
+        # 3초 넘게 서 있을 때만이라 잦지 않다.
+        if self.bias.refresh_count != self._bias_refresh_seen:
+            self._bias_refresh_seen = self.bias.refresh_count
+            bz = self.bias.bias[2]
+            self.get_logger().info(
+                f'Gyro bias refreshed (#{self.bias.refresh_count}) at stop: '
+                f'yaw bias {bz:+.6f} rad/s '
+                f'({math.degrees(bz) * 3600.0:+.1f} deg/hour)'
+            )
 
         if self._bias_reported:
             return
