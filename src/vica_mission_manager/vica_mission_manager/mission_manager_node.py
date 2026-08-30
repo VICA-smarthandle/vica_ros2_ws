@@ -244,6 +244,13 @@ class MissionManagerNode(Node):
             String, "/vica/wake", self._on_wake, 10,
             callback_group=self._main_group,
         )
+        # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
+        # on_listen_state 주석, 2026-08-30).
+        self.create_subscription(
+            String, "/vica/listen_state",
+            lambda msg: self.logic.on_listen_state(msg.data, self._now()), 10,
+            callback_group=self._main_group,
+        )
 
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
@@ -342,6 +349,16 @@ class MissionManagerNode(Node):
             return None
 
     def _on_intent(self, msg: VicaIntent) -> None:
+        # 복귀 주행 중 늦게 도착한 답 — 마지막 그물 (2026-08-30 실기: 무응답
+        # 오판으로 떠난 직후 도착한 답이 버려져 세울 방법이 없었다). 복귀를
+        # 조용히 멈추고(ASKING_NEXT) 아래 라우팅이 그 뜻을 그대로 처리한다
+        # — wait 는 대기, navigate 제안은 확인 흐름. finish 는 이미 홈으로
+        # 가는 중이라 제외(그대로 간다).
+        if (self.logic.state == State.RETURNING
+                and msg.intent in ("wait", "navigate")):
+            self._run_actions(self.logic.on_return_brake(self._now(), quiet=True))
+            self.get_logger().info(f"복귀 중 답 도착({msg.intent}) — 복귀 취소")
+
         # 도착 후 대화 중이면 답(wait/finish/cancel/affirm/deny)을
         # on_arrival_answer 로 보낸다 — 같은 말이라도 이 상태에선 뜻이 다르다
         # (도착 후 cancel = 홈 복귀 등). 상태 판정은 로직이 갖고 있다.

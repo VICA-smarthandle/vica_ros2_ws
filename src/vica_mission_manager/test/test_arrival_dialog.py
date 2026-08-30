@@ -253,3 +253,56 @@ class TestArrivalNavigateConfirm:
         logic = MissionLogic()
         logic.exit_arrival_dialog()                          # 아무 일 없음
         assert logic.state == State.IDLE
+
+
+class TestEarHold:
+    """무응답 시계는 귀가 바쁜 동안 멈춘다 (2026-08-30 실기 — 답이 STT·LLM
+    을 통과하는 동안 8초가 먼저 울려 "응답이 없어" 하고 떠났다)."""
+
+    def test_open_listen_holds_silence_deadline(self):
+        logic = arrive("restroom")               # 질문 재생완료 2.0 → 데드라인 10.0
+        logic.on_listen_state("open", 3.0)       # 사용자 쪽 창 열림
+        assert _say(logic.on_tick(10.5, NavStatus.NONE)) == []   # 잡아둠
+        logic.on_listen_state("speech", 11.0)    # 말하는 중
+        assert _say(logic.on_tick(12.0, NavStatus.NONE)) == []
+
+    def test_closed_grants_grace_for_llm(self):
+        """전사 성공(closed) 후에도 LLM 처리 시간(6초)을 기다린다."""
+        logic = arrive("restroom")
+        logic.on_listen_state("open", 3.0)
+        logic.on_listen_state("speech", 7.0)
+        logic.on_listen_state("closed", 9.5)     # STT 통과 — LLM 진행 중
+        assert _say(logic.on_tick(10.5, NavStatus.NONE)) == []   # 유예
+        acts = logic.on_tick(16.0, NavStatus.NONE)               # 유예 소진
+        assert any("돌아가겠습니다" in t for t in _say(acts))
+
+    def test_empty_fires_promptly(self):
+        logic = arrive("restroom")
+        logic.on_listen_state("open", 3.0)
+        logic.on_listen_state("empty", 8.5)      # 빈손 — 진짜 침묵
+        acts = logic.on_tick(10.5, NavStatus.NONE)
+        assert any("돌아가겠습니다" in t for t in _say(acts))
+
+    def test_stuck_open_ear_has_failsafe_cap(self):
+        """닫힘 신호를 영영 못 받아도 20초 상한 뒤엔 떠난다 (무한 대기 방지)."""
+        logic = arrive("restroom")
+        logic.on_listen_state("open", 3.0)       # 그리고 닫힘 신호 유실
+        assert _say(logic.on_tick(15.0, NavStatus.NONE)) == []
+        acts = logic.on_tick(24.0, NavStatus.NONE)   # 3.0+20 상한 초과
+        assert any("돌아가겠습니다" in t for t in _say(acts))
+
+
+class TestReturnNet:
+    """복귀 중 늦게 도착한 답의 마지막 그물 (2026-08-30)."""
+
+    def test_quiet_brake_then_wait_answer(self):
+        from vica_mission_manager.mission_logic import CancelNav
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("finish"), 3.0)      # RETURNING
+        acts = logic.on_return_brake(5.0, quiet=True)        # 조용한 브레이크
+        assert logic.state == State.ASKING_NEXT
+        assert _say(acts) == []                              # 질문 없이
+        assert any(isinstance(a, CancelNav) for a in acts)
+        acts2 = logic.on_arrival_answer(_intent("wait", wait_minutes=10), 5.5)
+        assert logic.state == State.WAITING
+        assert any("10분" in t for t in _say(acts2))

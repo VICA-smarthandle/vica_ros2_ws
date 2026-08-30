@@ -306,6 +306,11 @@ MSG_GOING_HOME = "홈으로 복귀중입니다."
 
 WAIT_MINUTES_CAP = 30
 LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유예
+# 귀 홀드 (2026-08-30): 무응답 시계는 귀가 바쁜 동안 멈춘다 — 답이 STT·LLM
+# 을 통과하는 동안 8초가 먼저 울려 떠나던 결함. closed(전사 성공) 후 LLM
+# 처리 유예, open 이 닫힘 신호를 잃어도 상한 뒤엔 떠난다(무한 대기 방지).
+EAR_GRACE_SEC = 6.0
+EAR_HOLD_MAX_SEC = 20.0
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
@@ -658,6 +663,10 @@ class MissionLogic:
         self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
+        # 귀 상태 (/vica/listen_state). 무응답 판정 전에 귀 사정을 본다.
+        self._ear_busy = False
+        self._ear_busy_since: Optional[float] = None
+        self._ear_grace_until: Optional[float] = None
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -1014,6 +1023,33 @@ class MissionLogic:
         """WAITING(제자리 대기) 중인가. 이때 "비카야"는 on_wake 로 간다."""
         return self.state == State.WAITING
 
+    def on_listen_state(self, state: str, now: float) -> list:
+        """/vica/listen_state (open/speech/closed/empty). 발화 없음.
+
+        closed = 발화가 STT 를 통과해 LLM 으로 가는 중 — 유예를 준다.
+        empty = 빈손 — 유예 없이 시계가 그대로 흐른다.
+        """
+        if state in ("open", "speech"):
+            if not self._ear_busy:
+                self._ear_busy_since = now
+            self._ear_busy = True
+        elif state == "closed":
+            self._ear_busy = False
+            self._ear_grace_until = now + EAR_GRACE_SEC
+        else:   # "empty"
+            self._ear_busy = False
+            self._ear_grace_until = None
+        return []
+
+    def _ear_holds(self, now: float) -> bool:
+        """무응답 시계를 잡아둘 이유가 있는가. 상한(EAR_HOLD_MAX_SEC)은
+        닫힘 신호 유실 대비 — 귀가 영영 바빠 보여도 결국 떠난다."""
+        if (self._ear_busy and self._ear_busy_since is not None
+                and now - self._ear_busy_since <= EAR_HOLD_MAX_SEC):
+            return True
+        return (self._ear_grace_until is not None
+                and now < self._ear_grace_until)
+
     def exit_arrival_dialog(self) -> None:
         """도착 후 대화를 조용히 닫는다 — 새 목적지 '제안'(need_confirm=True)이
         왔을 때 노드가 부른다. navigate 는 2단계(제안→확정)라 제안에서 바로
@@ -1144,7 +1180,7 @@ class MissionLogic:
         """홈 복귀 진입. 홈이 없으면 _enter_returning 이 제자리로 처리한다."""
         return self._enter_returning(now)
 
-    def on_return_brake(self, now: float) -> list:
+    def on_return_brake(self, now: float, quiet: bool = False) -> list:
         """홈 복귀 중 "비카야" (작업 E). 복귀를 취소하고 다시 안내를 묻는다 —
         부른 사람은 대개 로봇이 가버려 부른 사용자다. 긴급어("멈춰")는 별도
         경로로 어느 상태든 항상 통한다."""
@@ -1159,8 +1195,10 @@ class MissionLogic:
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if cancel_dest is not None:
             actions.append(CancelNav(cancel_dest))
-        actions.append(Say(MSG_WAIT_RESUME_ASK, priority="response",
-                           expects_reply=True))
+        if not quiet:
+            # quiet: 늦게 도착한 답이 바로 뒤따라 처리될 때 — 질문이 군더더기다.
+            actions.append(Say(MSG_WAIT_RESUME_ASK, priority="response",
+                               expects_reply=True))
         return actions
 
     def _reset_arrival_dialog(self) -> None:
@@ -1365,13 +1403,16 @@ class MissionLogic:
             # 무응답 사다리 (arrival-dialog 3절). 떠나기 예고 후면 유예를 세고,
             # 아니면 8초 침묵을 센다. 완전 침묵은 재질문 없이 바로 예고로 간다
             # (자리를 뜬 신호). 말을 알아듣는 쪽은 음성이다.
-            if self._leaving_deadline is not None and now >= self._leaving_deadline:
+            if (self._leaving_deadline is not None
+                    and now >= self._leaving_deadline
+                    and not self._ear_holds(now)):
                 self._reset_arrival_dialog()
                 actions.append(Say(MSG_GOING_HOME, priority="response"))
                 actions.extend(self._go_home(now))
             elif (self._leaving_deadline is None
                   and self._response_deadline is not None
-                  and now >= self._response_deadline):
+                  and now >= self._response_deadline
+                  and not self._ear_holds(now)):
                 actions.extend(self._leaving_notice(now))
 
         elif self.state == State.WAITING:
