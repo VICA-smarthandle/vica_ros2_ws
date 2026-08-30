@@ -177,3 +177,37 @@ class TestWaitingState:
         acts = logic.on_tick(3.0 + 61.0, NavStatus.NONE)
         assert MSG_GOING_HOME in _say(acts)
         assert logic.state == State.RETURNING
+
+
+class TestReturnBrake:
+    def test_wake_during_return_cancels_and_asks(self):
+        """홈 복귀 중 '비카야' → 복귀 취소 + 다시 안내 질문 (작업 E)."""
+        from vica_mission_manager.mission_logic import CancelNav
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("finish"), 3.0)   # RETURNING
+        assert logic.state == State.RETURNING
+        acts = logic.on_return_brake(5.0)
+        assert logic.state == State.ASKING_NEXT
+        assert MSG_WAIT_RESUME_ASK in _say(acts)
+        assert any(isinstance(a, CancelNav) for a in acts)
+
+    def test_return_brake_ignored_when_not_returning(self):
+        logic = MissionLogic()
+        assert logic.on_return_brake(1.0) == []
+
+
+class TestLoadHome:
+    def test_home_yaml_becomes_return_destination(self, tmp_path):
+        from vica_mission_manager.destinations import load_home
+        (tmp_path / "home.yaml").write_text(
+            "pose:\n  frame_id: map\n  x: 1.5\n  y: -0.5\n  yaw: 90.0\n"
+            'label: "입구"\n')
+        (tmp_path / "destinations.yaml").write_text("destinations: []\n")
+        home = load_home(str(tmp_path / "destinations.yaml"))
+        assert home is not None and home.id == "__home__"
+        assert home.pose.x == 1.5
+
+    def test_no_home_yaml_is_none(self, tmp_path):
+        from vica_mission_manager.destinations import load_home
+        (tmp_path / "destinations.yaml").write_text("destinations: []\n")
+        assert load_home(str(tmp_path / "destinations.yaml")) is None

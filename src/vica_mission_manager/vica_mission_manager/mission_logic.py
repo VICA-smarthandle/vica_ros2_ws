@@ -1004,6 +1004,16 @@ class MissionLogic:
         return actions
 
     # -- 도착 후 대화 (arrival-dialog-flow) ------------------------------------
+    def is_awaiting_arrival_answer(self) -> bool:
+        """도착 후 질문의 답을 기다리는 중인가. 노드가 라우팅에 쓴다 —
+        이때 들어온 wait/finish/cancel/affirm/deny/navigate 는 전부
+        on_arrival_answer 로 보낸다(그 외 상태의 뜻과 다르므로)."""
+        return self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME)
+
+    def is_waiting_in_place(self) -> bool:
+        """WAITING(제자리 대기) 중인가. 이때 "비카야"는 on_wake 로 간다."""
+        return self.state == State.WAITING
+
     def _ask_arrival(self, dest: Optional[Destination], now: float) -> list:
         """유형별 질문을 던지고 ASKING_NEXT 로 들어간다. "네"의 뜻(_asking_is_finish)
         을 함께 기억한다 — restroom 은 대기형(네=대기), 나머지는 종료형(네=끝)."""
@@ -1117,6 +1127,25 @@ class MissionLogic:
     def _go_home(self, now: float) -> list:
         """홈 복귀 진입. 홈이 없으면 _enter_returning 이 제자리로 처리한다."""
         return self._enter_returning(now)
+
+    def on_return_brake(self, now: float) -> list:
+        """홈 복귀 중 "비카야" (작업 E). 복귀를 취소하고 다시 안내를 묻는다 —
+        부른 사람은 대개 로봇이 가버려 부른 사용자다. 긴급어("멈춰")는 별도
+        경로로 어느 상태든 항상 통한다."""
+        if self.state != State.RETURNING:
+            return []
+        cancel_dest = self.active_destination
+        self.state = State.ASKING_NEXT
+        self.active_destination = None
+        self._asking_is_finish = False   # "네" = 계속
+        self._arrival_retried = False
+        self._response_deadline = None
+        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+        if cancel_dest is not None:
+            actions.append(CancelNav(cancel_dest))
+        actions.append(Say(MSG_WAIT_RESUME_ASK, priority="response",
+                           expects_reply=True))
+        return actions
 
     def _reset_arrival_dialog(self) -> None:
         self._asking_is_finish = False

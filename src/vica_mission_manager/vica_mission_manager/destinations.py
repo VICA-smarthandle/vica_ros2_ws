@@ -123,3 +123,31 @@ def load_map_bounds(map_yaml_path: str) -> Optional[MapBounds]:
         max_x=origin_x + width * resolution,
         max_y=origin_y + height * resolution,
     )
+
+
+def load_home(destinations_path: str) -> Optional[Destination]:
+    """목적지 폴더의 home.yaml 을 복귀 목적지(__home__)로 읽는다.
+
+    도착 후 대화·홈 복귀용. 없으면 None — 그러면 도착 후 대화가 제자리
+    대기로 폴백한다. 형식은 앱팀의 홈 저장 기능과 같아 나중에 그대로
+    대체된다 (pose{frame_id,x,y,yaw}). id 는 UUID 가 아닌 __home__ 이라
+    음성 경로로는 지목되지 않는다(관리자·복귀 전용).
+    """
+    home_path = Path(destinations_path).parent / "home.yaml"
+    if not home_path.exists():
+        return None
+    try:
+        data = yaml.safe_load(home_path.read_text()) or {}
+        pose = data.get("pose", {})
+        return Destination(
+            id="__home__",
+            name=str(data.get("label", "홈")),
+            pose=Pose2D(
+                x=float(pose["x"]),
+                y=float(pose["y"]),
+                yaw_deg=float(pose.get("yaw", 0.0)),
+                frame_id=str(pose.get("frame_id", "map")),
+            ),
+        )
+    except (KeyError, TypeError, ValueError, yaml.YAMLError):
+        return None
