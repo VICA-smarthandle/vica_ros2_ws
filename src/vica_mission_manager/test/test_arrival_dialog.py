@@ -52,17 +52,18 @@ class TestTypeQuestion:
         logic = MissionLogic(arrival_dialog=True)
         logic.on_intent(_intent(), _dest("restroom"), BOUNDS, True, 0.0)
         acts = logic.on_tick(1.0, NavStatus.SUCCEEDED)
-        assert MSG_ASK_RESTROOM in _say(acts)
+        assert any(MSG_ASK_RESTROOM in t for t in _say(acts))
+        assert any("도착했습니다" in t for t in _say(acts))  # 도착 멘트가 합쳐 나온다
 
     def test_entrance_asks_finish(self):
         logic = MissionLogic(arrival_dialog=True)
         logic.on_intent(_intent(), _dest("entrance"), BOUNDS, True, 0.0)
-        assert MSG_ASK_ENTRANCE in _say(logic.on_tick(1.0, NavStatus.SUCCEEDED))
+        assert any(MSG_ASK_ENTRANCE in t for t in _say(logic.on_tick(1.0, NavStatus.SUCCEEDED)))
 
     def test_generic_asks_wait_or_end(self):
         logic = MissionLogic(arrival_dialog=True)
         logic.on_intent(_intent(), _dest("reception"), BOUNDS, True, 0.0)
-        assert MSG_ASK_GENERIC in _say(logic.on_tick(1.0, NavStatus.SUCCEEDED))
+        assert any(MSG_ASK_GENERIC in t for t in _say(logic.on_tick(1.0, NavStatus.SUCCEEDED)))
 
     def test_dialog_off_keeps_legacy_dwell(self):
         """arrival_dialog=False 면 기존대로 도착 후 dwell → idle."""

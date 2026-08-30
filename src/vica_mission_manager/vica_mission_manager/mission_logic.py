@@ -1014,9 +1014,14 @@ class MissionLogic:
         """WAITING(제자리 대기) 중인가. 이때 "비카야"는 on_wake 로 간다."""
         return self.state == State.WAITING
 
-    def _ask_arrival(self, dest: Optional[Destination], now: float) -> list:
+    def _ask_arrival(self, dest: Optional[Destination], now: float,
+                     arrival_text: str = "") -> list:
         """유형별 질문을 던지고 ASKING_NEXT 로 들어간다. "네"의 뜻(_asking_is_finish)
-        을 함께 기억한다 — restroom 은 대기형(네=대기), 나머지는 종료형(네=끝)."""
+        을 함께 기억한다 — restroom 은 대기형(네=대기), 나머지는 종료형(네=끝).
+
+        arrival_text 가 있으면 도착 멘트와 질문을 한 발화로 합쳐 낸다(순서 역전
+        방지). 재질문(on_wake·복귀 브레이크)에서는 도착 멘트 없이 질문만 낸다.
+        """
         category = (dest.category if dest else "") or ""
         if category == "restroom":
             question, is_finish = MSG_ASK_RESTROOM, False
@@ -1030,7 +1035,8 @@ class MissionLogic:
         self._arrival_retried = False
         self._leaving_deadline = None
         self._response_deadline = None   # 재생완료(on_arrival_question_spoken)에서 시작
-        return [Say(question, priority="response", expects_reply=True)]
+        text = f"{arrival_text} {question}".strip() if arrival_text else question
+        return [Say(text, priority="response", expects_reply=True)]
 
     def on_arrival_question_spoken(self, now: float) -> list:
         """도착 후 질문 재생이 끝났다. 응답 대기 8초는 여기서부터 센다
@@ -1239,13 +1245,16 @@ class MissionLogic:
                 )
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                actions.append(Say(text))
                 if self.arrival_dialog:
-                    # 도착 멘트 뒤에 유형별 질문을 붙이고 답을 기다린다.
-                    actions.extend(self._ask_arrival(dest, now))
+                    # 도착 멘트와 유형별 질문을 한 발화로 합쳐 낸다 — 따로 내면
+                    # 우선순위(narration vs response)로 순서가 뒤집힌다(실기 확인
+                    # 2026-08-30). 한 문장이라 재생 완료 시점이 명확해 8초 응답
+                    # 창 시작도 어긋나지 않는다.
+                    actions.extend(self._ask_arrival(dest, now, arrival_text=text))
                 else:
                     self.state = State.ARRIVED
                     self._dwell_until = now + self.dwell_sec
+                    actions.append(Say(text))
             elif nav_status == NavStatus.RUNNING:
                 # 접근 감속: 목적지에 가까워질수록 최대속도 상한을 한 단계씩 내려
                 # 도착 순간의 속도 낙차(Δv)를 줄인다. 근거와 단계 값의 뜻은
