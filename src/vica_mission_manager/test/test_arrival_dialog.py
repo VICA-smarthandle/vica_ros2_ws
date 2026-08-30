@@ -212,3 +212,44 @@ class TestLoadHome:
         from vica_mission_manager.destinations import load_home
         (tmp_path / "destinations.yaml").write_text("destinations: []\n")
         assert load_home(str(tmp_path / "destinations.yaml")) is None
+
+
+class TestArrivalNavigateConfirm:
+    """도착 후 대화 중 새 목적지 '제안'은 즉시 출발하면 안 된다 (2026-08-30 실기).
+
+    navigate 는 2단계다 — 제안(need_confirm=True, 음성이 확인 질문을 말함) →
+    확정(need_confirm=False). 제안 단계에서 출발해버리면 질문 전에 달리고,
+    뒤따라온 확정 답은 "주행 중 새 요청"으로 거절된다(MSG_BUSY 실기 재현).
+    """
+
+    def test_proposal_joins_confirm_flow_not_navigate(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("affirm"), 3.0)     # WAITING
+        logic.on_wake(10.0)                                  # 재개 질문
+        # "입구로 가자" 제안 — 노드가 대화를 닫고 일반 확인 흐름으로 넘긴다
+        logic.exit_arrival_dialog()
+        assert logic.state == State.IDLE
+        nxt = _dest("", id="d2", name="입구")
+        acts = logic.on_intent(_intent("navigate", matched_destination_id="d2",
+                                       need_confirm=True), nxt, BOUNDS, True, 11.0)
+        assert logic.state == State.CONFIRMING               # 출발 안 함
+        assert not any(isinstance(a, Navigate) for a in acts)
+        # "그래" 확정 → 그때 출발
+        acts2 = logic.on_intent(_intent("navigate", matched_destination_id="d2"),
+                                nxt, BOUNDS, True, 12.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in acts2)
+
+    def test_confirmed_navigate_still_departs_immediately(self):
+        """확정(need_confirm=False)으로 온 navigate 는 기존대로 즉시 출발."""
+        logic = arrive("restroom")
+        nxt = _dest("", id="d2", name="안내소")
+        acts = logic.on_arrival_answer(
+            _intent("navigate", matched_destination_id="d2"), 3.0, next_dest=nxt)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in acts)
+
+    def test_exit_is_noop_outside_dialog(self):
+        logic = MissionLogic()
+        logic.exit_arrival_dialog()                          # 아무 일 없음
+        assert logic.state == State.IDLE

@@ -1014,6 +1014,15 @@ class MissionLogic:
         """WAITING(제자리 대기) 중인가. 이때 "비카야"는 on_wake 로 간다."""
         return self.state == State.WAITING
 
+    def exit_arrival_dialog(self) -> None:
+        """도착 후 대화를 조용히 닫는다 — 새 목적지 '제안'(need_confirm=True)이
+        왔을 때 노드가 부른다. navigate 는 2단계(제안→확정)라 제안에서 바로
+        출발하면 확인 질문 전에 달린다(2026-08-30 실기). IDLE 로 내려가
+        on_intent 게이트가 평소처럼 CONFIRMING 부터 밟게 한다."""
+        if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            self._reset_arrival_dialog()
+            self.state = State.IDLE
+
     def _ask_arrival(self, dest: Optional[Destination], now: float,
                      arrival_text: str = "") -> list:
         """유형별 질문을 던지고 ASKING_NEXT 로 들어간다. "네"의 뜻(_asking_is_finish)
@@ -1066,7 +1075,8 @@ class MissionLogic:
             return []
         kind = intent.intent
 
-        # 다음 목적지 — 도착 후에도 새 안내로 이어간다.
+        # 다음 목적지(확정만) — 제안(need_confirm=True)은 여기 오기 전에
+        # 노드가 exit_arrival_dialog 로 일반 확인 흐름에 합류시킨다.
         if kind == "navigate" and next_dest is not None:
             self.state = State.NAVIGATING
             self.active_destination = next_dest

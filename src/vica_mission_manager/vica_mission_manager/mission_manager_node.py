@@ -342,12 +342,20 @@ class MissionManagerNode(Node):
             return None
 
     def _on_intent(self, msg: VicaIntent) -> None:
-        # 도착 후 대화 중이면 모든 답(wait/finish/cancel/affirm/deny/navigate)을
+        # 도착 후 대화 중이면 답(wait/finish/cancel/affirm/deny)을
         # on_arrival_answer 로 보낸다 — 같은 말이라도 이 상태에선 뜻이 다르다
         # (도착 후 cancel = 홈 복귀 등). 상태 판정은 로직이 갖고 있다.
+        # 예외: 새 목적지 '제안'(navigate + need_confirm)은 대화의 답이 아니라
+        # 새 안내 요청이다 — 대화를 닫고 아래 일반 확인 흐름(CONFIRMING)으로
+        # 합류시킨다. 제안에서 바로 출발하면 확인 질문 전에 달리고, 뒤따라온
+        # 확정 답이 MSG_BUSY 로 거절된다 (2026-08-30 실기).
         if self.logic.is_awaiting_arrival_answer():
-            self._on_arrival_answer(msg)
-            return
+            if msg.intent == "navigate" and msg.need_confirm:
+                self.logic.exit_arrival_dialog()
+                # return 하지 않는다 — 아래 일반 경로가 이어서 처리한다.
+            else:
+                self._on_arrival_answer(msg)
+                return
         # 음성 취소·일시정지·재개는 service 와 같은 로직을 탄다.
         # 다만 취소는 바로 실행하지 않고 되물어 확인한 뒤에만 처리한다.
         if msg.intent in ("cancel", "pause", "resume"):
