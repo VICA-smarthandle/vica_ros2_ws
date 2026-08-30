@@ -662,7 +662,7 @@ class MissionLogic:
         ):
             # 오래된/엇갈린 confirm 방어 (request_id 없는 v1 의 임시 방어)
             self._to_idle()
-            return [Say(MSG_STALE_CONFIRM, priority="response")]
+            return [Say(MSG_STALE_CONFIRM, priority="response", expects_reply=True)]
 
         reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
         if reason != GateReason.OK:

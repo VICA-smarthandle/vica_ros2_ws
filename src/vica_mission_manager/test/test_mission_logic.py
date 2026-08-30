@@ -7,6 +7,7 @@ from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
     SpinInPlace,
     MSG_APPROACH_QUESTION,
+    MSG_STALE_CONFIRM,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
     CancelNav,
@@ -1123,3 +1124,19 @@ class TestApproachSafety:
         _, reason = getattr(logic, command)(3.0)
         assert reason == GateReason.NOT_NAVIGATING
         assert logic.state == State.APPROACHING
+
+
+class TestStaleConfirmListens:
+    def test_stale_confirm_retry_prompt_expects_a_reply(self):
+        """"다시 말씀해 주세요"는 질문이다 — expects_reply 없이는 말해 놓고
+        안 듣는다 (2026-08-28 실기: 사용자가 "비카야"를 다시 불러야 했다)."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        assert logic.state == State.CONFIRMING
+        actions = logic.on_intent(
+            make_intent(matched_destination_id="다른_목적지"), make_dest(),
+            BOUNDS, True, 1.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_STALE_CONFIRM
+        assert says[0].expects_reply is True
