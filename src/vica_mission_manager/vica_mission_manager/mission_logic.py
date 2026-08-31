@@ -265,22 +265,14 @@ MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도�
 # 자동 재시도 중임을 알린다. 로봇이 멈춰 있는 이유를 이용자가 알 수 있어야
 # 하고, 곧 다시 움직인다는 것도 알아야 놀라지 않는다.
 MSG_NAV_RETRY = "길이 막혀 잠시 기다렸다가 다시 가겠습니다."
-# E-stop 안내 — 걸릴 때 1멘트 + 풀릴 때 1멘트 (2026-08-31 감량: 대기 멘트와
-# 음성 즉답을 없앴다 — "멈춰" 한 번에 비슷한 말이 3연발이었다). 통신
-# 순단(정지 중)은 자동 복구되므로(AutoRecoveryPolicy) "관리자를 호출
-# 했습니다"가 거짓이 된다 — 그 경우만 자동 복구 예고로 갈린다. 원인 판별
-# 정본은 vica_safety/auto_recovery.py 의 COMM_SOURCES.
+# E-stop 안내 — 움직이는 중에 걸릴 때만 말한다 (2026-08-31 최종 감량).
+# 정지 중 걸림은 침묵: 로봇이 어차피 안 움직여 사용자에게 달라지는 게
+# 없고(통신 순단이면 1.4초 자동복구), 안 알린 걸림은 해제도 침묵한다.
+# 그래서 통신/사람 원인 판별(/estop_sources 스냅샷)도 함께 없앴다 —
+# 자동복구 예고 멘트가 그 판별의 유일한 소비자였다.
 MSG_ESTOPPED = "안전을 위해 멈추겠습니다. 관리자를 호출했습니다."
-MSG_ESTOP_COMM = "연결 문제로 잠시 섰습니다. 곧 자동으로 복구됩니다."
 MSG_ESTOP_RELEASED = "비상멈춤이 해제되었습니다."   # 2026-08-31 사용자 확정(짧게)
 
-_COMM_ESTOP_SOURCES = frozenset({
-    "motor_can",
-    "physical_stale",
-    "motor_can_stale",
-    "physical_waiting",
-    "motor_can_waiting",
-})
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
 MSG_CANCELED = "안내를 취소했습니다."
 
@@ -656,9 +648,8 @@ class MissionLogic:
         # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
         self.approach_turn_yaw_rad = approach_turn_yaw_rad
         self._turn_deadline: Optional[float] = None
-        # E-stop 안내용: 마지막으로 본 원인 목록 — 걸리는 순간 "통신 원인뿐
-        # 인가"를 판정하는 재료다 (원인은 곧 해제돼 사라지므로 스냅샷).
-        self._estop_sources: frozenset = frozenset()
+        # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
+        self._estop_announced = False
 
         # 도착 후 대화 (arrival-dialog-flow). 꺼져 있으면 도착 후 기존 dwell→
         # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
@@ -1056,13 +1047,6 @@ class MissionLogic:
         actions.extend(self._enter_returning(now))
         return actions
 
-    def on_estop_sources(self, sources: list, now: float) -> list:
-        """/estop_sources (원인 목록) 추적. 발화 없음 — 걸리는 순간의 통신/사람
-        판별 재료로만 쓴다 (2026-08-31 감량: reset 대기 멘트는 걸림 멘트와
-        연달아 나와 같은 말 2연발이 돼서 뺐다)."""
-        self._estop_sources = frozenset(s for s in sources if s)
-        return []
-
     # -- 도착 후 대화 (arrival-dialog-flow) ------------------------------------
     def is_awaiting_arrival_answer(self) -> bool:
         """도착 후 질문의 답을 기다리는 중인가. 노드가 라우팅에 쓴다 —
@@ -1294,9 +1278,13 @@ class MissionLogic:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
+        moving = self.state in _GOAL_ACTIVE_STATES
         self._enter_estopped(now)
         if not already_estopped:
-            actions.append(Say(MSG_ESTOPPED, priority="emergency"))
+            # 정지 중 "멈춰"도 침묵 — 움직임이 없으니 알릴 변화가 없다.
+            self._estop_announced = moving
+            if moving:
+                actions.append(Say(MSG_ESTOPPED, priority="emergency"))
         return actions
 
     def on_estop(self, active: bool, now: float) -> list:
@@ -1309,15 +1297,13 @@ class MissionLogic:
                 if self.state in _GOAL_ACTIVE_STATES:
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(CancelNav(self.active_destination))
-                # 통신 원인뿐이고 정지 중이면 자동 복구가 온다(1.4초 실측) —
-                # "관리자 호출"은 거짓이 된다. 주행 중 끊김은 관리자 몫.
-                comm_only = (bool(self._estop_sources)
-                             and self._estop_sources <= _COMM_ESTOP_SOURCES)
-                auto_expected = comm_only and self.state != State.NAVIGATING
+                # 움직이는 중에 걸렸을 때만 말한다 — 정지 중 걸림(통신 순단
+                # 자동복구 포함)은 사용자에게 달라지는 게 없어 침묵한다.
+                moving = self.state in _GOAL_ACTIVE_STATES
                 self._enter_estopped(now)
-                actions.append(Say(
-                    MSG_ESTOP_COMM if auto_expected else MSG_ESTOPPED,
-                    priority="emergency"))
+                self._estop_announced = moving
+                if moving:
+                    actions.append(Say(MSG_ESTOPPED, priority="emergency"))
                 return actions
         else:
             if self.state == State.ESTOPPED and self._estop_clear_since is None:
@@ -1554,9 +1540,13 @@ class MissionLogic:
                     else self._estop_entered_at
                 )
                 if t0 is not None and now - t0 >= self.estop_release_grace_sec:
+                    announced = self._estop_announced
+                    self._estop_announced = False
                     self._to_idle()
-                    # 위와 같은 이유. 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
-                    actions.append(Say(MSG_ESTOP_RELEASED, priority="response"))
+                    if announced:
+                        # 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
+                        # 침묵 걸림(정지 중)은 해제도 침묵 — 짝을 맞춘다.
+                        actions.append(Say(MSG_ESTOP_RELEASED, priority="response"))
 
         return actions
 

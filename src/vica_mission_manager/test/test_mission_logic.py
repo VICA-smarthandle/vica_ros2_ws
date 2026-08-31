@@ -423,7 +423,9 @@ class TestEmergency:
 
     def test_estop_latch_spam_says_once(self):
         # 20Hz 주기 발행 — 같은 상태 반복 수신 시 멘트 중복 금지
+        # (정지 중 걸림은 침묵 규칙이라 주행 중으로 검증한다)
         logic = MissionLogic()
+        start_navigation(logic)
         first = logic.on_estop(True, 0.0)
         assert any(isinstance(a, Say) for a in first)
         assert logic.on_estop(True, 0.05) == []
@@ -1191,48 +1193,49 @@ class TestApproachVoiceHooks:
 
 
 class TestEstopStateNarration:
-    """E-stop 전이 음성 안내 (2026-08-29 사용자 확정 문구).
+    """E-stop 안내 최종 규칙 (2026-08-31): 움직이는 중에 걸릴 때만 말한다.
 
-    "관리자를 호출했습니다"는 통신 순단(정지 중)에는 거짓이 된다 — 그 경우는
-    1.4초 만에 자동 복구되므로(AutoRecoveryPolicy) 자동 복구 예고로 갈린다.
-    원인 판별 정본은 vica_safety/auto_recovery.py 의 COMM_SOURCES.
+    정지 중 걸림(통신 순단 자동복구 포함)은 사용자에게 달라지는 게 없어
+    침묵하고, 침묵 걸림은 해제도 침묵한다(안 알린 걸 해제만 알리면 이상).
     """
 
-    def test_human_cause_calls_admin(self):
-        logic = MissionLogic()
-        logic.on_estop_sources(["voice"], 0.5)
-        actions = logic.on_estop(True, 1.0)
-        says = [a.text for a in actions if isinstance(a, Say)]
-        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
-
-    def test_comm_only_while_stopped_promises_auto_recovery(self):
-        logic = MissionLogic()
-        logic.on_estop_sources(["motor_can_stale"], 0.5)
-        actions = logic.on_estop(True, 1.0)
-        says = [a.text for a in actions if isinstance(a, Say)]
-        assert says == ["연결 문제로 잠시 섰습니다. 곧 자동으로 복구됩니다."]
-        # 자동 복구가 올 상황 — 원인이 비어도 관리자 대기 멘트는 내지 않는다
-        assert logic.on_estop_sources([], 2.0) == []
-
-    def test_comm_only_while_driving_calls_admin(self):
-        """주행 중 끊김은 자동 복구 대상이 아니다 — 관리자 문구가 맞다."""
+    def test_estop_while_driving_announces(self):
         logic = MissionLogic()
         start_navigation(logic)
-        logic.on_estop_sources(["motor_can_stale"], 1.5)
-        actions = logic.on_estop(True, 2.0)
+        actions = logic.on_estop(True, 1.0)
         says = [a.text for a in actions if isinstance(a, Say)]
         assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
 
-    def test_no_wait_admin_ment_after_causes_clear(self):
-        """원인이 해제돼도 추가 멘트 없음 — 걸림 1 + 해제 1 체계 (2026-08-31)."""
+    def test_estop_while_idle_is_silent(self):
         logic = MissionLogic()
-        logic.on_estop_sources(["voice"], 0.5)
-        logic.on_estop(True, 1.0)
-        assert logic.on_estop_sources([], 3.0) == []
-        assert logic.on_estop_sources([], 4.0) == []
+        actions = logic.on_estop(True, 1.0)
+        assert [a for a in actions if isinstance(a, Say)] == []
 
-    def test_sources_alone_do_not_speak_without_latch(self):
-        """래치가 없을 때의 원인 잔불(순단 회복 등)은 침묵한다."""
+    def test_silent_estop_silent_release(self):
+        logic = MissionLogic(estop_release_grace_sec=0.0)
+        logic.on_estop(True, 1.0)                       # 정지 중 — 침묵
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(3.0, NavStatus.NONE)
+        assert [a for a in actions if isinstance(a, Say)] == []
+        assert logic.state == State.IDLE                # 상태 전이는 정상
+
+    def test_announced_estop_announces_release(self):
+        logic = MissionLogic(estop_release_grace_sec=0.0)
+        start_navigation(logic)
+        logic.on_estop(True, 1.0)                       # 주행 중 — 발화
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(3.0, NavStatus.NONE)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["비상멈춤이 해제되었습니다."]
+
+    def test_voice_emergency_while_idle_is_silent(self):
         logic = MissionLogic()
-        logic.on_estop_sources(["motor_can_stale"], 0.5)
-        assert logic.on_estop_sources([], 1.0) == []
+        actions = logic.on_emergency("멈춰", 1.0)
+        assert [a for a in actions if isinstance(a, Say)] == []
+
+    def test_voice_emergency_while_driving_announces(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_emergency("멈춰", 1.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
