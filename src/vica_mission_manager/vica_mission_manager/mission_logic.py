@@ -274,7 +274,7 @@ MSG_ESTOP_COMM = "연결 문제로 잠시 섰습니다. 곧 자동으로 복구�
 MSG_ESTOP_WAIT_ADMIN = (
     "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."
 )
-MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
+MSG_ESTOP_RELEASED = "비상멈춤이 해제되었습니다."   # 2026-08-31 사용자 확정(짧게)
 
 _COMM_ESTOP_SOURCES = frozenset({
     "motor_can",
