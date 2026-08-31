@@ -276,3 +276,104 @@ def test_dead_motor_node_rejects_reset():
 
     assert accepted is False
     assert "motor_can_stale" in message
+
+
+# ===========================================================================
+# 부팅 유예 (input grace) — "아직 안 옴"과 "받다가 끊김"의 분리
+# ===========================================================================
+#
+# 근거: 2026-08-28 젯슨 로그 8월 전체 집계에서 `IDLE -> FAULT` 229회가 최다였다.
+# 노드가 뜬 직후에는 last_*_ns 가 None 인데 is_fresh_ns(None) 이 False 라서
+# 첫 evaluate 에서 곧바로 *_stale 이 붙는다. 미수신은 고장이 아니라 대기다.
+#
+# input_grace_ns 기본값은 0 이므로 이 블록 밖의 기존 시험은 영향을 받지 않는다.
+
+GRACE_NS = sec_to_ns(15.0)
+
+
+def test_missing_input_within_grace_is_waiting_not_stale():
+    # 부팅 유예 안의 미수신은 대기이지 고장이 아니다 → 래치를 새로 걸지 않는다.
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+        initially_latched=False,
+        input_grace_ns=GRACE_NS,
+        start_ns=T0,
+    )
+
+    snapshot = latch.evaluate(T0 + sec_to_ns(1.0))
+
+    assert "physical_waiting" in snapshot.active_sources
+    assert "motor_can_waiting" in snapshot.active_sources
+    assert "physical_stale" not in snapshot.active_sources
+    assert snapshot.latched is False
+
+
+def test_missing_input_past_grace_becomes_stale_and_latches():
+    # 유예를 넘기면 고장으로 승격한다. 유예는 무한정 봐주는 장치가 아니다.
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+        initially_latched=False,
+        input_grace_ns=GRACE_NS,
+        start_ns=T0,
+    )
+
+    snapshot = latch.evaluate(T0 + GRACE_NS + 1)
+
+    assert "physical_stale" in snapshot.active_sources
+    assert "physical_waiting" not in snapshot.active_sources
+    assert snapshot.latched is True
+
+
+def test_disconnect_after_first_receipt_is_stale_even_within_grace():
+    # 유예는 '첫 수신 전'에만 있다. 한 번 받은 뒤의 단절은 진짜 고장이다.
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+        initially_latched=False,
+        input_grace_ns=GRACE_NS,
+        start_ns=T0,
+    )
+    latch.mark_physical_seen(False, T0)
+    latch.mark_motor_can_seen(True, T0)
+
+    # 유예 창(15 s) 안이지만 타임아웃(0.5 s)은 넘긴 시점
+    snapshot = latch.evaluate(T0 + sec_to_ns(1.0))
+
+    assert "physical_stale" in snapshot.active_sources
+    assert "motor_can_stale" in snapshot.active_sources
+    assert "physical_waiting" not in snapshot.active_sources
+    assert snapshot.latched is True
+
+
+def test_button_pressed_during_grace_latches_immediately():
+    # 유예 중이라도 사람이 누른 것은 즉시 래치한다. 유예는 미수신에만 적용된다.
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+        initially_latched=False,
+        input_grace_ns=GRACE_NS,
+        start_ns=T0,
+    )
+
+    latch.mark_physical_seen(True, T0 + sec_to_ns(1.0))
+    snapshot = latch.evaluate(T0 + sec_to_ns(1.0))
+
+    assert "physical_f1" in snapshot.active_sources
+    assert snapshot.latched is True
+
+
+def test_grace_disabled_by_default_keeps_current_behaviour():
+    # input_grace_ns 기본값 0 = 되돌리기 경로. 기존 동작과 완전히 같아야 한다.
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+        initially_latched=False,
+    )
+
+    snapshot = latch.evaluate(T0)
+
+    assert "physical_stale" in snapshot.active_sources
+    assert "physical_waiting" not in snapshot.active_sources
+    assert snapshot.latched is True

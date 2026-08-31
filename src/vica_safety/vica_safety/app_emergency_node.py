@@ -18,6 +18,7 @@ from rclpy.qos import qos_profile_action_status_default
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
+from .auto_recovery import AutoRecoveryPolicy
 from .diagnostics import LABEL_BRIDGE, bridge_summary
 from .freshness import is_fresh_ns, sec_to_ns
 from .logging_utils import log_with_severity
@@ -40,8 +41,14 @@ def build_app_state(
     safety_state: str,
     message: str,
     timestamp: str,
+    auto_recovered: bool = False,
 ) -> dict:
-    """Build the backward-compatible authoritative app state payload."""
+    """Build the backward-compatible authoritative app state payload.
+
+    `auto_recovered`는 마지막 해제가 관리자 조작이 아니라 통신 복구로 이루어진
+    경우다. 앱은 원인 문자열을 보지 않으므로 이 JSON이 그 사실을 전할 유일한
+    통로다. 기본값이 False라 기존 호출부는 그대로 동작한다.
+    """
     return {
         "node": "app_emergency_node",
         "active": emergency_active,
@@ -52,6 +59,7 @@ def build_app_state(
             not emergency_active
             and safety_state == "ESTOP_RELEASED_WAIT_RESET"
         ),
+        "auto_recovered": auto_recovered,
         "message": message,
         "timestamp": timestamp,
     }
@@ -79,6 +87,13 @@ class AppEmergencyNode(Node):
         self.declare_parameter("call_timeout_sec", 2.0)
         self.declare_parameter("state_timeout_sec", 2.0)
         self.declare_parameter("source_settle_sec", 0.2)
+        self.declare_parameter("estop_sources_topic", "/estop_sources")
+        # 통신 원인이 모두 해소된 뒤 이 시간을 견뎌야 자동 복구를 시도한다.
+        # 접점이 떨릴 때 재출발하지 않게 하는 값이다(motor_can_timeout 0.5의 2배).
+        self.declare_parameter("auto_recover_settle_sec", 1.0)
+        self.declare_parameter("auto_recover_check_hz", 2.0)
+        # False 로 두면 자동 복구가 완전히 꺼진다(되돌리기 경로).
+        self.declare_parameter("auto_recover_enabled", True)
 
         self.activate_service = str(
             self.get_parameter("activate_service").value
@@ -115,6 +130,18 @@ class AppEmergencyNode(Node):
         self.source_settle_sec = float(
             self.get_parameter("source_settle_sec").value
         )
+        self.auto_recover_settle_sec = float(
+            self.get_parameter("auto_recover_settle_sec").value
+        )
+        self.auto_recover_enabled = bool(
+            self.get_parameter("auto_recover_enabled").value
+        )
+        auto_recover_check_hz = float(
+            self.get_parameter("auto_recover_check_hz").value
+        )
+        estop_sources_topic = str(
+            self.get_parameter("estop_sources_topic").value
+        )
 
         self.cb_group = ReentrantCallbackGroup()
         self.reset_lock = threading.Lock()
@@ -134,6 +161,12 @@ class AppEmergencyNode(Node):
         self.nav_statuses = []
         self.last_nav_status_ns = None
         self.last_message = "Safety 상태 확인 대기 중"
+        # 마지막 해제가 관리자 조작이었는지 통신 복구였는지. 앱 표시용이다.
+        self.auto_recovered = False
+        self.last_estop_sources: tuple = ()
+        self.auto_recovery = AutoRecoveryPolicy(
+            settle_ns=sec_to_ns(self.auto_recover_settle_sec),
+        )
 
         self.app_estop_publisher = self.create_publisher(Bool, app_topic, 10)
         self.state_publisher = self.create_publisher(String, state_topic, 10)
@@ -148,6 +181,14 @@ class AppEmergencyNode(Node):
             String,
             "/safety_state",
             self.safety_state_callback,
+            10,
+            callback_group=self.cb_group,
+        )
+        # 원인의 종류를 받아야 통신 장애와 사람 개입을 구분할 수 있다.
+        self.create_subscription(
+            String,
+            estop_sources_topic,
+            self.estop_sources_callback,
             10,
             callback_group=self.cb_group,
         )
@@ -205,6 +246,12 @@ class AppEmergencyNode(Node):
             self.publish_state,
             callback_group=self.cb_group,
         )
+        if self.auto_recover_enabled:
+            self.create_timer(
+                1.0 / auto_recover_check_hz,
+                self.try_auto_recover,
+                callback_group=self.cb_group,
+            )
 
         # 이 노드가 앱의 유일한 창구다. 조용히 죽으면 관리자는 리셋 수단을 잃는데
         # 화면에는 아무 표시도 나지 않는다.
@@ -239,9 +286,24 @@ class AppEmergencyNode(Node):
     def safety_state_callback(self, msg: String) -> None:
         """Track Safety Supervisor state for the final reset confirmation."""
         with self.state_condition:
+            previous = self.safety_state
             self.safety_state = str(msg.data)
             self.last_safety_state_ns = self.now_ns()
+            # 주행 중(RUNNING) 끊김이면 자동 복구를 잠근다. 사용자가 정한
+            # "정지 중일 때만" 조건이 여기서 판정된다.
+            self.auto_recovery.observe_safety_state(
+                previous,
+                self.safety_state,
+            )
             self.state_condition.notify_all()
+
+    def estop_sources_callback(self, msg: String) -> None:
+        """Feed the central latch cause list into the auto-recovery policy."""
+        sources = tuple(name for name in msg.data.split(",") if name)
+        with self.state_condition:
+            if sources:
+                self.last_estop_sources = sources
+            self.auto_recovery.observe_sources(sources, self.now_ns())
 
     def nav_status_callback(self, msg: GoalStatusArray) -> None:
         """Track active Nav2 action states, including canceling goals."""
@@ -280,7 +342,13 @@ class AppEmergencyNode(Node):
                 sequence_started=False,
             )
         try:
-            return self.run_reset_sequence(response)
+            result = self.run_reset_sequence(response)
+            if result.success:
+                # 관리자가 직접 풀었으므로 자동 복구 정책도 처음 상태로
+                # 돌아간다. 사람 개입으로 걸린 잠금이 여기서 풀린다.
+                self.auto_recovery.notify_manual_reset()
+                self.auto_recovered = False
+            return result
         finally:
             self.reset_lock.release()
 
@@ -450,6 +518,52 @@ class AppEmergencyNode(Node):
             )
         )
 
+    def try_auto_recover(self) -> None:
+        """Clear a comm-only latch once, while stopped, without an operator.
+
+        관리자가 누르던 그 절차(`run_reset_sequence`)를 그대로 부른다. 절차를
+        건너뛰지 않으므로 통신이 아직 돌아오지 않았다면 `estop_reset` 단계에서
+        거부되고, 그 사건은 관리자에게 넘어간다.
+
+        판정은 `AutoRecoveryPolicy`가 하고 여기서는 배선만 한다. 조건은
+        (1) 원인이 통신 계열뿐, (2) 주행 중 끊김이 아님, (3) settle 유지,
+        (4) 수동 reset과 경합 없음이다.
+        """
+        with self.state_condition:
+            if not self.auto_recovery.should_recover(self.now_ns()):
+                return
+            cause = ",".join(self.last_estop_sources) or "unknown"
+            state_before = self.safety_state
+
+        # 수동 reset이 돌고 있으면 이번 주기는 건너뛴다. 다음 주기에 다시 본다.
+        if not self.reset_lock.acquire(blocking=False):
+            return
+        try:
+            self.get_logger().warn(
+                f"[AUTO RECOVER] cause={cause} "
+                f"settle={self.auto_recover_settle_sec:.1f}s "
+                f"state_before={state_before}"
+            )
+            result = self.run_reset_sequence(Trigger.Response())
+            with self.state_condition:
+                self.auto_recovery.mark_attempted(success=result.success)
+                self.auto_recovered = bool(result.success)
+            if result.success:
+                self.last_message = (
+                    "통신이 복구되어 비상정지를 자동 해제했습니다 "
+                    f"(원인: {cause})"
+                )
+                self.get_logger().info(
+                    "[AUTO RECOVER] 완료: 관리자 개입 없이 래치를 해제했습니다"
+                )
+            else:
+                self.get_logger().error(
+                    f"[AUTO RECOVER] 실패: {result.message} "
+                    "-- 이 사건은 관리자 reset이 필요합니다"
+                )
+        finally:
+            self.reset_lock.release()
+
     def publish_app_estop(self) -> None:
         """Repeat the app source level without ever clearing the central latch."""
         msg = Bool()
@@ -464,6 +578,7 @@ class AppEmergencyNode(Node):
             safety_state=self.safety_state,
             message=self.last_message,
             timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            auto_recovered=self.auto_recovered,
         )
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)

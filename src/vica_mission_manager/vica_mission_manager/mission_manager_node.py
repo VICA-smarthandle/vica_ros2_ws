@@ -46,10 +46,11 @@ from vica_interfaces.srv import (
 )
 
 from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
-from .destinations import load_destinations, load_map_bounds
+from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
+    MSG_APPROACH_QUESTION,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -131,6 +132,9 @@ class MissionManagerNode(Node):
         # RobotState 층/건물 값 소스는 미결 사항 #5 — 일단 파라미터.
         self.declare_parameter("current_floor", -1)
         self.declare_parameter("current_building", "")
+        # 도착 후 대화(arrival-dialog-flow). 기본 on (2026-08-30 사용자 결정) —
+        # 도착 후 유형별 질문·대기·홈 복귀가 동작한다. 끄려면 :=false.
+        self.declare_parameter("arrival_dialog", True)
 
         dest_path = str(self.get_parameter("destinations_yaml").value)
         if not dest_path:
@@ -175,6 +179,13 @@ class MissionManagerNode(Node):
 
         retry_limit = int(self.get_parameter("nav_retry_limit").value)
         retry_delay = float(self.get_parameter("nav_retry_delay_sec").value)
+        # 도착 후 대화 + 홈 복귀. home.yaml(목적지 폴더의 __home__)이 있으면
+        # 복귀 목적지로 넣는다 — 없으면 도착 후 대화는 제자리 대기로 폴백한다.
+        arrival_dialog = bool(self.get_parameter("arrival_dialog").value)
+        # 지도 변경 감지까지 하는 쪽을 쓴다. dev 의 _load_home 은 같은 파일을
+        # 읽지만 "지도가 홈보다 새로 저장됐으면 visited_ok 를 내린다"가 없다 —
+        # 그게 없으면 벽 위치가 옮겨진 지도에서 옛 홈을 확인된 것으로 믿는다.
+        home = self._load_home_destination()
         self.logic = MissionLogic(
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
             approach_turn_yaw_rad=math.radians(
@@ -183,27 +194,23 @@ class MissionManagerNode(Node):
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
             nav_retry_delay_sec=retry_delay,
-            return_destination=self._load_home_destination(),
+            arrival_dialog=arrival_dialog,
+            # 홈 좌표는 목적지 폴더의 home.yaml 하나다. 앱이 HomeStorage 로
+            # 쓰고 노드가 읽는다 — 두 구현이 같은 형식을 쓴다.
+            return_destination=home,
             auto_return_home=bool(self.get_parameter("auto_return_home").value),
         )
-        if self.logic.return_destination is not None:
+        if arrival_dialog:
             self.get_logger().info(
-                f"홈 위치: {self.logic.return_destination.pose.x:.2f}, "
-                f"{self.logic.return_destination.pose.y:.2f}, "
-                f"{self.logic.return_destination.pose.yaw_deg:.0f}도"
+                f"도착 후 대화: 켜짐 · 홈={'있음' if home else '없음(제자리 대기)'}")
+        if home is not None and self.logic.auto_return_home:
+            self.get_logger().warn(
+                "접근 뒤 자동 홈 복귀: 켜짐 — 사람이 부르지 않아도 로봇이 홈까지 달립니다."
             )
-            if self.logic.auto_return_home:
-                self.get_logger().warn(
-                    "접근 뒤 자동 홈 복귀: 켜짐 — 사람이 부르지 않아도 로봇이 홈까지 달립니다."
-                )
-            else:
-                self.get_logger().info(
-                    "접근 뒤 자동 홈 복귀: 꺼짐(기본) — 접근을 마친 자리에 섭니다. "
-                    "앱의 홈 복귀 버튼은 그대로 동작합니다."
-                )
-        else:
+        elif home is not None:
             self.get_logger().info(
-                "홈 위치 미지정 — 자동 복귀는 꺼진 상태로 시작합니다(안내는 정상)."
+                "접근 뒤 자동 홈 복귀: 꺼짐(기본) — 접근을 마친 자리에 섭니다. "
+                "앱의 홈 복귀 버튼은 그대로 동작합니다."
             )
         if retry_limit > 0:
             self.get_logger().info(
@@ -257,6 +264,40 @@ class MissionManagerNode(Node):
             self._on_estop,
             10,
             callback_group=self._emergency_group,
+        )
+        # 원인 목록(쉼표 분리). "원인은 다 해제됐고 관리자 reset 만 남은"
+        # 구간을 음성으로 알리는 재료다 (mission_logic.on_estop_sources).
+        self.create_subscription(
+            String,
+            "/estop_sources",
+            self._on_estop_sources,
+            10,
+            callback_group=self._emergency_group,
+        )
+
+        # 접근 질문의 "재생 종료" 시점. 응답 대기 8초를 여기서부터 세도록
+        # mission_logic.on_approach_question_spoken 이 설계돼 있었는데(6.2절)
+        # 배선이 없었다 — 그래서 질문 생성 시각부터 세어, 재생 2초 + STT 자동
+        # 녹음 4초 + 변환 2초가 8초와 경주하게 됐다(2026-08-28 실기).
+        self.create_subscription(
+            String,
+            "/vica/tts_done",
+            self._on_tts_done,
+            10,
+            callback_group=self._main_group,
+        )
+
+        # 웨이크워드 호출. WAITING 각성·복귀 브레이크(도착 후 대화)에 쓴다.
+        self.create_subscription(
+            String, "/vica/wake", self._on_wake, 10,
+            callback_group=self._main_group,
+        )
+        # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
+        # on_listen_state 주석, 2026-08-30).
+        self.create_subscription(
+            String, "/vica/listen_state",
+            lambda msg: self.logic.on_listen_state(msg.data, self._now()), 10,
+            callback_group=self._main_group,
         )
 
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
@@ -383,7 +424,38 @@ class MissionManagerNode(Node):
 
     # -- 콜백 -------------------------------------------------------------------
 
+    def _load_home(self):
+        try:
+            return load_home(self._destinations_path)
+        except Exception as exc:  # 홈이 없거나 깨져도 서비스는 계속돼야 한다
+            self.get_logger().warn(f"홈 로드 실패(제자리 대기로 폴백): {exc}")
+            return None
+
     def _on_intent(self, msg: VicaIntent) -> None:
+        # 복귀 주행 중 늦게 도착한 답 — 마지막 그물 (2026-08-30 실기: 무응답
+        # 오판으로 떠난 직후 도착한 답이 버려져 세울 방법이 없었다). 복귀를
+        # 조용히 멈추고(ASKING_NEXT) 아래 라우팅이 그 뜻을 그대로 처리한다
+        # — wait 는 대기, navigate 제안은 확인 흐름. finish 는 이미 홈으로
+        # 가는 중이라 제외(그대로 간다).
+        if (self.logic.state == State.RETURNING
+                and msg.intent in ("wait", "navigate")):
+            self._run_actions(self.logic.on_return_brake(self._now(), quiet=True))
+            self.get_logger().info(f"복귀 중 답 도착({msg.intent}) — 복귀 취소")
+
+        # 도착 후 대화 중이면 답(wait/finish/cancel/affirm/deny)을
+        # on_arrival_answer 로 보낸다 — 같은 말이라도 이 상태에선 뜻이 다르다
+        # (도착 후 cancel = 홈 복귀 등). 상태 판정은 로직이 갖고 있다.
+        # 예외: 새 목적지 '제안'(navigate + need_confirm)은 대화의 답이 아니라
+        # 새 안내 요청이다 — 대화를 닫고 아래 일반 확인 흐름(CONFIRMING)으로
+        # 합류시킨다. 제안에서 바로 출발하면 확인 질문 전에 달리고, 뒤따라온
+        # 확정 답이 MSG_BUSY 로 거절된다 (2026-08-30 실기).
+        if self.logic.is_awaiting_arrival_answer():
+            if msg.intent == "navigate" and msg.need_confirm:
+                self.logic.exit_arrival_dialog()
+                # return 하지 않는다 — 아래 일반 경로가 이어서 처리한다.
+            else:
+                self._on_arrival_answer(msg)
+                return
         # 음성 취소·일시정지·재개는 service 와 같은 로직을 탄다.
         # 다만 취소는 바로 실행하지 않고 되물어 확인한 뒤에만 처리한다.
         if msg.intent in ("cancel", "pause", "resume"):
@@ -401,6 +473,7 @@ class MissionManagerNode(Node):
             matched_destination_id=msg.matched_destination_id,
             need_confirm=msg.need_confirm,
             safety_flag=msg.safety_flag,
+            wait_minutes=int(getattr(msg, "wait_minutes", -1)),
         )
         dest = self.destinations.get(msg.matched_destination_id) or None
         actions = self.logic.on_intent(
@@ -411,6 +484,18 @@ class MissionManagerNode(Node):
             f"confirm={msg.need_confirm} -> state={self.logic.state.value}"
         )
         self._run_actions(actions)
+
+    def _on_tts_done(self, msg: String) -> None:
+        """TTS 가 끊기지 않고 끝까지 재생한 문장. 접근 질문일 때만 시계를 켠다.
+
+        다른 멘트(수락·도착 등)의 재생 완료는 응답 대기와 무관하고, 로직 쪽이
+        AWAITING_USER 가 아니면 무시하므로 이중 방어다.
+        """
+        if MSG_APPROACH_QUESTION in msg.data:
+            self.logic.on_approach_question_spoken(self._now())
+        # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
+        # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
+        self.logic.on_arrival_question_spoken(self._now())
 
     def _on_voice_answer(self, affirmative: bool) -> None:
         before = self.logic.state
@@ -425,6 +510,37 @@ class MissionManagerNode(Node):
             f"접근 응답 {'긍정' if affirmative else '부정'}: "
             f"{before.value} -> {self.logic.state.value}"
         )
+
+    def _on_arrival_answer(self, msg: VicaIntent) -> None:
+        """도착 후 대화 중의 답. navigate 답이면 다음 목적지를 게이트 없이
+        넘긴다(로직이 NAVIGATING 으로 전이) — 목적지 확정은 이미 음성 쪽
+        matched_destination_id 로 됐다."""
+        intent = IntentData(
+            intent=msg.intent,
+            matched_destination_id=msg.matched_destination_id,
+            need_confirm=msg.need_confirm,
+            safety_flag=msg.safety_flag,
+            wait_minutes=int(getattr(msg, "wait_minutes", -1)),
+        )
+        next_dest = None
+        if msg.intent == "navigate":
+            next_dest = self.destinations.get(msg.matched_destination_id) or None
+        before = self.logic.state
+        actions = self.logic.on_arrival_answer(intent, self._now(), next_dest=next_dest)
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"도착 후 답 intent={msg.intent}: {before.value} -> {self.logic.state.value}")
+
+    def _on_wake(self, msg: String) -> None:
+        """/vica/wake — WAITING 중이면 각성(다시 안내 질문), RETURNING 중이면
+        복귀 브레이크(E): 사용자가 부르면 홈으로 가던 것을 멈추고 응대한다."""
+        if self.logic.is_waiting_in_place():
+            self._run_actions(self.logic.on_wake(self._now()))
+        elif self.logic.state == State.RETURNING:
+            actions = self.logic.on_return_brake(self._now())
+            if actions:
+                self._run_actions(actions)
+                self.get_logger().info("복귀 중 '비카야' — 복귀 취소하고 응대")
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
@@ -968,6 +1084,10 @@ class MissionManagerNode(Node):
                 f"중앙 estop={self._estop_active} -> state={self.logic.state.value}"
             )
         self._run_actions(actions)
+
+    def _on_estop_sources(self, msg: String) -> None:
+        sources = [part for part in msg.data.split(",") if part]
+        self._run_actions(self.logic.on_estop_sources(sources, self._now()))
 
     def _tick(self) -> None:
         status = self._poll_nav_status()

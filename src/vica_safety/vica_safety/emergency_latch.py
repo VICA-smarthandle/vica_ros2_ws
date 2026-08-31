@@ -28,9 +28,15 @@ class EmergencyLatch:
         f1_timeout_ns: int,
         motor_can_timeout_ns: int,
         initially_latched: bool = True,
+        input_grace_ns: int = 0,
+        start_ns: Optional[int] = None,
     ):
         self.f1_timeout_ns = f1_timeout_ns
         self.motor_can_timeout_ns = motor_can_timeout_ns
+        # 부팅 유예: 첫 수신 전의 미수신을 고장으로 승격하지 않는 창.
+        # 0 이면 유예가 없고 기존 동작과 완전히 같다(되돌리기 경로).
+        self.input_grace_ns = input_grace_ns
+        self.start_ns = start_ns
         self.latched = initially_latched
         self.sources = {
             "physical_f1": False,
@@ -68,6 +74,19 @@ class EmergencyLatch:
         if not ok:
             self.latched = True
 
+    def _within_grace(self, now: int) -> bool:
+        """Report whether the boot grace window is still open.
+
+        시간 역전(음수 경과)은 유예 밖으로 본다. freshness와 같은 fail-safe
+        방향이다 -- 시계가 튀었을 때 유예를 늘려 주면 안 된다.
+        """
+        if self.input_grace_ns <= 0:
+            return False
+        if self.start_ns is None:
+            self.start_ns = now
+        elapsed = now - self.start_ns
+        return 0 <= elapsed <= self.input_grace_ns
+
     def evaluate(self, now: int) -> LatchSnapshot:
         physical_fresh = is_fresh_ns(
             self.last_physical_ns,
@@ -79,14 +98,30 @@ class EmergencyLatch:
             now_ns=now,
             timeout_ns=self.motor_can_timeout_ns,
         )
+        within_grace = self._within_grace(now)
+
         active_sources = [
             name for name, active in self.sources.items() if active
         ]
+        # 래치를 걸 근거가 되는 원인만 따로 센다. `*_waiting`은 원인 목록에는
+        # 실리지만(그동안 reset도 자동복구도 막아야 하므로) 래치를 새로 걸지는
+        # 않는다. 미수신은 고장이 아니라 아직 오지 않은 것이다.
+        latching_sources = list(active_sources)
+
         if not physical_fresh:
-            active_sources.append("physical_stale")
+            if self.last_physical_ns is None and within_grace:
+                active_sources.append("physical_waiting")
+            else:
+                active_sources.append("physical_stale")
+                latching_sources.append("physical_stale")
         if not motor_can_fresh:
-            active_sources.append("motor_can_stale")
-        if active_sources:
+            if self.last_motor_can_ns is None and within_grace:
+                active_sources.append("motor_can_waiting")
+            else:
+                active_sources.append("motor_can_stale")
+                latching_sources.append("motor_can_stale")
+
+        if latching_sources:
             self.latched = True
         return LatchSnapshot(
             latched=self.latched,

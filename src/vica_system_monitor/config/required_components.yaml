@@ -67,7 +67,13 @@ robot_health_monitor_node:
     # 이 신호들을 aggregator로 보내지 않는 이유: 집계가 1 Hz라 ESTOP 표시가 최대 1초
     # 늦어진다(초안 3.1절 "진단을 안전 신호 전달 경로로 쓰지 말 것").
     #
-    # 값은 기존 노드와 정합을 맞춘다. emergency_stop_node의 f1_timeout_sec가 0.5다.
+    # 이 값은 `/estop_state` **토픽 자체가 오는가**를 본다. 그 토픽은 publish_hz
+    # 20 Hz 로 나오므로 0.5 초면 10 주기 여유다.
+    #
+    # [주의] emergency_stop_node 의 f1_timeout_sec 와 같은 값이 아니다. 그쪽은
+    # 2026-08-31 에 0.5 -> 3.0 이 됐지만(CAN 순단으로 인한 헛 래치를 없애려고),
+    # 이 값은 0.5 로 둔다. 여기를 3.0 으로 따라 올리면 안전 노드가 죽은 것을
+    # 3 초 동안 모르게 된다 — 두 값은 감시 대상이 다르다.
     emergency_stop_timeout_sec: 0.5
     safety_state_timeout_sec: 1.0
     tf_timeout_sec: 3.0

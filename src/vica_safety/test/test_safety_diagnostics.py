@@ -235,3 +235,49 @@ def test_app_analyzer_does_not_capture_the_safety_supervisor():
         assert pattern not in node_name, (
             f"app analyzer의 '{pattern}'가 '{node_name}'를 잡습니다"
         )
+
+
+# ---------------------------------------------------------------------------
+# 부팅 유예 (WAITING_INPUT)
+# ---------------------------------------------------------------------------
+#
+# 부팅 직후의 미수신은 '아직 안 옴'이지 '끊김'이 아니다. 여기서 ERROR를 내면
+# WAITING_INPUT을 도입한 취지가 사라진다 - 관리자가 없는 고장을 찾게 된다.
+# 그렇다고 OK도 아니다. 아직 버튼을 감시하지 못하는 것은 사실이므로 WARN이다.
+
+
+def test_boot_grace_is_warn_not_error():
+    level, message = latch_summary(
+        can_ready=True,
+        physical_fresh=False,
+        motor_can_fresh=False,
+        latch_state='WAITING_INPUT',
+    )
+
+    assert level == WARN
+    assert '대기' in message
+
+
+def test_boot_grace_does_not_mask_a_closed_can_path():
+    # CAN을 아예 열지 못한 것은 유예로 봐줄 일이 아니다. 열리지 않으면 첫 신호도
+    # 영원히 오지 않는다.
+    level, _ = latch_summary(
+        can_ready=False,
+        physical_fresh=False,
+        motor_can_fresh=False,
+        latch_state='WAITING_INPUT',
+    )
+
+    assert level == ERROR
+
+
+def test_stale_after_grace_is_still_error():
+    # 유예를 넘긴 뒤에는 종전대로 ERROR다. 회귀 방지.
+    level, _ = latch_summary(
+        can_ready=True,
+        physical_fresh=False,
+        motor_can_fresh=True,
+        latch_state='FAULT',
+    )
+
+    assert level == ERROR

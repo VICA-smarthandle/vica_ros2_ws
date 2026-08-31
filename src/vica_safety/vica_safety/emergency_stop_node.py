@@ -5,7 +5,7 @@ import rclpy
 from diagnostic_updater import Updater
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from .diagnostics import LABEL_LATCH, STALE, latch_summary, sources_text
@@ -15,6 +15,9 @@ from .logging_utils import log_with_severity
 
 
 PID_PNT_IO_MONITOR = 0xF1
+
+# 부팅 유예 안의 미수신 원인. 래치를 걸지 않으며 상태 이름도 따로 쓴다.
+WAITING_SOURCES = ("physical_waiting", "motor_can_waiting")
 
 
 def f1_frame_means_estop_active(
@@ -42,8 +45,18 @@ def classify_latch_state(snapshot: LatchSnapshot) -> str:
     stale_sources = ("physical_stale", "motor_can_stale")
     if any(source in snapshot.active_sources for source in stale_sources):
         return "FAULT"
-    if snapshot.active_sources:
+    # `*_waiting`은 부팅 유예 안의 미수신이다. 고장이 아니라 대기이므로 다른
+    # 원인이 하나도 없을 때만 그 이름으로 부른다. 대기가 고장·눌림을 가리면
+    # 관리자가 진짜 원인을 못 본다.
+    latching = [
+        source
+        for source in snapshot.active_sources
+        if source not in WAITING_SOURCES
+    ]
+    if latching:
         return "ESTOP_ACTIVE"
+    if snapshot.active_sources:
+        return "WAITING_INPUT"
     if snapshot.latched:
         return "ESTOP_RELEASED_WAIT_RESET"
     return "CLEARED"
@@ -58,6 +71,8 @@ def describe_latch_transition(old: str, new: str) -> tuple[str, str]:
         return "error", "[FAULT]"
     if new == "ESTOP_RELEASED_WAIT_RESET":
         return "warn", "[WAIT RESET]"
+    if new == "WAITING_INPUT":
+        return "info", "[WAITING INPUT]"
     return "info", "[ESTOP CLEARED]"
 
 
@@ -76,9 +91,29 @@ class EmergencyStopNode(Node):
         self.declare_parameter("f1_check_byte_2", 3)
         self.declare_parameter("f1_check_mask", 0x10)
         self.declare_parameter("f1_active_value", 0x00)
-        self.declare_parameter("f1_timeout_sec", 0.5)
+        # ── 통신 미수신 판정 시간 ────────────────────────────────────────
+        #
+        # 2026-08-31 사용자 지정. 0.5 -> 3.0.
+        #
+        # 0.5 초는 순간적인 CAN·DDS 지연을 통신 단절과 구분하지 못했다.
+        # 2026-08-20 "다시출발 먹통" 사건의 원인 중 하나가 그 순단이었고,
+        # 아무도 끊지 않았는데 걸린 래치를 관리자가 앱에서 풀어야 했다.
+        #
+        # [대가] 진짜 단절일 때 정지가 2.5 초 늦다. 0.5 m/s 주행 중이면 그사이
+        # 1.25 m 를 더 간다. 이 값을 다시 내릴 때는 그 헛 래치가 실제로
+        # 사라졌는지를 먼저 확인한다 — 원인이 남은 채 시간만 줄이면 8/20 이
+        # 재발한다.
+        #
+        # 이 값은 '프레임이 아예 안 오는 시간'이다. 프레임이 오고 있는 한
+        # 물리 버튼 눌림은 여전히 즉시(publish_hz 20 Hz) 감지된다. 즉 버튼
+        # 반응이 3 초 느려지는 것이 아니다.
+        self.declare_parameter("f1_timeout_sec", 3.0)
         self.declare_parameter("log_f1_frames", True)
-        self.declare_parameter("motor_can_timeout_sec", 0.5)
+        self.declare_parameter("motor_can_timeout_sec", 3.0)
+        # 부팅 유예: 노드 기동 후 이 시간까지의 '첫 수신 전 미수신'은 고장이
+        # 아니라 대기로 본다. motor node 가 떠서 드라이버 IO monitor 를 켜고
+        # 첫 F1 이 방송되기까지의 여유다. 0.0 이면 종전 동작(즉시 stale)이다.
+        self.declare_parameter("input_grace_sec", 15.0)
 
         self.publish_hz = float(self.get_parameter("publish_hz").value)
         self.input_mode = str(self.get_parameter("input_mode").value)
@@ -106,16 +141,24 @@ class EmergencyStopNode(Node):
         self.motor_can_timeout_sec = float(
             self.get_parameter("motor_can_timeout_sec").value
         )
+        self.input_grace_sec = float(
+            self.get_parameter("input_grace_sec").value
+        )
 
         # 모든 watchdog·throttle은 단일 STEADY_TIME clock과 정수 나노초를 쓴다.
         self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self.f1_timeout_ns = sec_to_ns(self.f1_timeout_sec)
         self.motor_can_timeout_ns = sec_to_ns(self.motor_can_timeout_sec)
+        self.input_grace_ns = sec_to_ns(self.input_grace_sec)
 
         self.latch = EmergencyLatch(
             f1_timeout_ns=self.f1_timeout_ns,
             motor_can_timeout_ns=self.motor_can_timeout_ns,
             initially_latched=True,
+            input_grace_ns=self.input_grace_ns,
+            # 유예의 기준점은 이 노드가 뜬 순간이다. latch 가 첫 evaluate 에서
+            # 스스로 잡게 두면 timer 지연만큼 창이 밀린다.
+            start_ns=self.now_ns(),
         )
         self.bus = None
         self.last_f1_log_ns = None
@@ -128,6 +171,14 @@ class EmergencyStopNode(Node):
 
         self.pub_estop = self.create_publisher(Bool, "/emergency_stop", 10)
         self.pub_estop_state = self.create_publisher(Bool, "/estop_state", 10)
+        # 원인의 '종류'를 밖으로 내보낸다. Bool 두 개로는 통신 원인과 사람이
+        # 누른 것을 구분할 수 없어 app_emergency_node 가 자동 복구 여부를
+        # 판단하지 못한다. 진단에만 있던 값을 토픽으로도 낸다.
+        self.pub_estop_sources = self.create_publisher(
+            String,
+            "/estop_sources",
+            10,
+        )
         self.create_subscription(
             Bool,
             "/app_emergency_stop",
@@ -185,7 +236,12 @@ class EmergencyStopNode(Node):
             "/motor/can_ok"
         )
         self.get_logger().info(
-            "Publishing central latch: /emergency_stop, /estop_state"
+            "Publishing central latch: /emergency_stop, /estop_state, "
+            "/estop_sources"
+        )
+        self.get_logger().info(
+            f"Boot input grace: {self.input_grace_sec:.1f}s "
+            "(first-receipt only; 0 disables)"
         )
         self.get_logger().info(
             "Internal service: /vica_safety/internal/estop_reset"
@@ -259,6 +315,11 @@ class EmergencyStopNode(Node):
         msg.data = snapshot.latched
         self.pub_estop.publish(msg)
         self.pub_estop_state.publish(msg)
+
+        sources_msg = String()
+        sources_msg.data = ",".join(snapshot.active_sources)
+        self.pub_estop_sources.publish(sources_msg)
+
         self.log_transition_if_needed(snapshot)
 
     def can_input_is_ready(self) -> bool:

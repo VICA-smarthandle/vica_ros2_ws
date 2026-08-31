@@ -76,6 +76,12 @@ def latch_summary(
     """
     if not can_ready:
         return ERROR, '물리 비상정지 입력을 열지 못했습니다'
+    # 부팅 유예 안의 미수신은 '끊김'이 아니라 '아직 안 옴'이다. ERROR로 찍으면
+    # 관리자가 없는 고장을 찾는다. 그렇다고 OK도 아니다 - 아직 버튼을 감시하지
+    # 못하는 것은 사실이므로 WARN에 둔다. 유예를 넘기면 latch_state가 FAULT로
+    # 바뀌므로 아래 ERROR 규칙이 그대로 받는다.
+    if latch_state == 'WAITING_INPUT':
+        return WARN, '부팅 후 첫 입력 대기 중입니다'
     if not physical_fresh:
         return ERROR, '물리 비상정지 입력이 끊겼습니다'
     if not motor_can_fresh:

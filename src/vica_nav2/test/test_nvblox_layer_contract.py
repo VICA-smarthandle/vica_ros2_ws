@@ -85,18 +85,29 @@ def _costmap(name):
     return _params()[name][name]['ros__parameters']
 
 
-def test_local_costmap_always_has_nvblox():
-    """local에 nvblox가 없으면 DWB가 LiDAR 평면 아래 장애물을 못 본다.
+def test_local_nvblox_absence_is_a_recorded_decision():
+    """local의 nvblox_layer는 2026-08-28 사용자 판정으로 plugins에서 빠졌다.
 
-    laser_frame은 지면 0.382 m다. 사선 책상다리처럼 그 아래에서 올라오는 구조물은
-    voxel_layer(scan)가 못 보고 nvblox의 esdf slice만 본다. 이건 협상 대상이 아니다.
+    원래 이 시험은 존재를 강제했다 — laser_frame은 지면 0.382 m라 그 아래에서
+    올라오는 구조물(사선 책상다리 등)은 voxel_layer(scan)가 못 보고 nvblox만
+    보기 때문이다. 그 위험은 그대로 유효하다.
+
+    그럼에도 뺀 이유: 카메라 잔상(6~30 s) 문제로 nvblox 노드를 아예 띄우지 않은
+    채 운용해 왔고, 층만 남긴 구성은 데이터 없이 굶은 눈이라 실제 보호를 주지
+    못하면서 구성만 거짓말을 했다. 라이다 단독임을 명시하고, 시험 구역에서
+    라이다 평면 밖 높이의 물체를 치우는 운용 규칙으로 대신한다.
+
+    블록은 남겨 두어야 한다 — plugins에 한 줄을 되살리는 것이 복귀 절차다.
+    다시 넣기로 확정되면 이 시험을 존재 강제로 되돌린다.
     """
     cm = _costmap('local_costmap')
-    assert 'nvblox_layer' in cm['plugins'], (
-        f'local_costmap plugins에 nvblox_layer가 없다: {cm["plugins"]}'
+    assert 'nvblox_layer' in cm, (
+        'local_costmap에 nvblox_layer 블록이 아예 없다. plugins에서 빼는 것은'
+        ' 되지만 블록은 남겨 두어야 한 줄로 되돌릴 수 있다'
     )
     assert cm['nvblox_layer']['plugin'] == NVBLOX_PLUGIN
-    assert cm['nvblox_layer']['enabled'] is True
+    if 'nvblox_layer' in cm['plugins']:
+        assert cm['nvblox_layer']['enabled'] is True
 
 
 def test_global_nvblox_presence_is_recorded_as_an_open_experiment():
@@ -248,6 +259,14 @@ def test_ghost_clears_within_the_maneuver_budget():
     """
     if not NVBLOX_OVERRIDES.is_file():
         pytest.skip(f'nvblox override 없음: {NVBLOX_OVERRIDES}')
+    # nvblox_layer 가 plugins 에서 빠져 있으면 유령이 costmap 에 들어오지 않으므로
+    # 소멸 시간이 주행에 영향을 주지 않는다(2026-08-28 사용자 판정, 라이다 단독).
+    # 다시 켜면 이 계약이 되살아난다. **그때 함께 볼 것**: 2026-08-29 에
+    # max_vel_theta 를 0.4 -> 0.5 로 올려 기동 예산이 5.57 -> 4.78 s 가 됐고,
+    # 현재 소멸 30.5 s 는 그 6배 상한(28.7 s)을 넘는다. nvblox 재투입 시
+    # decay_tsdf_rate_hz 를 올리거나 이 상한을 다시 계산해야 한다.
+    if 'nvblox_layer' not in _costmap('local_costmap')['plugins']:
+        pytest.skip('local_costmap plugins 에 nvblox_layer 가 없다 - 위 주석 참고')
     p = yaml.safe_load(NVBLOX_OVERRIDES.read_text(encoding='utf-8'))
     p = p['/**']['ros__parameters']
     rate = p['decay_tsdf_rate_hz']
