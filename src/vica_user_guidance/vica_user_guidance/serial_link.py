@@ -98,6 +98,30 @@ class SerialLink:
         self._fault_code = FAULT_NONE
         return True
 
+    # ── 수신 ───────────────────────────────────────────
+
+    def read_available(self, now_ns: int) -> bytes:
+        """수신 버퍼에 쌓인 바이트를 전부 반환한다. 없거나 미연결이면 b"".
+
+        블로킹하지 않는다 — in_waiting 만큼만 읽는다. 단일 스레드 executor 에서
+        read 가 기다리면 상태코드 전송까지 같이 멈춘다.
+        """
+        if self._port is None:
+            return b""
+        try:
+            waiting = self._port.in_waiting
+            if not waiting:
+                return b""
+            data = self._port.read(waiting)
+            return bytes(data) if data else b""
+        except Exception:
+            # 수신 중 단절도 전송 실패와 같은 경로로 처리한다. 포트를 닫아야
+            # maybe_reconnect 가 살아난다.
+            self._fault_code = FAULT_WRITE_FAIL
+            self._close_port()
+            self._last_attempt_ns = now_ns
+            return b""
+
     # ── 재연결 ─────────────────────────────────────────
 
     def maybe_reconnect(self, now_ns: int) -> None:
