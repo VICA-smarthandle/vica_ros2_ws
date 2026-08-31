@@ -1546,7 +1546,10 @@ class MissionLogic:
                     if announced:
                         # 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
                         # 침묵 걸림(정지 중)은 해제도 침묵 — 짝을 맞춘다.
-                        actions.append(Say(MSG_ESTOP_RELEASED, priority="response"))
+                        # emergency 등급: 걸림 멘트가 아직 재생 중이면 끊고
+                        # 즉시 해제를 알린다(2026-08-31). response 면 걸림
+                        # 멘트 완주를 기다려 낡은 소식이 된다.
+                        actions.append(Say(MSG_ESTOP_RELEASED, priority="emergency"))
 
         return actions
 

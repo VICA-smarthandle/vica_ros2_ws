@@ -409,8 +409,10 @@ class TestEmergency:
         assert says, "주행 실패 시 안내가 없다"
         assert all(s.priority == "response" for s in says)
 
-    def test_estop_released_say_is_not_narration(self):
-        """비상 멈춤 해제 안내도 같은 이유로 narration 이면 안 된다."""
+    def test_estop_released_say_preempts_estop_ment(self):
+        """해제 안내는 emergency 등급 — 걸림 멘트가 아직 재생 중이면 끊고
+        즉시 나가야 한다(2026-08-31 결정). narration 은 물론 response 도
+        안 된다: response 는 걸림 멘트 완주를 기다려 낡은 소식이 된다."""
         logic = MissionLogic()
         start_navigation(logic)
         logic.on_estop(True, 1.0)
@@ -419,7 +421,7 @@ class TestEmergency:
         actions = logic.on_tick(2.0 + logic.estop_release_grace_sec, NavStatus.NONE)
         says = [a for a in actions if isinstance(a, Say)]
         assert says, "비상 멈춤 해제 안내가 없다"
-        assert all(s.priority == "response" for s in says)
+        assert all(s.priority == "emergency" for s in says)
 
     def test_estop_latch_spam_says_once(self):
         # 20Hz 주기 발행 — 같은 상태 반복 수신 시 멘트 중복 금지
