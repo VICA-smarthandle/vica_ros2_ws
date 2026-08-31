@@ -369,11 +369,16 @@ class MissionManagerNode(Node):
         if msg.intent in ("cancel", "pause", "resume"):
             self._on_voice_mission_command(msg)
             return
-        # 접근 질문의 짧은 답(계약: VicaIntent.msg 의 affirm/deny 절).
-        # 어느 질문의 답인지는 여기의 상태가 정한다 — AWAITING_USER 가 아니면
+        # 짧은 답(affirm/deny)은 어느 질문의 답인지 여기의 상태가 정한다.
+        # CONFIRMING 이면 확인 질문("…로 안내해 드릴까요?")의 답 — 목적지는
+        # 미션이 이미 알고 있어 LLM 의 추측 없이 직접 확정한다(2026-08-31).
+        # 그 외에는 접근 질문 배선 — AWAITING_USER 가 아니면
         # on_approach_answer 가 빈 목록을 돌려주고, 그때는 무시가 정답이다.
         if msg.intent in ("affirm", "deny"):
-            self._on_voice_answer(msg.intent == "affirm")
+            if self.logic.state == State.CONFIRMING:
+                self._on_confirm_answer(msg.intent == "affirm")
+            else:
+                self._on_voice_answer(msg.intent == "affirm")
             return
 
         intent = IntentData(
@@ -404,6 +409,20 @@ class MissionManagerNode(Node):
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
         self.logic.on_arrival_question_spoken(self._now())
+
+    def _on_confirm_answer(self, affirmative: bool) -> None:
+        """확인 질문의 네/아니오. 확인 중 목적지를 되찾아 로직에 넘긴다."""
+        dest_id = self.logic.confirming_dest_id or ""
+        dest = self.destinations.get(dest_id) or None
+        before = self.logic.state
+        actions = self.logic.on_confirm_answer(
+            affirmative, dest, self.map_bounds, self._nav2_ready(), self._now()
+        )
+        self.get_logger().info(
+            f"확인 응답 {'긍정' if affirmative else '부정'}: dest={dest_id or '-'} "
+            f"{before.value} -> {self.logic.state.value}"
+        )
+        self._run_actions(actions)
 
     def _on_voice_answer(self, affirmative: bool) -> None:
         before = self.logic.state

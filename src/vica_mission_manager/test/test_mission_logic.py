@@ -211,6 +211,51 @@ class TestTransitions:
         assert logic.state == State.IDLE
         assert any(isinstance(a, Say) for a in actions)
 
+    def test_confirm_affirm_starts_navigation(self):
+        """확인 질문의 "네"는 LLM 추측 없이 그 목적지로 바로 확정 출발한다
+        (2026-08-31 실기: 이 통로가 없어 affirm 이 버려지고 30초 뒤 취소됐다)."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.confirming_dest_id == "room_407"
+        actions = logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_confirm_deny_cancels_quietly_to_idle(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        actions = logic.on_confirm_answer(False, make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, Say) for a in actions)
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_confirm_answer_ignored_outside_confirming(self):
+        logic = MissionLogic()
+        assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 0.0) == []
+        assert logic.state == State.IDLE
+        assert logic.confirming_dest_id is None
+
+    def test_confirm_affirm_without_dest_keeps_waiting(self):
+        """목적지를 되찾지 못하면 아무 데나 출발하지 않고 확인 상태를 유지한다
+        — LLM 확정 navigate 나 타임아웃이 이어받는다."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.on_confirm_answer(True, None, BOUNDS, True, 3.0) == []
+        assert logic.state == State.CONFIRMING
+        # 엉뚱한 목적지가 넘어와도 마찬가지다.
+        assert logic.on_confirm_answer(
+            True, make_dest(id="restroom"), BOUNDS, True, 4.0) == []
+        assert logic.state == State.CONFIRMING
+
+    def test_confirm_affirm_still_passes_gate(self):
+        """확인 답이라도 게이트는 그대로 밟는다 — nav 미준비면 출발하지 않는다."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        actions = logic.on_confirm_answer(True, make_dest(), BOUNDS, False, 3.0)
+        assert logic.state != State.NAVIGATING
+        assert not any(isinstance(a, Navigate) for a in actions)
+
     def test_stale_confirm_different_dest_rejected(self):
         logic = MissionLogic()
         logic.on_intent(

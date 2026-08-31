@@ -779,6 +779,54 @@ class MissionLogic:
             Navigate(dest),
         ]
 
+    @property
+    def confirming_dest_id(self) -> Optional[str]:
+        """확인 중인 목적지 id. CONFIRMING 밖에서는 None."""
+        if self.state != State.CONFIRMING:
+            return None
+        return self._confirming_dest_id
+
+    def on_confirm_answer(
+        self,
+        affirmative: bool,
+        dest: Optional[Destination],
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+        now: float,
+    ) -> list:
+        """확인 질문("…로 안내해 드릴까요?")에 대한 네/아니오의 정식 통로.
+
+        2026-08-31 실기 전까지 이 통로가 없어, "그래" 한마디를 LLM 이 대화
+        기록으로 목적지를 추측해 확정 navigate 로 재구성해야만 출발했다.
+        추측이 어긋나면 엉뚱한 곳으로 가고, affirm 으로 해석되면 접근 질문
+        전용 배선이라 통째로 버려졌다(그날 밤 affirm 무시 4건·확인 타임아웃
+        취소 7건). 확인 중인 목적지는 미션이 이미 알고 있으므로 여기서 직접
+        확정한다 — LLM 이 목적지를 만들지 않는다는 원칙 그대로다.
+
+        긍정이면 확정 요청과 완전히 같은 길(on_intent 의 게이트·시작 블록)을
+        밟는다 — 확인 답이라고 게이트를 건너뛰면 안 된다(fail-closed).
+        LLM 이 여전히 확정 navigate 를 보내는 경로도 그대로 살아 있다.
+        """
+        if self.state != State.CONFIRMING:
+            return []
+        if not affirmative:
+            # "아니오" — 확인 중이던 요청을 접는다. 멘트는 타임아웃과 같은
+            # 기존 문구를 쓴다(신규 멘트 금지, 2026-08-31 멘트 최소주의).
+            self._to_idle()
+            return [Say(MSG_CONFIRM_TIMEOUT, priority="response")]
+        if dest is None or dest.id != (self._confirming_dest_id or ""):
+            # 확인 중이던 목적지를 되찾지 못했다(id 미기록·저장소 갱신 등).
+            # 아무 데나 출발하는 것보다 침묵이 낫다 — CONFIRMING 을 유지해
+            # LLM 의 확정 navigate 나 타임아웃이 이어받게 둔다.
+            return []
+        confirmed = IntentData(
+            intent="navigate",
+            matched_destination_id=dest.id,
+            need_confirm=False,
+            safety_flag="normal",
+        )
+        return self.on_intent(confirmed, dest, bounds, nav_ready, now)
+
     # -- 취소 / 일시정지 / 재개 --------------------------------------------------
     #
     # 세 요청 모두 안전 사건이 아니라 목표 조작이다. E-stop 과 달리 래치도 reset 도
