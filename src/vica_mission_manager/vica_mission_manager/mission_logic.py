@@ -346,6 +346,11 @@ DISTANCE_MILESTONES_M = ()
 # 질문 뒤 답을 기다리는 시간. STT 검증 1.84초를 포함한 값이며, 재생이 끝난
 # 시점부터 센다(on_approach_question_spoken).
 APPROACH_RESPONSE_TIMEOUT_SEC = 8.0
+# 질문 재생완료(tts_done)가 영영 안 올 때(TTS 사망 등)의 탈출용 안전망.
+# 예전엔 질문을 큐에 넣는 시각부터 8초를 세는 폴백이었는데, 질문 음성이
+# 정확히 8.0초라 재생이 끝나는 순간 시계도 끝나 답할 창이 0초였다
+# (2026-08-31 실기 로그 2건 — 질문 후 8.2초 만에 "실례했습니다" 이탈).
+APPROACH_QUESTION_STUCK_SEC = 30.0
 # 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
 # 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
 APPROACH_TURN_TIMEOUT_SEC = 15.0
@@ -1003,9 +1008,10 @@ class MissionLogic:
     def on_approach_question_spoken(self, now: float) -> list:
         """질문 재생이 끝났다. 응답 대기 8초는 여기서부터 센다(설계 6.2절).
 
-        재생에 몇 초가 걸리는지는 TTS 만 알 수 있어 노드가 알려준다. 알려주지
-        않아도 동작은 한다 — 그때는 질문을 만든 시각부터 세므로, 어긋나더라도
-        사람에게 불리한 쪽(더 짧게 기다리는 쪽)으로만 어긋난다.
+        재생에 몇 초가 걸리는지는 TTS 만 알 수 있어 노드가 알려준다. 안 오면
+        AWAITING_USER 진입 때 걸어 둔 안전망(APPROACH_QUESTION_STUCK_SEC)이
+        탈출을 맡는다. tts_done 은 끊긴 발화에도 발행되므로(2026-08-31 수리)
+        정상 경로에서는 반드시 온다.
         """
         if self.state != State.AWAITING_USER:
             return []
@@ -1405,7 +1411,10 @@ class MissionLogic:
                 # 사람 앞 1.1 m 에 섰다. 여기서부터 주도권은 음성 쪽으로 넘어가고
                 # Mission 은 타임아웃만 센다(설계 4절).
                 self.state = State.AWAITING_USER
-                self._response_deadline = now + self.approach_response_timeout_sec
+                # 여기서는 탈출용 안전망만 건다. 진짜 응답 8초는 질문 재생이
+                # 끝난 시점(on_approach_question_spoken)부터 — 도착 후 대화와
+                # 같은 방식. 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
+                self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                 actions.append(

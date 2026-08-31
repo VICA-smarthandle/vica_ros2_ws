@@ -854,16 +854,40 @@ class TestApproachTransitions:
         assert len(navigates) == 1
         assert navigates[0].destination.id == "standby"
 
-    def test_no_answer_within_8s_returns(self):
+    def test_no_answer_stuck_fallback_returns(self):
+        """tts_done 이 영영 안 오면(TTS 사망) 안전망 30초로 탈출한다.
+        예전의 '큐 시각부터 8초'는 질문 음성(8.0초)과 겹쳐 답할 창이
+        0초가 되는 결함이었다(2026-08-31 실기)."""
         logic = MissionLogic(
             return_destination=make_home(), approach_response_timeout_sec=8.0
         )
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
-        assert logic.on_tick(12.9, NavStatus.NONE) == []
+        # 옛 폴백이라면 13.0 에 이탈했을 시각 — 아직 기다려야 한다.
+        assert logic.on_tick(13.0, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
-        actions = logic.on_tick(13.0, NavStatus.NONE)
+        assert logic.on_tick(34.9, NavStatus.NONE) == []
+        actions = logic.on_tick(35.1, NavStatus.NONE)
         assert logic.state == State.RETURNING
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_question_as_long_as_window_still_gets_full_8s(self):
+        """실기 재현: 질문 재생이 8.0초(응답 창과 같은 길이)여도 재생완료부터
+        8초를 온전히 기다린다. 큐 시각 기준이면 여기서 창이 0초였다."""
+        logic = MissionLogic(
+            return_destination=make_home(), approach_response_timeout_sec=8.0
+        )
+        start_approach(logic)
+        arrive_and_ask(logic, 0.0)
+        logic.on_approach_question_spoken(8.2)  # 8.0초 wav + 지연
+        assert logic.on_tick(8.3, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        # 재생완료 + 8초 직전까지는 답을 기다린다
+        assert logic.on_tick(16.1, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        # 그 안에 온 답은 정상 수락된다
+        actions = logic.on_approach_answer(True, 16.15)
+        assert logic.state == State.TURNING
         assert any(isinstance(a, Say) for a in actions)
 
     def test_timeout_counts_from_playback_end(self):
