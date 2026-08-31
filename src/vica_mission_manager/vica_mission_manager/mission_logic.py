@@ -604,7 +604,7 @@ class MissionLogic:
         self,
         confirm_timeout_sec: float = 30.0,
         dwell_sec: float = 2.0,
-        estop_release_grace_sec: float = 2.0,
+        estop_release_grace_sec: float = 1.0,  # 2.0→1.0 (8/31): 해제 소식을 더 빨리
         approach_stages: Optional[Sequence] = None,
         nav_retry_limit: int = 2,
         nav_retry_delay_sec: float = 3.0,

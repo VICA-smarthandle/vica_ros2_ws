@@ -43,7 +43,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
-            DeclareLaunchArgument("estop_release_grace_sec", default_value="2.0"),
+            DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
             # 접근 감속 단계. 두 배열은 순번끼리 짝이며 개수가 같아야 한다.
             # 잔여거리가 1.0 m 이하면 80 %, 0.5 m 이하면 60 %로 최대속도 상한을
             # 내린다. 한 번 내려간 제한은 그 Goal 동안 풀리지 않는다.

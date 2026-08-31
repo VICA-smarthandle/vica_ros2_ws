@@ -85,7 +85,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
-        self.declare_parameter("estop_release_grace_sec", 2.0)
+        self.declare_parameter("estop_release_grace_sec", 1.0)
         # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
         # 0 으로 두면 종전처럼 실패를 안내하고 끝낸다.
         self.declare_parameter("nav_retry_limit", 2)
