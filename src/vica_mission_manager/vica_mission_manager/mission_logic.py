@@ -292,7 +292,7 @@ MSG_CANCELED = "안내를 취소했습니다."
 # 기억한다. 문구 정본은 이 상수들 — 캐시가 구운 판을 재생한다(글자 일치).
 MSG_ASK_RESTROOM = "다녀오시는 동안 여기서 기다릴까요?"          # 대기형
 MSG_ASK_ENTRANCE = "여기까지 안내를 마칠까요?"                  # 종료형
-MSG_ASK_GENERIC = "이제 괜찮으신가요? 아니면 여기서 대기할까요?"  # 종료형
+MSG_ASK_GENERIC = "여기서 대기할까요?"                          # 대기형·시간 질문
 MSG_ASK_WAIT_TIME = "몇 분쯤 걸리실까요?"
 # 대기 확정. {minutes} 는 코드가 채운다 — 캐시엔 넣지 않는다(가변).
 MSG_WAIT_CONFIRM = "{minutes}분 대기하겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
@@ -311,6 +311,9 @@ LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유
 # 처리 유예, open 이 닫힘 신호를 잃어도 상한 뒤엔 떠난다(무한 대기 방지).
 EAR_GRACE_SEC = 6.0
 EAR_HOLD_MAX_SEC = 20.0
+# 질문 재생이 끊기면 tts_done 이 없어 8초 시계가 영영 시작 안 된다(구멍,
+# 2026-08-31). ASKING 진입 후 이 시간 안에 시계가 못 열리면 강제로 연다.
+ASKING_STUCK_FALLBACK_SEC = 30.0
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
@@ -663,6 +666,8 @@ class MissionLogic:
         # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
         self.arrival_dialog = arrival_dialog
         self._asking_is_finish = False   # 방금 던진 질문이 종료형인가("네"=끝)
+        self._asking_time_after_yes = False  # 대기 수락 시 시간을 물을 유형인가
+        self._asking_entered_at: Optional[float] = None  # 시계 유실 폴백 기준
         self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
@@ -1074,15 +1079,20 @@ class MissionLogic:
         방지). 재질문(on_wake·복귀 브레이크)에서는 도착 멘트 없이 질문만 낸다.
         """
         category = (dest.category if dest else "") or ""
+        # (질문, 종료형인가, 대기 수락 시 시간을 묻는가). 그 외 유형은 대기형
+        # 으로 개편(2026-08-31) — "여기서 대기할까요?"라 네/아니오 판단이
+        # 단순하다: 네=대기(시간 질문으로), 아니오=종료.
         if category == "restroom":
-            question, is_finish = MSG_ASK_RESTROOM, False
+            question, is_finish, ask_time = MSG_ASK_RESTROOM, False, False
         elif category == "entrance":
-            question, is_finish = MSG_ASK_ENTRANCE, True
+            question, is_finish, ask_time = MSG_ASK_ENTRANCE, True, False
         else:
-            question, is_finish = MSG_ASK_GENERIC, True
+            question, is_finish, ask_time = MSG_ASK_GENERIC, False, True
         self.state = State.ASKING_NEXT
         self.active_destination = None
         self._asking_is_finish = is_finish
+        self._asking_time_after_yes = ask_time
+        self._asking_entered_at = now
         self._arrival_retried = False
         self._leaving_deadline = None
         self._response_deadline = None   # 재생완료(on_arrival_question_spoken)에서 시작
@@ -1102,9 +1112,11 @@ class MissionLogic:
             return []
         self._wait_until = None
         self._asking_is_finish = False   # "네" = 계속 (대기형처럼 다룬다)
+        self._asking_time_after_yes = True   # "네"면 목적지를 새로 묻는 흐름
         self.state = State.ASKING_NEXT
         self._arrival_retried = False
         self._response_deadline = None
+        self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
         return [Say(MSG_WAIT_RESUME_ASK, priority="response", expects_reply=True)]
 
     def on_arrival_answer(self, intent: "IntentData", now: float,
@@ -1131,16 +1143,24 @@ class MissionLogic:
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
 
-        # 대기: wait, 또는 대기형(restroom) 질문의 affirm.
+        # 시간 질문(ASKING_WAIT_TIME)에 네/아니오는 답이 아니다 — 옛 질문
+        # 태그로 해석하면 "네"가 종료(홈행)로 둔갑했다(2026-08-31 구멍 ②).
+        # 숫자가 올 때까지 재질문 사다리로 보낸다.
+        if self.state == State.ASKING_WAIT_TIME and kind in ("affirm", "deny"):
+            return self._arrival_no_answer(now)
+
+        # 대기: wait, 또는 대기형 질문의 affirm.
         if kind == "wait" or (kind == "affirm" and not self._asking_is_finish):
             minutes = intent.wait_minutes if kind == "wait" else -1
-            # restroom·entrance(질문 태그로 왔거나 시간이 실림): 시간 안 묻고 대기.
-            # 그 외에서 시간 없이 대기만 원하면 "몇 분쯤?" 후속 질문.
             if minutes is None or minutes < 0:
-                if self.state == State.ASKING_NEXT and not self._asking_is_finish:
+                # 시간 없음: 그 외 유형(ask_time)만 "몇 분쯤?" 후속 질문,
+                # restroom·entrance 는 시간 안 묻고 기본 30분(스펙).
+                if (self.state == State.ASKING_NEXT
+                        and not self._asking_time_after_yes):
                     return self._enter_waiting(WAIT_MINUTES_CAP, now,
                                                default_msg=True)
                 self.state = State.ASKING_WAIT_TIME
+                self._asking_entered_at = now
                 self._response_deadline = None
                 return [Say(MSG_ASK_WAIT_TIME, priority="response",
                             expects_reply=True)]
@@ -1173,6 +1193,7 @@ class MissionLogic:
         if not self._arrival_retried:
             self._arrival_retried = True
             self._response_deadline = None
+            self._asking_entered_at = now   # 재질문도 새 시계 유실 폴백 기준
             return [Say(MSG_ARRIVAL_RETRY, priority="response", expects_reply=True)]
         return self._leaving_notice(now)
 
@@ -1198,6 +1219,7 @@ class MissionLogic:
         self._asking_is_finish = False   # "네" = 계속
         self._arrival_retried = False
         self._response_deadline = None
+        self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if cancel_dest is not None:
             actions.append(CancelNav(cancel_dest))
@@ -1209,6 +1231,8 @@ class MissionLogic:
 
     def _reset_arrival_dialog(self) -> None:
         self._asking_is_finish = False
+        self._asking_time_after_yes = False
+        self._asking_entered_at = None
         self._arrival_retried = False
         self._leaving_deadline = None
         self._wait_until = None
@@ -1419,6 +1443,14 @@ class MissionLogic:
                   and self._response_deadline is not None
                   and now >= self._response_deadline
                   and not self._ear_holds(now)):
+                actions.extend(self._leaving_notice(now))
+            elif (self._leaving_deadline is None
+                  and self._response_deadline is None
+                  and self._asking_entered_at is not None
+                  and now - self._asking_entered_at >= ASKING_STUCK_FALLBACK_SEC
+                  and not self._ear_holds(now)):
+                # 질문 재생이 끊겨 tts_done(시계 기점)이 유실된 경우 —
+                # 영구 대기 대신 강제로 무응답 절차를 연다 (구멍 ①).
                 actions.extend(self._leaving_notice(now))
 
         elif self.state == State.WAITING:

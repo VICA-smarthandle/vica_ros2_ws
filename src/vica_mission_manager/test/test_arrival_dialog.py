@@ -331,3 +331,78 @@ class TestAppCancelInWaiting:
         logic = arrive("restroom")   # ASKING_NEXT
         actions, reason = logic.on_cancel_request(3.0)
         assert reason != GateReason.OK
+
+
+class TestGenericIsWaitStyle:
+    """그 외 유형 질문 개편 (2026-08-31 사용자 결정): "여기서 대기할까요?"
+    — "네"=대기(시간 질문으로), "아니요"=종료. 네/아니오 판단이 단순해진다."""
+
+    def test_generic_affirm_asks_time(self):
+        logic = arrive("reception")
+        acts = logic.on_arrival_answer(_intent("affirm"), 3.0)
+        assert logic.state == State.ASKING_WAIT_TIME
+        assert MSG_ASK_WAIT_TIME in _say(acts)
+
+    def test_generic_deny_finishes(self):
+        logic = arrive("reception")
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert logic.state == State.RETURNING
+        assert MSG_FINISH in _say(acts)
+
+    def test_restroom_affirm_still_skips_time(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        assert logic.state == State.WAITING          # 시간 안 묻고 기본 30분
+
+    def test_entrance_wait_skips_time_question(self):
+        """entrance 에서 "기다려줘"(시간 없음) — 스펙대로 시간 안 묻고 30분."""
+        logic = arrive("entrance")
+        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=-1), 3.0)
+        assert logic.state == State.WAITING
+        assert any("30분" in t for t in _say(acts))
+
+
+class TestAskWaitTimeRejectsYesNo:
+    """시간 질문에 네/아니오는 답이 아니다 (구멍 ②: 옛 질문 태그가 남아
+    "네"가 종료로 오해석됐다) — 재질문으로 보낸다."""
+
+    def _to_wait_time(self):
+        logic = arrive("reception")
+        logic.on_arrival_answer(_intent("affirm"), 3.0)   # → ASKING_WAIT_TIME
+        logic.on_arrival_question_spoken(4.0)
+        return logic
+
+    def test_affirm_reasks(self):
+        logic = self._to_wait_time()
+        acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
+        assert logic.state == State.ASKING_WAIT_TIME       # 홈에 안 감
+        assert MSG_ARRIVAL_RETRY in _say(acts)
+
+    def test_deny_reasks(self):
+        logic = self._to_wait_time()
+        acts = logic.on_arrival_answer(_intent("deny"), 5.0)
+        assert logic.state == State.ASKING_WAIT_TIME       # 30분 대기도 안 함
+        assert MSG_ARRIVAL_RETRY in _say(acts)
+
+
+class TestAskingStuckFallback:
+    """구멍 ①: 질문 재생이 끊기면 tts_done 이 없어 시계가 영영 시작 안 됐다
+    — 진입 후 30초가 지나면 강제로 무응답 절차를 연다."""
+
+    def test_lost_tts_done_still_leaves(self):
+        logic = MissionLogic(return_destination=HOME, arrival_dialog=True)
+        logic.on_intent(_intent(), _dest("restroom"), BOUNDS, True, 0.0)
+        logic.on_tick(1.0, NavStatus.SUCCEEDED)            # ASKING_NEXT 진입
+        # tts_done 유실 — on_arrival_question_spoken 호출 없음
+        assert _say(logic.on_tick(20.0, NavStatus.NONE)) == []   # 아직 상한 전
+        acts = logic.on_tick(32.0, NavStatus.NONE)               # 진입+30초 초과
+        assert any("돌아가겠습니다" in t for t in _say(acts))
+
+
+def test_wake_resume_does_not_trip_stuck_fallback():
+    """WAITING 각성 직후 낡은 진입 시각으로 폴백이 즉발하면 안 된다."""
+    logic = arrive("restroom")
+    logic.on_arrival_answer(_intent("affirm"), 3.0)     # WAITING
+    logic.on_wake(600.0)                                 # 10분 뒤 각성
+    acts = logic.on_tick(601.0, NavStatus.NONE)          # 질문 재생 중일 시각
+    assert not any("돌아가겠습니다" in t for t in _say(acts))
