@@ -1,0 +1,47 @@
+# 앱이 그린 금지구역을 저장한다. keepout_map_node 가 처리한다.
+#
+# 왜 topic 왕복이 아니라 service 인가. 이 요청은 "됐다/안 됐다"가 있는 일이다.
+# topic 으로 보내면 request_id 를 붙여 답장을 짝짓는 일을 앱이 직접 해야 하는데,
+# 이 팀의 최근 앱 기능(PoseCheck·SaveHome·SaveMap·DeleteMap)은 전부 service 다.
+#
+# 앱은 언제나 **전체 목록**을 보낸다. 부분 수정 규약이 없으므로 삭제도 그냥
+# '그 사각형이 빠진 목록'이다. 그래서 삭제 전용 서비스가 없다.
+
+string map_id
+
+# 사각형 목록 JSON 배열. 좌표는 ROS map 좌표(m)다.
+#   [{"zone_id": "kz_01", "name": "계단 앞",
+#     "x_min": 1.2, "y_min": 2.5, "x_max": 3.8, "y_max": 4.4}, ...]
+#
+# 배열을 문자열로 넣는 이유: 사각형 하나를 message 로 만들면 vica_interfaces 에
+# 타입이 하나 더 늘고 앱·노드·LLM 세 저장소가 그 타입을 함께 따라와야 한다.
+# 이 값은 앱과 이 노드 둘만 읽는다.
+string zones_json
+
+# true 면 저장 뒤 Nav2 마스크 서버에 load_map 을 걸어 곧바로 반영한다.
+# 주행 중이면 반영하지 않는다 — 로봇이 새 금지구역 안에 서 있으면 planner 가
+# "Starting point in lethal space" 로 실패한다. 그때는 저장만 하고 applied 를
+# false 로 돌려준다.
+bool apply_now
+---
+bool accepted
+
+# 실패 원인. 앱이 문구와 분기에 쓴다.
+#   ''             통과
+#   'bad_map_id'   지도 이름에 경로 문자가 섞였다
+#   'no_map'       원본 지도 yaml 또는 이미지가 없다
+#   'bad_map'      resolution·origin 을 읽지 못했다
+#   'bad_zone'     좌표가 숫자가 아니거나 구역 id 가 겹친다
+#   'too_small'    사각형이 최소 크기(0.1 m)보다 작다
+#   'out_of_map'   사각형이 지도 밖에만 있다
+#   'io_error'     파일을 쓰지 못했다
+#   'busy_driving' 저장은 됐지만 주행 중이라 반영을 미뤘다
+string reason
+string message
+
+# 실제로 저장된 사각형 수.
+int32 zone_count
+
+# Nav2 에 지금 반영됐는가. false 면 화면에 '적용 대기'로 보여야 한다.
+# 저장(파일)과 적용(Nav2)은 다른 일이라 앱이 둘을 구분해 보여줘야 한다.
+bool applied

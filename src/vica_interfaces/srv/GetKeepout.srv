@@ -1,0 +1,16 @@
+# 지도 하나에 저장된 금지구역 목록을 읽는다. keepout_map_node 가 처리한다.
+#
+# 앱이 지도를 고르거나 '다시 불러오기'를 누를 때 호출한다. 저장된 적이 없으면
+# 실패가 아니라 빈 목록이다 — 아직 안 그린 지도가 정상 상태다.
+
+string map_id
+---
+bool accepted
+string reason
+string message
+
+# SaveKeepout 의 zones_json 과 같은 형식이다. 없으면 '[]'.
+string zones_json
+
+# Nav2 가 읽는 마스크 파일이 지금 있는가. 앱이 '적용 대기'를 판단하는 데 쓴다.
+bool mask_exists
