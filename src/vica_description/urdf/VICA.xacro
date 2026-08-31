@@ -12,6 +12,15 @@
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
+<!-- 초음파 DYP-A22 x2 (2026-08-31): 앞범퍼 중앙에서 좌우 107mm, 지면 91.3mm,
+     수평 장착(틸트 불가 확정). docs/handoff_jetson_ultrasonic_i2c.md §6.6.
+     frame 이름은 드라이버 ultrasonic_frame_ids 와 일치해야 한다.
+     z = 0.0913(지면) - 0.190(base_link) = -0.0987.
+     [실측 확인] 센서가 범퍼 앞면(+0.305)보다 튀어나와 있으면 usonic_x 와
+     footprint 앞단을 함께 키워야 한다(같은 문서 §6.6 주의). -->
+<xacro:property name="usonic_x" value="0.305" />
+<xacro:property name="usonic_y" value="0.107" />
+<xacro:property name="usonic_z" value="-0.0987" />
 <!-- 2026-08-24 줄자 실측으로 확정. 앞서 있던 1075 mm 는 2026-08-18 이설 때 넣은
      설계값이었고 한 번도 재본 적이 없었다. 이번 재부착으로 실제 높이가 바뀌었다.
      바닥에서 카메라 몸체 중앙까지 실측 910 mm (D455 는 렌즈가 몸체 중앙 높이에
@@ -322,6 +331,21 @@
   <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
+</joint>
+
+<!-- 초음파: 빔 축 = +x(전방), 수평. Range 메시지의 부채꼴이 이 frame 에서 그려진다. -->
+<link name="usonic_front_left"/>
+<joint name="usonic_front_left_joint" type="fixed">
+  <origin xyz="${usonic_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="usonic_front_left"/>
+</joint>
+
+<link name="usonic_front_right"/>
+<joint name="usonic_front_right_joint" type="fixed">
+  <origin xyz="${usonic_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="usonic_front_right"/>
 </joint>
 
 <!-- 마스트 장착 기울기. 2026-08-29 실측으로 위 3.0도(camera_pitch)를 넣었다.
