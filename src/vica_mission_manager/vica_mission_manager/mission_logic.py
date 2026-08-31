@@ -461,7 +461,10 @@ def check_cancel_gate(state: State, estop_active: bool) -> GateReason:
     """
     if estop_active or state == State.ESTOPPED:
         return GateReason.ESTOP_ACTIVE
-    if state not in (State.NAVIGATING, State.PAUSED):
+    # WAITING(최대 30분 제자리 대기)도 취소 허용 — 관리자가 앱으로 대기를
+    # 풀 유일한 길이다 (2026-08-31, 이전엔 회수 불가). ASKING_* 는 길어야
+    # 1분이고 침묵이면 저절로 홈에 오므로 열지 않는다(범위 최소).
+    if state not in (State.NAVIGATING, State.PAUSED, State.WAITING):
         return GateReason.NOT_NAVIGATING
     return GateReason.OK
 
@@ -789,6 +792,9 @@ class MissionLogic:
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if self.state == State.NAVIGATING:
             actions.append(CancelNav(self.active_destination))
+        if self.state == State.WAITING:
+            # 대기 타이머·질문 태그를 완전히 정리 — 남으면 유령 복귀가 된다.
+            self._reset_arrival_dialog()
         self._to_idle()
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK

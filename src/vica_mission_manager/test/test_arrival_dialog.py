@@ -306,3 +306,28 @@ class TestReturnNet:
         acts2 = logic.on_arrival_answer(_intent("wait", wait_minutes=10), 5.5)
         assert logic.state == State.WAITING
         assert any("10분" in t for t in _say(acts2))
+
+
+class TestAppCancelInWaiting:
+    """관리자 회수 (2026-08-31): WAITING(최대 30분)은 앱 취소로 풀 수 있어야
+    한다 — 이전엔 취소 게이트가 NAVIGATING/PAUSED 만 허용해 회수 불가였다.
+    ASKING_* 는 길어야 1분이고 침묵이면 저절로 홈에 오므로 열지 않는다
+    (사용자 결정 — 범위 최소)."""
+
+    def test_cancel_releases_waiting(self):
+        from vica_mission_manager.mission_logic import GateReason
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("wait", wait_minutes=30), 3.0)
+        assert logic.state == State.WAITING
+        actions, reason = logic.on_cancel_request(10.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        # 대기 타이머가 완전히 정리돼야 한다 — 남으면 유령 복귀가 된다
+        assert logic._wait_until is None
+        assert any("취소" in t for t in _say(actions))
+
+    def test_cancel_still_rejected_in_asking(self):
+        from vica_mission_manager.mission_logic import GateReason
+        logic = arrive("restroom")   # ASKING_NEXT
+        actions, reason = logic.on_cancel_request(3.0)
+        assert reason != GateReason.OK
