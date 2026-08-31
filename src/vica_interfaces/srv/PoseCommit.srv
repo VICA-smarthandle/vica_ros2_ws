@@ -20,3 +20,8 @@ float64 verify_score
 float64 amcl_x
 float64 amcl_y
 float64 amcl_yaw
+
+# 반영 뒤 AMCL 자세에서 다시 잰 빔 끝점. PoseCheck 와 같은 뜻이다.
+# 확정 전 그림과 겹쳐 보면 AMCL 이 어디로 옮겼는지가 눈에 보인다.
+float32[] hit_x
+float32[] hit_y

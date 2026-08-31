@@ -292,6 +292,37 @@ def _beam_points(beams: ScanBeams):
     return beams.ranges * np.cos(beams.angles), beams.ranges * np.sin(beams.angles)
 
 
+def beam_hits(beams: ScanBeams, x: float, y: float, yaw: float, *, sensor=(0.0, 0.0, 0.0)):
+    """빔 끝점을 map 좌표로 옮긴다. 앱이 지도 위에 겹쳐 그릴 점들이다.
+
+    RViz 는 초기 위치를 잡고 나면 그 자세 기준으로 라이다 점을 지도에 겹쳐
+    보여준다. 사람은 그 그림으로 "맞았나"를 눈으로 판단한다. 앱에도 같은 것을
+    주려고 이 좌표를 서비스 응답에 실어 보낸다.
+
+    **앱이 직접 계산할 수 없다.** /scan 은 라이다 기준 각도·거리로 오므로 지도에
+    그리려면 로봇의 정확한 자세가 필요한데, 지금 잡으려는 것이 바로 그 자세다.
+    반면 여기서는 이미 찾아낸 자세가 있으니 바로 옮길 수 있다.
+
+    변환 순서는 _score_translations 와 같다 — 채점이 쓰는 좌표와 화면에 그리는
+    좌표가 갈리면 그림이 거짓말을 한다. 라이다가 로봇 중심보다 18.5 cm 앞이라는
+    사실도 여기 함께 반영된다.
+    """
+    if beams.used == 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    point_x, point_y = _beam_points(beams)
+    sensor_x, sensor_y, sensor_yaw = sensor
+    cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+    laser_x = cos_yaw * sensor_x - sin_yaw * sensor_y
+    laser_y = sin_yaw * sensor_x + cos_yaw * sensor_y
+    beam_yaw = yaw + sensor_yaw
+    cos_beam, sin_beam = math.cos(beam_yaw), math.sin(beam_yaw)
+
+    world_x = x + laser_x + cos_beam * point_x - sin_beam * point_y
+    world_y = y + laser_y + sin_beam * point_x + cos_beam * point_y
+    return world_x, world_y
+
+
 def _lookup(field: np.ndarray, grid: MapGrid, wx: np.ndarray, wy: np.ndarray,
             max_dist: float) -> np.ndarray:
     """Read the distance field at world points. 지도 밖은 완전 빗나감으로 친다."""

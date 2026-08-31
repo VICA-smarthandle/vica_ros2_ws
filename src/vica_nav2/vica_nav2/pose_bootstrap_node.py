@@ -38,6 +38,7 @@ from vica_interfaces.srv import PoseCheck, PoseCommit
 
 from .pose_score import (
     build_likelihood_field,
+    beam_hits,
     filter_beams,
     MapGrid,
     MIN_BEAMS,
@@ -264,6 +265,12 @@ class PoseBootstrapNode(Node):
         response.margin = got.margin
         response.moved_m = got.moved_m
         response.moved_deg = got.moved_deg
+        # 찾아낸 자세에서 본 라이다 점. 앱이 지도에 겹쳐 그린다 - RViz 가
+        # 초기 위치를 잡은 뒤 보여주는 그 그림이다. 채점하면서 이미 만든
+        # 좌표라 추가 계산이 없다.
+        hit_x, hit_y = beam_hits(beams, got.x, got.y, got.yaw, sensor=sensor)
+        response.hit_x = [float(v) for v in hit_x]
+        response.hit_y = [float(v) for v in hit_y]
 
         self.get_logger().info(
             '확인 (%.2f, %.2f) -> (%.2f, %.2f, %.1f도) 점수 %.1f 격차 %.1f 빔 %d/%d %s (%.0f ms)'
@@ -330,6 +337,11 @@ class PoseBootstrapNode(Node):
         response.accepted = True
         response.verify_score = verify
         response.amcl_x, response.amcl_y, response.amcl_yaw = got_x, got_y, got_yaw
+        # 반영 뒤 AMCL 이 믿는 자세에서 본 라이다 점. 확정 전 그림과 겹쳐 보면
+        # AMCL 이 어디로 옮겼는지가 눈에 보인다.
+        hit_x, hit_y = beam_hits(beams, got_x, got_y, got_yaw, sensor=sensor)
+        response.hit_x = [float(v) for v in hit_x]
+        response.hit_y = [float(v) for v in hit_y]
         drift = math.hypot(got_x - request.x, got_y - request.y)
         # '차이'는 짚어 준 자세와 AMCL 사이다. 실제 물리 위치와의 차이가 아니다 —
         # 2026-08-25 실기에서 3 m 틀린 자리를 확정해도 "2 cm"가 나와 관리자가

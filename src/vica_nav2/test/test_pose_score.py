@@ -496,3 +496,62 @@ def test_peaks_keep_a_different_angle_at_the_same_spot():
     picks = _pick_peaks(xs, ys, yaws, scores, 2, 0.15, math.radians(10))
 
     assert len(picks) == 2
+
+
+# --- 라이다 점 좌표 (2026-08-31) ---------------------------------------------
+#
+# RViz 는 초기 위치를 잡은 뒤 그 자세 기준으로 라이다 점을 지도에 겹쳐 보여준다.
+# 앱에도 같은 그림을 주려고 채점에 쓴 좌표를 서비스 응답에 실어 보낸다.
+
+
+def test_hits_land_on_the_walls_at_the_true_pose():
+    """정답 자세에서는 점이 벽 위에 놓인다. 이 그림이 '맞았다'의 뜻이다."""
+    from vica_nav2.pose_score import _lookup, beam_hits
+
+    grid = cross_map()
+    field = build_likelihood_field(grid)
+    truth = (12.0, 9.0, 0.4)
+    beams = beams_at(grid, *truth)
+
+    hit_x, hit_y = beam_hits(beams, *truth, sensor=LASER_OFFSET)
+    distances = _lookup(field, grid, hit_x, hit_y, MAX_DIST)
+
+    assert hit_x.size == beams.used
+    assert float(np.median(distances)) < 0.05
+
+
+def test_hits_move_with_the_pose():
+    """자세를 옮기면 점도 그만큼 옮겨진다 - 틀린 자세는 그림으로 드러난다."""
+    from vica_nav2.pose_score import beam_hits
+
+    grid = cross_map()
+    beams = beams_at(grid, 12.0, 9.0, 0.0)
+
+    base_x, _ = beam_hits(beams, 12.0, 9.0, 0.0, sensor=LASER_OFFSET)
+    moved_x, _ = beam_hits(beams, 12.3, 9.0, 0.0, sensor=LASER_OFFSET)
+
+    assert float(np.mean(moved_x - base_x)) == pytest.approx(0.3)
+
+
+def test_hits_include_the_laser_offset():
+    """라이다는 로봇 중심보다 18.5 cm 앞이다. 그림도 그 사실을 따라야 한다."""
+    from vica_nav2.pose_score import beam_hits
+
+    grid = cross_map()
+    beams = beams_at(grid, 12.0, 9.0, 0.0)
+
+    with_offset, _ = beam_hits(beams, 12.0, 9.0, 0.0, sensor=LASER_OFFSET)
+    without, _ = beam_hits(beams, 12.0, 9.0, 0.0, sensor=(0.0, 0.0, 0.0))
+
+    assert float(np.mean(with_offset - without)) == pytest.approx(LASER_OFFSET[0])
+
+
+def test_hits_with_no_beams_is_empty_not_crashed():
+    """라이다가 안 들어와도 화면이 죽으면 안 된다."""
+    from vica_nav2.pose_score import beam_hits
+
+    empty = filter_beams([], 0.0, 0.1)
+    hit_x, hit_y = beam_hits(empty, 1.0, 2.0, 0.0)
+
+    assert hit_x.size == 0
+    assert hit_y.size == 0
