@@ -466,9 +466,10 @@ def check_cancel_gate(state: State, estop_active: bool) -> GateReason:
     """
     if estop_active or state == State.ESTOPPED:
         return GateReason.ESTOP_ACTIVE
-    # WAITING(최대 30분 제자리 대기)도 취소 허용 — 관리자가 앱으로 대기를
-    # 풀 유일한 길이다 (2026-08-31, 이전엔 회수 불가). ASKING_* 는 길어야
-    # 1분이고 침묵이면 저절로 홈에 오므로 열지 않는다(범위 최소).
+    # 음성 취소의 게이트다 — 주행·일시정지·대기(WAITING, 8/31 회수 수리)만.
+    # 접근 응대·도착 질문을 지나가는 "취소" 한마디가 끊으면 안 된다.
+    # **앱(관리자) 취소는 이 게이트를 안 탄다** — on_app_cancel 이 전면
+    # 개방(ESTOPPED 예외만)으로 따로 처리한다 (2026-08-31 사용자 결정).
     if state not in (State.NAVIGATING, State.PAUSED, State.WAITING):
         return GateReason.NOT_NAVIGATING
     return GateReason.OK
@@ -669,6 +670,9 @@ class MissionLogic:
         self.arrival_dialog = arrival_dialog
         self._asking_is_finish = False   # 방금 던진 질문이 종료형인가("네"=끝)
         self._asking_time_after_yes = False  # 대기 수락 시 시간을 물을 유형인가
+        # 이번 주행의 출처가 앱(관리자)인가. 앱 주행 도착엔 대화·홈 복귀를
+        # 붙이지 않는다 (2026-08-31 사용자 결정 — 관리 중 소음 제거).
+        self._nav_from_app = False
         self._asking_entered_at: Optional[float] = None  # 시계 유실 폴백 기준
         self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
@@ -790,19 +794,72 @@ class MissionLogic:
     # 없고, 처리 뒤 바로 새 요청을 받을 수 있다. 판정은 여기(Mission Manager)가 하고
     # 앱·LLM·CLI 는 요청만 보낸다.
 
+    def _force_clear_all(self, now: float) -> list:
+        """진행 중인 모든 활동을 강제 정리한다 (앱 선점·전체 취소 전용).
+
+        상태별 정리가 흩어지면 하나를 빠뜨려 유령(낡은 타이머·보관 목적지)이
+        생긴다 — 한곳에 모은다. Nav2 goal 이 있는 상태만 CancelNav 를 낸다.
+        TURNING 의 spin 은 nav goal 이 아니라 여기서 못 끊는다 — 몇 초짜리라
+        새 Navigate 가 큐에서 자연히 이어받는다.
+        """
+        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+        if (self.state in (State.NAVIGATING, State.APPROACHING, State.RETURNING)
+                and self.active_destination is not None):
+            actions.append(CancelNav(self.active_destination))
+        self._reset_arrival_dialog()
+        self._to_idle()   # 보관 목적지·재시도 예약·확인 대기까지 전부 정리
+        return actions
+
+    def on_app_destination(self, dest: Optional[Destination],
+                           bounds: Optional[MapBounds], nav_ready: bool,
+                           now: float) -> tuple:
+        """앱(관리자) 새 목적지 — ESTOPPED 만 빼고 어느 상태든 선점한다.
+
+        2026-08-31 사용자 결정: 관리자의 새 목적지는 내부적으로 전부 취소한
+        뒤 즉시 출발한다. 멘트는 기존 출발 안내만 쓴다(신규 문구 없음 —
+        사용자 결정). E-stop 래치만은 못 뚫는다(reset 경로 보호). 목적지
+        품질 검증(공개·좌표·Nav2 준비)은 음성 게이트와 같은 기준이다.
+        """
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if dest is None:
+            return [], GateReason.UNKNOWN_DESTINATION
+        if dest.authorization != "public":
+            return [], GateReason.PRIVATE_DESTINATION
+        if not dest.is_approachable:
+            return [], GateReason.NOT_APPROACHABLE
+        if not pose_valid(dest, bounds):
+            return [], GateReason.POSE_INVALID
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        actions = self._force_clear_all(now)
+        self.state = State.NAVIGATING
+        self.active_destination = dest
+        self._nav_from_app = True
+        actions.append(Say(say_destination(MSG_START, dest.name)))
+        actions.append(Navigate(dest))
+        return actions, GateReason.OK
+
     def on_cancel_request(self, now: float) -> tuple:
-        """목적지 취소. (actions, GateReason) 을 돌려준다."""
+        """음성 취소. 게이트(주행·일시정지·대기)를 지킨다 — 앱 취소는
+        on_app_cancel. (actions, GateReason) 을 돌려준다."""
         reason = check_cancel_gate(self.state, self.estop_active)
         if reason != GateReason.OK:
             return [], reason
+        actions = self._force_clear_all(now)
+        actions.append(Say(MSG_CANCELED, priority="response"))
+        return actions, GateReason.OK
 
-        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
-        if self.state == State.NAVIGATING:
-            actions.append(CancelNav(self.active_destination))
-        if self.state == State.WAITING:
-            # 대기 타이머·질문 태그를 완전히 정리 — 남으면 유령 복귀가 된다.
-            self._reset_arrival_dialog()
-        self._to_idle()
+    def on_app_cancel(self, now: float) -> tuple:
+        """앱(관리자) 취소 — ESTOPPED 만 빼고 어느 상태든 전부 정리하고
+        IDLE (2026-08-31 사용자 결정). 음성 취소와 달리 게이트가 없다:
+        관리자 버튼은 오인식이 없고, 접근 응대·도착 질문도 끊을 권한이 있다.
+        E-stop 래치만은 못 푼다(reset 경로 보호)."""
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if self.state == State.IDLE:
+            return [], GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
+        actions = self._force_clear_all(now)
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
 
@@ -1325,7 +1382,7 @@ class MissionLogic:
                 )
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                if self.arrival_dialog:
+                if self.arrival_dialog and not self._nav_from_app:
                     # 도착 멘트와 유형별 질문을 한 발화로 합쳐 낸다 — 따로 내면
                     # 우선순위(narration vs response)로 순서가 뒤집힌다(실기 확인
                     # 2026-08-30). 한 문장이라 재생 완료 시점이 명확해 8초 응답
@@ -1648,6 +1705,7 @@ class MissionLogic:
         self.approach_track_id = None
         self.approach_goal_pose = None
         self._response_deadline = None
+        self._nav_from_app = False
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -1675,3 +1733,4 @@ class MissionLogic:
         self.approach_track_id = None
         self.approach_goal_pose = None
         self._response_deadline = None
+        self._nav_from_app = False

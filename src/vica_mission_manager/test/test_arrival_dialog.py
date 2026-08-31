@@ -406,3 +406,109 @@ def test_wake_resume_does_not_trip_stuck_fallback():
     logic.on_wake(600.0)                                 # 10분 뒤 각성
     acts = logic.on_tick(601.0, NavStatus.NONE)          # 질문 재생 중일 시각
     assert not any("돌아가겠습니다" in t for t in _say(acts))
+
+
+# ---- 앱 전권화 (2026-08-31 사용자 결정) -------------------------------------
+from vica_mission_manager.mission_logic import CancelNav, GateReason
+
+
+def _builders():
+    """선점당할 활성 상태를 만드는 빌더들. (상태 이름 -> logic)"""
+    def navigating():
+        logic = MissionLogic(return_destination=HOME, arrival_dialog=True)
+        logic.on_intent(_intent(), _dest("restroom"), BOUNDS, True, 0.0)
+        return logic
+    def confirming():
+        logic = MissionLogic(arrival_dialog=True)
+        logic.on_intent(_intent(need_confirm=True), _dest("restroom"), BOUNDS, True, 0.0)
+        return logic
+    def paused():
+        logic = navigating()
+        logic.on_pause_request(1.0)
+        return logic
+    def asking():
+        return arrive("restroom")
+    def asking_time():
+        logic = arrive("reception")
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        return logic
+    def waiting():
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        return logic
+    def returning():
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("finish"), 3.0)
+        return logic
+    return {
+        State.NAVIGATING: navigating, State.CONFIRMING: confirming,
+        State.PAUSED: paused, State.ASKING_NEXT: asking,
+        State.ASKING_WAIT_TIME: asking_time, State.WAITING: waiting,
+        State.RETURNING: returning,
+    }
+
+
+class TestAppOverride:
+    """앱 새 목적지는 ESTOPPED 만 빼고 어느 상태든 선점한다 — 내부 취소 후
+    즉시 출발 (2026-08-31 사용자 결정). 멘트는 기존 출발 안내만."""
+
+    def test_preempts_every_active_state(self):
+        nxt = _dest("", id="99999999-9999-4999-8999-999999999999", name="입구")
+        for want_state, build in _builders().items():
+            logic = build()
+            assert logic.state == want_state
+            actions, reason = logic.on_app_destination(nxt, BOUNDS, True, 50.0)
+            assert reason == GateReason.OK, want_state
+            assert logic.state == State.NAVIGATING, want_state
+            assert logic.active_destination.name == "입구", want_state
+            assert any(isinstance(a, Navigate) for a in actions), want_state
+            # 유령 방지: 대기·재시도·보관 목적지가 깨끗해야 한다
+            assert logic._wait_until is None and logic.paused_destination is None
+
+    def test_idle_still_works(self):
+        logic = MissionLogic(arrival_dialog=True)
+        actions, reason = logic.on_app_destination(_dest(""), BOUNDS, True, 0.0)
+        assert reason == GateReason.OK and logic.state == State.NAVIGATING
+
+    def test_estopped_rejected(self):
+        logic = MissionLogic()
+        logic.on_estop(True, 0.0)
+        _, reason = logic.on_app_destination(_dest(""), BOUNDS, True, 1.0)
+        assert reason == GateReason.ESTOP_ACTIVE
+
+    def test_app_drive_skips_arrival_dialog(self):
+        """앱 주행 도착은 도착 멘트만 하고 조용히 정지 (source 태그)."""
+        logic = MissionLogic(return_destination=HOME, arrival_dialog=True)
+        logic.on_app_destination(_dest("restroom"), BOUNDS, True, 0.0)
+        acts = logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.ARRIVED           # 대화 없이 기존 dwell
+        assert any("도착" in t for t in _say(acts))
+        assert not any("기다릴까요" in t for t in _say(acts))
+
+    def test_voice_drive_still_gets_dialog(self):
+        logic = arrive("restroom")                    # 음성 주행 → 질문 나옴
+        assert logic.state == State.ASKING_NEXT
+
+
+class TestAppCancelAll:
+    """앱 취소는 ESTOPPED 만 빼고 전부 정리하고 IDLE (2026-08-31 결정)."""
+
+    def test_cancels_every_active_state(self):
+        for want_state, build in _builders().items():
+            logic = build()
+            actions, reason = logic.on_app_cancel(50.0)
+            assert reason == GateReason.OK, want_state
+            assert logic.state == State.IDLE, want_state
+            assert logic._wait_until is None and logic.paused_destination is None
+
+    def test_idle_cancel_is_quiet_ok(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_cancel(0.0)
+        assert reason == GateReason.OK
+        assert actions == []                          # 멘트 최소주의 — 조용히
+
+    def test_estopped_cancel_rejected(self):
+        logic = MissionLogic()
+        logic.on_estop(True, 0.0)
+        _, reason = logic.on_app_cancel(1.0)
+        assert reason != GateReason.OK

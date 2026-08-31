@@ -682,7 +682,8 @@ class MissionManagerNode(Node):
         """command 이름에 맞는 로직 핸들러를 부른다. (actions, GateReason)"""
         now = self._now()
         if command == "cancel":
-            return self.logic.on_cancel_request(now)
+            # 앱 취소는 전면 개방 판 — 음성 취소(on_cancel_request)와 다르다.
+            return self.logic.on_app_cancel(now)
         if command == "pause":
             return self.logic.on_pause_request(now)
         if command == "resume":
@@ -721,26 +722,12 @@ class MissionManagerNode(Node):
                 f"current={self._map_id}, requested={request.map_id}"
             )
             return response
-        if self.logic.state != State.IDLE:
-            response.accepted = False
-            response.message = (
-                f"Mission이 idle 상태가 아닙니다: state={self.logic.state.value}"
-            )
-            return response
-
+        # 앱은 어느 상태든 선점한다(ESTOPPED 예외) — 내부에서 전부 취소 후
+        # 즉시 출발 (2026-08-31 사용자 결정, on_app_destination 주석 참고).
         destination = self.destinations.get(destination_id)
-        intent = IntentData(
-            intent="navigate",
-            matched_destination_id=destination_id,
-            need_confirm=False,
-            safety_flag="normal",
-        )
-        reason = check_gate(
-            intent,
-            destination,
-            self.map_bounds,
-            self.logic.estop_active,
-            self._nav2_ready(),
+        before = self.logic.state
+        actions, reason = self.logic.on_app_destination(
+            destination, self.map_bounds, self._nav2_ready(), self._now()
         )
         if reason != GateReason.OK:
             response.accepted = False
@@ -750,14 +737,9 @@ class MissionManagerNode(Node):
                 f"id={destination_id} reason={reason.value}"
             )
             return response
-
-        actions = self.logic.on_intent(
-            intent,
-            destination,
-            self.map_bounds,
-            True,
-            self._now(),
-        )
+        if before != State.IDLE:
+            self.get_logger().info(
+                f"앱 선점 주행: {before.value} 를 취소하고 새 목적지로")
         self._run_actions(actions)
         response.accepted = self._nav_active
         response.message = (
