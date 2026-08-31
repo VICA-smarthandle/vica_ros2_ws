@@ -6,6 +6,8 @@ from launch.actions import (
     DeclareLaunchArgument,
     GroupAction,
     IncludeLaunchDescription,
+    LogInfo,
+    OpaqueFunction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -73,8 +75,99 @@ def generate_launch_description():
         convert_types=True,
     )
 
+    def keepout_actions(context):
+        """금지구역 마스크 서버 두 개를 띄운다. 마스크 파일이 있을 때만 띄운다.
+
+        OpaqueFunction 인 이유: 지도 경로는 실행할 때 정해지는 값이라
+        LaunchConfiguration 을 여기서 perform 해야 파일 존재를 볼 수 있다.
+        IfCondition 은 파일이 있는지 물어볼 수 없다.
+
+        keepout_map 을 비워 두면 map 인자에서 <이름>_keepout.yaml 을 유도한다.
+        사람이 지도 이름을 두 번 적게 만들면 언젠가 서로 다른 지도의 마스크를
+        물린다 — 그때 로봇은 엉뚱한 자리를 막고도 아무 말을 하지 않는다.
+
+        파일이 없으면 서버를 아예 띄우지 않는다. 그러면 KeepoutFilter 가
+        2초마다 "Filter mask was not received" 만 찍고 주행은 종전과 같다.
+        앱에서 금지구역을 한 번이라도 저장하면 keepout_map_node 가 빈 마스크를
+        만들어 두므로, 그 뒤로는 이 분기가 항상 참이 된다.
+        """
+        explicit = LaunchConfiguration("keepout_map").perform(context).strip()
+        if explicit:
+            keepout_yaml = explicit
+        else:
+            map_path = LaunchConfiguration("map").perform(context)
+            stem = os.path.splitext(os.path.basename(map_path))[0]
+            keepout_yaml = os.path.join(
+                os.path.dirname(map_path), f"{stem}_keepout.yaml"
+            )
+
+        if not os.path.isfile(keepout_yaml):
+            return [
+                LogInfo(
+                    msg=(
+                        "[keepout] 마스크가 없어 금지구역 없이 실행한다: "
+                        f"{keepout_yaml}"
+                    )
+                )
+            ]
+
+        return [
+            LogInfo(msg=f"[keepout] 마스크를 적용한다: {keepout_yaml}"),
+            # 원본 지도를 읽는 map_server 와 별개인 두 번째 Map Server 다.
+            # 이름이 nav2_params.yaml 의 블록 이름과 같아야 파라미터를 받는다.
+            #
+            # 이 노드가 /keepout_filter_mask_server/load_map 서비스를 연다.
+            # 앱에서 사각형을 고치면 keepout_map_node 가 그 서비스를 불러
+            # 마스크만 갈아끼운다 — Nav2 재시작도, AMCL 재수렴도 없다.
+            Node(
+                package="nav2_map_server",
+                executable="map_server",
+                name="keepout_filter_mask_server",
+                output="screen",
+                parameters=[configured_params, {"yaml_filename": keepout_yaml}],
+                respawn=False,
+            ),
+            Node(
+                package="nav2_map_server",
+                executable="costmap_filter_info_server",
+                name="keepout_costmap_filter_info_server",
+                output="screen",
+                parameters=[configured_params],
+                respawn=False,
+            ),
+            # 전용 lifecycle_manager. 이유는 collision_monitor 쪽 주석과 같다 —
+            # nav2_bringup 의 lifecycle_nodes 목록에 이 둘이 없어서 관리자를
+            # 붙이지 않으면 unconfigured 로 남아 아무것도 발행하지 않는다.
+            # lifecycle_manager_navigation 은 건드리지 않는다.
+            Node(
+                package="nav2_lifecycle_manager",
+                executable="lifecycle_manager",
+                name="lifecycle_manager_keepout",
+                output="screen",
+                parameters=[
+                    {"use_sim_time": use_sim_time},
+                    {"autostart": True},
+                    {
+                        "node_names": [
+                            "keepout_filter_mask_server",
+                            "keepout_costmap_filter_info_server",
+                        ]
+                    },
+                ],
+                respawn=False,
+            ),
+        ]
+
     return LaunchDescription([
         DeclareLaunchArgument("map"),
+        DeclareLaunchArgument(
+            "keepout_map",
+            default_value="",
+            description=(
+                "금지구역 마스크 YAML. 비우면 map 인자에서 <이름>_keepout.yaml 을 "
+                "찾고, 그 파일이 없으면 금지구역 없이 실행한다."
+            ),
+        ),
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("autostart", default_value="true"),
@@ -154,6 +247,10 @@ def generate_launch_description():
             }],
             respawn=False,
         ),
+        # 금지구역 마스크 서버. GroupAction 밖에 둔다 — 안쪽 SetRemap 은
+        # behavior_server 지정이라 여기까지 오지 않지만, 마스크 서버는 Nav2
+        # 주행 배선과 무관한 데이터 공급자라 섞지 않는 편이 읽기 쉽다.
+        OpaqueFunction(function=keepout_actions),
         GroupAction(
             actions=[
                 # 2026-08-15 [NAV2-B5]: velocity_smoother와 /cmd_vel_req 사이에

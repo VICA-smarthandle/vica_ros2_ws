@@ -1364,6 +1364,40 @@ global_costmap:
       #
       # nvblox_layer 블록은 남겨 둔다. plugins 에 없으면 로드되지 않아 무해하다.
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+
+      # ===== KZ-5: 관리자가 앱에서 그린 금지구역 (2026-08-31) =====
+      #
+      # filters 는 plugins 와 별개 항목이다. 위 plugins 목록에 넣으면 안 된다 —
+      # Nav2 공식 문서가 "inflation layer 와의 간섭을 막으려고 분리했다"고
+      # 명시한다. LayeredCostmap 은 plugins 를 먼저 다 돌린 뒤 filters 를
+      # master grid 에 얹는다(layered_costmap.cpp 262~268행).
+      #
+      # 그 순서의 결과로 **금지구역에는 inflation 이 붙지 않는다.** 로봇은
+      # 금지구역 경계선에 몸을 딱 붙일 수 있다(내접반경 0.277 m). 그래서 앱은
+      # "실제로 막을 범위보다 20~30 cm 크게 그리라"고 안내한다. 마스크를 만들
+      # 때 자동으로 넓히지 않는 것은 사용자 결정이다(A안) — 앱에 보이는 사각형과
+      # 로봇이 지키는 사각형이 달라지면 사람이 화면을 믿을 수 없게 된다.
+      #
+      # local_costmap 에는 아직 넣지 않는다. local 의 global_frame 은 odom 이라
+      # 마스크(map frame)와 프레임이 달라 KeepoutFilter 가 셀마다 TF 변환을
+      # 돌린다(keepout_filter.cpp 285~315행). 6x6 m / 0.05 = 14,400칸을 5 Hz 로
+      # 갱신하는데 Jetson CPU 여유가 이미 빠듯하다(load average 최대 13.8).
+      # global 적용 뒤 controller_server 의 "missed its desired rate" 를 세어
+      # 여유를 확인하고 나서 판단한다. 공식 문서도 "둘 다가 최선이지만 항상
+      # 그럴 필요는 없다"고 적었다.
+      #
+      # 마스크가 없으면 이 필터는 2초마다 "Filter mask was not received" 를
+      # 찍기만 하고 아무 일도 하지 않는다. launch 는 마스크 파일이 있을 때만
+      # 두 서버를 띄운다.
+      filters: ["keepout_filter"]
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: True
+        # 마스크 토픽 이름이 아니다. 필터가 "어떤 종류의 마스크인지"와 "실제
+        # 마스크 토픽 이름"을 안내받는 정보 토픽이다.
+        # keepout_costmap_filter_info_server 의 filter_info_topic 과 같아야 한다.
+        filter_info_topic: "/keepout_costmap_filter_info"
+
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
@@ -2052,3 +2086,38 @@ collision_monitor:
       type: "scan"
       topic: "/scan"
       enabled: True
+
+# ===== 금지구역 마스크 서버 두 개 (2026-08-31) =====
+#
+# 왜 두 개인가. Costmap Filters 설계상 마스크는 짝으로 온다.
+#   ① Map Server 한 대가 마스크 이미지를 OccupancyGrid 로 발행한다
+#   ② Costmap Filter Info Server 가 "그 마스크가 어떤 종류이고 어느 토픽에
+#      있는지"를 발행한다
+# 필터는 ②를 먼저 구독해서 ①의 토픽 이름을 배운 뒤 마스크를 구독한다.
+# 그래서 ②의 mask_topic 과 ①의 topic_name 은 반드시 같은 글자여야 한다.
+#
+# 두 서버 모두 lifecycle 노드다. nav2_bringup 의 lifecycle_manager 목록에 없어서
+# 전용 관리자를 launch 에서 따로 붙인다(collision_monitor 와 같은 사정).
+#
+# 원본 지도를 읽는 map_server(1460행)와는 다른 노드다. AMCL 은 원본만 보고
+# 금지구역은 길찾기에만 관여한다 — 마스크를 아무리 고쳐도 위치추정은 안 바뀐다.
+keepout_filter_mask_server:
+  ros__parameters:
+    use_sim_time: false
+    # launch 가 <지도>_keepout.yaml 로 채운다. 여기서는 자리만 만들어 둔다.
+    yaml_filename: ""
+    topic_name: "/keepout_filter_mask"
+    frame_id: "map"
+
+keepout_costmap_filter_info_server:
+  ros__parameters:
+    use_sim_time: false
+    # 0 = Keepout/Preferred lanes. 1 = Speed limit(percent), 2 = Speed limit(absolute).
+    type: 0
+    filter_info_topic: "/keepout_costmap_filter_info"
+    mask_topic: "/keepout_filter_mask"
+    # Keepout 필터는 base·multiplier 를 쓰지 않는다(OccupancyGrid 값을 그대로
+    # 비용으로 쓴다). 그래도 공식 문서가 "1:1 변환임을 분명히 하려고" 0.0/1.0 을
+    # 적어 두라고 한다.
+    base: 0.0
+    multiplier: 1.0
