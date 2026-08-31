@@ -1223,20 +1223,13 @@ class TestEstopStateNarration:
         says = [a.text for a in actions if isinstance(a, Say)]
         assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
 
-    def test_wait_admin_announced_once_when_causes_clear(self):
-        """원인 전부 해제 = reset 대기 진입. 1회만 알리고 반복하지 않는다."""
+    def test_no_wait_admin_ment_after_causes_clear(self):
+        """원인이 해제돼도 추가 멘트 없음 — 걸림 1 + 해제 1 체계 (2026-08-31)."""
         logic = MissionLogic()
         logic.on_estop_sources(["voice"], 0.5)
         logic.on_estop(True, 1.0)
-        actions = logic.on_estop_sources([], 3.0)
-        says = [a.text for a in actions if isinstance(a, Say)]
-        assert says == [
-            "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."]
-        assert logic.on_estop_sources([], 4.0) == []       # 반복 없음
-        logic.on_estop_sources(["button"], 5.0)            # 원인 재점화
-        actions = logic.on_estop_sources([], 6.0)          # 다시 비면 다시 1회
-        assert [a.text for a in actions if isinstance(a, Say)] == [
-            "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."]
+        assert logic.on_estop_sources([], 3.0) == []
+        assert logic.on_estop_sources([], 4.0) == []
 
     def test_sources_alone_do_not_speak_without_latch(self):
         """래치가 없을 때의 원인 잔불(순단 회복 등)은 침묵한다."""
