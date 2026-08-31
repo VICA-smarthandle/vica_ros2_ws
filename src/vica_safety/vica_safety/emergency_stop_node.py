@@ -91,9 +91,25 @@ class EmergencyStopNode(Node):
         self.declare_parameter("f1_check_byte_2", 3)
         self.declare_parameter("f1_check_mask", 0x10)
         self.declare_parameter("f1_active_value", 0x00)
-        self.declare_parameter("f1_timeout_sec", 0.5)
+        # ── 통신 미수신 판정 시간 ────────────────────────────────────────
+        #
+        # 2026-08-31 사용자 지정. 0.5 -> 3.0.
+        #
+        # 0.5 초는 순간적인 CAN·DDS 지연을 통신 단절과 구분하지 못했다.
+        # 2026-08-20 "다시출발 먹통" 사건의 원인 중 하나가 그 순단이었고,
+        # 아무도 끊지 않았는데 걸린 래치를 관리자가 앱에서 풀어야 했다.
+        #
+        # [대가] 진짜 단절일 때 정지가 2.5 초 늦다. 0.5 m/s 주행 중이면 그사이
+        # 1.25 m 를 더 간다. 이 값을 다시 내릴 때는 그 헛 래치가 실제로
+        # 사라졌는지를 먼저 확인한다 — 원인이 남은 채 시간만 줄이면 8/20 이
+        # 재발한다.
+        #
+        # 이 값은 '프레임이 아예 안 오는 시간'이다. 프레임이 오고 있는 한
+        # 물리 버튼 눌림은 여전히 즉시(publish_hz 20 Hz) 감지된다. 즉 버튼
+        # 반응이 3 초 느려지는 것이 아니다.
+        self.declare_parameter("f1_timeout_sec", 3.0)
         self.declare_parameter("log_f1_frames", True)
-        self.declare_parameter("motor_can_timeout_sec", 0.5)
+        self.declare_parameter("motor_can_timeout_sec", 3.0)
         # 부팅 유예: 노드 기동 후 이 시간까지의 '첫 수신 전 미수신'은 고장이
         # 아니라 대기로 본다. motor node 가 떠서 드라이버 IO monitor 를 켜고
         # 첫 F1 이 방송되기까지의 여유다. 0.0 이면 종전 동작(즉시 stale)이다.
