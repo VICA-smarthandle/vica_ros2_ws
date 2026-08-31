@@ -15,6 +15,8 @@ from vica_nav2.pose_score import (
     judge,
     MapGrid,
     MAX_DIST,
+    _parabola_offset,
+    _pick_peaks,
     score_pose,
     search_pose,
 )
@@ -395,3 +397,102 @@ def test_chamfer_fallback_is_close_enough_to_scipy():
     a = score_pose(exact, grid, beams, 12.0, 9.0, 0.0, sensor=LASER_OFFSET)
     b = score_pose(approx, grid, beams, 12.0, 9.0, 0.0, sensor=LASER_OFFSET)
     assert a == pytest.approx(b, abs=1.0)
+
+
+# --- 3단계 탐색 (2026-08-31) -------------------------------------------------
+#
+# 종전 2단계는 정밀 격자가 2.5 cm 라 같은 자리를 여러 번 짚으면 68 점과 72 점이
+# 오갔다. 합격선이 70 이라 손가락 1~2 cm 차이로 당락이 갈렸다.
+
+
+def test_repeated_taps_land_on_the_same_answer():
+    """이 파일에서 가장 중요한 시험이다.
+
+    관리자가 같은 자리 주변을 여러 번 눌러도 **같은 답**이 나와야 한다.
+    실기에서 "될 때도 있고 안 될 때도 있다"고 보고된 증상이 이것이었다.
+    """
+    grid = cross_map()
+    field = build_likelihood_field(grid)
+    truth = (12.0, 9.0, 0.3)
+    beams = beams_at(grid, *truth)
+
+    found = []
+    for dx, dy in [(-0.25, -0.2), (-0.1, 0.15), (0.0, 0.0),
+                   (0.12, -0.08), (0.25, 0.22), (0.18, 0.05)]:
+        result = search_pose(
+            field, grid, beams,
+            truth[0] + dx, truth[1] + dy,
+            yaw_hint=truth[2] + math.radians(15),
+            sensor=LASER_OFFSET,
+        )
+        found.append(result)
+
+    # 되찾은 자세들이 서로 1 cm 안에 모여야 한다.
+    xs = [r.x for r in found]
+    ys = [r.y for r in found]
+    assert max(xs) - min(xs) < 0.01
+    assert max(ys) - min(ys) < 0.01
+
+    # 점수도 흔들리지 않아야 한다. 합격선 근처에서 오르내리면 당락이 갈린다.
+    scores = [r.score for r in found]
+    assert max(scores) - min(scores) < 1.0
+
+
+def test_search_beats_the_old_grid_resolution():
+    """격자(3 mm)보다 정밀해야 한다. 포물선 보간이 하는 일이다."""
+    grid = cross_map()
+    field = build_likelihood_field(grid)
+    truth = (12.0, 9.0, 0.0)
+    beams = beams_at(grid, *truth)
+
+    result = search_pose(
+        field, grid, beams,
+        truth[0] + 0.17, truth[1] - 0.13,
+        yaw_hint=truth[2], sensor=LASER_OFFSET,
+    )
+    assert math.hypot(result.x - truth[0], result.y - truth[1]) < 0.01
+
+
+# --- 포물선 보간 -------------------------------------------------------------
+
+
+def test_parabola_finds_the_peak_between_samples():
+    """오른쪽이 높으면 꼭짓점도 오른쪽에 있다."""
+    assert _parabola_offset(0.5, 1.0, 0.9) > 0
+    assert _parabola_offset(0.9, 1.0, 0.5) < 0
+    assert _parabola_offset(0.5, 1.0, 0.5) == pytest.approx(0.0)
+
+
+def test_parabola_refuses_when_the_middle_is_not_the_peak():
+    """가운데가 최대가 아니면 포물선 가정이 깨진다. 그때는 손대지 않는다."""
+    assert _parabola_offset(1.0, 0.5, 0.9) == 0.0
+    assert _parabola_offset(1.0, 1.0, 1.0) == 0.0
+
+
+# --- 봉우리 고르기 -----------------------------------------------------------
+
+
+def test_peaks_skip_neighbours_of_the_same_hill():
+    """상위 N 개를 그냥 뽑으면 한 봉우리의 이웃 칸이 자리를 다 차지한다."""
+    xs = np.array([0.0, 0.02, 1.0, 1.02])
+    ys = np.zeros(4)
+    yaws = np.zeros(4)
+    scores = np.array([0.9, 0.89, 0.8, 0.79])
+
+    picks = _pick_peaks(xs, ys, yaws, scores, 4, 0.15, math.radians(10))
+
+    assert len(picks) == 2
+    assert picks[0][0] == pytest.approx(0.0)
+    assert picks[1][0] == pytest.approx(1.0)
+
+
+def test_peaks_keep_a_different_angle_at_the_same_spot():
+    """같은 자리라도 각도가 다르면 다른 봉우리다 - 180도 뒤집힘이 그렇다."""
+    xs = np.zeros(2)
+    ys = np.zeros(2)
+    yaws = np.array([0.0, math.pi])
+    scores = np.array([0.9, 0.85])
+
+    picks = _pick_peaks(xs, ys, yaws, scores, 2, 0.15, math.radians(10))
+
+    assert len(picks) == 2

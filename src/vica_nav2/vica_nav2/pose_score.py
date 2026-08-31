@@ -54,18 +54,51 @@ MAX_RANGE = 11.0
 # --- 점유 판정. map_preview.py 의 trinary 기준과 같다 ------------------------
 OCCUPIED_THRESHOLD = 65
 
-# --- 탐색 격자 ---------------------------------------------------------------
+# --- 탐색 격자 (3단계) --------------------------------------------------------
 #
 # 사람 손가락은 위치를 20~50 cm, 각도를 10~20도 틀린다. 그래서 찍은 값을 그대로
 # 쓰지 않고 그 주변을 훑는다. Cartographer 의 real_time_correlative_scan_matcher
 # 와 같은 방식이다.
+#
+# **왜 3단계인가** (2026-08-31). 종전 2단계는 정밀 격자가 2.5 cm 라 그 사이의
+# 진짜 최고점을 못 찾았고, 정밀 탐색 범위(+-10 cm)가 거친 격자(10 cm)의 반올림
+# 오차를 겨우 덮어 거친 1등이 조금만 어긋나도 따라가지 못했다. 그래서 같은
+# 자리를 여러 번 짚으면 68 점과 72 점이 오갔다 - 합격선이 70 이라 당락이 갈렸다.
+#
+# 단계를 하나 더 두면 **후보가 곱해지지 않고 걸러진다.** 1단계는 넓게 훑어
+# 봉우리 후보만 추리고, 2단계가 그 후보들만 좁혀 보고, 3단계가 1등만 아주
+# 촘촘히 본다. 계산은 4.5 배로 늘지만 젯슨 실측 30 ms 기준 135 ms 이고
+# 판정선은 1초다(docs/pose_bootstrap_bench.md). 초기 위치는 한 번 하고 마는
+# 일이라 정확도에 시간을 쓰는 편이 맞다(사용자 판정 2026-08-31).
+
+# 1단계 - 넓게 훑어 봉우리 후보를 추린다. 값은 종전 거친 격자 그대로다.
 COARSE_XY_RADIUS = 0.5
 COARSE_XY_STEP = 0.1
 COARSE_YAW_STEP = math.radians(5.0)
-FINE_XY_RADIUS = 0.1
-FINE_XY_STEP = 0.025
-FINE_YAW_RADIUS = math.radians(5.0)
-FINE_YAW_STEP = math.radians(1.0)
+
+# 1단계에서 2단계로 넘길 후보 수와, 서로 다른 봉우리로 치는 최소 간격.
+#
+# 간격을 두지 않으면 같은 봉우리의 이웃 칸이 후보를 다 차지해 정작 다른 자리의
+# 2등 봉우리를 놓친다. 위치 간격은 거친 격자(10 cm)의 1.5 배, 각도는 거친
+# 격자(5도)의 2 배다 - 한 칸 이웃은 같은 봉우리로 본다.
+TOP_K = 10
+PEAK_MIN_XY = 0.15
+PEAK_MIN_YAW = math.radians(10.0)
+
+# 2단계 - 각 후보 주변을 좁혀 1등을 정한다.
+#
+# 반경은 1단계 격자의 반(+-5 cm, +-2.5도)보다 넉넉해야 반올림으로 밀린 진짜
+# 답을 덮는다.
+MID_XY_RADIUS = 0.06
+MID_XY_STEP = 0.015
+MID_YAW_RADIUS = math.radians(3.0)
+MID_YAW_STEP = math.radians(0.5)
+
+# 3단계 - 1등 주변만 최고 해상도로 본다. 여기에 포물선 보간이 붙는다.
+FINE_XY_RADIUS = 0.015
+FINE_XY_STEP = 0.003
+FINE_YAW_RADIUS = math.radians(0.6)
+FINE_YAW_STEP = math.radians(0.1)
 
 # 사람이 4방향 버튼으로 방향을 골랐을 때 훑는 범위.
 #
@@ -345,6 +378,70 @@ def _yaw_candidates(yaw_hint):
     return _grid_1d(float(yaw_hint), YAW_WINDOW, COARSE_YAW_STEP)
 
 
+def _pick_peaks(all_x, all_y, all_yaw, all_score, count, min_xy, min_yaw):
+    """점수 높은 순으로 **서로 떨어진** 후보만 고른다.
+
+    그냥 상위 N 개를 뽑으면 **한 봉우리의 이웃 칸들이 자리를 다 차지한다.**
+    10 cm 격자에서 최고점 옆칸은 거의 같은 자세이고, 그것을 열 개 모아 봐야
+    2단계가 같은 곳을 열 번 들여다볼 뿐이다. 정작 다른 자리에 있는 진짜 2등
+    봉우리는 후보에 못 든다.
+
+    그래서 이미 고른 후보와 위치·각도가 모두 가까우면 건너뛴다. 영상처리의
+    non-maximum suppression 과 같은 생각이다.
+    """
+    order = np.argsort(all_score)[::-1]
+    picks = []
+    for index in order:
+        x, y, yaw = all_x[index], all_y[index], all_yaw[index]
+        too_close = False
+        for px, py, pyaw in picks:
+            near_xy = math.hypot(x - px, y - py) < min_xy
+            near_yaw = abs(_angle_diff(yaw, pyaw)) < min_yaw
+            if near_xy and near_yaw:
+                too_close = True
+                break
+        if not too_close:
+            picks.append((float(x), float(y), float(yaw)))
+            if len(picks) >= count:
+                break
+    return picks
+
+
+def _parabola_offset(low: float, mid: float, high: float) -> float:
+    """세 점의 값으로 격자 사이 꼭짓점 위치를 구한다. -0.5 ~ +0.5 칸.
+
+    격자 위에서만 답을 고르면 **간격의 절반이 그냥 버려진다.** 3 mm 격자라면
+    최대 1.5 mm 다. 그런데 점수 곡선은 꼭짓점 근처에서 포물선에 가까우므로,
+    이웃한 세 점만 알면 **재지 않고도** 진짜 꼭짓점을 계산할 수 있다.
+
+    사진을 확대할 때 픽셀 사이 값을 추정하는 것과 같은 원리이며, 신호처리에서
+    오래 쓰는 방법이다(sub-pixel refinement). 추가 채점이 없어 공짜다.
+
+    가운데가 최대가 아니거나 세 점이 일직선이면 0 을 돌려준다 - 그때는 포물선
+    가정이 깨져서 계산이 엉뚱한 곳을 가리킨다.
+    """
+    if not (mid >= low and mid >= high):
+        return 0.0
+    denominator = low - 2.0 * mid + high
+    if abs(denominator) < 1e-12:
+        return 0.0
+    offset = 0.5 * (low - high) / denominator
+    # 포물선이 거의 평평하면 계산이 한 칸 밖을 가리킨다. 그건 못 믿는다.
+    return float(offset) if -0.5 <= offset <= 0.5 else 0.0
+
+
+def _refine_axis(line: np.ndarray, index: int, step: float) -> float:
+    """한 축을 따라 자른 점수 열에서 꼭짓점 보정량을 구한다. 미터 또는 라디안.
+
+    양 끝이면 이웃이 한쪽뿐이라 포물선을 그릴 수 없다 - 그때는 0 이다.
+    """
+    if line.size < 3 or index <= 0 or index >= line.size - 1:
+        return 0.0
+    return _parabola_offset(
+        float(line[index - 1]), float(line[index]), float(line[index + 1]),
+    ) * step
+
+
 def _sweep(field, grid, beams, xs, ys, yaws, sensor, sigma_hit, max_dist):
     """Score the full (xs x ys x yaws) block. Returns flat arrays."""
     point_x, point_y = _beam_points(beams)
@@ -395,29 +492,75 @@ def search_pose(
     coarse_y = _grid_1d(y, COARSE_XY_RADIUS, COARSE_XY_STEP)
     coarse_yaw = _yaw_candidates(yaw_hint)
 
+    # --- 1단계: 넓게 훑어 봉우리 후보를 추린다 --------------------------------
     all_x, all_y, all_yaw, all_score = _sweep(
         field, grid, beams, coarse_x, coarse_y, coarse_yaw, sensor, sigma_hit, max_dist,
     )
     best = int(np.argmax(all_score))
-    best_x, best_y, best_yaw = all_x[best], all_y[best], all_yaw[best]
+    best_yaw = all_yaw[best]
 
     # 2등은 각도가 크게 다른 후보 중에서 고른다. 앞뒤 미끄러짐은 2등으로 세지 않는다.
     wrapped = np.abs((all_yaw - best_yaw + math.pi) % (2.0 * math.pi) - math.pi)
     other_peak = wrapped > SUPPRESS_YAW
     runner_up = float(all_score[other_peak].max() * 100.0) if other_peak.any() else 0.0
 
+    # --- 2단계: 후보들만 좁혀 보고 1등을 정한다 -------------------------------
+    #
+    # 1등 하나만 넘기지 않는 이유: 1단계 격자가 10 cm 라 진짜 최고점이 옆칸에
+    # 있을 수 있다. 그때 1등만 좁혀 보면 **한 칸 옆의 더 좋은 답을 영영 못 본다.**
+    peaks = _pick_peaks(
+        all_x, all_y, all_yaw, all_score, TOP_K, PEAK_MIN_XY, PEAK_MIN_YAW,
+    )
+    mid_best = None
+    for peak_x, peak_y, peak_yaw in peaks:
+        got = _sweep(
+            field, grid, beams,
+            _grid_1d(peak_x, MID_XY_RADIUS, MID_XY_STEP),
+            _grid_1d(peak_y, MID_XY_RADIUS, MID_XY_STEP),
+            _grid_1d(peak_yaw, MID_YAW_RADIUS, MID_YAW_STEP),
+            sensor, sigma_hit, max_dist,
+        )
+        top = int(np.argmax(got[3]))
+        if mid_best is None or got[3][top] > mid_best[3]:
+            mid_best = (float(got[0][top]), float(got[1][top]),
+                        float(got[2][top]), float(got[3][top]))
+    best_x, best_y, best_yaw = mid_best[0], mid_best[1], mid_best[2]
+
+    # --- 3단계: 1등 주변만 최고 해상도 + 포물선 -------------------------------
+    fine_xs = _grid_1d(best_x, FINE_XY_RADIUS, FINE_XY_STEP)
+    fine_ys = _grid_1d(best_y, FINE_XY_RADIUS, FINE_XY_STEP)
+    fine_yaws = _grid_1d(best_yaw, FINE_YAW_RADIUS, FINE_YAW_STEP)
     fine_x, fine_y, fine_yaw, fine_score = _sweep(
-        field, grid, beams,
-        _grid_1d(best_x, FINE_XY_RADIUS, FINE_XY_STEP),
-        _grid_1d(best_y, FINE_XY_RADIUS, FINE_XY_STEP),
-        _grid_1d(best_yaw, FINE_YAW_RADIUS, FINE_YAW_STEP),
-        sensor, sigma_hit, max_dist,
+        field, grid, beams, fine_xs, fine_ys, fine_yaws, sensor, sigma_hit, max_dist,
     )
     top = int(np.argmax(fine_score))
     got_x = float(fine_x[top])
     got_y = float(fine_y[top])
-    got_yaw = float((fine_yaw[top] + math.pi) % (2.0 * math.pi) - math.pi)
+    got_yaw = float(fine_yaw[top])
     score = float(fine_score[top] * 100.0)
+
+    # 격자 위에서 고른 답을 격자 사이로 다듬는다. _sweep 이 (yaw, x, y) 순서로
+    # 채우므로 그 모양 그대로 되돌려 이웃 값을 읽는다.
+    cube = fine_score.reshape(fine_yaws.size, fine_xs.size, fine_ys.size)
+    yaw_i, xy_i = divmod(top, fine_xs.size * fine_ys.size)
+    x_i, y_i = divmod(xy_i, fine_ys.size)
+    got_x += _refine_axis(cube[yaw_i, :, y_i], x_i, FINE_XY_STEP)
+    got_y += _refine_axis(cube[yaw_i, x_i, :], y_i, FINE_XY_STEP)
+    got_yaw += _refine_axis(cube[:, x_i, y_i], yaw_i, FINE_YAW_STEP)
+    got_yaw = float((got_yaw + math.pi) % (2.0 * math.pi) - math.pi)
+
+    # 다듬은 자리를 실제로 채점해 보고 나빠졌으면 격자 값을 그대로 쓴다.
+    # 포물선은 근사라 꼭짓점 근처가 평평하면 살짝 빗나갈 수 있다.
+    refined = score_pose(
+        field, grid, beams, got_x, got_y, got_yaw,
+        sensor=sensor, sigma_hit=sigma_hit, max_dist=max_dist,
+    )
+    if refined >= score:
+        score = refined
+    else:
+        got_x = float(fine_x[top])
+        got_y = float(fine_y[top])
+        got_yaw = float((fine_yaw[top] + math.pi) % (2.0 * math.pi) - math.pi)
 
     turned = 0.0 if yaw_hint is None else _angle_diff(got_yaw, float(yaw_hint))
 

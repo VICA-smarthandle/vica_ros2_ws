@@ -79,11 +79,25 @@ class PoseBootstrapNode(Node):
         self.declare_parameter('min_score', MIN_SCORE)
         self.declare_parameter('min_beams', MIN_BEAMS)
         self.declare_parameter('min_margin', MIN_MARGIN)
-        # /initialpose 에 실어 보낼 신뢰도. recovery_alpha_fast/slow 가 0.0 이라
-        # AMCL 은 스스로 전역 재초기화를 하지 않는다. 우리가 넣은 값이 곧 출발점이라
-        # 넓게 퍼뜨릴 이유가 없다.
-        self.declare_parameter('position_sigma_m', 0.1)
-        self.declare_parameter('yaw_sigma_deg', 3.0)
+        # /initialpose 에 실어 보낼 신뢰도. AMCL 은 이 값으로 입자를 뿌리고,
+        # 로봇이 움직이면 라이다와 맞는 입자만 살려 진짜 자리를 찾아간다.
+        #
+        # **좁게 잡으면 AMCL 이 고칠 여지를 뺏는다** (2026-08-31 수정). 종전
+        # 0.1 m 는 RViz 기본값(0.5 m)의 5분의 1 이었다. 그 근거는 "우리는 채점을
+        # 하니 정확하다" 였는데 실기가 그 전제를 반증했다 - 8/25 에 복도 방향으로
+        # 1.5~2.9 m 를 틀리고도 73~82 점으로 통과했다. 양옆 벽은 앞뒤에 대해
+        # 아무 말도 하지 않아서 채점으로는 잡을 수 없는 축이다.
+        #
+        # 0.1 m 로 신고하면 입자가 그 안에만 뿌려져, 진짜 자리가 밖에 있으면
+        # **입자가 하나도 닿지 않아 영영 못 찾는다.** 주행 중 라이다 보정에
+        # 기대려 해도 보정할 후보 자체가 없다. recovery_alpha_fast/slow 가 0.0
+        # 이라 전역 재초기화도 없다.
+        #
+        # 그래서 RViz 와 같은 0.25 m 로 넓힌다. 3단계 탐색이 격자 오차를 mm 로
+        # 줄인 뒤라도(pose_score 3단계 주석) 이 값은 "채점이 못 보는 축까지
+        # 포함한 불확실성"이라 따로 넓게 잡는다. 각도도 같은 이유로 10도다.
+        self.declare_parameter('position_sigma_m', 0.25)
+        self.declare_parameter('yaw_sigma_deg', 10.0)
         # update_min_d 가 0.10 이라 로봇이 10 cm 움직이기 전에는 AMCL 이 갱신하지
         # 않는다. 서 있는 채로 확정하면 아무 일도 안 일어난 것처럼 보인다.
         self.declare_parameter('nomotion_delay_sec', 0.5)
