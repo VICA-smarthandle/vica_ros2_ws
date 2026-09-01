@@ -295,7 +295,6 @@ MSG_ASK_WAIT_TIME = "몇 분쯤 걸리실까요?"
 # 대기 확정. {minutes} 는 코드가 채운다 — 캐시엔 넣지 않는다(가변).
 MSG_WAIT_CONFIRM = "{minutes}분 대기하겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
 MSG_WAIT_DEFAULT = "네, 최대 30분까지 여기서 기다리겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
-MSG_WAIT_RESUME_ASK = "다시 안내를 시작할까요?"
 MSG_FINISH = "안내를 종료합니다."
 # 무응답 사다리 (3절): 못 알아들으면 재질문 1회, 그 뒤/침묵이면 떠나기 예고.
 MSG_ARRIVAL_RETRY = "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해 주세요."
@@ -1255,7 +1254,7 @@ class MissionLogic:
     def on_wake(self, now: float) -> list:
         """"비카야" — 새 대화의 시작 신호.
 
-        WAITING 이면 각성: 다시 안내를 시작할지 묻는다. 답-대기 상태
+        어느 상태든 옛 대화를 접고 새 대화로 받는다. 답-대기 상태
         (CONFIRMING·도착 질문·접근 질문)면 옛 질문을 조용히 접는다
         (2026-09-01 사용자 결정) — 답 자리가 살아 있으면 새 대화의 첫
         마디(짧은 "그래" 오전사 등)가 옛 질문의 답으로 오인 접수된다.
@@ -1263,15 +1262,14 @@ class MissionLogic:
         RETURNING 의 복귀 브레이크는 노드가 on_return_brake 로 따로 보낸다.
         """
         if self.state == State.WAITING:
+            # 각성 질문("다시 안내를 시작할까요?")은 2026-09-01 삭제(A안) —
+            # "네"가 도착-대화 문법(대기 승낙→시간 질문)으로 새는 오배선이
+            # 실기에서 혼란→무응답 판정→홈행 연쇄를 만들었다. "네?"가 이미
+            # 말할 차례를 알리므로, 대기를 접고 새 대화로 받는다.
             self._wait_until = None
-            self._asking_is_finish = False   # "네" = 계속 (대기형처럼 다룬다)
-            self._asking_time_after_yes = True   # "네"면 목적지를 새로 묻는 흐름
-            self.state = State.ASKING_NEXT
-            self._arrival_retried = False
-            self._response_deadline = None
-            self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
-            return [Say(MSG_WAIT_RESUME_ASK, priority="response",
-                        expects_reply=True)]
+            self._reset_arrival_dialog()
+            self._to_idle()
+            return []
         if self.state == State.CONFIRMING:
             self._to_idle()
             return []
@@ -1384,25 +1382,28 @@ class MissionLogic:
         return self._enter_returning(now, dialog_finish=True)
 
     def on_return_brake(self, now: float, quiet: bool = False) -> list:
-        """홈 복귀 중 "비카야" (작업 E). 복귀를 취소하고 다시 안내를 묻는다 —
-        부른 사람은 대개 로봇이 가버려 부른 사용자다. 긴급어("멈춰")는 별도
-        경로로 어느 상태든 항상 통한다."""
+        """홈 복귀 중 "비카야"/늦은 답 (작업 E). 복귀를 취소한다.
+
+        quiet(늦은 답 선처리): 바로 뒤따르는 답이 on_arrival_answer 로
+        처리되도록 ASKING_NEXT 로 들어간다. 호출("비카야")이면 질문 없이
+        접고 IDLE — 각성 질문은 2026-09-01 삭제(A안, 비카야=새 대화).
+        긴급어("멈춰")는 별도 경로로 어느 상태든 항상 통한다."""
         if self.state != State.RETURNING:
             return []
         cancel_dest = self.active_destination
-        self.state = State.ASKING_NEXT
         self.active_destination = None
-        self._asking_is_finish = False   # "네" = 계속
-        self._arrival_retried = False
-        self._response_deadline = None
-        self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if cancel_dest is not None:
             actions.append(CancelNav(cancel_dest))
-        if not quiet:
-            # quiet: 늦게 도착한 답이 바로 뒤따라 처리될 때 — 질문이 군더더기다.
-            actions.append(Say(MSG_WAIT_RESUME_ASK, priority="response",
-                               expects_reply=True))
+        if quiet:
+            self.state = State.ASKING_NEXT
+            self._asking_is_finish = False   # "네" = 계속
+            self._arrival_retried = False
+            self._response_deadline = None
+            self._asking_entered_at = now    # 낡은 진입 시각이면 폴백 즉발
+        else:
+            self._reset_arrival_dialog()
+            self._to_idle()
         return actions
 
     def _reset_arrival_dialog(self) -> None:

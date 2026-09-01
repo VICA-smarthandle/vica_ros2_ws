@@ -11,7 +11,7 @@ from vica_mission_manager.mission_logic import (
     Pose2D, Say, State,
     MSG_ASK_RESTROOM, MSG_ASK_ENTRANCE, MSG_ASK_GENERIC, MSG_ASK_WAIT_TIME,
     MSG_WAIT_DEFAULT, MSG_FINISH, MSG_LEAVING_NOTICE,
-    MSG_ARRIVAL_RETRY, MSG_WAIT_RESUME_ASK,
+    MSG_ARRIVAL_RETRY,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -175,12 +175,12 @@ class TestWakeFoldsArrivalQuestion:
 
 
 class TestWaitingState:
-    def test_wake_asks_resume(self):
+    def test_wake_folds_waiting_quietly(self):
+        """WAITING 중 "비카야" → 각성 질문 없이 접고 새 대화(9/1 A안)."""
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("affirm"), 3.0)   # WAITING
-        acts = logic.on_wake(20.0)
-        assert MSG_WAIT_RESUME_ASK in _say(acts)
-        assert logic.state == State.ASKING_NEXT
+        assert logic.on_wake(20.0) == []
+        assert logic.state == State.IDLE
 
     def test_wait_timeout_leaves(self):
         logic = arrive("restroom")
@@ -192,15 +192,15 @@ class TestWaitingState:
 
 
 class TestReturnBrake:
-    def test_wake_during_return_cancels_and_asks(self):
-        """홈 복귀 중 '비카야' → 복귀 취소 + 다시 안내 질문 (작업 E)."""
+    def test_wake_during_return_cancels_quietly(self):
+        """홈 복귀 중 '비카야' → 복귀 취소, 질문 없이 새 대화(9/1 A안)."""
         from vica_mission_manager.mission_logic import CancelNav
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("finish"), 3.0)   # RETURNING
         assert logic.state == State.RETURNING
         acts = logic.on_return_brake(5.0)
-        assert logic.state == State.ASKING_NEXT
-        assert MSG_WAIT_RESUME_ASK in _say(acts)
+        assert logic.state == State.IDLE
+        assert not _say(acts)
         assert any(isinstance(a, CancelNav) for a in acts)
 
     def test_return_brake_ignored_when_not_returning(self):
