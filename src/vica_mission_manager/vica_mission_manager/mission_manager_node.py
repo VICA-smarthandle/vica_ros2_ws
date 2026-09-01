@@ -239,6 +239,13 @@ class MissionManagerNode(Node):
         # 콜백에서 무한히 기다리면 고치려던 문제가 그대로 돌아오므로 시한을 둔다.
         self._nav_lock_timeout_sec = 2.0
         self._nav_active = False  # goToPose 수락 후 완료 전까지 True
+        # 주행 번호표. goToPose/spin 이 수락될 때마다 1 오른다. 취소 스레드는
+        # 자기가 받은 번호와 지금 번호가 다르면 취소를 건너뛴다 — 번호가
+        # 달라졌다는 것은 그 사이 새 goal 이 나갔다는 뜻이고(앱 전권화의
+        # [취소 -> 즉시 출발] 경로), 그때 cancelTask() 를 부르면 옛 goal 이
+        # 아니라 방금 보낸 새 goal 이 취소된다. 옛 goal 은 Nav2 가 새 goal 을
+        # 받으면서 스스로 선점해 이미 내려가 있다.
+        self._nav_gen = 0
 
         # emergency 계열은 전용 callback group — intent/tick 처리가
         # 긴급 취소를 블로킹하지 않게 한다 (MultiThreadedExecutor 전제).
@@ -1154,6 +1161,10 @@ class MissionManagerNode(Node):
         try:
             accepted = self.navigator.goToPose(goal)
             self._nav_active = bool(accepted)
+            if accepted:
+                # 번호표를 올린다. 거부됐으면 올리지 않는다 — 옛 goal 이
+                # 그대로 잡혀 있으므로, 대기 중인 취소가 그것을 마저 지워야 한다.
+                self._nav_gen += 1
         finally:
             self._nav_lock.release()
         if accepted:
@@ -1180,6 +1191,9 @@ class MissionManagerNode(Node):
         with self._nav_lock:
             accepted = self.navigator.spin(spin_dist=action.yaw_rad)
             self._nav_active = bool(accepted)
+            if accepted:
+                # 회전도 Nav2 task 다. 번호를 올려 늦은 취소가 못 건드리게 한다.
+                self._nav_gen += 1
         if accepted:
             self.get_logger().info(
                 f"제자리 회전 시작: {action.yaw_rad:.2f} rad (핸들을 사람 쪽으로)"
@@ -1230,9 +1244,12 @@ class MissionManagerNode(Node):
         self._nav_active = False
 
         # 3) 시한 없는 취소 호출은 별도 스레드로 보낸다. _nav_lock 을 그 스레드가
-        #    잡으므로 _start_nav 는 아래에서 시한부로 기다린다.
+        #    잡으므로 _start_nav 는 아래에서 시한부로 기다린다. 쪽지에 지금
+        #    번호표를 적어 준다 — 스레드가 lock 을 잡기 전에 새 goal 이 나가면
+        #    번호가 달라지고, 그때는 취소하면 안 된다.
         threading.Thread(
             target=self._cancel_nav_blocking,
+            args=(self._nav_gen,),
             name="vica_nav_cancel",
             daemon=True,
         ).start()
@@ -1240,9 +1257,21 @@ class MissionManagerNode(Node):
             "Nav2 goal 취소 요청 (보조 경로 — 모터 정지 권위는 래치 체인)"
         )
 
-    def _cancel_nav_blocking(self) -> None:
-        """콜백 밖에서 navigator.cancelTask() 를 부른다. 예외를 삼키지 않고 남긴다."""
+    def _cancel_nav_blocking(self, gen: int) -> None:
+        """콜백 밖에서 navigator.cancelTask() 를 부른다. 예외를 삼키지 않고 남긴다.
+
+        gen 은 취소를 시킨 시점의 주행 번호표다. cancelTask() 는 '지금 잡혀
+        있는' task 를 취소하므로, 이 스레드가 lock 을 잡기 전에 _start_nav 가
+        새 goal 을 보냈다면(앱 전권화의 [취소 -> 즉시 출발]) 그대로 부르면
+        방금 보낸 새 goal 이 죽는다. 번호가 달라졌으면 옛 goal 은 Nav2 선점으로
+        이미 내려간 뒤라 할 일이 없다.
+        """
         with self._nav_lock:
+            if self._nav_gen != gen:
+                self.get_logger().info(
+                    "Nav2 취소 건너뜀 — 새 goal 이 이전 goal 을 이미 대체했다"
+                )
+                return
             try:
                 self.navigator.cancelTask()
             except Exception as exc:  # noqa: BLE001 - 스레드가 조용히 죽지 않게 한다
