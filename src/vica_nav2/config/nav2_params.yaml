@@ -865,7 +865,17 @@ local_costmap:
       # 시험 구역에서 그 높이의 물체를 치우고 운용한다.
       # 복귀는 이 리스트에 "nvblox_layer" 한 줄을 되살리면 된다 — 아래 블록은
       # 그대로 남겨 둔다 (test_nvblox_layer_contract 가 블록 존재를 감시한다).
-      plugins: ["voxel_layer", "inflation_layer"]
+      # 2026-08-31: range_sensor 레이어(전방 초음파) 추가. inflation 은 항상
+      # 마지막이어야 한다(팽창은 다른 층이 다 그린 뒤에 한다).
+      #
+      # 센서별로 레이어를 분리한 이유(같은 날 실주행 usonic_drive03 실측):
+      # 한 레이어에 두 토픽을 넣으면 확률 장부를 공유한다. 60도 부채꼴은
+      # 0.185m 부터 겹치는데, 상자 옆면에 소리가 비껴 맞은 센서가 거짓
+      # "에코 없음"을 내면 clear_on_max_reading 이 겹침 구역의 이웃 센서
+      # 마크까지 지웠다 — LETHAL 109→0→109 깜빡임, 로봇이 상자를 밀고 감.
+      # 레이어를 나누면 clear 는 자기 장부만 지우고, master 는 max 결합이라
+      # 한쪽이라도 "장애물"이면 남는다. (사용자 제안, 2026-08-31)
+      plugins: ["voxel_layer", "range_sensor_front_left", "range_sensor_front_right", "inflation_layer"]
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
@@ -1050,6 +1060,35 @@ local_costmap:
           # 스캔에 물체가 없는 방향은 inf 로 온다. 그것을 최대거리로 바꿔
           # 빈 공간 청소에 쓴다. false 면 빈 곳이 안 지워진다.
           inf_is_valid: true
+      # 전방 초음파 2개 (DYP-A22, 지면 91.3mm 수평 장착, 지향각 30도).
+      # 라이다(0.382m 층)와 depth_scan(0.30~1.05m 띠)이 못 보는 지면~0.30m
+      # 낮은 장애물, 그리고 유리를 맡는다. 발행원은 user_guidance_driver_node
+      # (스마트핸들 나노 경유, 채널당 약 4.8Hz). 설계·근거:
+      # docs/handoff_jetson_ultrasonic_i2c.md §6.5. global costmap 에는 넣지
+      # 않는다 — 방위 분해능이 없어 저장 지도를 뭉갠다.
+      # 공통 설정 주석 (두 레이어 동일):
+      # - clear_on_max_reading true: 드라이버가 "에코 없음"을 range=max_range 로
+      #   발행하면 그 부채꼴을 지운다. false 면 유령이 rolling window 밖으로
+      #   나갈 때까지 남는다.
+      # - no_readings_timeout 0.0: 초음파가 죽어도 costmap 을 stale 로 만들지
+      #   않는다(보조 센서라 fail-open). 단절 진단은 /vica/smart_handle_state.
+      # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
+      range_sensor_front_left:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/front_left"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_front_right:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/front_right"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True

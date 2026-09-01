@@ -111,7 +111,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
-        self.declare_parameter("estop_release_grace_sec", 2.0)
+        self.declare_parameter("estop_release_grace_sec", 1.0)
         # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
         # 0 으로 두면 종전처럼 실패를 안내하고 끝낸다.
         self.declare_parameter("nav_retry_limit", 2)
@@ -262,15 +262,6 @@ class MissionManagerNode(Node):
             Bool,
             "/emergency_stop",
             self._on_estop,
-            10,
-            callback_group=self._emergency_group,
-        )
-        # 원인 목록(쉼표 분리). "원인은 다 해제됐고 관리자 reset 만 남은"
-        # 구간을 음성으로 알리는 재료다 (mission_logic.on_estop_sources).
-        self.create_subscription(
-            String,
-            "/estop_sources",
-            self._on_estop_sources,
             10,
             callback_group=self._emergency_group,
         )
@@ -461,11 +452,16 @@ class MissionManagerNode(Node):
         if msg.intent in ("cancel", "pause", "resume"):
             self._on_voice_mission_command(msg)
             return
-        # 접근 질문의 짧은 답(계약: VicaIntent.msg 의 affirm/deny 절).
-        # 어느 질문의 답인지는 여기의 상태가 정한다 — AWAITING_USER 가 아니면
+        # 짧은 답(affirm/deny)은 어느 질문의 답인지 여기의 상태가 정한다.
+        # CONFIRMING 이면 확인 질문("…로 안내해 드릴까요?")의 답 — 목적지는
+        # 미션이 이미 알고 있어 LLM 의 추측 없이 직접 확정한다(2026-08-31).
+        # 그 외에는 접근 질문 배선 — AWAITING_USER 가 아니면
         # on_approach_answer 가 빈 목록을 돌려주고, 그때는 무시가 정답이다.
         if msg.intent in ("affirm", "deny"):
-            self._on_voice_answer(msg.intent == "affirm")
+            if self.logic.state == State.CONFIRMING:
+                self._on_confirm_answer(msg.intent == "affirm")
+            else:
+                self._on_voice_answer(msg.intent == "affirm")
             return
 
         intent = IntentData(
@@ -496,6 +492,20 @@ class MissionManagerNode(Node):
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
         self.logic.on_arrival_question_spoken(self._now())
+
+    def _on_confirm_answer(self, affirmative: bool) -> None:
+        """확인 질문의 네/아니오. 확인 중 목적지를 되찾아 로직에 넘긴다."""
+        dest_id = self.logic.confirming_dest_id or ""
+        dest = self.destinations.get(dest_id) or None
+        before = self.logic.state
+        actions = self.logic.on_confirm_answer(
+            affirmative, dest, self.map_bounds, self._nav2_ready(), self._now()
+        )
+        self.get_logger().info(
+            f"확인 응답 {'긍정' if affirmative else '부정'}: dest={dest_id or '-'} "
+            f"{before.value} -> {self.logic.state.value}"
+        )
+        self._run_actions(actions)
 
     def _on_voice_answer(self, affirmative: bool) -> None:
         before = self.logic.state
@@ -961,7 +971,8 @@ class MissionManagerNode(Node):
         """command 이름에 맞는 로직 핸들러를 부른다. (actions, GateReason)"""
         now = self._now()
         if command == "cancel":
-            return self.logic.on_cancel_request(now)
+            # 앱 취소는 전면 개방 판 — 음성 취소(on_cancel_request)와 다르다.
+            return self.logic.on_app_cancel(now)
         if command == "pause":
             return self.logic.on_pause_request(now)
         if command == "resume":
@@ -1000,26 +1011,12 @@ class MissionManagerNode(Node):
                 f"current={self._map_id}, requested={request.map_id}"
             )
             return response
-        if self.logic.state != State.IDLE:
-            response.accepted = False
-            response.message = (
-                f"Mission이 idle 상태가 아닙니다: state={self.logic.state.value}"
-            )
-            return response
-
+        # 앱은 어느 상태든 선점한다(ESTOPPED 예외) — 내부에서 전부 취소 후
+        # 즉시 출발 (2026-08-31 사용자 결정, on_app_destination 주석 참고).
         destination = self.destinations.get(destination_id)
-        intent = IntentData(
-            intent="navigate",
-            matched_destination_id=destination_id,
-            need_confirm=False,
-            safety_flag="normal",
-        )
-        reason = check_gate(
-            intent,
-            destination,
-            self.map_bounds,
-            self.logic.estop_active,
-            self._nav2_ready(),
+        before = self.logic.state
+        actions, reason = self.logic.on_app_destination(
+            destination, self.map_bounds, self._nav2_ready(), self._now()
         )
         if reason != GateReason.OK:
             response.accepted = False
@@ -1029,14 +1026,9 @@ class MissionManagerNode(Node):
                 f"id={destination_id} reason={reason.value}"
             )
             return response
-
-        actions = self.logic.on_intent(
-            intent,
-            destination,
-            self.map_bounds,
-            True,
-            self._now(),
-        )
+        if before != State.IDLE:
+            self.get_logger().info(
+                f"앱 선점 주행: {before.value} 를 취소하고 새 목적지로")
         self._run_actions(actions)
         response.accepted = self._nav_active
         response.message = (
@@ -1084,10 +1076,6 @@ class MissionManagerNode(Node):
                 f"중앙 estop={self._estop_active} -> state={self.logic.state.value}"
             )
         self._run_actions(actions)
-
-    def _on_estop_sources(self, msg: String) -> None:
-        sources = [part for part in msg.data.split(",") if part]
-        self._run_actions(self.logic.on_estop_sources(sources, self._now()))
 
     def _tick(self) -> None:
         status = self._poll_nav_status()

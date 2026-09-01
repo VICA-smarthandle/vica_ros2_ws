@@ -37,13 +37,15 @@ import yaml
 
 # ── URDF 정본에서 온 값 (vica_description/urdf/VICA.xacro) ────────────────
 BASE_LINK_Z = 0.190
-CAMERA_Z_IN_BASE = 0.835
-CAMERA_HEIGHT = BASE_LINK_Z + CAMERA_Z_IN_BASE      # 지면 1.025 m
+# 2026-08-30 카메라 재장착으로 0.835 -> 0.855 (지면 1.045 m, 줄자 실측).
+# 탈부착하면 이 값과 CAMERA_PITCH_DEG 를 함께 다시 잰다.
+CAMERA_Z_IN_BASE = 0.855
+CAMERA_HEIGHT = BASE_LINK_Z + CAMERA_Z_IN_BASE      # 지면 1.045 m
 # 마스트가 실제로 기운 각도(음수 = 위로 들림). 2026-08-29 바닥평면 RANSAC
 # 4회 실측(3.05 / 2.88 / 3.16 / 3.06 -> 3.04 +- 0.14).
 # 부호 주의: 측정기의 양수는 "URDF 보다 위로 들렸다"는 뜻이라 URDF pitch 에는
 # 뒤집어 넣는다. 처음에 +0.0524 를 넣었더니 오차가 두 배가 되어 확정했다.
-CAMERA_PITCH_DEG = -3.0
+CAMERA_PITCH_DEG = -0.71   # 2026-08-30 재장착 후. 음수 = 위로 (URDF 와 같은 부호)
 
 # 마운트 오차 + 주행 중 피칭. 이보다 크게 흔들린다면 파라미터가 아니라 기구로
 # 풀 문제다.

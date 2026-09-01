@@ -211,6 +211,51 @@ class TestTransitions:
         assert logic.state == State.IDLE
         assert any(isinstance(a, Say) for a in actions)
 
+    def test_confirm_affirm_starts_navigation(self):
+        """확인 질문의 "네"는 LLM 추측 없이 그 목적지로 바로 확정 출발한다
+        (2026-08-31 실기: 이 통로가 없어 affirm 이 버려지고 30초 뒤 취소됐다)."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.confirming_dest_id == "room_407"
+        actions = logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_confirm_deny_cancels_quietly_to_idle(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        actions = logic.on_confirm_answer(False, make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, Say) for a in actions)
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_confirm_answer_ignored_outside_confirming(self):
+        logic = MissionLogic()
+        assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 0.0) == []
+        assert logic.state == State.IDLE
+        assert logic.confirming_dest_id is None
+
+    def test_confirm_affirm_without_dest_keeps_waiting(self):
+        """목적지를 되찾지 못하면 아무 데나 출발하지 않고 확인 상태를 유지한다
+        — LLM 확정 navigate 나 타임아웃이 이어받는다."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.on_confirm_answer(True, None, BOUNDS, True, 3.0) == []
+        assert logic.state == State.CONFIRMING
+        # 엉뚱한 목적지가 넘어와도 마찬가지다.
+        assert logic.on_confirm_answer(
+            True, make_dest(id="restroom"), BOUNDS, True, 4.0) == []
+        assert logic.state == State.CONFIRMING
+
+    def test_confirm_affirm_still_passes_gate(self):
+        """확인 답이라도 게이트는 그대로 밟는다 — nav 미준비면 출발하지 않는다."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        actions = logic.on_confirm_answer(True, make_dest(), BOUNDS, False, 3.0)
+        assert logic.state != State.NAVIGATING
+        assert not any(isinstance(a, Navigate) for a in actions)
+
     def test_stale_confirm_different_dest_rejected(self):
         logic = MissionLogic()
         logic.on_intent(
@@ -409,8 +454,10 @@ class TestEmergency:
         assert says, "주행 실패 시 안내가 없다"
         assert all(s.priority == "response" for s in says)
 
-    def test_estop_released_say_is_not_narration(self):
-        """비상 멈춤 해제 안내도 같은 이유로 narration 이면 안 된다."""
+    def test_estop_released_say_preempts_estop_ment(self):
+        """해제 안내는 emergency 등급 — 걸림 멘트가 아직 재생 중이면 끊고
+        즉시 나가야 한다(2026-08-31 결정). narration 은 물론 response 도
+        안 된다: response 는 걸림 멘트 완주를 기다려 낡은 소식이 된다."""
         logic = MissionLogic()
         start_navigation(logic)
         logic.on_estop(True, 1.0)
@@ -419,11 +466,13 @@ class TestEmergency:
         actions = logic.on_tick(2.0 + logic.estop_release_grace_sec, NavStatus.NONE)
         says = [a for a in actions if isinstance(a, Say)]
         assert says, "비상 멈춤 해제 안내가 없다"
-        assert all(s.priority == "response" for s in says)
+        assert all(s.priority == "emergency" for s in says)
 
     def test_estop_latch_spam_says_once(self):
         # 20Hz 주기 발행 — 같은 상태 반복 수신 시 멘트 중복 금지
+        # (정지 중 걸림은 침묵 규칙이라 주행 중으로 검증한다)
         logic = MissionLogic()
+        start_navigation(logic)
         first = logic.on_estop(True, 0.0)
         assert any(isinstance(a, Say) for a in first)
         assert logic.on_estop(True, 0.05) == []
@@ -852,16 +901,40 @@ class TestApproachTransitions:
         assert len(navigates) == 1
         assert navigates[0].destination.id == "standby"
 
-    def test_no_answer_within_8s_returns(self):
+    def test_no_answer_stuck_fallback_returns(self):
+        """tts_done 이 영영 안 오면(TTS 사망) 안전망 30초로 탈출한다.
+        예전의 '큐 시각부터 8초'는 질문 음성(8.0초)과 겹쳐 답할 창이
+        0초가 되는 결함이었다(2026-08-31 실기)."""
         logic = MissionLogic(
             return_destination=make_home(), approach_response_timeout_sec=8.0
         )
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
-        assert logic.on_tick(12.9, NavStatus.NONE) == []
+        # 옛 폴백이라면 13.0 에 이탈했을 시각 — 아직 기다려야 한다.
+        assert logic.on_tick(13.0, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
-        actions = logic.on_tick(13.0, NavStatus.NONE)
+        assert logic.on_tick(34.9, NavStatus.NONE) == []
+        actions = logic.on_tick(35.1, NavStatus.NONE)
         assert logic.state == State.RETURNING
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_question_as_long_as_window_still_gets_full_8s(self):
+        """실기 재현: 질문 재생이 8.0초(응답 창과 같은 길이)여도 재생완료부터
+        8초를 온전히 기다린다. 큐 시각 기준이면 여기서 창이 0초였다."""
+        logic = MissionLogic(
+            return_destination=make_home(), approach_response_timeout_sec=8.0
+        )
+        start_approach(logic)
+        arrive_and_ask(logic, 0.0)
+        logic.on_approach_question_spoken(8.2)  # 8.0초 wav + 지연
+        assert logic.on_tick(8.3, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        # 재생완료 + 8초 직전까지는 답을 기다린다
+        assert logic.on_tick(16.1, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        # 그 안에 온 답은 정상 수락된다
+        actions = logic.on_approach_answer(True, 16.15)
+        assert logic.state == State.TURNING
         assert any(isinstance(a, Say) for a in actions)
 
     def test_timeout_counts_from_playback_end(self):
@@ -1223,55 +1296,49 @@ class TestApproachVoiceHooks:
 
 
 class TestEstopStateNarration:
-    """E-stop 전이 음성 안내 (2026-08-29 사용자 확정 문구).
+    """E-stop 안내 최종 규칙 (2026-08-31): 움직이는 중에 걸릴 때만 말한다.
 
-    "관리자를 호출했습니다"는 통신 순단(정지 중)에는 거짓이 된다 — 그 경우는
-    1.4초 만에 자동 복구되므로(AutoRecoveryPolicy) 자동 복구 예고로 갈린다.
-    원인 판별 정본은 vica_safety/auto_recovery.py 의 COMM_SOURCES.
+    정지 중 걸림(통신 순단 자동복구 포함)은 사용자에게 달라지는 게 없어
+    침묵하고, 침묵 걸림은 해제도 침묵한다(안 알린 걸 해제만 알리면 이상).
     """
 
-    def test_human_cause_calls_admin(self):
-        logic = MissionLogic()
-        logic.on_estop_sources(["voice"], 0.5)
-        actions = logic.on_estop(True, 1.0)
-        says = [a.text for a in actions if isinstance(a, Say)]
-        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
-
-    def test_comm_only_while_stopped_promises_auto_recovery(self):
-        logic = MissionLogic()
-        logic.on_estop_sources(["motor_can_stale"], 0.5)
-        actions = logic.on_estop(True, 1.0)
-        says = [a.text for a in actions if isinstance(a, Say)]
-        assert says == ["연결 문제로 잠시 섰습니다. 곧 자동으로 복구됩니다."]
-        # 자동 복구가 올 상황 — 원인이 비어도 관리자 대기 멘트는 내지 않는다
-        assert logic.on_estop_sources([], 2.0) == []
-
-    def test_comm_only_while_driving_calls_admin(self):
-        """주행 중 끊김은 자동 복구 대상이 아니다 — 관리자 문구가 맞다."""
+    def test_estop_while_driving_announces(self):
         logic = MissionLogic()
         start_navigation(logic)
-        logic.on_estop_sources(["motor_can_stale"], 1.5)
-        actions = logic.on_estop(True, 2.0)
+        actions = logic.on_estop(True, 1.0)
         says = [a.text for a in actions if isinstance(a, Say)]
         assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
 
-    def test_wait_admin_announced_once_when_causes_clear(self):
-        """원인 전부 해제 = reset 대기 진입. 1회만 알리고 반복하지 않는다."""
+    def test_estop_while_idle_is_silent(self):
         logic = MissionLogic()
-        logic.on_estop_sources(["voice"], 0.5)
-        logic.on_estop(True, 1.0)
-        actions = logic.on_estop_sources([], 3.0)
-        says = [a.text for a in actions if isinstance(a, Say)]
-        assert says == [
-            "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."]
-        assert logic.on_estop_sources([], 4.0) == []       # 반복 없음
-        logic.on_estop_sources(["button"], 5.0)            # 원인 재점화
-        actions = logic.on_estop_sources([], 6.0)          # 다시 비면 다시 1회
-        assert [a.text for a in actions if isinstance(a, Say)] == [
-            "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."]
+        actions = logic.on_estop(True, 1.0)
+        assert [a for a in actions if isinstance(a, Say)] == []
 
-    def test_sources_alone_do_not_speak_without_latch(self):
-        """래치가 없을 때의 원인 잔불(순단 회복 등)은 침묵한다."""
+    def test_silent_estop_silent_release(self):
+        logic = MissionLogic(estop_release_grace_sec=0.0)
+        logic.on_estop(True, 1.0)                       # 정지 중 — 침묵
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(3.0, NavStatus.NONE)
+        assert [a for a in actions if isinstance(a, Say)] == []
+        assert logic.state == State.IDLE                # 상태 전이는 정상
+
+    def test_announced_estop_announces_release(self):
+        logic = MissionLogic(estop_release_grace_sec=0.0)
+        start_navigation(logic)
+        logic.on_estop(True, 1.0)                       # 주행 중 — 발화
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(3.0, NavStatus.NONE)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["비상멈춤이 해제되었습니다."]
+
+    def test_voice_emergency_while_idle_is_silent(self):
         logic = MissionLogic()
-        logic.on_estop_sources(["motor_can_stale"], 0.5)
-        assert logic.on_estop_sources([], 1.0) == []
+        actions = logic.on_emergency("멈춰", 1.0)
+        assert [a for a in actions if isinstance(a, Say)] == []
+
+    def test_voice_emergency_while_driving_announces(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_emergency("멈춰", 1.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]

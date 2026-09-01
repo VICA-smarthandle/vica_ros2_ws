@@ -12,6 +12,15 @@
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
+<!-- 초음파 DYP-A22 x2 (2026-08-31): 앞범퍼 중앙에서 좌우 107mm, 지면 91.3mm,
+     수평 장착(틸트 불가 확정). docs/handoff_jetson_ultrasonic_i2c.md §6.6.
+     frame 이름은 드라이버 ultrasonic_frame_ids 와 일치해야 한다.
+     z = 0.0913(지면) - 0.190(base_link) = -0.0987.
+     [실측 확인] 센서가 범퍼 앞면(+0.305)보다 튀어나와 있으면 usonic_x 와
+     footprint 앞단을 함께 키워야 한다(같은 문서 §6.6 주의). -->
+<xacro:property name="usonic_x" value="0.305" />
+<xacro:property name="usonic_y" value="0.107" />
+<xacro:property name="usonic_z" value="-0.0987" />
 <!-- 2026-08-24 줄자 실측으로 확정. 앞서 있던 1075 mm 는 2026-08-18 이설 때 넣은
      설계값이었고 한 번도 재본 적이 없었다. 이번 재부착으로 실제 높이가 바뀌었다.
      바닥에서 카메라 몸체 중앙까지 실측 910 mm (D455 는 렌즈가 몸체 중앙 높이에
@@ -34,8 +43,13 @@
      camera_z = 1.025 - base_link 0.190 = 0.835. 2026-08-25 값(지면 1.05 / 0.860)에서
      2.5 cm 내려왔다. 같은 회차에 차체 세로가 80 -> 72 cm 로 줄었지만 그쪽은 이 값과
      무관하다 - nav2_params.yaml 의 footprint 후방(-0.495 -> -0.415)이 받는다.
-     수평(rpy 0 0 0)은 이번에 바꾸지 않았다. -->
-<xacro:property name="camera_z" value="0.835" />
+     수평(rpy 0 0 0)은 이번에 바꾸지 않았다.
+
+     2026-08-30 재고정: 지면 1.045 m (줄자 실측, 사용자 확정).
+     camera_z = 1.045 - base_link 0.190 = 0.855. 카메라를 탈착 후 재장착하면서
+     2.0 cm 올라갔다. **탈부착할 때마다 높이와 기울기를 함께 재는 것을 절차로
+     삼는다** - 아래 camera_pitch 주석의 도구가 둘을 같이 출력한다. -->
+<xacro:property name="camera_z" value="0.855" />
 <!-- 2026-08-29 저녁 실측: 마스트가 위로 3.0도 들려 있다(pitch 음수).
      재는 법 - 깊이 포인트클라우드에서 바닥 평면을 RANSAC 으로 찾아
      그 법선의 앞뒤 성분을 읽었다(평면 두께 9 mm, 점 9,000개).
@@ -51,7 +65,18 @@
      찍어 로봇 앞이 까맣게 찼다("길이 막혔다"). 3도는 2 m 앞에서 10.5 cm 다.
      카메라를 물리적으로 수평에 맞추는 대신 실제 각도를 여기 적는다 -
      기울어져 있어도 TF 가 알기만 하면 계산은 정확해진다. -->
-<xacro:property name="camera_pitch" value="-0.0524" />  <!-- 3.0 도, 위로 -->
+<xacro:property name="camera_pitch" value="-0.0124" />  <!-- 0.7 도, 위로 -->
+<!-- 2026-08-30 재장착 후 재측정: 3.0도 -> 0.7도 (둘 다 위로).
+     같은 회차에 높이도 1.025 -> 1.045 m 로 2 cm 올라갔다(줄자 실측).
+
+     이 도구가 재는 것은 **URDF 기준 잔여 오차**다. TF 가 이미 camera_pitch 를
+     반영하고 있기 때문이다. 따라서 새 값은 절대값이 아니라
+         새 값 = 지금 값 + 잔여 오차를 되돌리는 양
+     이다. 이번에 -3.00 도에서 잔여 -2.29 도가 나왔으므로 -0.71 도가 됐다.
+     도구가 이 계산을 대신하도록 고쳤다(scripts/vica_camera_pitch.py).
+     그 전에는 절대값을 찍어 줘서, 그대로 넣으면 오차가 오히려 커졌다.
+
+     측정 3회 -2.35 / -2.31 / -2.24 도, 편차 0.05. 평면 두께 8 mm, 점 17,000개. -->
 <!-- Drive wheel / caster geometry. Single source for every y coordinate. -->
 <!-- 줄자 실측(바퀴 중심 사이). CAD 0.3618과 2.2 mm 차이.
      encoder.yaml의 wheel_base_m 0.37은 회전 시험으로 맞춘 오도메트리 보정 상수라
@@ -306,6 +331,21 @@
   <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
+</joint>
+
+<!-- 초음파: 빔 축 = +x(전방), 수평. Range 메시지의 부채꼴이 이 frame 에서 그려진다. -->
+<link name="usonic_front_left"/>
+<joint name="usonic_front_left_joint" type="fixed">
+  <origin xyz="${usonic_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="usonic_front_left"/>
+</joint>
+
+<link name="usonic_front_right"/>
+<joint name="usonic_front_right_joint" type="fixed">
+  <origin xyz="${usonic_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="usonic_front_right"/>
 </joint>
 
 <!-- 마스트 장착 기울기. 2026-08-29 실측으로 위 3.0도(camera_pitch)를 넣었다.

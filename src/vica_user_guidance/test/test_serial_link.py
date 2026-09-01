@@ -47,6 +47,51 @@ def protocol_fault(name):
     return {"NONE": 0, "PORT_OPEN": 1, "WRITE_FAIL": 2, "NOT_CONFIGURED": 3}[name]
 
 
+class FakeReadPort(FakePort):
+    """수신까지 흉내내는 포트. read 실패를 시킬 수 있다."""
+
+    def __init__(self, rx=b"", fail_read=False):
+        super().__init__()
+        self.rx = rx
+        self.fail_read = fail_read
+
+    @property
+    def in_waiting(self):
+        if self.fail_read:
+            raise OSError("read failed")
+        return len(self.rx)
+
+    def read(self, n):
+        data, self.rx = self.rx[:n], self.rx[n:]
+        return data
+
+
+def test_read_available_returns_buffered_bytes():
+    port = FakeReadPort(rx=b"\xaa\x55\x01")
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.read_available(NOW) == b"\xaa\x55\x01"
+    assert link.read_available(NOW) == b""      # 비었으면 블로킹 없이 빈 값
+
+
+def test_read_available_when_disconnected_returns_empty():
+    link = SerialLink(port="/dev/null", baudrate=115200, enabled=False)
+    assert link.read_available(NOW) == b""
+
+
+def test_read_failure_closes_port_and_sets_fault():
+    """수신 중 단절도 전송 실패처럼 포트를 닫아야 재연결이 살아난다."""
+    port = FakeReadPort(fail_read=True)
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.read_available(NOW) == b""
+    assert link.connected is False
+    assert port.closed is True
+    assert link.fault_code == protocol_fault("WRITE_FAIL")
+
+
 def test_port_open_failure_does_not_raise():
     """포트 open 실패는 예외가 아니라 fault로 보고한다."""
 

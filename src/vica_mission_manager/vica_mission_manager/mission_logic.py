@@ -268,24 +268,14 @@ MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도�
 # 자동 재시도 중임을 알린다. 로봇이 멈춰 있는 이유를 이용자가 알 수 있어야
 # 하고, 곧 다시 움직인다는 것도 알아야 놀라지 않는다.
 MSG_NAV_RETRY = "길이 막혀 잠시 기다렸다가 다시 가겠습니다."
-# E-stop 안내 3종 (2026-08-29 사용자 확정 문구). 통신 순단(정지 중)은 자동
-# 복구되므로(AutoRecoveryPolicy) "관리자를 호출했습니다"가 거짓이 된다 —
-# 그 경우만 자동 복구 예고로 갈린다. 원인 판별 정본은
-# vica_safety/auto_recovery.py 의 COMM_SOURCES (갈라지면 판별이 어긋난다).
+# E-stop 안내 — 움직이는 중에 걸릴 때만 말한다 (2026-08-31 최종 감량).
+# 정지 중 걸림은 침묵: 로봇이 어차피 안 움직여 사용자에게 달라지는 게
+# 없고(통신 순단이면 1.4초 자동복구), 안 알린 걸림은 해제도 침묵한다.
+# 그래서 통신/사람 원인 판별(/estop_sources 스냅샷)도 함께 없앴다 —
+# 자동복구 예고 멘트가 그 판별의 유일한 소비자였다.
 MSG_ESTOPPED = "안전을 위해 멈추겠습니다. 관리자를 호출했습니다."
-MSG_ESTOP_COMM = "연결 문제로 잠시 섰습니다. 곧 자동으로 복구됩니다."
-MSG_ESTOP_WAIT_ADMIN = (
-    "안전 확인이 필요해서 관리자를 기다리고 있습니다. 잠시만 기다려 주세요."
-)
-MSG_ESTOP_RELEASED = "비상 멈춤이 해제되었습니다. 새로운 목적지를 말씀해 주세요."
+MSG_ESTOP_RELEASED = "비상멈춤이 해제되었습니다."   # 2026-08-31 사용자 확정(짧게)
 
-_COMM_ESTOP_SOURCES = frozenset({
-    "motor_can",
-    "physical_stale",
-    "motor_can_stale",
-    "physical_waiting",
-    "motor_can_waiting",
-})
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
 MSG_CANCELED = "안내를 취소했습니다."
 
@@ -295,7 +285,7 @@ MSG_CANCELED = "안내를 취소했습니다."
 # 기억한다. 문구 정본은 이 상수들 — 캐시가 구운 판을 재생한다(글자 일치).
 MSG_ASK_RESTROOM = "다녀오시는 동안 여기서 기다릴까요?"          # 대기형
 MSG_ASK_ENTRANCE = "여기까지 안내를 마칠까요?"                  # 종료형
-MSG_ASK_GENERIC = "이제 괜찮으신가요? 아니면 여기서 대기할까요?"  # 종료형
+MSG_ASK_GENERIC = "여기서 대기할까요?"                          # 대기형·시간 질문
 MSG_ASK_WAIT_TIME = "몇 분쯤 걸리실까요?"
 # 대기 확정. {minutes} 는 코드가 채운다 — 캐시엔 넣지 않는다(가변).
 MSG_WAIT_CONFIRM = "{minutes}분 대기하겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
@@ -314,6 +304,11 @@ LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유
 # 처리 유예, open 이 닫힘 신호를 잃어도 상한 뒤엔 떠난다(무한 대기 방지).
 EAR_GRACE_SEC = 6.0
 EAR_HOLD_MAX_SEC = 20.0
+# 최후 안전망: ASKING 진입 후 이 시간 안에 응답 시계가 못 열리면 강제로
+# 연다. 근본 수리는 TTS 쪽 — 끊긴 발화도 tts_done 을 발행한다(2026-08-31)
+# — 이라 정상 계통에선 절대 안 울리고, 신호 유실·TTS 사망 같은 계통 밖
+# 사고에서만 마지막으로 "결국 홈으로" 원칙을 지킨다(watchdog).
+ASKING_STUCK_FALLBACK_SEC = 30.0
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
@@ -354,6 +349,11 @@ DISTANCE_MILESTONES_M = ()
 # 질문 뒤 답을 기다리는 시간. STT 검증 1.84초를 포함한 값이며, 재생이 끝난
 # 시점부터 센다(on_approach_question_spoken).
 APPROACH_RESPONSE_TIMEOUT_SEC = 8.0
+# 질문 재생완료(tts_done)가 영영 안 올 때(TTS 사망 등)의 탈출용 안전망.
+# 예전엔 질문을 큐에 넣는 시각부터 8초를 세는 폴백이었는데, 질문 음성이
+# 정확히 8.0초라 재생이 끝나는 순간 시계도 끝나 답할 창이 0초였다
+# (2026-08-31 실기 로그 2건 — 질문 후 8.2초 만에 "실례했습니다" 이탈).
+APPROACH_QUESTION_STUCK_SEC = 30.0
 # 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
 # 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
 APPROACH_TURN_TIMEOUT_SEC = 15.0
@@ -464,7 +464,11 @@ def check_cancel_gate(state: State, estop_active: bool) -> GateReason:
     """
     if estop_active or state == State.ESTOPPED:
         return GateReason.ESTOP_ACTIVE
-    if state not in (State.NAVIGATING, State.PAUSED):
+    # 음성 취소의 게이트다 — 주행·일시정지·대기(WAITING, 8/31 회수 수리)만.
+    # 접근 응대·도착 질문을 지나가는 "취소" 한마디가 끊으면 안 된다.
+    # **앱(관리자) 취소는 이 게이트를 안 탄다** — on_app_cancel 이 전면
+    # 개방(ESTOPPED 예외만)으로 따로 처리한다 (2026-08-31 사용자 결정).
+    if state not in (State.NAVIGATING, State.PAUSED, State.WAITING):
         return GateReason.NOT_NAVIGATING
     return GateReason.OK
 
@@ -644,7 +648,7 @@ class MissionLogic:
         self,
         confirm_timeout_sec: float = 30.0,
         dwell_sec: float = 2.0,
-        estop_release_grace_sec: float = 2.0,
+        estop_release_grace_sec: float = 1.0,  # 2.0→1.0 (8/31): 해제 소식을 더 빨리
         approach_stages: Optional[Sequence] = None,
         nav_retry_limit: int = 2,
         nav_retry_delay_sec: float = 3.0,
@@ -710,17 +714,18 @@ class MissionLogic:
         # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
         self.approach_turn_yaw_rad = approach_turn_yaw_rad
         self._turn_deadline: Optional[float] = None
-        # E-stop 안내용: 마지막으로 본 원인 목록과 "관리자 개입이 필요한
-        # 래치인가" 판정. 판정은 걸리는 순간 확정한다 — 원인은 곧 해제돼
-        # 사라지므로 나중엔 알 수 없다.
-        self._estop_sources: frozenset = frozenset()
-        self._estop_admin_needed = True
-        self._estop_wait_announced = False
+        # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
+        self._estop_announced = False
 
         # 도착 후 대화 (arrival-dialog-flow). 꺼져 있으면 도착 후 기존 dwell→
         # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
         self.arrival_dialog = arrival_dialog
         self._asking_is_finish = False   # 방금 던진 질문이 종료형인가("네"=끝)
+        self._asking_time_after_yes = False  # 대기 수락 시 시간을 물을 유형인가
+        # 이번 주행의 출처가 앱(관리자)인가. 앱 주행 도착엔 대화·홈 복귀를
+        # 붙이지 않는다 (2026-08-31 사용자 결정 — 관리 중 소음 제거).
+        self._nav_from_app = False
+        self._asking_entered_at: Optional[float] = None  # 시계 유실 폴백 기준
         self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
@@ -835,22 +840,126 @@ class MissionLogic:
             Navigate(dest),
         ]
 
+    @property
+    def confirming_dest_id(self) -> Optional[str]:
+        """확인 중인 목적지 id. CONFIRMING 밖에서는 None."""
+        if self.state != State.CONFIRMING:
+            return None
+        return self._confirming_dest_id
+
+    def on_confirm_answer(
+        self,
+        affirmative: bool,
+        dest: Optional[Destination],
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+        now: float,
+    ) -> list:
+        """확인 질문("…로 안내해 드릴까요?")에 대한 네/아니오의 정식 통로.
+
+        2026-08-31 실기 전까지 이 통로가 없어, "그래" 한마디를 LLM 이 대화
+        기록으로 목적지를 추측해 확정 navigate 로 재구성해야만 출발했다.
+        추측이 어긋나면 엉뚱한 곳으로 가고, affirm 으로 해석되면 접근 질문
+        전용 배선이라 통째로 버려졌다(그날 밤 affirm 무시 4건·확인 타임아웃
+        취소 7건). 확인 중인 목적지는 미션이 이미 알고 있으므로 여기서 직접
+        확정한다 — LLM 이 목적지를 만들지 않는다는 원칙 그대로다.
+
+        긍정이면 확정 요청과 완전히 같은 길(on_intent 의 게이트·시작 블록)을
+        밟는다 — 확인 답이라고 게이트를 건너뛰면 안 된다(fail-closed).
+        LLM 이 여전히 확정 navigate 를 보내는 경로도 그대로 살아 있다.
+        """
+        if self.state != State.CONFIRMING:
+            return []
+        if not affirmative:
+            # "아니오" — 확인 중이던 요청을 접는다. 멘트는 타임아웃과 같은
+            # 기존 문구를 쓴다(신규 멘트 금지, 2026-08-31 멘트 최소주의).
+            self._to_idle()
+            return [Say(MSG_CONFIRM_TIMEOUT, priority="response")]
+        if dest is None or dest.id != (self._confirming_dest_id or ""):
+            # 확인 중이던 목적지를 되찾지 못했다(id 미기록·저장소 갱신 등).
+            # 아무 데나 출발하는 것보다 침묵이 낫다 — CONFIRMING 을 유지해
+            # LLM 의 확정 navigate 나 타임아웃이 이어받게 둔다.
+            return []
+        confirmed = IntentData(
+            intent="navigate",
+            matched_destination_id=dest.id,
+            need_confirm=False,
+            safety_flag="normal",
+        )
+        return self.on_intent(confirmed, dest, bounds, nav_ready, now)
+
     # -- 취소 / 일시정지 / 재개 --------------------------------------------------
     #
     # 세 요청 모두 안전 사건이 아니라 목표 조작이다. E-stop 과 달리 래치도 reset 도
     # 없고, 처리 뒤 바로 새 요청을 받을 수 있다. 판정은 여기(Mission Manager)가 하고
     # 앱·LLM·CLI 는 요청만 보낸다.
 
+    def _force_clear_all(self, now: float) -> list:
+        """진행 중인 모든 활동을 강제 정리한다 (앱 선점·전체 취소 전용).
+
+        상태별 정리가 흩어지면 하나를 빠뜨려 유령(낡은 타이머·보관 목적지)이
+        생긴다 — 한곳에 모은다. Nav2 goal 이 있는 상태만 CancelNav 를 낸다.
+        TURNING 의 spin 은 nav goal 이 아니라 여기서 못 끊는다 — 몇 초짜리라
+        새 Navigate 가 큐에서 자연히 이어받는다.
+        """
+        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+        if (self.state in (State.NAVIGATING, State.APPROACHING, State.RETURNING)
+                and self.active_destination is not None):
+            actions.append(CancelNav(self.active_destination))
+        self._reset_arrival_dialog()
+        self._to_idle()   # 보관 목적지·재시도 예약·확인 대기까지 전부 정리
+        return actions
+
+    def on_app_destination(self, dest: Optional[Destination],
+                           bounds: Optional[MapBounds], nav_ready: bool,
+                           now: float) -> tuple:
+        """앱(관리자) 새 목적지 — ESTOPPED 만 빼고 어느 상태든 선점한다.
+
+        2026-08-31 사용자 결정: 관리자의 새 목적지는 내부적으로 전부 취소한
+        뒤 즉시 출발한다. 멘트는 기존 출발 안내만 쓴다(신규 문구 없음 —
+        사용자 결정). E-stop 래치만은 못 뚫는다(reset 경로 보호). 목적지
+        품질 검증(공개·좌표·Nav2 준비)은 음성 게이트와 같은 기준이다.
+        """
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if dest is None:
+            return [], GateReason.UNKNOWN_DESTINATION
+        if dest.authorization != "public":
+            return [], GateReason.PRIVATE_DESTINATION
+        if not dest.is_approachable:
+            return [], GateReason.NOT_APPROACHABLE
+        if not pose_valid(dest, bounds):
+            return [], GateReason.POSE_INVALID
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        actions = self._force_clear_all(now)
+        self.state = State.NAVIGATING
+        self.active_destination = dest
+        self._nav_from_app = True
+        actions.append(Say(say_destination(MSG_START, dest.name)))
+        actions.append(Navigate(dest))
+        return actions, GateReason.OK
+
     def on_cancel_request(self, now: float) -> tuple:
-        """목적지 취소. (actions, GateReason) 을 돌려준다."""
+        """음성 취소. 게이트(주행·일시정지·대기)를 지킨다 — 앱 취소는
+        on_app_cancel. (actions, GateReason) 을 돌려준다."""
         reason = check_cancel_gate(self.state, self.estop_active)
         if reason != GateReason.OK:
             return [], reason
+        actions = self._force_clear_all(now)
+        actions.append(Say(MSG_CANCELED, priority="response"))
+        return actions, GateReason.OK
 
-        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
-        if self.state == State.NAVIGATING:
-            actions.append(CancelNav(self.active_destination))
-        self._to_idle()
+    def on_app_cancel(self, now: float) -> tuple:
+        """앱(관리자) 취소 — ESTOPPED 만 빼고 어느 상태든 전부 정리하고
+        IDLE (2026-08-31 사용자 결정). 음성 취소와 달리 게이트가 없다:
+        관리자 버튼은 오인식이 없고, 접근 응대·도착 질문도 끊을 권한이 있다.
+        E-stop 래치만은 못 푼다(reset 경로 보호)."""
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if self.state == State.IDLE:
+            return [], GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
+        actions = self._force_clear_all(now)
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
 
@@ -1008,9 +1117,10 @@ class MissionLogic:
     def on_approach_question_spoken(self, now: float) -> list:
         """질문 재생이 끝났다. 응답 대기 8초는 여기서부터 센다(설계 6.2절).
 
-        재생에 몇 초가 걸리는지는 TTS 만 알 수 있어 노드가 알려준다. 알려주지
-        않아도 동작은 한다 — 그때는 질문을 만든 시각부터 세므로, 어긋나더라도
-        사람에게 불리한 쪽(더 짧게 기다리는 쪽)으로만 어긋난다.
+        재생에 몇 초가 걸리는지는 TTS 만 알 수 있어 노드가 알려준다. 안 오면
+        AWAITING_USER 진입 때 걸어 둔 안전망(APPROACH_QUESTION_STUCK_SEC)이
+        탈출을 맡는다. tts_done 은 끊긴 발화에도 발행되므로(2026-08-31 수리)
+        정상 경로에서는 반드시 온다.
         """
         if self.state != State.AWAITING_USER:
             return []
@@ -1050,27 +1160,6 @@ class MissionLogic:
 
         actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
         actions.extend(self._enter_returning(now))
-        return actions
-
-    def on_estop_sources(self, sources: list, now: float) -> list:
-        """/estop_sources (원인 목록, 쉼표 분리 전 상태). reset 대기를 알린다.
-
-        원인이 전부 해제됐는데 래치가 남아 있으면 관리자 reset 만 남은
-        구간이다 — 시각장애인에게는 "말없이 안 움직이는 시간"이라 1회
-        알린다. 자동 복구가 올 상황(통신 원인·정지 중)이면 침묵한다.
-        """
-        new = frozenset(s for s in sources if s)
-        actions: list = []
-        if (self.estop_active
-                and self._estop_sources and not new
-                and self._estop_admin_needed
-                and not self._estop_wait_announced):
-            self._estop_wait_announced = True
-            actions.append(Say(MSG_ESTOP_WAIT_ADMIN, priority="response"))
-        if new:
-            # 원인이 다시 켜졌다 — 다음에 비면 다시 1회 알릴 수 있게 한다.
-            self._estop_wait_announced = False
-        self._estop_sources = new
         return actions
 
     # -- 도착 후 대화 (arrival-dialog-flow) ------------------------------------
@@ -1129,15 +1218,20 @@ class MissionLogic:
         방지). 재질문(on_wake·복귀 브레이크)에서는 도착 멘트 없이 질문만 낸다.
         """
         category = (dest.category if dest else "") or ""
+        # (질문, 종료형인가, 대기 수락 시 시간을 묻는가). 그 외 유형은 대기형
+        # 으로 개편(2026-08-31) — "여기서 대기할까요?"라 네/아니오 판단이
+        # 단순하다: 네=대기(시간 질문으로), 아니오=종료.
         if category == "restroom":
-            question, is_finish = MSG_ASK_RESTROOM, False
+            question, is_finish, ask_time = MSG_ASK_RESTROOM, False, False
         elif category == "entrance":
-            question, is_finish = MSG_ASK_ENTRANCE, True
+            question, is_finish, ask_time = MSG_ASK_ENTRANCE, True, False
         else:
-            question, is_finish = MSG_ASK_GENERIC, True
+            question, is_finish, ask_time = MSG_ASK_GENERIC, False, True
         self.state = State.ASKING_NEXT
         self.active_destination = None
         self._asking_is_finish = is_finish
+        self._asking_time_after_yes = ask_time
+        self._asking_entered_at = now
         self._arrival_retried = False
         self._leaving_deadline = None
         self._response_deadline = None   # 재생완료(on_arrival_question_spoken)에서 시작
@@ -1157,9 +1251,11 @@ class MissionLogic:
             return []
         self._wait_until = None
         self._asking_is_finish = False   # "네" = 계속 (대기형처럼 다룬다)
+        self._asking_time_after_yes = True   # "네"면 목적지를 새로 묻는 흐름
         self.state = State.ASKING_NEXT
         self._arrival_retried = False
         self._response_deadline = None
+        self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
         return [Say(MSG_WAIT_RESUME_ASK, priority="response", expects_reply=True)]
 
     def on_arrival_answer(self, intent: "IntentData", now: float,
@@ -1186,16 +1282,24 @@ class MissionLogic:
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
 
-        # 대기: wait, 또는 대기형(restroom) 질문의 affirm.
+        # 시간 질문(ASKING_WAIT_TIME)에 네/아니오는 답이 아니다 — 옛 질문
+        # 태그로 해석하면 "네"가 종료(홈행)로 둔갑했다(2026-08-31 구멍 ②).
+        # 숫자가 올 때까지 재질문 사다리로 보낸다.
+        if self.state == State.ASKING_WAIT_TIME and kind in ("affirm", "deny"):
+            return self._arrival_no_answer(now)
+
+        # 대기: wait, 또는 대기형 질문의 affirm.
         if kind == "wait" or (kind == "affirm" and not self._asking_is_finish):
             minutes = intent.wait_minutes if kind == "wait" else -1
-            # restroom·entrance(질문 태그로 왔거나 시간이 실림): 시간 안 묻고 대기.
-            # 그 외에서 시간 없이 대기만 원하면 "몇 분쯤?" 후속 질문.
             if minutes is None or minutes < 0:
-                if self.state == State.ASKING_NEXT and not self._asking_is_finish:
+                # 시간 없음: 그 외 유형(ask_time)만 "몇 분쯤?" 후속 질문,
+                # restroom·entrance 는 시간 안 묻고 기본 30분(스펙).
+                if (self.state == State.ASKING_NEXT
+                        and not self._asking_time_after_yes):
                     return self._enter_waiting(WAIT_MINUTES_CAP, now,
                                                default_msg=True)
                 self.state = State.ASKING_WAIT_TIME
+                self._asking_entered_at = now
                 self._response_deadline = None
                 return [Say(MSG_ASK_WAIT_TIME, priority="response",
                             expects_reply=True)]
@@ -1228,6 +1332,7 @@ class MissionLogic:
         if not self._arrival_retried:
             self._arrival_retried = True
             self._response_deadline = None
+            self._asking_entered_at = now   # 재질문도 새 시계 유실 폴백 기준
             return [Say(MSG_ARRIVAL_RETRY, priority="response", expects_reply=True)]
         return self._leaving_notice(now)
 
@@ -1253,6 +1358,7 @@ class MissionLogic:
         self._asking_is_finish = False   # "네" = 계속
         self._arrival_retried = False
         self._response_deadline = None
+        self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if cancel_dest is not None:
             actions.append(CancelNav(cancel_dest))
@@ -1264,6 +1370,8 @@ class MissionLogic:
 
     def _reset_arrival_dialog(self) -> None:
         self._asking_is_finish = False
+        self._asking_time_after_yes = False
+        self._asking_entered_at = None
         self._arrival_retried = False
         self._leaving_deadline = None
         self._wait_until = None
@@ -1285,11 +1393,13 @@ class MissionLogic:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
+        moving = self.state in _GOAL_ACTIVE_STATES
         self._enter_estopped(now)
         if not already_estopped:
-            self._estop_admin_needed = True      # 긴급어 = 사람 개입 원인
-            self._estop_wait_announced = False
-            actions.append(Say(MSG_ESTOPPED, priority="emergency"))
+            # 정지 중 "멈춰"도 침묵 — 움직임이 없으니 알릴 변화가 없다.
+            self._estop_announced = moving
+            if moving:
+                actions.append(Say(MSG_ESTOPPED, priority="emergency"))
         return actions
 
     def on_estop(self, active: bool, now: float) -> list:
@@ -1302,17 +1412,13 @@ class MissionLogic:
                 if self.state in _GOAL_ACTIVE_STATES:
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(CancelNav(self.active_destination))
-                # 통신 원인뿐이고 정지 중이면 자동 복구가 온다(1.4초 실측) —
-                # "관리자 호출"은 거짓이 된다. 주행 중 끊김은 관리자 몫.
-                comm_only = (bool(self._estop_sources)
-                             and self._estop_sources <= _COMM_ESTOP_SOURCES)
-                auto_expected = comm_only and self.state != State.NAVIGATING
-                self._estop_admin_needed = not auto_expected
-                self._estop_wait_announced = False
+                # 움직이는 중에 걸렸을 때만 말한다 — 정지 중 걸림(통신 순단
+                # 자동복구 포함)은 사용자에게 달라지는 게 없어 침묵한다.
+                moving = self.state in _GOAL_ACTIVE_STATES
                 self._enter_estopped(now)
-                actions.append(Say(
-                    MSG_ESTOP_COMM if auto_expected else MSG_ESTOPPED,
-                    priority="emergency"))
+                self._estop_announced = moving
+                if moving:
+                    actions.append(Say(MSG_ESTOPPED, priority="emergency"))
                 return actions
         else:
             if self.state == State.ESTOPPED and self._estop_clear_since is None:
@@ -1354,7 +1460,7 @@ class MissionLogic:
                 )
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                if self.arrival_dialog:
+                if self.arrival_dialog and not self._nav_from_app:
                     # 도착 멘트와 유형별 질문을 한 발화로 합쳐 낸다 — 따로 내면
                     # 우선순위(narration vs response)로 순서가 뒤집힌다(실기 확인
                     # 2026-08-30). 한 문장이라 재생 완료 시점이 명확해 8초 응답
@@ -1414,7 +1520,10 @@ class MissionLogic:
                 # 사람 앞 1.1 m 에 섰다. 여기서부터 주도권은 음성 쪽으로 넘어가고
                 # Mission 은 타임아웃만 센다(설계 4절).
                 self.state = State.AWAITING_USER
-                self._response_deadline = now + self.approach_response_timeout_sec
+                # 여기서는 탈출용 안전망만 건다. 진짜 응답 8초는 질문 재생이
+                # 끝난 시점(on_approach_question_spoken)부터 — 도착 후 대화와
+                # 같은 방식. 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
+                self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
                 self._approach.reset()
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                 actions.append(
@@ -1474,6 +1583,14 @@ class MissionLogic:
                   and self._response_deadline is not None
                   and now >= self._response_deadline
                   and not self._ear_holds(now)):
+                actions.extend(self._leaving_notice(now))
+            elif (self._leaving_deadline is None
+                  and self._response_deadline is None
+                  and self._asking_entered_at is not None
+                  and now - self._asking_entered_at >= ASKING_STUCK_FALLBACK_SEC
+                  and not self._ear_holds(now)):
+                # 질문 재생이 끊겨 tts_done(시계 기점)이 유실된 경우 —
+                # 영구 대기 대신 강제로 무응답 절차를 연다 (구멍 ①).
                 actions.extend(self._leaving_notice(now))
 
         elif self.state == State.WAITING:
@@ -1546,9 +1663,16 @@ class MissionLogic:
                     else self._estop_entered_at
                 )
                 if t0 is not None and now - t0 >= self.estop_release_grace_sec:
+                    announced = self._estop_announced
+                    self._estop_announced = False
                     self._to_idle()
-                    # 위와 같은 이유. 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
-                    actions.append(Say(MSG_ESTOP_RELEASED, priority="response"))
+                    if announced:
+                        # 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
+                        # 침묵 걸림(정지 중)은 해제도 침묵 — 짝을 맞춘다.
+                        # emergency 등급: 걸림 멘트가 아직 재생 중이면 끊고
+                        # 즉시 해제를 알린다(2026-08-31). response 면 걸림
+                        # 멘트 완주를 기다려 낡은 소식이 된다.
+                        actions.append(Say(MSG_ESTOP_RELEASED, priority="emergency"))
 
         return actions
 
@@ -1713,6 +1837,7 @@ class MissionLogic:
         self.approach_track_id = None
         self.approach_goal_pose = None
         self._response_deadline = None
+        self._nav_from_app = False
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -1743,3 +1868,4 @@ class MissionLogic:
         self._returning_home = False
         self.approach_goal_pose = None
         self._response_deadline = None
+        self._nav_from_app = False

@@ -14,6 +14,7 @@
 
 #include <Servo.h>
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
 
 // ══════════════════════════════════════════
 #define NUM_LEDS_A  30
@@ -103,6 +104,160 @@ bool everConnected = false;
 uint8_t arriveBlinksLeft = 0;
 // 마지막 소등 프레임을 한 주기 유지하기 위한 플래그.
 bool arriveTailPending = false;
+
+// ══════════════════════════════════════════════════════════════════
+// 초음파 DYP-A22 IIC ×2 — 논블로킹 순차 측정 (2026-08-31 신규)
+//
+// 설계 정본: docs/handoff_jetson_ultrasonic_i2c.md (§5.3 구조, §6.2 프레임)
+// 기존 서보·LED 로직은 한 줄도 건드리지 않는다 — A-2 사고 이력 참조.
+//
+// 왜 순차인가: 센서 간격 214mm 라 실사용 구간에서 빔이 겹친다. 동시에 쏘면
+// 서로의 메아리를 자기 것으로 읽어 "그럴듯한 틀린 거리"가 나온다(§4.2).
+//
+// 타이밍: 채널당 GAP 5ms → TRIG → WAIT 100ms → READ. 2채널 = 약 210ms,
+// 프레임 약 4.8Hz. I2C 트랜잭션은 블로킹이지만 50kHz 에서 1ms 미만이라
+// 14ms 서보 스텝을 방해하지 않는다. NeoPixel show()와는 같은 loop()에서
+// 순차 실행되므로 겹치지 않는다. show()가 인터럽트를 끄는 동안 millis()가
+// 1~2ms 밀릴 수 있어 WAIT 에 여유(데이터시트 80 + 10ms)를 둔다.
+//
+// 채널 0 = front_left  (7bit 0x68 — usonic_addr_setup 스케치로 주소 굽기)
+// 채널 1 = front_right (7bit 0x74 — 공장 기본)
+// ══════════════════════════════════════════════════════════════════
+#define US_N          2
+#define US_TRIG_CMD   0xBC  // 150cm·mm 단위. 2026-08-31 실기 확정 — 0xBD(50cm)는
+                            // 0xFFFD 만 반환했고 0xBC 는 실거리를 반환했다(§2.10)
+#define US_WAIT_MS    100   // 0xBC 최대 측정시간 90ms + show() 지터 여유
+#define US_CLEAR_MM   3001  // "범위 내 에코 없음". 실패(0)와 구분해야 costmap 이
+                            // 앞이 뚫렸을 때 부채꼴을 지울 수 있다
+#define US_ANGLE_LEVEL 0x03 // 지향각 레벨 3(50°) — 2026-09-01 시험(사용자).
+                            // 40°(호 폭 1.05m, 8회차 통과)과 60°(1.5m, 과잉 봉쇄)
+                            // 사이 절충 — 호 폭 1.31m. 좁은 곳 봉쇄가 재발하면
+                            // 0x02 로 복귀. ROS fov 0.873 과 일치시킬 것.
+                            // (레벨: 1=30°/0.524, 2=40°/0.698, 3=50°/0.873, 4=60°/1.047)
+#define US_GAP_MS     5     // 채널 사이 간격. 앞 채널 잔향이 다음 측정에 남지 않게
+#define US_REG_DIST   0x02
+#define US_REG_CMD    0x10
+// 상향 프레임 8B: AA 55 seq d0L d0H d1L d1H xor (거리 mm, little-endian).
+// 헤더 0xAA/0x55 는 하향 상태코드(0~7)와 겹치지 않아 양방향이 섞여도 안전하다.
+// 값 규약: 0 = 채널 무효(3회 연속 실패, 젯슨 쪽은 그 채널 미발행)
+//          1~3000 = 실거리 mm
+//          3001 = 범위 내 에코 없음(clear, 젯슨 쪽은 max_range 로 발행해 부채꼴을 지운다)
+#define US_FRAME_H1   0xAA
+#define US_FRAME_H2   0x55
+
+const uint8_t US_ADDR7[US_N] = { 0x68, 0x74 };
+
+enum UsPhase { US_TRIG, US_WAIT, US_READ };
+UsPhase       usPhase   = US_TRIG;
+uint8_t       usCh      = 0;
+bool          usTrigOk  = false;
+unsigned long usPhaseAt = 0;
+uint8_t       usSeq     = 0;
+uint16_t      usDist[US_N]  = { 0, 0 };  // 프레임에 실을 값. 0 = 무효
+uint8_t       usFails[US_N] = { 0, 0 };  // 연속 실패 수
+uint16_t      usBuf[US_N][3];            // 3점 중앙값용 최근 유효 샘플
+uint8_t       usBufN[US_N]  = { 0, 0 };
+
+bool usWrite8(uint8_t addr7, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr7);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+// 거리 레지스터 0x02 에서 2바이트. 상위 바이트 먼저다(§2.7 big-endian).
+bool usReadDist(uint8_t addr7, uint16_t *out) {
+  Wire.beginTransmission(addr7);
+  Wire.write(US_REG_DIST);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(addr7, (uint8_t)2) != 2) return false;
+  uint8_t hi = Wire.read(), lo = Wire.read();
+  *out = ((uint16_t)hi << 8) | lo;
+  return true;
+}
+
+uint16_t usMedian3(uint16_t a, uint16_t b, uint16_t c) {
+  if (a > b) { uint16_t t = a; a = b; b = t; }
+  if (b > c) { b = (a > c) ? a : c; }
+  return b;
+}
+
+void usStore(uint8_t ch, uint16_t mm) {
+  usFails[ch] = 0;
+  if (usBufN[ch] < 3) {
+    usBuf[ch][usBufN[ch]++] = mm;
+  } else {
+    usBuf[ch][0] = usBuf[ch][1];
+    usBuf[ch][1] = usBuf[ch][2];
+    usBuf[ch][2] = mm;
+  }
+  // 3점이 모이기 전에는 최신값을 그대로 쓴다. 기동 직후 공백을 줄인다.
+  usDist[ch] = (usBufN[ch] >= 3)
+      ? usMedian3(usBuf[ch][0], usBuf[ch][1], usBuf[ch][2])
+      : mm;
+}
+
+void usFail(uint8_t ch) {
+  if (usFails[ch] < 255) usFails[ch]++;
+  if (usFails[ch] >= 3) {
+    usDist[ch] = 0;   // 무효 표시. 마지막 유효값을 계속 내보내면 costmap 이 낡은
+    usBufN[ch] = 0;   // 벽을 믿는다 — 복구 후 낡은 샘플이 중앙값을 오염하지 않게 비운다
+  }
+}
+
+void usSendFrame() {
+  uint8_t f[8];
+  f[0] = US_FRAME_H1;
+  f[1] = US_FRAME_H2;
+  f[2] = usSeq++;
+  f[3] = usDist[0] & 0xFF;
+  f[4] = usDist[0] >> 8;
+  f[5] = usDist[1] & 0xFF;
+  f[6] = usDist[1] >> 8;
+  f[7] = f[2] ^ f[3] ^ f[4] ^ f[5] ^ f[6];
+  Serial.write(f, 8);
+}
+
+// 트리거 실패도 WAIT 를 그대로 거친다 — 센서가 빠져 있어도 주기가 흔들리지
+// 않아 프레임이 항상 약 5Hz 로 나간다(실패 시 시리얼 폭주 방지).
+void usTask(unsigned long now) {
+  switch (usPhase) {
+    case US_TRIG:
+      if (now - usPhaseAt < US_GAP_MS) return;
+      usTrigOk  = usWrite8(US_ADDR7[usCh], US_REG_CMD, US_TRIG_CMD);
+      usPhase   = US_WAIT;
+      usPhaseAt = now;
+      return;
+
+    case US_WAIT:
+      if (now - usPhaseAt < US_WAIT_MS) return;
+      usPhase = US_READ;
+      return;
+
+    case US_READ: {
+      uint16_t raw;
+      // 0xFFFF = 측정 미완료, 0xFFFE = 동주파수 간섭 — 둘 다 거리가 아니다(§2.9)
+      // 0xFFFD = 범위 내 에코 없음(2026-08-31 실기 관찰, 데이터시트 미기재)
+      //          — 정상 상황이므로 clear 로 저장한다. 실패로 치면 앞이 뚫려
+      //          있을 때마다 채널이 무효(0)가 되어 costmap 을 지울 수 없다.
+      if (usTrigOk && usReadDist(US_ADDR7[usCh], &raw)) {
+        if (raw >= 1 && raw <= 3000)      usStore(usCh, raw);
+        else if (raw == 0xFFFD)           usStore(usCh, US_CLEAR_MM);
+        else                              usFail(usCh);
+      } else {
+        usFail(usCh);
+      }
+      usPhase   = US_TRIG;
+      usPhaseAt = now;
+      usCh++;
+      if (usCh >= US_N) {
+        usCh = 0;
+        usSendFrame();
+      }
+      return;
+    }
+  }
+}
 
 void setA(uint32_t color) {
   for (int i = 0; i < NUM_LEDS_A; i++) ledA.setPixelColor(i, color);
@@ -223,6 +378,23 @@ void setup() {
   setBoth(SKY);   // 부팅 대기 표시. 첫 수신 전까지 이 상태를 유지한다.
 
   lastRxMillis = millis();
+
+  // ── 초음파 I2C ──
+  // 케이블이 길어 데이터시트 상한(100kHz)의 절반으로 시작한다(§4.2-4).
+  // setWireTimeout: SDA 락업 시 25ms 후 자동 복구 — 없으면 loop() 전체가 멎어
+  // 서보·LED·워치독까지 같이 죽는다.
+  Wire.begin();
+  Wire.setClock(50000);
+  Wire.setWireTimeout(25000, true);
+
+  // 지향각 레벨 1을 전원 인가 시마다 굽는다. 레지스터 휘발 여부가 데이터시트에
+  // 없어, 기본값(레벨 4·60°)으로 돌아가면 높이 91.3mm 수평 장착에서 16cm 앞부터
+  // 바닥이 장애물로 찍힌다(§3.1). 냉기동 직후 센서 안정화(≤1s) 대비 3회 재시도.
+  for (uint8_t i = 0; i < US_N; i++) {
+    uint8_t tries = 3;
+    while (tries-- && !usWrite8(US_ADDR7[i], 0x07, US_ANGLE_LEVEL)) delay(100);
+  }
+  usPhaseAt = millis();
 }
 
 void loop() {
@@ -248,6 +420,10 @@ void loop() {
     watchdogTripped = true;
     applyState(STATE_LINK_LOST);
   }
+
+  // ── 초음파 순차 측정 (논블로킹) ─────────
+  // 링크 상태와 무관하게 돈다. 젯슨이 조용해도 측정·송신은 계속한다.
+  usTask(now);
 
   // ── 서보 슬로우 이동 ───────────────────
   // 한 번에 돌리지 않고 14ms마다 1도씩. 사용자 손목에 충격을 주지 않는다.

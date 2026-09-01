@@ -12,7 +12,9 @@
 
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rclpy.duration import Duration
 from rclpy.node import Node
+from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, String
 
 from vica_interfaces.msg import SmartHandleState, TurnGuide
@@ -26,6 +28,7 @@ from .guidance_priority import (
 )
 from .serial_link import SerialLink
 from .timebase import sec_to_ns
+from .ultrasonic_frame import FrameAccumulator
 
 
 class UserGuidanceDriverNode(Node):
@@ -48,6 +51,27 @@ class UserGuidanceDriverNode(Node):
         self.declare_parameter("reconnect_interval_sec", 2.0)
         self.declare_parameter("arrival_hold_sec", 4.0)
         self.declare_parameter("enable_serial", True)
+
+        # ── 초음파 (2026-08-31, docs/handoff_jetson_ultrasonic_i2c.md §6.4) ──
+        # 같은 포트의 상향 프레임을 읽어 Range 로 발행한다. 노드를 따로 만들지
+        # 않는 이유: 시리얼 포트는 하나뿐이고 두 프로세스가 같은 포트를 동시에
+        # 열 수 없다.
+        self.declare_parameter("ultrasonic_enabled", True)
+        self.declare_parameter("ultrasonic_rate_hz", 20.0)  # 프레임 4.8Hz 의 4배
+        self.declare_parameter(
+            "ultrasonic_topics", ["/ultrasonic/front_left", "/ultrasonic/front_right"]
+        )
+        self.declare_parameter(
+            "ultrasonic_frame_ids", ["usonic_front_left", "usonic_front_right"]
+        )
+        self.declare_parameter("ultrasonic_fov_rad", 0.524)   # 지향각 레벨 1(30도)
+        self.declare_parameter("ultrasonic_min_range_m", 0.02)
+        self.declare_parameter("ultrasonic_max_range_m", 0.30)
+        # 순차 발사라 채널마다 측정 시점이 다르다. 프레임 수신 시각에서 이만큼
+        # 과거를 stamp 로 쓴다 — MCU 에 시계가 없어 수신 시각을 그대로 쓰면
+        # costmap 이 낡은 값을 새것으로 착각한다.
+        self.declare_parameter("ultrasonic_measurement_delay_ms", [210, 105])
+        self.declare_parameter("ultrasonic_stale_warn_sec", 2.0)
 
         self.cue_timeout_ns = sec_to_ns(
             float(self.get_parameter("cue_timeout_sec").value)
@@ -101,6 +125,10 @@ class UserGuidanceDriverNode(Node):
             self.diag_loop,
             clock=self.steady_clock,
         )
+
+        self.us_enabled = bool(self.get_parameter("ultrasonic_enabled").value)
+        if self.us_enabled:
+            self._setup_ultrasonic()
 
         self.get_logger().info(
             "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event"
@@ -232,6 +260,96 @@ class UserGuidanceDriverNode(Node):
         msg.last_state_code = self.link.last_state_code
         msg.write_error_count = self.link.write_error_count
         self.pub_state.publish(msg)
+
+    # ── 초음파 ─────────────────────────────────────────
+
+    def _setup_ultrasonic(self) -> None:
+        topics = [str(t) for t in self.get_parameter("ultrasonic_topics").value]
+        self.us_frame_ids = [
+            str(f) for f in self.get_parameter("ultrasonic_frame_ids").value
+        ]
+        delays = [
+            int(d) for d in self.get_parameter("ultrasonic_measurement_delay_ms").value
+        ]
+        if not (
+            len(topics) == len(self.us_frame_ids) == len(delays) == protocol.US_CHANNELS
+        ):
+            # 채널 수가 어긋난 채 돌면 엉뚱한 frame_id 로 발행된다. 기동을 막는
+            # 편이 조용히 틀리는 것보다 낫다.
+            raise ValueError(
+                "ultrasonic_topics/frame_ids/measurement_delay_ms 는 모두 "
+                f"채널 수 {protocol.US_CHANNELS}개여야 합니다: "
+                f"{len(topics)}/{len(self.us_frame_ids)}/{len(delays)}"
+            )
+
+        self.us_fov = float(self.get_parameter("ultrasonic_fov_rad").value)
+        self.us_min_range = float(self.get_parameter("ultrasonic_min_range_m").value)
+        self.us_max_range = float(self.get_parameter("ultrasonic_max_range_m").value)
+        self.us_delay_ns = [ms * 1_000_000 for ms in delays]
+        self.us_stale_warn_ns = sec_to_ns(
+            float(self.get_parameter("ultrasonic_stale_warn_sec").value)
+        )
+
+        self.us_acc = FrameAccumulator()
+        self.us_pubs = [self.create_publisher(Range, t, 10) for t in topics]
+        self.us_last_frame_ns = None
+        self.us_stale_warned = False
+
+        self.create_timer(
+            1.0 / float(self.get_parameter("ultrasonic_rate_hz").value),
+            self.ultrasonic_loop,
+            clock=self.steady_clock,
+        )
+        self.get_logger().info(f"Ultrasonic Range publishing: {topics}")
+
+    def ultrasonic_loop(self) -> None:
+        """상향 프레임을 읽어 채널별 Range 로 발행한다.
+
+        발행은 프레임 수신에만 의존한다 — 프레임이 끊기면 저절로 발행이 멎고,
+        costmap 은 stale 판정으로 스스로 값을 만료시킨다. 마지막 값 재발행이나
+        range=0 발행은 하지 않는다(인수인계 문서 §4.1 채택 항목).
+        """
+        now = self.now_ns()
+        data = self.link.read_available(now)
+        for frame in self.us_acc.feed(data):
+            self.us_last_frame_ns = now
+            self.us_stale_warned = False
+            self._publish_ranges(frame)
+        self._warn_if_ultrasonic_stale(now)
+
+    def _publish_ranges(self, frame) -> None:
+        stamp_base = self.get_clock().now()
+        for ch, mm in enumerate(frame.distances_mm):
+            if mm == protocol.US_DIST_INVALID:
+                # 채널 무효(3회 연속 실패) — 그 채널만 건너뛴다. 한 센서 고장이
+                # 다른 채널을 죽이지 않는다.
+                continue
+            msg = Range()
+            msg.header.stamp = (
+                stamp_base - Duration(nanoseconds=self.us_delay_ns[ch])
+            ).to_msg()
+            msg.header.frame_id = self.us_frame_ids[ch]
+            msg.radiation_type = Range.ULTRASOUND
+            msg.field_of_view = self.us_fov
+            msg.min_range = self.us_min_range
+            msg.max_range = self.us_max_range
+            if mm == protocol.US_CLEAR_MM or mm / 1000.0 > self.us_max_range:
+                # 에코 없음(또는 관심 범위 밖 실거리) = 그 부채꼴은 뚫려 있다.
+                # max_range 로 발행해야 RangeSensorLayer 가 부채꼴을 지운다.
+                msg.range = self.us_max_range
+            else:
+                msg.range = mm / 1000.0
+            self.us_pubs[ch].publish(msg)
+
+    def _warn_if_ultrasonic_stale(self, now_ns: int) -> None:
+        """프레임이 끊기면 1회 경고한다. 발행 중단 자체는 설계된 동작이다."""
+        if self.us_last_frame_ns is None or self.us_stale_warned:
+            return
+        if now_ns - self.us_last_frame_ns > self.us_stale_warn_ns:
+            self.us_stale_warned = True
+            self.get_logger().warn(
+                "초음파 프레임 수신 끊김 — Range 발행 중단 (펌웨어·배선·포트 확인)"
+            )
 
     def shutdown_to_neutral(self) -> None:
         """종료 시 기본 상태를 1회 보내고 포트를 닫는다.
