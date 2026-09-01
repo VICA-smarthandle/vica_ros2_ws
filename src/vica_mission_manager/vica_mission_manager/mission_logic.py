@@ -1343,8 +1343,15 @@ class MissionLogic:
         return [Say(MSG_LEAVING_NOTICE, priority="response")]
 
     def _go_home(self, now: float) -> list:
-        """홈 복귀 진입. 홈이 없으면 _enter_returning 이 제자리로 처리한다."""
-        return self._enter_returning(now)
+        """안내 종료의 홈 복귀(도착 후 대화의 종료 답·무응답 떠남·대기 만료).
+
+        auto_return_home 을 보지 않는다 — 그 스위치는 로봇이 먼저 다가갔다
+        거절당한 **접근 뒤** 복귀의 '제자리' 정책이고(2026-08-27 사용자 결정),
+        여기는 사용자가 안내 종료를 고른 경우라 시나리오대로 홈으로 간다
+        (2026-09-01 사용자 확인). 홈이 지정되지 않았으면 _enter_returning 이
+        제자리로 처리한다.
+        """
+        return self._enter_returning(now, dialog_finish=True)
 
     def on_return_brake(self, now: float, quiet: bool = False) -> list:
         """홈 복귀 중 "비카야" (작업 E). 복귀를 취소하고 다시 안내를 묻는다 —
@@ -1745,12 +1752,15 @@ class MissionLogic:
             return False, reason, []
         return True, reason, self._enter_returning(now, is_home=True)
 
-    def _enter_returning(self, now: float, is_home: bool = False) -> list:
+    def _enter_returning(
+        self, now: float, is_home: bool = False, dialog_finish: bool = False
+    ) -> list:
         """대기 위치(= 홈)로 돌아간다.
 
-        들어오는 길이 둘이다.
-          - 접근을 거절당했거나 답을 못 들었을 때 (`is_home=False`)
+        들어오는 길이 셋이다.
+          - 접근을 거절당했거나 답을 못 들었을 때 (기본)
           - 관리자가 앱에서 홈 복귀를 눌렀을 때 (`is_home=True`)
+          - 도착 후 대화에서 사용자가 안내 종료를 골랐을 때 (`dialog_finish=True`)
 
         가는 곳은 같다. 복귀는 접근이 아니므로 0.3 m/s 제한을 여기서 푼다.
         홈이 지정되지 않았으면 제자리에서 끝낸다 — 상태만 지나가고 다음 tick 에
@@ -1759,11 +1769,12 @@ class MissionLogic:
         track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
         세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
         """
-        # 관리자가 부른 복귀는 늘 홈으로 간다. 접근 뒤 복귀는 auto_return_home 이
-        # 켜져 있을 때만 간다 — 꺼져 있으면 그 자리에 선 채로 상태만 정리한다.
+        # auto_return_home 게이트는 접근 뒤 복귀에만 걸린다 — 꺼져 있으면 그
+        # 자리에 선 채로 상태만 정리한다. 관리자 복귀와 안내 종료는 늘 홈으로
+        # 간다(2026-09-01 시나리오 확인).
         destination = (
             self.return_destination
-            if is_home or self.auto_return_home
+            if is_home or dialog_finish or self.auto_return_home
             else None
         )
         self.state = State.RETURNING
