@@ -32,7 +32,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.msg import PersonDetection
@@ -300,9 +300,10 @@ class MissionManagerNode(Node):
         )
 
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
-        # 취소·앱 선점의 큐 청소(StopSpeech) — 하던 말 중단 + 대기 비긴급
-        # 폐기. barge-in 과 같은 토픽·같은 의미다 (2026-09-01).
-        self.pub_tts_stop = self.create_publisher(Empty, "/vica/tts_stop", 10)
+        # 취소·앱 선점의 큐 청소(StopSpeech)는 tts_request 의 제어 메시지
+        # "control:stop" 으로 보낸다 — 별도 토픽(tts_stop)은 뒤이어 시키는
+        # 새 멘트("안내를 시작합니다")와 도착 순서가 뒤집힐 수 있다
+        # (실기: 같은 경합으로 "네?" 증발). 같은 토픽은 순서가 보장된다.
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
         self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
@@ -1124,7 +1125,9 @@ class MissionManagerNode(Node):
                     self.pub_listen_request.publish(Bool(data=True))
                     self.get_logger().info("질문 발화 — 재청취 요청 발행")
             elif isinstance(action, StopSpeech):
-                self.pub_tts_stop.publish(Empty())
+                out = String()
+                out.data = "control:stop"
+                self.pub_tts.publish(out)
                 self.get_logger().info("발화 큐 청소 (취소·선점)")
             elif isinstance(action, CancelNav):
                 self._cancel_nav(action.destination, action.event)
