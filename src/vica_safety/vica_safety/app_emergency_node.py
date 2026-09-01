@@ -42,12 +42,24 @@ def build_app_state(
     message: str,
     timestamp: str,
     auto_recovered: bool = False,
+    sources: tuple = (),
 ) -> dict:
     """Build the backward-compatible authoritative app state payload.
 
     `auto_recovered`는 마지막 해제가 관리자 조작이 아니라 통신 복구로 이루어진
     경우다. 앱은 원인 문자열을 보지 않으므로 이 JSON이 그 사실을 전할 유일한
     통로다. 기본값이 False라 기존 호출부는 그대로 동작한다.
+
+    `sources`는 지금 래치를 붙들고 있는 원인이다(`physical_f1`·`app`·`voice`·
+    `motor_can`·`*_stale`). `/estop_sources`로도 나가지만 앱이 그것을 따로
+    구독하면 두 토픽의 도착 순서가 어긋나 **원인을 모르는 채 팝업이 먼저 뜨는
+    순간**이 생긴다. 같은 메시지에 실어 보내면 그 틈이 없다.
+
+    앱이 이 값을 쓰는 이유는 하나다. 물리 버튼이나 음성으로 걸린 비상정지는
+    관리자가 현장을 확인해야 하지만, 관리자가 앱에서 직접 누른 것은 확인을
+    요청할 일이 아니다. 원인 없이는 그 둘을 가릴 수 없다.
+
+    키를 **더하기만** 하므로 이 필드를 모르는 기존 앱은 그대로 동작한다.
     """
     return {
         "node": "app_emergency_node",
@@ -60,6 +72,7 @@ def build_app_state(
             and safety_state == "ESTOP_RELEASED_WAIT_RESET"
         ),
         "auto_recovered": auto_recovered,
+        "sources": list(sources),
         "message": message,
         "timestamp": timestamp,
     }
@@ -579,6 +592,13 @@ class AppEmergencyNode(Node):
             message=self.last_message,
             timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             auto_recovered=self.auto_recovered,
+            # 걸려 있을 때만 원인을 싣는다.
+            #
+            # last_estop_sources 는 **해제된 뒤에도 마지막 원인을 들고 있다**
+            # (estop_sources_callback 이 빈 목록으로는 덮어쓰지 않는다). 자동 복구
+            # 로그가 "무엇 때문에 걸렸던 것인지"를 적어야 하기 때문이다.
+            # 그 값을 그대로 내보내면 앱은 이미 풀린 비상정지의 옛 원인을 보게 된다.
+            sources=self.last_estop_sources if self.emergency_active else (),
         )
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)

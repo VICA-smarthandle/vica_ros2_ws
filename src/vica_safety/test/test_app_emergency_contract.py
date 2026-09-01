@@ -206,6 +206,41 @@ def test_app_state_active_uses_authoritative_emergency_state():
     assert payload["reset_allowed"] is False
 
 
+def test_app_state_carries_estop_sources_for_the_app():
+    """앱이 원인을 볼 수 있어야 한다(2026-08-31).
+
+    물리 버튼·음성으로 걸린 비상정지는 관리자가 현장을 확인해야 하고, 관리자가
+    앱에서 직접 누른 것은 그럴 일이 아니다. 원인 없이는 앱이 그 둘을 가릴 수
+    없어 두 경우에 같은 문구가 뜬다.
+    """
+    payload = build_app_state(
+        app_active=False,
+        emergency_active=True,
+        safety_state="ESTOP_ACTIVE",
+        message="physical estop",
+        timestamp="2026-07-22T00:00:00+00:00",
+        sources=("physical_f1",),
+    )
+
+    assert payload["sources"] == ["physical_f1"]
+
+
+def test_app_state_without_sources_stays_backward_compatible():
+    """sources를 안 주는 호출부도 그대로 동작한다.
+
+    키는 더하기만 했으므로 이 필드를 모르는 앱도 깨지지 않는다.
+    """
+    payload = build_app_state(
+        app_active=True,
+        emergency_active=True,
+        safety_state="ESTOP_ACTIVE",
+        message="app estop",
+        timestamp="2026-07-22T00:00:00+00:00",
+    )
+
+    assert payload["sources"] == []
+
+
 def test_app_state_marks_cleared_waiting_supervisor_as_resettable():
     payload = build_app_state(
         app_active=False,
