@@ -86,8 +86,9 @@ def generate_launch_description():
             default_value='true',
             description=(
                 'motor node 를 함께 띄웁니다. 터미널에서 이미 띄웠다면 false 로 '
-                '넘기세요. mapping_supervisor_node 는 그래프를 보고 자동으로 판단해 '
-                '이 값을 넘깁니다.'
+                '넘기세요. mapping_supervisor_node 는 항상 false 를 넘깁니다 — '
+                'motor 는 터미네이터 ⑤ 칸 소유로 고정이고(2026-08-25 실기 결정), '
+                '떠 있는지는 시작 전 필수 노드 검사가 확인합니다.'
             ),
         ),
         DeclareLaunchArgument(

@@ -18,11 +18,14 @@ motor node 라서, 없으면 /wheel/odom 이 나오지 않는다". 다만 그 �
 safety 는 아예 띄우지 않는다. 터미네이터의 safety 칸이 AUTO 라 창을 띄우는 순간
 자동 실행되므로, 여기서 또 띄우면 항상 두 벌이 된다.
 
-**저장은 콜백에서 기다리지 않는다.** vica_map_save.sh 는 map_saver 제한시간이
-기본 120초라 그만큼 걸릴 수 있다. 콜백에서 기다리면 같은 콜백 그룹의 다른 요청이
-전부 그 뒤로 줄을 서고, rosbridge 까지 막힌다 — mission_manager 의 _cancel_nav 가
-정확히 그렇게 멈췄던 적이 있다(2026-08-21 수정). 그래서 서비스는 즉시 응답하고
-실제 저장은 별도 스레드에서 돌며, 결과는 /vica/mapping_status 로 알린다.
+**저장도 정지도 콜백에서 기다리지 않는다.** vica_map_save.sh 는 map_saver
+제한시간이 기본 120초라 그만큼 걸릴 수 있고, 프로세스 종료 사다리
+(SIGINT→SIGTERM→SIGKILL, 각 유예 8초)는 최악 24초다. 콜백에서 기다리면 같은
+콜백 그룹의 다른 요청이 전부 그 뒤로 줄을 서고, rosbridge 까지 막힌다 —
+mission_manager 의 _cancel_nav 가 정확히 그렇게 멈췄던 적이 있다(2026-08-21
+수정). 그래서 서비스는 즉시 응답하고, 저장은 별도 스레드에서, 정지는 상태
+타이머(_tick)가 사다리를 한 칸씩 밟으며(StopEscalation) 진행한다. 결과는
+/vica/mapping_status 로 알린다.
 """
 
 from datetime import datetime
@@ -32,6 +35,7 @@ from pathlib import Path
 import signal
 import subprocess
 import threading
+import time
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -55,6 +59,7 @@ from .mapping_session import (
     missing_prerequisites,
     normalise_map_name,
     running_stacks,
+    StopEscalation,
 )
 
 DEFAULT_LAUNCH = [
@@ -99,6 +104,9 @@ class MappingSupervisorNode(Node):
         self.started_at = None
         self._process = None
         self._pgid = None
+        # 진행 중인 종료 사다리. None 이면 정리 중이 아니다. _tick 이 매 초
+        # 들여다보며 한 칸씩 올린다 — 콜백에서 기다리지 않기 위해서다(머리말).
+        self._stop = None
         self._lock = threading.Lock()
 
         self._main_group = MutuallyExclusiveCallbackGroup()
@@ -184,6 +192,9 @@ class MappingSupervisorNode(Node):
 
     def _advance(self) -> None:
         """Move the state machine forward. 반드시 _lock 을 잡고 부른다."""
+        if self._stop is not None:
+            self._advance_stop()
+            return
         if self.state is MappingState.STARTING:
             if self._process is not None and self._process.poll() is not None:
                 self._set_state(
@@ -201,7 +212,7 @@ class MappingSupervisorNode(Node):
                     MappingState.ERROR,
                     f'{timeout:.0f}초 안에 cartographer 가 올라오지 않았습니다.',
                 )
-                self._terminate_process()
+                self._begin_stop()
         elif self.state is MappingState.MAPPING:
             if self._process is not None and self._process.poll() is not None:
                 self._set_state(
@@ -220,7 +231,11 @@ class MappingSupervisorNode(Node):
     def handle_start(self, _request, response):
         """Start the mapping stack after checking nothing conflicts."""
         with self._lock:
-            reason = blocking_reason(self.state, self._node_names())
+            reason = blocking_reason(
+                self.state,
+                self._node_names(),
+                list(self.get_parameter('prerequisite_nodes').value),
+            )
             if reason:
                 response.success = False
                 response.message = reason
@@ -229,9 +244,9 @@ class MappingSupervisorNode(Node):
 
             command = list(self.get_parameter('launch_command').value)
             # motor 는 터미네이터 소유로 고정이다 (2026-08-25 실기 결정) —
-            # 위 DEFAULT_PREREQUISITES 주석 참고. 필수 노드 검사가 이미 motor
-            # 생존을 보장했으므로 launch 는 절대 다시 띄우지 않는다. 이래야
-            # 중복 실행 가능성이 원천적으로 없다.
+            # 위 DEFAULT_PREREQUISITES 주석 참고. 바로 위 blocking_reason 이
+            # 필수 노드(motor 포함) 생존을 확인했으므로 launch 는 절대 다시
+            # 띄우지 않는다. 이래야 중복 실행 가능성이 원천적으로 없다.
             command.append('start_motor:=false')
             try:
                 # start_new_session=True 로 자식에게 새 프로세스 그룹을 준다.
@@ -258,18 +273,27 @@ class MappingSupervisorNode(Node):
         return response
 
     def handle_stop(self, _request, response):
-        """Stop the mapping stack. 저장하지 않는다 — 저장은 별도 요청이다."""
+        """Stop the mapping stack. 저장하지 않는다 — 저장은 별도 요청이다.
+
+        여기서 종료를 기다리지 않는다(머리말). SIGINT 만 바로 보내고 즉시
+        응답하며, 사다리의 나머지 칸과 완료 판정은 _tick 이 맡는다. 앱은
+        저장과 마찬가지로 /vica/mapping_status 가 idle 이 되는 것으로 완료를
+        안다.
+        """
         with self._lock:
             if self._process is None:
                 self._set_state(MappingState.IDLE, '')
                 response.success = True
                 response.message = '실행 중인 매핑이 없습니다.'
                 return response
+            if self._stop is not None:
+                response.success = True
+                response.message = '이미 정리하는 중입니다.'
+                return response
             self._set_state(MappingState.STOPPING, '정리하는 중입니다.')
-            self._terminate_process()
-            self._set_state(MappingState.IDLE, '')
+            self._begin_stop()
         response.success = True
-        response.message = '매핑을 종료했습니다.'
+        response.message = '매핑 종료를 시작했습니다. 완료는 상태로 알립니다.'
         return response
 
     def handle_save(self, request, response):
@@ -366,8 +390,58 @@ class MappingSupervisorNode(Node):
 
     # -- 프로세스 -------------------------------------------------------
 
+    def _begin_stop(self) -> None:
+        """정리를 시작한다 — SIGINT 를 바로 보내고 사다리를 세운다.
+
+        _lock 을 잡고 부른다. 기다리지 않는다. 이후 진행은 _advance_stop 이
+        매 tick 맡는다.
+        """
+        if self._process is None or self._stop is not None:
+            return
+        grace = float(self.get_parameter('shutdown_grace_sec').value)
+        self._stop = StopEscalation(grace, time.monotonic())
+        self._send_group_signal(self._stop.first_signal)
+
+    def _advance_stop(self) -> None:
+        """사다리를 한 칸씩 밟는다. _lock 을 잡고 부른다.
+
+        프로세스가 죽었으면 정리를 끝낸다. 유예가 지났으면 다음 신호를 보낸다.
+        SIGKILL 뒤에는 보낼 것이 없으므로 poll 이 시체를 거둘 때까지만 본다.
+        """
+        if self._process is None:
+            self._stop = None
+            return
+        if self._process.poll() is not None:
+            self._forget_process()
+            self._stop = None
+            # 사용자가 멈춘 정상 종료만 IDLE 로 내린다. STARTING 시한 초과로
+            # 들어온 정리는 ERROR 상태와 사유를 그대로 남겨야 사람이 본다.
+            if self.state is MappingState.STOPPING:
+                self._set_state(MappingState.IDLE, '매핑을 종료했습니다.')
+            else:
+                self.get_logger().info('매핑 스택 정리 완료 (상태 유지).')
+            return
+        sig = self._stop.escalate_signal(time.monotonic())
+        if sig is not None:
+            self.get_logger().warn(
+                f'유예 안에 끝나지 않았습니다. {sig.name} 로 올립니다.'
+            )
+            self._send_group_signal(sig)
+
+    def _send_group_signal(self, sig) -> None:
+        """자식 프로세스 그룹 전체에 신호를 보낸다. 실패해도 예외를 내지 않는다."""
+        try:
+            os.killpg(self._pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            # 이미 죽었거나 손댈 수 없다 — 다음 tick 의 poll 이 정리한다.
+            pass
+
     def _terminate_process(self) -> None:
-        """Send SIGINT to the whole group, then escalate. _lock 을 잡고 부른다."""
+        """Blocking 종료 — destroy_node 전용.
+
+        노드가 내려가는 중이라 타이머가 더 돌지 않으므로 여기서만 기다려도
+        아무도 막지 않는다. 평상시 정지는 _begin_stop + _advance_stop 을 쓴다.
+        """
         if self._process is None:
             return
         grace = float(self.get_parameter('shutdown_grace_sec').value)

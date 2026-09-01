@@ -5,15 +5,17 @@
 **"언제 막히는가"**를 더 촘촘히 검증한다.
 """
 
+import signal
+
 from vica_cartographer.mapping_session import (
     blocking_reason,
     duplicated_names,
-    is_motor_up,
     is_stack_up,
     MappingState,
     missing_prerequisites,
     normalise_map_name,
     running_stacks,
+    StopEscalation,
 )
 
 
@@ -124,15 +126,80 @@ def test_too_long_name_is_rejected():
     assert '깁니다' in error
 
 
-def test_motor_detection_ignores_namespace():
-    """Motor 가 이미 떠 있으면 launch 에 start_motor:=false 를 넘겨야 한다."""
-    assert is_motor_up(['/mdrobot_can_keyboard_knob_node']) is True
-    assert is_motor_up(['/robot1/mdrobot_can_keyboard_knob_node']) is True
-    assert is_motor_up(['/cartographer_node']) is False
-
-
 def test_motor_alone_does_not_block_start():
     """Motor 는 두 스택이 공유한다. 떠 있다고 매핑을 막을 이유가 없다."""
     assert blocking_reason(
         MappingState.IDLE, ['/mdrobot_can_keyboard_knob_node']
     ) is None
+
+
+# -- 필수 노드 검사 (2026-09-01) ------------------------------------------
+#
+# 종전에는 handle_start 의 주석만 "검사했다"고 말하고 코드는 검사하지 않았다.
+# 모터 없이 시작하면 /wheel/odom 이 영영 안 나와 40초 뒤 STARTING 시한
+# 초과로만 죽었다 — 회차 무효. 이제 시작 전에 사람이 할 조치를 알려주며 막는다.
+
+PREREQS = [
+    'camera/camera',
+    'imu_base_link_adapter',
+    'mdrobot_can_keyboard_knob_node',
+]
+
+ALL_PREREQS_UP = [
+    '/camera/camera',
+    '/imu_base_link_adapter',
+    '/mdrobot_can_keyboard_knob_node',
+]
+
+
+def test_missing_motor_blocks_start_with_actionable_message():
+    names = ['/camera/camera', '/imu_base_link_adapter']
+    reason = blocking_reason(MappingState.IDLE, names, PREREQS)
+    assert reason is not None
+    assert '모터' in reason          # 노드 이름이 아니라 사람 말로
+    assert '⑤' in reason             # 어디서 띄우는지까지
+
+
+def test_all_prerequisites_up_allows_start():
+    assert blocking_reason(MappingState.IDLE, ALL_PREREQS_UP, PREREQS) is None
+
+
+def test_prerequisites_default_empty_keeps_old_behaviour():
+    """인자 required 없이 부르면 종전과 같다 — 상태 표시용 호출이 안 흔들린다."""
+    assert blocking_reason(MappingState.IDLE, ['/rosapi']) is None
+
+
+def test_nav2_check_still_wins_over_prerequisites():
+    """위험한 것(중복 /odom)이 헛수고(필수 노드)보다 먼저 보여야 한다."""
+    reason = blocking_reason(MappingState.IDLE, ['/amcl'], PREREQS)
+    assert 'Nav2' in reason
+
+
+# -- 정지 사다리 (2026-09-01) ---------------------------------------------
+#
+# 종전 _terminate_process 는 콜백 안에서 최대 24초 기다려 rosbridge 까지
+# 막았다. 이제 타이머가 매 tick 물어보고, 이 객체는 기다리지 않는다.
+
+def test_stop_starts_with_sigint():
+    stop = StopEscalation(grace_sec=8.0, now=100.0)
+    assert stop.first_signal == signal.SIGINT
+
+
+def test_no_escalation_before_grace():
+    stop = StopEscalation(grace_sec=8.0, now=100.0)
+    assert stop.escalate_signal(107.9) is None
+
+
+def test_escalates_to_sigterm_then_sigkill():
+    stop = StopEscalation(grace_sec=8.0, now=100.0)
+    assert stop.escalate_signal(108.0) == signal.SIGTERM
+    assert stop.escalate_signal(115.9) is None      # 새 유예가 다시 돈다
+    assert stop.escalate_signal(116.0) == signal.SIGKILL
+
+
+def test_nothing_above_sigkill():
+    """SIGKILL 은 무시될 수 없다 — 더 올릴 데가 없고, poll 이 시체를 거둔다."""
+    stop = StopEscalation(grace_sec=8.0, now=100.0)
+    stop.escalate_signal(108.0)
+    stop.escalate_signal(116.0)
+    assert stop.escalate_signal(999.0) is None
