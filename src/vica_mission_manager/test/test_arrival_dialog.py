@@ -165,6 +165,15 @@ class TestNoAnswerLadder:
         assert logic.state == State.WAITING           # 끼어들면 산다
 
 
+class TestWakeFoldsArrivalQuestion:
+    def test_wake_folds_asking_and_stray_answer_is_dead(self):
+        """"비카야"는 도착 질문을 접는다(9/1) — 이후 답은 무시."""
+        logic = arrive("restroom")               # ASKING_NEXT
+        assert logic.on_wake(3.0) == []
+        assert logic.state == State.IDLE
+        assert logic.on_arrival_answer(_intent("affirm"), 4.0) == []
+
+
 class TestWaitingState:
     def test_wake_asks_resume(self):
         logic = arrive("restroom")

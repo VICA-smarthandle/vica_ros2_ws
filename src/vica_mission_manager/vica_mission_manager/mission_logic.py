@@ -1253,17 +1253,40 @@ class MissionLogic:
         return []
 
     def on_wake(self, now: float) -> list:
-        """WAITING 중 "비카야" — 다시 안내를 시작할지 묻는다 (제자리 대기 각성)."""
-        if self.state != State.WAITING:
+        """"비카야" — 새 대화의 시작 신호.
+
+        WAITING 이면 각성: 다시 안내를 시작할지 묻는다. 답-대기 상태
+        (CONFIRMING·도착 질문·접근 질문)면 옛 질문을 조용히 접는다
+        (2026-09-01 사용자 결정) — 답 자리가 살아 있으면 새 대화의 첫
+        마디(짧은 "그래" 오전사 등)가 옛 질문의 답으로 오인 접수된다.
+        접는 멘트는 없다: 사용자는 이미 새 말을 하려는 참이다.
+        RETURNING 의 복귀 브레이크는 노드가 on_return_brake 로 따로 보낸다.
+        """
+        if self.state == State.WAITING:
+            self._wait_until = None
+            self._asking_is_finish = False   # "네" = 계속 (대기형처럼 다룬다)
+            self._asking_time_after_yes = True   # "네"면 목적지를 새로 묻는 흐름
+            self.state = State.ASKING_NEXT
+            self._arrival_retried = False
+            self._response_deadline = None
+            self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
+            return [Say(MSG_WAIT_RESUME_ASK, priority="response",
+                        expects_reply=True)]
+        if self.state == State.CONFIRMING:
+            self._to_idle()
             return []
-        self._wait_until = None
-        self._asking_is_finish = False   # "네" = 계속 (대기형처럼 다룬다)
-        self._asking_time_after_yes = True   # "네"면 목적지를 새로 묻는 흐름
-        self.state = State.ASKING_NEXT
-        self._arrival_retried = False
-        self._response_deadline = None
-        self._asking_entered_at = now    # 낡은 진입 시각이면 폴백이 즉발한다
-        return [Say(MSG_WAIT_RESUME_ASK, priority="response", expects_reply=True)]
+        if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            self._reset_arrival_dialog()
+            self._to_idle()
+            return []
+        if self.state == State.AWAITING_USER:
+            # 같은 사람을 곧장 다시 쫓지 않게 억제하고 제자리에 선다 —
+            # 부른 사람과의 새 대화가 이어진다 (복귀 주행은 하지 않는다).
+            self._suppress_track(self.approach_track_id, now)
+            self._approach.reset()
+            self._to_idle()
+            return []
+        return []
 
     def on_arrival_answer(self, intent: "IntentData", now: float,
                           next_dest: Optional[Destination] = None) -> list:

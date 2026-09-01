@@ -553,15 +553,20 @@ class MissionManagerNode(Node):
             f"도착 후 답 intent={msg.intent}: {before.value} -> {self.logic.state.value}")
 
     def _on_wake(self, msg: String) -> None:
-        """/vica/wake — WAITING 중이면 각성(다시 안내 질문), RETURNING 중이면
-        복귀 브레이크(E): 사용자가 부르면 홈으로 가던 것을 멈추고 응대한다."""
-        if self.logic.is_waiting_in_place():
-            self._run_actions(self.logic.on_wake(self._now()))
-        elif self.logic.state == State.RETURNING:
+        """/vica/wake — WAITING 은 각성(다시 안내 질문), RETURNING 은 복귀
+        브레이크(E), 답-대기 상태는 옛 질문 접기(2026-09-01). 나머지는 무시."""
+        if self.logic.state == State.RETURNING:
             actions = self.logic.on_return_brake(self._now())
             if actions:
                 self._run_actions(actions)
                 self.get_logger().info("복귀 중 '비카야' — 복귀 취소하고 응대")
+            return
+        before = self.logic.state
+        actions = self.logic.on_wake(self._now())
+        if actions or before != self.logic.state:
+            self._run_actions(actions)
+            self.get_logger().info(
+                f"'비카야': {before.value} -> {self.logic.state.value}")
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.

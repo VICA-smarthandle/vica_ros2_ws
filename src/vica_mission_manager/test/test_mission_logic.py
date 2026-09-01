@@ -1371,3 +1371,26 @@ class TestSpeechFlushOnCancel:
             make_dest(id="restroom"), BOUNDS, True, 1.0)
         assert actions and isinstance(actions[0], StopSpeech)
         assert any(isinstance(a, Navigate) for a in actions)
+
+
+class TestWakeFoldsStaleQuestions:
+    """"비카야" = 새 대화 (2026-09-01) — 답-대기 상태를 조용히 접는다.
+    답 자리가 살아 있으면 새 대화의 첫 마디가 옛 질문의 답으로 오인 접수된다."""
+
+    def test_wake_folds_confirming_and_stray_affirm_is_dead(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        assert logic.on_wake(1.0) == []          # 멘트 없이 접는다
+        assert logic.state == State.IDLE
+        # 접힌 확인 질문의 답("그래" 오전사)은 아무것도 못 움직인다
+        assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 2.0) == []
+        assert logic.state == State.IDLE
+
+    def test_wake_folds_approach_question_and_stays_put(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        assert logic.on_wake(6.0) == []
+        assert logic.state == State.IDLE         # 물러나지 않고 제자리
+        assert logic.on_approach_answer(True, 7.0) == []
