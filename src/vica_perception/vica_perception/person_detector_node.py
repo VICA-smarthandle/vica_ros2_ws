@@ -35,10 +35,15 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_geometry_msgs import do_transform_point
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from vica_interfaces.msg import PersonDetection
+from vica_interfaces.msg import PersonDetection, RobotState
 from vica_interfaces.srv import RequestApproach
 from vica_perception.approach_request_policy import ApproachRequestThrottle
 from vica_perception.detection_gate import DetectionGate, DetectionSample, Point2D
+from vica_perception.inference_gate import (
+    DEFAULT_STATE_TIMEOUT_S,
+    InferenceGate,
+    InferenceReason,
+)
 from vica_perception.person_geometry import (
     bbox_center,
     body_depth_median_m,
@@ -57,6 +62,9 @@ class PersonDetectorNode(Node):
         self.declare_parameter("conf_threshold", 0.25)
         self.declare_parameter("publish_rate_hz", 5.0)
         self.declare_parameter("target_frame", "map")
+        # 주행 중 추론 차단. 끄면 종전대로 항상 추론한다(inference_gate 참고).
+        self.declare_parameter("gate_while_moving", True)
+        self.declare_parameter("robot_state_timeout_s", DEFAULT_STATE_TIMEOUT_S)
 
         self._model = model
         self._conf = float(self.get_parameter("conf_threshold").value)
@@ -64,6 +72,13 @@ class PersonDetectorNode(Node):
         self._target_frame = str(self.get_parameter("target_frame").value)
 
         self._gate = DetectionGate()
+        self._infer_gate = InferenceGate(
+            state_timeout_s=float(
+                self.get_parameter("robot_state_timeout_s").value),
+            enabled=bool(self.get_parameter("gate_while_moving").value),
+        )
+        # 마지막으로 로그에 남긴 사유. 프레임마다 찍으면 5 Hz 로 로그가 넘친다.
+        self._last_infer_reason: InferenceReason | None = None
         self._tf = Buffer()
         self._tf_listener = TransformListener(self._tf, self)
 
@@ -91,9 +106,15 @@ class PersonDetectorNode(Node):
                                  self._on_depth, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, "/camera/camera/depth/camera_info",
                                  self._on_depth_info, qos_profile_sensor_data)
+        # 주행 여부만 본다. QoS 는 기본 신뢰(depth 3 종과 달리 sensor_data 가
+        # 아니다) — 1 Hz 상태 한 건을 놓치면 그만큼 판정이 늦는다.
+        self.create_subscription(RobotState, "/vica/robot_state",
+                                 self._on_robot_state, 10)
         self.get_logger().info(
-            "person_detector_node 시작 (conf %.2f, %.1f Hz, frame %s)"
-            % (self._conf, 1.0 / self._period_s, self._target_frame))
+            "person_detector_node 시작 (conf %.2f, %.1f Hz, frame %s, "
+            "주행 중 추론 %s)"
+            % (self._conf, 1.0 / self._period_s, self._target_frame,
+               "차단" if self._infer_gate.enabled else "허용"))
 
     # ── 입력 보관 ──────────────────────────────────────────────────────────
     def _on_depth(self, msg: Image) -> None:
@@ -102,8 +123,23 @@ class PersonDetectorNode(Node):
     def _on_depth_info(self, msg: CameraInfo) -> None:
         self._depth_info = msg
 
+    def _on_robot_state(self, msg: RobotState) -> None:
+        # RobotState 에는 header 가 없다. 신선도는 수신 시각으로 잰다.
+        self._infer_gate.observe_state(
+            time.monotonic_ns(), msg.is_moving, msg.is_paused)
+
     # ── 본 처리 ────────────────────────────────────────────────────────────
     def _on_color(self, msg: Image) -> None:
+        # 5 Hz 솎기보다 **먼저** 본다. 차단 중에는 `_last_infer_mono` 를 건드리지
+        # 않으므로, 주행이 끝나면 다음 프레임에서 곧바로 추론이 돌아온다.
+        now_ns = time.monotonic_ns()
+        reason = self._infer_gate.reason(now_ns)
+        if reason is not self._last_infer_reason:
+            self.get_logger().info("추론 게이트: %s" % reason.value)
+            self._last_infer_reason = reason
+        if not self._infer_gate.should_infer(now_ns):
+            return
+
         now_mono = time.monotonic()
         if now_mono - self._last_infer_mono < self._period_s:
             return                       # 5 Hz 로 솎는다
