@@ -94,7 +94,14 @@ bt_navigator:
     robot_base_frame: base_footprint
     odom_topic: /odom
     bt_loop_duration: 10
-    default_server_timeout: 20
+    # BT가 planner/controller 액션 서버의 접수(ack)·결과를 기다리는 시한(ms).
+    # 20 -> 100 (2026-09-01): load 가 높으면 서버가 20ms 안에 접수를 못 해
+    # "Timed out ... acknowledge goal request" / "Failed to get result in
+    # node halt" 로 goal 이 ABORTED 가 됐다 — 로봇은 도착해 있는데 앱에는
+    # 실패("Nav2 task failed")+관리자 호출 팝업이 뜨던 원인(실기 로그 3건).
+    # 100ms 는 BT tick(10ms) 열 번 분량 — 지각은 참되, 서버가 진짜 죽은
+    # 경우의 실패 판정은 유지된다.
+    default_server_timeout: 100
     wait_for_service_timeout: 1000
     # 'default_nav_through_poses_bt_xml'은 기본값을 쓴다:
     #   nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml

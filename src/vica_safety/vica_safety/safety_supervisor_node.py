@@ -65,7 +65,13 @@ class SafetySupervisorNode(Node):
 
         self.declare_parameter("publish_hz", 30.0)
         self.declare_parameter("cmd_timeout_sec", 0.5)
-        self.declare_parameter("estop_timeout_sec", 0.5)
+        # /emergency_stop 하트비트(30Hz)가 이만큼 안 오면 FAULT(fail-closed).
+        # 0.5 -> 2.0 (2026-09-01): CPU·DDS 순단에 하트비트가 0.5초 지각하는
+        # 것만으로 감독이 FAULT->WAIT_RESET 로 떨어져, 래치는 안 걸렸는데
+        # 관리자 초기화만 요구하는 유령 정지가 실기에서 반복됐다(17:34 실증,
+        # 자동복구 사각지대). motor_can 을 3.0초로 늘린 것과 같은 철학 —
+        # 순단은 참고, 진짜 두절(2초+)에는 여전히 즉시 잠근다.
+        self.declare_parameter("estop_timeout_sec", 2.0)
         self.declare_parameter("max_linear_mps", 1.0)
         self.declare_parameter("max_angular_radps", 2.0)
 
