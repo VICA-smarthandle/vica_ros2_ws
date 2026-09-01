@@ -197,6 +197,15 @@ class CancelNav:
 
 
 @dataclass(frozen=True)
+class StopSpeech:
+    """하던 말을 끊고 대기 중인 비긴급 발화를 비운다 (노드가 /vica/tts_stop 발행).
+
+    취소·앱 선점의 큐 청소 (2026-09-01 사용자 결정): 상태는 즉시 바뀌는데
+    입에 물린 낡은 멘트("방2 앞에 도착했습니다…")가 이어 나오면 헛소리가
+    된다. tts_stop 은 긴급 발화를 건드리지 않는다 (tts_queue 계약)."""
+
+
+@dataclass(frozen=True)
 class SpinInPlace:
     """제자리 회전. 노드는 BasicNavigator.spin() 으로 실행한다.
 
@@ -898,7 +907,9 @@ class MissionLogic:
         TURNING 의 spin 은 nav goal 이 아니라 여기서 못 끊는다 — 몇 초짜리라
         새 Navigate 가 큐에서 자연히 이어받는다.
         """
-        actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+        # 말부터 끊는다 — 이후 붙는 새 멘트(취소 확인·새 안내 시작)가
+        # 낡은 멘트 뒤에 줄 서지 않게 한다 (2026-09-01 큐 청소).
+        actions: list = [StopSpeech(), SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if (self.state in (State.NAVIGATING, State.APPROACHING, State.RETURNING)
                 and self.active_destination is not None):
             actions.append(CancelNav(self.active_destination))

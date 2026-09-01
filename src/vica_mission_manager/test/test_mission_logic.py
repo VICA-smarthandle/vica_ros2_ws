@@ -6,6 +6,7 @@ import pytest
 from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
     SpinInPlace,
+    StopSpeech,
     MSG_APPROACH_QUESTION,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
@@ -1345,3 +1346,28 @@ class TestEstopStateNarration:
         actions = logic.on_emergency("멈춰", 1.0)
         says = [a.text for a in actions if isinstance(a, Say)]
         assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
+
+
+class TestSpeechFlushOnCancel:
+    """취소·앱 선점은 하던 말부터 끊는다 (2026-09-01 큐 청소) — 상태는 즉시
+    바뀌는데 낡은 멘트("방2 앞에 도착했습니다…")가 이어 나오면 헛소리가 된다."""
+
+    def test_voice_cancel_flushes_first(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_cancel_request(1.0)
+        assert actions and isinstance(actions[0], StopSpeech)
+
+    def test_app_cancel_flushes_first(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_app_cancel(1.0)
+        assert actions and isinstance(actions[0], StopSpeech)
+
+    def test_app_preempt_flushes_first(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_app_destination(
+            make_dest(id="restroom"), BOUNDS, True, 1.0)
+        assert actions and isinstance(actions[0], StopSpeech)
+        assert any(isinstance(a, Navigate) for a in actions)
