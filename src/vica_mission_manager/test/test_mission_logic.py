@@ -7,7 +7,6 @@ from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
     SpinInPlace,
     MSG_APPROACH_QUESTION,
-    MSG_STALE_CONFIRM,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_ONBOARDING,
@@ -265,7 +264,8 @@ class TestTransitions:
         actions = logic.on_intent(make_intent(matched_destination_id="room_407"),
                                   make_dest(), BOUNDS, True, 5.0)
         assert logic.state == State.IDLE
-        assert any(isinstance(a, Say) for a in actions)
+        # 9/1 감량: 멘트 없이 접는다 — 출발만 안 하면 된다.
+        assert not any(isinstance(a, Say) for a in actions)
         assert not any(isinstance(a, Navigate) for a in actions)
 
     def test_navigating_rejects_new_navigate(self):
@@ -447,7 +447,9 @@ class TestEmergency:
         narration 은 가장 먼저 버려지는 등급이다. 사용자가 왜 멈췄는지 알 유일한
         단서가 조용히 사라지면, 눈으로 확인할 수 없는 사용자는 상태를 오해한다.
         """
-        logic = MissionLogic()
+        # 재시도 안내는 9/1 감량(침묵 재출발)이라, 재시도를 꺼서 최종 실패
+        # 안내(MSG_NAV_FAILED)를 바로 받는다 — 이 시험의 본래 관심사다.
+        logic = MissionLogic(nav_retry_limit=0)
         start_navigation(logic)
         actions = logic.on_tick(10.0, NavStatus.FAILED)
         says = [a for a in actions if isinstance(a, Say)]
@@ -1245,9 +1247,10 @@ class TestStaleConfirmListens:
         actions = logic.on_intent(
             make_intent(matched_destination_id="다른_목적지"), make_dest(),
             BOUNDS, True, 1.0)
-        says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_STALE_CONFIRM
-        assert says[0].expects_reply is True
+        # 2026-09-01 감량: 엇갈린 confirm 은 멘트 없이 접는다 — 침묵이면
+        # 사용자가 다시 말하고, 그 요청이 새 확인 흐름을 연다.
+        assert not any(isinstance(a, Say) for a in actions)
+        assert logic.state == State.IDLE
 class TestApproachVoiceHooks:
     """계획 문서(voice docs/approach-voice-flow.md)의 남은 두 조각.
 
@@ -1273,14 +1276,14 @@ class TestApproachVoiceHooks:
     def test_decline_speaks_farewell(self):
         assert MSG_APPROACH_DECLINED == "알겠습니다. 이만 물러납니다."
 
-    def test_turn_success_speaks_done_then_onboarding(self):
+    def test_turn_success_onboards_without_done_ment(self):
+        """회전 완료 멘트는 9/1 감량 — 바로 뒤 온보딩 질문이 완료를 대신한다."""
         logic = MissionLogic()
         self._accept_with_turn(logic)
         actions = logic.on_tick(7.0, NavStatus.SUCCEEDED)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [
-            "회전이 완료되었습니다.", MSG_APPROACH_ONBOARDING]
-        assert says[1].expects_reply is True         # 온보딩 끝 = 재청취 창
+        assert [s.text for s in says] == [MSG_APPROACH_ONBOARDING]
+        assert says[0].expects_reply is True         # 온보딩 끝 = 재청취 창
         assert logic.state == State.IDLE
 
     def test_turn_failure_skips_done_but_still_onboards(self):

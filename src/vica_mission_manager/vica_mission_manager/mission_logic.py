@@ -263,11 +263,7 @@ MSG_POSE_INVALID = "아직 안내할 수 없는 곳입니다. 위치 등록이 �
 MSG_NAV_NOT_READY = "아직 준비 중입니다. 잠시 후 다시 말씀해 주세요."
 MSG_ESTOP_REJECT = "지금은 비상 멈춤 상태입니다. 해제 후 다시 말씀해 주세요."
 MSG_CONFIRM_TIMEOUT = "안내 요청이 취소되었습니다."
-MSG_STALE_CONFIRM = "요청이 확인되지 않았습니다. 다시 말씀해 주세요."
 MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도해 주세요."
-# 자동 재시도 중임을 알린다. 로봇이 멈춰 있는 이유를 이용자가 알 수 있어야
-# 하고, 곧 다시 움직인다는 것도 알아야 놀라지 않는다.
-MSG_NAV_RETRY = "길이 막혀 잠시 기다렸다가 다시 가겠습니다."
 # E-stop 안내 — 움직이는 중에 걸릴 때만 말한다 (2026-08-31 최종 감량).
 # 정지 중 걸림은 침묵: 로봇이 어차피 안 움직여 사용자에게 달라지는 게
 # 없고(통신 순단이면 1.4초 자동복구), 안 알린 걸림은 해제도 침묵한다.
@@ -295,7 +291,6 @@ MSG_FINISH = "안내를 종료합니다."
 # 무응답 사다리 (3절): 못 알아들으면 재질문 1회, 그 뒤/침묵이면 떠나기 예고.
 MSG_ARRIVAL_RETRY = "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해 주세요."
 MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아가겠습니다."
-MSG_GOING_HOME = "홈으로 복귀중입니다."
 
 WAIT_MINUTES_CAP = 30
 LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유예
@@ -326,7 +321,6 @@ MSG_APPROACH_QUESTION = (
 )
 MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
-MSG_APPROACH_TURN_DONE = "회전이 완료되었습니다."
 MSG_APPROACH_ONBOARDING = (
     "안녕하세요? 반갑습니다! 저에게 말을 거실 때는 '비카야'라고 불러주세요. "
     "자, 이제 어디로 가고 싶으신가요?"
@@ -816,9 +810,11 @@ class MissionLogic:
             and self._confirming_dest_id
             and intent.matched_destination_id != self._confirming_dest_id
         ):
-            # 오래된/엇갈린 confirm 방어 (request_id 없는 v1 의 임시 방어)
+            # 오래된/엇갈린 confirm 방어 (request_id 없는 v1 의 임시 방어).
+            # 멘트 없이 접는다(2026-09-01 감량) — 침묵이면 사용자가 다시
+            # 말하고, 그 요청이 새 확인 흐름을 연다.
             self._to_idle()
-            return [Say(MSG_STALE_CONFIRM, priority="response", expects_reply=True)]
+            return []
 
         reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
         if reason != GateReason.OK:
@@ -1456,7 +1452,7 @@ class MissionLogic:
             ):
                 self.cancel_confirm_pending = False
                 self._cancel_confirm_deadline = None
-                actions.append(Say(MSG_CANCEL_KEPT, priority="response"))
+                # "이어갑니다" 멘트는 2026-09-01 감량 — 답 안 했으면 조용히 계속.
 
             if nav_status == NavStatus.SUCCEEDED:
                 dest = self.active_destination
@@ -1513,7 +1509,7 @@ class MissionLogic:
                     self._nav_retry_count += 1
                     self._retry_destination = failed_dest
                     self._retry_at = now + self.nav_retry_delay_sec
-                    actions.append(Say(MSG_NAV_RETRY, priority="response"))
+                    # 재시도 안내 멘트는 2026-09-01 감량 — 침묵 후 재출발.
                 else:
                     self._retry_destination = None
                     self._retry_at = None
@@ -1553,7 +1549,8 @@ class MissionLogic:
                 # 창이 열리고, 회전으로 사용자가 핸들 방향에 정렬됐으므로
                 # DOA 방향 관문도 자연히 유효해진다.
                 self._to_idle()
-                actions.append(Say(MSG_APPROACH_TURN_DONE, priority="response"))
+                # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 온보딩 질문이
+                # 완료를 대신한다.
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
@@ -1584,7 +1581,7 @@ class MissionLogic:
                     and now >= self._leaving_deadline
                     and not self._ear_holds(now)):
                 self._reset_arrival_dialog()
-                actions.append(Say(MSG_GOING_HOME, priority="response"))
+                # 복귀 멘트는 2026-09-01 감량 — 직전 떠나기 예고가 이미 말했다.
                 actions.extend(self._go_home(now))
             elif (self._leaving_deadline is None
                   and self._response_deadline is not None
@@ -1607,7 +1604,6 @@ class MissionLogic:
             # 복귀가 자연스럽다.
             if self._wait_until is not None and now >= self._wait_until:
                 self._reset_arrival_dialog()
-                actions.append(Say(MSG_GOING_HOME, priority="response"))
                 actions.extend(self._go_home(now))
 
         elif self.state == State.RETURNING:

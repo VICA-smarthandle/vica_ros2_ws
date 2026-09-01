@@ -10,7 +10,7 @@ from vica_mission_manager.mission_logic import (
     Destination, IntentData, MapBounds, MissionLogic, Navigate, NavStatus,
     Pose2D, Say, State,
     MSG_ASK_RESTROOM, MSG_ASK_ENTRANCE, MSG_ASK_GENERIC, MSG_ASK_WAIT_TIME,
-    MSG_WAIT_DEFAULT, MSG_FINISH, MSG_GOING_HOME, MSG_LEAVING_NOTICE,
+    MSG_WAIT_DEFAULT, MSG_FINISH, MSG_LEAVING_NOTICE,
     MSG_ARRIVAL_RETRY, MSG_WAIT_RESUME_ASK,
 )
 
@@ -154,7 +154,8 @@ class TestNoAnswerLadder:
         logic = arrive("restroom")
         logic.on_tick(10.5, NavStatus.NONE)           # 예고 (유예 3초 시작)
         acts = logic.on_tick(14.0, NavStatus.NONE)    # 유예 경과
-        assert MSG_GOING_HOME in _say(acts)
+        # 복귀 멘트는 9/1 감량 — 직전 떠나기 예고가 이미 말했으니 침묵 출발.
+        assert not _say(acts)
         assert logic.state == State.RETURNING
 
     def test_grace_interrupt_returns_to_dialog(self):
@@ -176,7 +177,8 @@ class TestWaitingState:
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("wait", wait_minutes=1), 3.0)  # 1분
         acts = logic.on_tick(3.0 + 61.0, NavStatus.NONE)
-        assert MSG_GOING_HOME in _say(acts)
+        # 대기 만료도 침묵 복귀(9/1 감량) — 대기 안내에서 이미 예고했다.
+        assert not _say(acts)
         assert logic.state == State.RETURNING
 
 
