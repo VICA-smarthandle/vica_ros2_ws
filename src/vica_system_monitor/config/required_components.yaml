@@ -142,16 +142,21 @@ robot_health_monitor_node:
       severity: 3
       grace_sec: 20.0
 
-    # nvblox·카메라. LiDAR가 2D를 계속 커버하므로 DEGRADED로 둔다.
+    # 카메라. LiDAR가 2D를 계속 커버하므로 DEGRADED로 둔다.
+    #
+    # [2026-08-31] nvblox에서 카메라 점군으로 감시 대상을 바꿨다. Nav2가 nvblox를
+    # 쓰지 않고, 카메라는 점군을 2D 스캔으로 눌러 local_costmap에 넣는 경로로만
+    # 쓴다(probes.yaml의 camera_points·depth_scan). 등급 근거는 그대로다 —
+    # 카메라가 빠져도 /scan이 2D 장애물을 계속 본다.
     #
     # [팀 확정 필요] 초안 19-11이 STOP/DEGRADED와 판정 임계를 팀 위험성 평가 대상으로
-    # 올려두었다. 3D 장애물(난간, 테이블 아래)을 놓치는 위험을 어떻게 볼지에 달렸다.
+    # 올려두었다. 낮은 장애물(난간, 테이블 아래)을 놓치는 위험을 어떻게 볼지에 달렸다.
     # 등급을 올리려면 아래 severity를 3으로 바꾸면 된다 — 코드 수정이 필요 없다.
     perception:
       required: false
       observable: true
       severity: 2
-      grace_sec: 45.0      # Docker 컨테이너 기동이 가장 늦다
+      grace_sec: 45.0      # 카메라 컨테이너 기동이 가장 늦다
 
     # [관측 불가] Smart Handle은 아두이노 -> 젯슨 상향 통신이 없다. 서보·LED·진동이
     # 실제로 동작했는지 확인할 방법이 없다(SmartHandleState.msg 주석).

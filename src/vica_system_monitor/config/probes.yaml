@@ -1,7 +1,13 @@
 # external_diagnostics_node가 감시할 대상 목록.
 #
 # 이 노드는 우리가 고칠 수 없는 대상을 대신해 /diagnostics를 발행한다. rplidar_ros,
-# nvblox(Docker), D455는 외부 패키지라 fork하지 않으면 진단을 낼 수 없다.
+# D455는 외부 패키지라 fork하지 않으면 진단을 낼 수 없다.
+#
+# [2026-08-31] nvblox 감시를 뺐다. Nav2는 더 이상 nvblox를 쓰지 않는다 —
+# nav2_params.yaml의 global·local plugins 목록 어디에도 nvblox_layer가 없다.
+# 카메라는 점군(PointCloud2)을 2D 스캔으로 눌러 local_costmap에 넣는 경로로만
+# 쓴다. 쓰지도 않는 것을 감시하면 앱에 '카메라 인식 저하'가 상시로 떠서, 정작
+# 봐야 할 결함을 사람이 무시하게 된다.
 #
 # [중요] 최상위 키는 launch의 Node(name=...)와 정확히 일치해야 한다.
 # 다르면 파라미터가 조용히 무시되고 전부 기본값으로 동작한다.
@@ -59,7 +65,7 @@ external_diagnostics_node:
     # 구독이 끊기지 않는다.
     topic_probe_names:
       - lidar_scan
-      - nvblox_slice
+      - depth_scan
       - camera_depth
       - camera_color
       - odom
@@ -78,18 +84,38 @@ external_diagnostics_node:
       fault_code: LIDAR_SCAN_STALE
       optional: false
 
-    nvblox_slice:
+    # ===== 카메라 인식 (2026-08-31, nvblox_slice 를 대신한다) =====
+    #
+    # 카메라가 costmap 까지 가는 길은 두 칸이다.
+    #
+    #   /camera/camera/depth/color/points   (PointCloud2, D455)
+    #        -> depth_band_to_scan (pointcloud_to_laserscan, 0.30~1.05 m 띠)
+    #   /camera/depth_scan                  (LaserScan)
+    #        -> local_costmap 의 observation_sources: scan depth_scan
+    #
+    # **점군 토픽은 구독하지 않는다.** 640x480 XYZRGB 를 30 Hz 로 복사하면
+    # 감시 노드가 초당 수백 MB 를 먹는 대역폭 소비자가 된다. camera_depth 가
+    # 보는 camera_info 가 같은 주기로 나오면서 수백 바이트라 그것으로 충분하다.
+    #
+    # 그래서 두 칸을 이렇게 가른다.
+    #   camera_depth(camera_info) 끊김 -> 카메라(또는 컨테이너)가 죽었다
+    #   depth_scan 만 끊김             -> 변환 노드가 죽었다. 카메라는 멀쩡하다
+    # 한 칸만 보면 이 둘이 같은 얼굴로 보인다.
+    depth_scan:
       component: perception
-      topic: /nvblox_node/static_map_slice
-      msg_type: nvblox_msgs/msg/DistanceMapSlice
-      qos: default
-      # 정상 ~9 Hz 기대(docs/vica_robot_bringup_manual.md).
-      # nvblox_base.yaml의 update_esdf_rate_hz가 10.0이다.
-      # [정지 실측 2026-08-01] 9.38 / 9.51 Hz. 기대와 일치하므로 범위를 그대로 둔다.
+      # LaserScan 이다. 빔 173개라 camera_info 와 비슷한 크기이며 점군이 아니다.
+      topic: /camera/depth_scan
+      msg_type: sensor_msgs/msg/LaserScan
+      qos: sensor_data
+      # [미검증] 변환 노드는 들어온 점군 한 장마다 스캔 한 장을 낸다. 즉 실효
+      # 주기는 카메라 점군 주기와 같다. nav2_map_test.launch.py 의 scan_time
+      # 0.0667 은 메시지 필드값이지 발행 주기가 아니다. 아래는 "끊김을 잡는"
+      # 넓은 범위이며, 실측 뒤 다른 프로브처럼 조인다:
+      #   ros2 topic hz /camera/depth_scan
       min_hz: 3.0
-      max_hz: 12.0
-      fault_code: NVBLOX_SLICE_STALE
-      # nvblox_msgs가 없으면 이 프로브만 건너뛴다. 어댑터는 계속 동작한다.
+      max_hz: 40.0
+      fault_code: DEPTH_SCAN_STALE
+      # 카메라가 없으면 이 프로브만 건너뛴다. 어댑터는 계속 동작한다.
       optional: true
 
     # [정지 실측 2026-08-01] depth 30.01 / 30.24 Hz, color 28.28 / 29.31 Hz.
@@ -198,7 +224,6 @@ external_diagnostics_node:
       - ekf_node
       - controller_server
       - motor_node
-      - nvblox_node
       - realsense_node
 
     # baseline 43.6 %. 정적 TF 캐시 최적화가 끝나면 이 값을 다시 조인다.
@@ -225,12 +250,9 @@ external_diagnostics_node:
       cmdline_pattern: mdrobot_can_keyboard_knob_node
       warn_percent: 25.0
 
-    # [신규 2026-08-01] Docker 프로세스. baseline 25.9 %.
-    # GPU 경합 조사(2026-07-30-gpu-nvblox-stt-contention.md)와 함께 볼 수 있게 둔다.
-    nvblox_node:
-      component: perception
-      cmdline_pattern: nvblox_node
-      warn_percent: 50.0
+    # [2026-08-31] nvblox_node CPU 프로브를 뺐다. Nav2 가 nvblox 를 쓰지 않으므로
+    # 그 프로세스는 이제 떠 있지 않는 것이 정상이다. baseline 25.9 % 와 GPU 경합
+    # 조사(devlog/2026-07-30-gpu-nvblox-stt-contention.md)는 그 문서에 남아 있다.
 
     # [신규 2026-08-01] Docker 프로세스. baseline 37.4 %.
     realsense_node:

@@ -70,8 +70,13 @@ def test_lidar_is_stop_severity():
 
 
 def test_perception_defaults_to_degraded():
-    """nvblox·depth 기본 등급은 DEGRADED다. 초안 19-11의 팀 확정 대상이다."""
-    assert CATALOG['NVBLOX_SLICE_STALE'].severity == SEVERITY_DEGRADED
+    """카메라 기본 등급은 DEGRADED다. 초안 19-11의 팀 확정 대상이다.
+
+    [2026-08-31] NVBLOX_SLICE_STALE 을 DEPTH_SCAN_STALE 로 바꿨다. Nav2 가
+    nvblox 를 쓰지 않고, 카메라는 점군을 2D 스캔으로 눌러 costmap 에 넣는
+    경로로만 쓴다.
+    """
+    assert CATALOG['DEPTH_SCAN_STALE'].severity == SEVERITY_DEGRADED
     assert CATALOG['CAMERA_DEPTH_STALE'].severity == SEVERITY_DEGRADED
 
 
@@ -119,10 +124,10 @@ def test_describe_unknown_code_does_not_raise():
 def test_describe_severity_override_wins():
     """required_components.yaml이 등급을 덮어쓸 수 있다.
 
-    nvblox 등급을 팀이 DEGRADED에서 STOP으로 올릴 때 코드를 고치지 않게 하는 경로다.
+    카메라 등급을 팀이 DEGRADED에서 STOP으로 올릴 때 코드를 고치지 않게 하는 경로다.
     """
-    default = describe('NVBLOX_SLICE_STALE')
-    overridden = describe('NVBLOX_SLICE_STALE', severity=SEVERITY_STOP)
+    default = describe('DEPTH_SCAN_STALE')
+    overridden = describe('DEPTH_SCAN_STALE', severity=SEVERITY_STOP)
 
     assert default.severity == SEVERITY_DEGRADED
     assert overridden.severity == SEVERITY_STOP

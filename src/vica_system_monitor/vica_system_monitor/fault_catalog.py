@@ -146,12 +146,20 @@ CATALOG: Dict[str, FaultSpec] = {
     # --- perception --------------------------------------------------------
     # nvblox·카메라 등급은 팀 위험성 평가 대상이다(초안 19절). 기본값은 DEGRADED이며
     # required_components.yaml에서 STOP으로 올릴 수 있다.
-    'NVBLOX_SLICE_STALE': FaultSpec(
+    # [2026-08-31] NVBLOX_SLICE_STALE 을 뺐다. Nav2 가 nvblox 를 쓰지 않는다 —
+    # nav2_params.yaml 의 global·local plugins 어디에도 nvblox_layer 가 없다.
+    # 쓰지 않는 것을 감시하면 앱에 결함이 상시로 떠서, 사람이 결함 표시 자체를
+    # 무시하게 된다. 카메라는 아래 두 코드로 본다.
+    #
+    # 카메라 -> costmap 경로가 두 칸이라 결함도 둘로 갈린다.
+    #   /camera/camera/depth/color/points -> depth_band_to_scan -> /camera/depth_scan
+    # CAMERA_DEPTH_STALE 도 함께 뜨면 카메라가, 이것만 뜨면 변환 노드가 죽은 것이다.
+    'DEPTH_SCAN_STALE': FaultSpec(
         'perception',
         SEVERITY_DEGRADED,
-        'nvblox 3D 장애물 정보가 {age_sec}초 동안 갱신되지 않았습니다. '
+        '카메라 기반 장애물 스캔이 {age_sec}초 동안 수신되지 않았습니다. '
         'LiDAR 기반 2D 장애물 회피는 계속 동작합니다.',
-        'nvblox Docker 컨테이너 실행 상태를 확인해 주세요.',
+        '카메라 연결과 depth_band_to_scan 노드 실행 상태를 확인해 주세요.',
     ),
     'CAMERA_DEPTH_STALE': FaultSpec(
         'perception',

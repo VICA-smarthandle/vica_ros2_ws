@@ -180,27 +180,59 @@ def test_every_process_probe_parses_cleanly():
 # ---------------------------------------------------------------------------
 
 
-def test_camera_probes_watch_camera_info_not_image():
-    """카메라는 원본 image가 아니라 camera_info를 봐야 한다.
+def test_camera_probes_never_subscribe_to_raw_frames():
+    """카메라 계열 프로브는 원본 프레임을 구독하지 않는다.
 
-    30 Hz depth 프레임을 복사하면 감시 노드가 대역폭 소비자가 된다. 같은 주기로
-    나오면서 수백 바이트인 camera_info로 충분하다.
+    30 Hz depth 프레임이나 점군을 복사하면 감시 노드가 대역폭 소비자가 된다.
+    640x480 XYZRGB 점군은 한 장에 수 MB다.
+
+    [2026-08-31] 규칙을 '반드시 camera_info'에서 '원본 프레임 금지'로 고쳤다.
+    카메라 경로에 /camera/depth_scan(LaserScan, 빔 173개)이 들어왔기 때문이다.
+    그것은 camera_info와 크기가 비슷하고 costmap이 실제로 먹는 값이라 감시
+    대상으로 맞다. 막으려던 것은 '카메라 토픽'이 아니라 '무거운 원본'이다.
     """
     params = load_probe_params()
+    heavy = ('image', 'points', 'depth/color/points')
 
     for name in params.get('topic_probe_names', []):
         topic = params[name]['topic']
-        if '/camera/' not in topic:
-            continue
-        assert 'camera_info' in topic, (
-            f"'{name}'이 {topic}을 구독한다. 카메라는 camera_info를 봐야 한다."
+        for token in heavy:
+            assert token not in topic, (
+                f"'{name}'이 {topic}을 구독한다. 원본 프레임은 감시하지 않는다."
+            )
+
+
+def test_camera_probes_are_optional():
+    """카메라가 없어도 어댑터가 기동 실패하지 않아야 한다.
+
+    [2026-08-31] 종전 test_nvblox_probe_is_optional을 대신한다. Nav2가 nvblox를
+    쓰지 않게 되어 그 프로브를 뺐고, 감시 대상이 카메라 경로로 바뀌었다.
+    """
+    params = load_probe_params()
+    for name in ('depth_scan', 'camera_depth', 'camera_color'):
+        assert params[name]['optional'] is True, (
+            f"'{name}'이 optional이 아니다. 카메라가 없으면 어댑터가 죽는다."
         )
 
 
-def test_nvblox_probe_is_optional():
-    """nvblox_msgs symlink가 빠져도 어댑터가 기동 실패하지 않아야 한다."""
+def test_nvblox_is_no_longer_watched():
+    """nvblox 감시가 되살아나지 않게 잠근다.
+
+    Nav2의 global·local plugins 어디에도 nvblox_layer가 없다. 쓰지 않는 것을
+    감시하면 앱에 결함이 상시로 떠서 사람이 결함 표시 자체를 무시하게 된다.
+    다시 쓰기로 정하면 이 시험부터 지운다.
+    """
     params = load_probe_params()
-    assert params['nvblox_slice']['optional'] is True
+    names = list(params.get('topic_probe_names', [])) + list(
+        params.get('process_probe_names', [])
+    )
+    for name in names:
+        assert 'nvblox' not in name, f"'{name}'이 남아 있다."
+        topic = params[name].get('topic', '')
+        pattern = params[name].get('cmdline_pattern', '')
+        assert 'nvblox' not in topic and 'nvblox' not in pattern, (
+            f"'{name}'이 아직 nvblox를 본다."
+        )
 
 
 def test_baseline_probes_for_optimization_gate_exist():
