@@ -805,12 +805,22 @@ class MissionLogic:
             return [Say(MSG_APPROACH_BUSY, priority="response")]
 
         if intent.need_confirm:
-            # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
-            # ros_tts_node 가 이미 재생하므로 여기서 중복 발화하지 않는다.
-            self.state = State.CONFIRMING
-            self._confirming_dest_id = intent.matched_destination_id or None
-            self._confirm_deadline = now + self.confirm_timeout_sec
-            return []
+            if (self.state == State.CONFIRMING
+                    and self._confirming_dest_id
+                    and intent.matched_destination_id == self._confirming_dest_id):
+                # 확인 중인 그 목적지를 다시 말했다("응 화장실로 가자") —
+                # 그건 답이다. LLM 이 재제안(confirm=True)으로 되돌려줘도
+                # 확정한다 (2026-09-01, 야간 로그: 같은 확인 질문이 반복되다
+                # 3수째에야 출발). 확인 답의 정식 통로로 보낸다 — 게이트
+                # 포함 (need_confirm 그대로 흘리면 게이트가 거부한다).
+                return self.on_confirm_answer(True, dest, bounds, nav_ready, now)
+            else:
+                # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
+                # ros_tts_node 가 이미 재생하므로 여기서 중복 발화하지 않는다.
+                self.state = State.CONFIRMING
+                self._confirming_dest_id = intent.matched_destination_id or None
+                self._confirm_deadline = now + self.confirm_timeout_sec
+                return []
 
         # need_confirm == false (확정 요청)
         if (

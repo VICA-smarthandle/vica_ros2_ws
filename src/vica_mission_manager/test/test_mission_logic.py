@@ -1394,3 +1394,29 @@ class TestWakeFoldsStaleQuestions:
         assert logic.on_wake(6.0) == []
         assert logic.state == State.IDLE         # 물러나지 않고 제자리
         assert logic.on_approach_answer(True, 7.0) == []
+
+
+class TestConfirmReproposalIsAnswer:
+    """확인 중 같은 목적지의 재제안(confirm=True)은 답이다 (2026-09-01) —
+    LLM 이 "응 화장실로 가자"를 재제안으로 되돌려도 출발해야 한다."""
+
+    def test_same_dest_reproposal_starts_navigation(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        assert logic.state == State.CONFIRMING
+        actions = logic.on_intent(make_intent(need_confirm=True), make_dest(),
+                                  BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_different_dest_reproposal_switches_confirming(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        actions = logic.on_intent(
+            make_intent(need_confirm=True, matched_destination_id="restroom"),
+            make_dest(id="restroom"), BOUNDS, True, 3.0)
+        assert logic.state == State.CONFIRMING
+        assert logic.confirming_dest_id == "restroom"
+        assert not any(isinstance(a, Navigate) for a in actions)
