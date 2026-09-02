@@ -180,12 +180,22 @@ robot_health_monitor_node:
       severity: 2
       grace_sec: 20.0
 
-    # [관측 불가] 음성 노드는 아직 /diagnostics를 내지 않는다. 마이크 무입력은 오디오
-    # 콜백 내부 상태라 어댑터로 볼 수 없다(초안 8.6.1절).
-    # 진단이 추가되면 observable: true로 바꾼다.
+    # [부분 관측 — 실행 여부만] 2026-09-02 사용자 판정.
+    #
+    # 볼 수 있는 것: 웨이크워드·TTS·LLM **프로세스가 떠 있는가**
+    #   (probes.yaml 의 voice_wakeword·voice_tts·voice_llm, required: true).
+    #
+    # **볼 수 없는 것: 마이크가 실제로 들리는가.** 노드가 멀쩡히 떠서 CPU 를
+    # 쓰고 있어도 소리가 안 들어올 수 있고, 그때 "멈춰"를 외쳐도 로봇은 못
+    # 듣는다. 오디오는 ROS 토픽이 아니라 콜백 안으로 직행해 밖에서는 원리적으로
+    # 볼 수 없다(vica_architecture.md 13.3절이 P1 위험으로 올려 둔 항목).
+    #
+    # 그래서 초록불의 뜻은 "음성이 정상"이 아니라 **"노드가 떠 있다"**뿐이다.
+    # 그 한계를 VOICE_NODE_SILENT 문구와 앱 표시에 적었다. 마이크 입력 카운터가
+    # 음성 노드에 들어오면 그때 진짜 관측으로 올린다(LLM 파트 수정 후).
     voice:
       required: false
-      observable: false
+      observable: true
       severity: 2
       grace_sec: 60.0      # 모델 적재가 오래 걸린다
 

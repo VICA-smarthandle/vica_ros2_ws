@@ -621,3 +621,36 @@ def test_guidance_messages_name_both_handle_and_ultrasonic():
     for code in ('GUIDANCE_NODE_SILENT', 'GUIDANCE_UPLINK_STALE'):
         action = CATALOG[code].suggested_action
         assert '초음파' in action, f'{code} 에 초음파 안내가 없습니다'
+
+
+# -- 음성: 노드 실행만 확인 (2026-09-02) ------------------------------------
+#
+# 마이크가 들리는지는 밖에서 볼 수 없다. 그래서 '실행만 확인'이라는 한계가
+# 화면에 남아 있어야 한다 — 초록불이 "음성 정상"으로 읽히면 안 된다.
+
+
+def test_voice_is_observed_by_process_only():
+    """주기 토픽이 없어 프로세스로만 본다."""
+    params = load_probe_params()
+    names = params.get('process_probe_names', [])
+    for name in ('voice_wakeword', 'voice_tts', 'voice_llm'):
+        assert name in names, f'{name} 프로브가 없습니다'
+        assert params[name]['component'] == 'voice'
+    # 음성은 topic_rate 로 볼 수 없다 — 말을 걸 때만 나오기 때문이다.
+    for name in params.get('topic_probe_names', []):
+        assert params[name]['component'] != 'voice'
+
+
+def test_voice_process_absence_is_a_fault():
+    """required 가 없으면 프로세스가 없어도 OK 로 지나가 죽음을 못 잡는다."""
+    params = load_probe_params()
+    for name in ('voice_wakeword', 'voice_tts', 'voice_llm'):
+        assert params[name].get('required') is True, f'{name} 에 required 가 없습니다'
+
+
+def test_voice_is_observable_but_not_required():
+    """실행 여부는 보되 주행을 막지 않는다."""
+    comp = load_monitor_params()['voice']
+    assert comp['observable'] is True
+    assert comp['required'] is False
+    assert comp['severity'] == 2   # DEGRADED

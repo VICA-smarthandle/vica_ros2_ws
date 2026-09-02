@@ -65,6 +65,7 @@ _TOPIC_FIELDS = (
 _PROCESS_FIELDS = (
     ('component', ''),
     ('cmdline_pattern', ''),
+    ('required', False),
     ('warn_percent', 0.0),
 )
 
@@ -324,6 +325,16 @@ class ExternalDiagnosticsNode(Node):
             pid = self.cpu_pid.get(spec.name)
 
             if pid is None:
+                if spec.required:
+                    # 이 프로세스는 있어야 한다. 부재 자체가 결함이다.
+                    # 주기 토픽이 없어 다른 관측 수단이 없는 부품에만 쓴다
+                    # (2026-09-02, 음성).
+                    stat.summary(
+                        DiagnosticStatus.ERROR,
+                        '노드가 실행되지 않고 있습니다',
+                    )
+                    stat.add('pattern', spec.cmdline_pattern)
+                    return stat
                 # 프로세스가 없다. Docker PID namespace 때문일 수도 있다.
                 # 결함이 아니라 미구성으로 보고한다.
                 stat.summary(
