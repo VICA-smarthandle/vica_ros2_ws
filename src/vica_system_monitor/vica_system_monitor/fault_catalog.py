@@ -101,6 +101,17 @@ CATALOG: Dict[str, FaultSpec] = {
         'Safety 상태가 {age_sec}초 동안 갱신되지 않았습니다.',
         'safety_supervisor_node 실행 상태를 확인해 주세요.',
     ),
+    # 감독이 /emergency_stop 하트비트를 제 시간에 못 받은 상태다. **아무도 누르지
+    # 않았는데** 주행이 막히는 유일한 안전 상태라, 화면에 이름이 없으면 관리자가
+    # 원인을 찾을 단서가 하나도 없다(2026-09-01 실기: "일부 기능 저하" 다섯 글자만
+    # 떴다). 자동 복구에 넣지 않기로 한 결정(2026-09-02 사용자 판정)이 이 문구를
+    # 더 중요하게 만든다 — 사람이 직접 풀어야 하므로 무엇을 할지 알아야 한다.
+    'SAFETY_SUPERVISOR_FAULT': FaultSpec(
+        'safety',
+        SEVERITY_STOP,
+        '비상정지 신호 갱신이 늦어 FAULT 상태입니다.',
+        '앱에서 비상정지를 걸었다 풀어주세요.',
+    ),
     'SAFETY_RESET_REQUIRED': FaultSpec(
         'safety',
         SEVERITY_STOP,

@@ -324,6 +324,25 @@ def _judge_safety(
             latched=True,
         )
 
+    if safety.state == 'FAULT':
+        # 감독이 하트비트를 제 시간에 못 받은 상태다. 래치는 안 걸렸고
+        # (estop_latched=False) 감독은 살아서 방송 중이라(fresh=True) 위의 어느
+        # 검사에도 안 걸린다. 그래서 종전에는 결함 0건으로 지나가고 전체 등급만
+        # DEGRADED('일부 기능 저하')가 됐다 — 주행이 막혔는데 화면이 이유를
+        # 말하지 않았다(2026-09-01 실기).
+        #
+        # latched=False 로 둔다. 중앙 래치가 건 것이 아니므로 관리자 reset 이
+        # 아니라 신호가 돌아오면 스스로 풀린다.
+        description = describe('SAFETY_SUPERVISOR_FAULT')
+        return Fault(
+            component='safety',
+            fault_code='SAFETY_SUPERVISOR_FAULT',
+            severity=SEVERITY_STOP,
+            detail=description.detail,
+            suggested_action=description.suggested_action,
+            latched=False,
+        )
+
     if safety.state == 'ESTOP_RELEASED_WAIT_RESET':
         description = describe('SAFETY_RESET_REQUIRED')
         return Fault(
