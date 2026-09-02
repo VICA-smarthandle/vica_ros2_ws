@@ -1420,3 +1420,47 @@ class TestConfirmReproposalIsAnswer:
         assert logic.state == State.CONFIRMING
         assert logic.confirming_dest_id == "restroom"
         assert not any(isinstance(a, Navigate) for a in actions)
+
+
+class TestDeliveryAllowsPrivate:
+    """물류 배송(`/vica/mission/request_delivery`)만 private 목적지를 허용한다
+    (2026-09-02). 일반 앱 요청은 그대로 거부하고, private 를 열어도 접근
+    불가·지도 밖·Nav2 미준비·E-stop 은 여전히 막는다."""
+
+    def test_plain_app_request_still_rejects_private(self):
+        logic = MissionLogic()
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0)
+        assert reason == GateReason.PRIVATE_DESTINATION
+
+    def test_delivery_accepts_private(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0,
+            allow_private=True)
+        assert reason == GateReason.OK
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic.state == State.NAVIGATING
+
+    def test_delivery_still_rejects_unapproachable(self):
+        logic = MissionLogic()
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private", is_approachable=False),
+            BOUNDS, True, 0.0, allow_private=True)
+        assert reason == GateReason.NOT_APPROACHABLE
+
+    def test_delivery_still_rejects_out_of_map(self):
+        logic = MissionLogic()
+        dest = make_dest(authorization="private",
+                         pose=Pose2D(x=99.0, y=99.0, yaw_deg=0.0, frame_id="map"))
+        _, reason = logic.on_app_destination(
+            dest, BOUNDS, True, 0.0, allow_private=True)
+        assert reason == GateReason.POSE_INVALID
+
+    def test_delivery_still_rejects_estop(self):
+        logic = MissionLogic()
+        logic.estop_active = True
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0,
+            allow_private=True)
+        assert reason == GateReason.ESTOP_ACTIVE

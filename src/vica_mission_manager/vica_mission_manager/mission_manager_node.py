@@ -321,6 +321,15 @@ class MissionManagerNode(Node):
             self._on_destination_request,
             callback_group=self._main_group,
         )
+        # 물류 배송 전용 문. 요청 모양은 같고 private 목적지만 추가로 허용한다.
+        # MissionCommand 처럼 "무엇을 할지는 service 이름이 정한다". 음성/LLM 은
+        # 서비스 클라이언트가 없어 이 문에 닿지 못한다(홈 복귀와 같은 논리).
+        self.create_service(
+            RequestDestination,
+            "/vica/mission/request_delivery",
+            self._on_delivery_request,
+            callback_group=self._main_group,
+        )
         self.create_service(
             Trigger,
             "/vica/mission/reload_destinations",
@@ -1002,6 +1011,31 @@ class MissionManagerNode(Node):
         response: RequestDestination.Response,
     ) -> RequestDestination.Response:
         """앱·CLI 요청을 UUID로 검증하고 기존 Mission gate를 통과시킨다."""
+        return self._handle_destination_request(
+            request, response, allow_private=False, label="공개 목적지"
+        )
+
+    def _on_delivery_request(
+        self,
+        request: RequestDestination.Request,
+        response: RequestDestination.Response,
+    ) -> RequestDestination.Response:
+        """물류 배송 요청. 공개 요청과 같되 private 목적지를 허용한다.
+
+        허용하는 것은 authorization 하나뿐이다. 접근 불가·지도 밖·Nav2 미준비·
+        E-stop 은 그대로 거부한다 — 배송이라고 벽 속으로 보내지는 않는다.
+        """
+        return self._handle_destination_request(
+            request, response, allow_private=True, label="배송 목적지"
+        )
+
+    def _handle_destination_request(
+        self,
+        request: RequestDestination.Request,
+        response: RequestDestination.Response,
+        allow_private: bool,
+        label: str,
+    ) -> RequestDestination.Response:
         try:
             request_id = str(UUID(request.request_id))
             destination_id = str(UUID(request.destination_id))
@@ -1033,13 +1067,14 @@ class MissionManagerNode(Node):
         destination = self.destinations.get(destination_id)
         before = self.logic.state
         actions, reason = self.logic.on_app_destination(
-            destination, self.map_bounds, self._nav2_ready(), self._now()
+            destination, self.map_bounds, self._nav2_ready(), self._now(),
+            allow_private=allow_private,
         )
         if reason != GateReason.OK:
             response.accepted = False
             response.message = f"목적지 요청 거부: {reason.value}"
             self.get_logger().warn(
-                f"공개 목적지 요청 거부: map_id={request.map_id} "
+                f"{label} 요청 거부: map_id={request.map_id} "
                 f"id={destination_id} reason={reason.value}"
             )
             return response

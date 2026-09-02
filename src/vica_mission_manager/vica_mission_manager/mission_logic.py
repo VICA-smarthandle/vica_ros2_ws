@@ -928,19 +928,25 @@ class MissionLogic:
 
     def on_app_destination(self, dest: Optional[Destination],
                            bounds: Optional[MapBounds], nav_ready: bool,
-                           now: float) -> tuple:
+                           now: float, allow_private: bool = False) -> tuple:
         """앱(관리자) 새 목적지 — ESTOPPED 만 빼고 어느 상태든 선점한다.
 
         2026-08-31 사용자 결정: 관리자의 새 목적지는 내부적으로 전부 취소한
         뒤 즉시 출발한다. 멘트는 기존 출발 안내만 쓴다(신규 문구 없음 —
         사용자 결정). E-stop 래치만은 못 뚫는다(reset 경로 보호). 목적지
         품질 검증(공개·좌표·Nav2 준비)은 음성 게이트와 같은 기준이다.
+
+        ``allow_private`` 는 **물류 배송 전용**이다(2026-09-02 사용자 결정).
+        배송은 교수 사무실처럼 private 로 저장된 곳으로 가는 일이 많다. 이
+        스위치는 `/vica/mission/request_delivery` 서비스만 켜며, 일반 주행
+        요청과 음성 경로는 그대로 private 를 거부한다. 접근 가능 여부·좌표·
+        Nav2 준비·E-stop 검사는 스위치와 무관하게 그대로다.
         """
         if self.estop_active or self.state == State.ESTOPPED:
             return [], GateReason.ESTOP_ACTIVE
         if dest is None:
             return [], GateReason.UNKNOWN_DESTINATION
-        if dest.authorization != "public":
+        if dest.authorization != "public" and not allow_private:
             return [], GateReason.PRIVATE_DESTINATION
         if not dest.is_approachable:
             return [], GateReason.NOT_APPROACHABLE
