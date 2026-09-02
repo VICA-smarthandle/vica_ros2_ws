@@ -556,3 +556,68 @@ def test_launch_uses_all_three_config_files():
         'required_components.yaml',
     ):
         assert name in text, f'{name}이 launch에 연결되지 않았습니다'
+
+
+# -- 관측 범위 전환 (2026-09-02) -------------------------------------------
+#
+# guidance 와 app 을 '관측 불가'에서 '관측 가능'으로 올렸다. 근거가 각각
+# 상향 통신(초음파 4.8Hz)과 브리지 상시 발행(/robot_status 2Hz)이라,
+# 그 근거가 사라지면 이 시험이 먼저 깨져야 한다.
+
+
+def _probe(name):
+    params = load_probe_params()
+    assert name in params.get('topic_probe_names', []), f'{name} 프로브가 없습니다'
+    return params[name]
+
+
+def test_guidance_is_observable_with_two_rungs():
+    """드라이버 생존과 아두이노 응답을 따로 본다 — 한 칸이면 구분이 안 된다."""
+    comp = load_monitor_params()['guidance']
+    assert comp['observable'] is True
+
+    state = _probe('handle_state')
+    uplink = _probe('handle_uplink')
+    assert state['component'] == 'guidance'
+    assert uplink['component'] == 'guidance'
+    # 서로 다른 토픽이어야 두 고장을 가른다.
+    assert state['topic'] != uplink['topic']
+
+
+def test_guidance_does_not_block_driving():
+    """핸들이 없어도 로봇은 달린다. STOP 으로 올리면 진짜 주행 결함과 섞인다."""
+    comp = load_monitor_params()['guidance']
+    assert comp['required'] is False
+    assert comp['severity'] == 2   # DEGRADED
+
+
+def test_app_bridge_is_observable_and_warn_only():
+    """브리지는 로봇 동작과 무관하다 — WARN 상한이다."""
+    comp = load_monitor_params()['app']
+    assert comp['observable'] is True
+    assert comp['required'] is False
+    assert comp['severity'] == 1   # WARN
+    assert _probe('app_bridge')['component'] == 'app'
+
+
+def test_new_probe_fault_codes_exist_in_catalog():
+    """문구 없는 결함 코드는 화면에 코드만 뜬다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    for name in ('handle_state', 'handle_uplink', 'app_bridge'):
+        code = _probe(name)['fault_code']
+        assert code in CATALOG, f'{code} 문구가 카탈로그에 없습니다'
+
+
+def test_new_fault_messages_say_whether_driving_is_affected():
+    """관리자가 로봇을 세우러 뛰어갈지 말지를 문구에서 바로 알아야 한다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    for code in ('GUIDANCE_NODE_SILENT', 'GUIDANCE_UPLINK_STALE', 'APP_BRIDGE_SILENT'):
+        assert '주행' in CATALOG[code].detail_template, f'{code} 에 주행 영향이 없습니다'
+
+
+def test_guidance_messages_name_both_handle_and_ultrasonic():
+    """아두이노 하나에 둘이 물려 있다. 하나만 적으면 나머지를 못 찾는다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    for code in ('GUIDANCE_NODE_SILENT', 'GUIDANCE_UPLINK_STALE'):
+        action = CATALOG[code].suggested_action
+        assert '초음파' in action, f'{code} 에 초음파 안내가 없습니다'
