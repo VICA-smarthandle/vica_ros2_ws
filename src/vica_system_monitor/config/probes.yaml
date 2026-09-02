@@ -196,6 +196,30 @@ external_diagnostics_node:
       fault_code: LOCALIZATION_WHEEL_ODOM_STALE
       optional: false
 
+    # -----------------------------------------------------------------------
+    # link 프로브 — 토픽에 발행자가 붙어 있는지만 본다 (2026-09-02)
+    # -----------------------------------------------------------------------
+    #
+    # topic_rate 와 다르다. **주기를 재지 않고 구독도 하지 않는다.** DDS 그래프에
+    # 발행자가 몇 개인지만 센다.
+    #
+    # 왜 필요한가: /cmd_vel_req 는 로봇이 달릴 때만 메시지가 흐른다. 서 있을 때
+    # 0 Hz 가 정상이라 주기로는 "길이 열렸는가"를 판정할 수 없다. 그런데 그 길을
+    # 만드는 collision_monitor 가 활성화에 실패하면 **발행자 자체가 0** 이 된다 —
+    # 그것이 정지 중에도 읽히는 유일한 신호다.
+    link_probe_names:
+      - cmd_vel_req_link
+
+    # 발행자는 collision_monitor 하나다(nav2_params.yaml 의
+    # cmd_vel_out_topic: "/cmd_vel_req"). behavior_server 도 노드 지정 remap 으로
+    # 같은 토픽에 붙지만, 그쪽은 복구 동작 때만이라 상시로 있다고 보지 않는다.
+    # 그래서 1 개 이상이면 통과다.
+    cmd_vel_req_link:
+      component: navigation
+      topic: /cmd_vel_req
+      min_publishers: 1
+      fault_code: NAV2_CMD_PATH_DOWN
+
     # ===== 스마트 핸들 + 초음파 (2026-09-02) =====
     #
     # **아두이노 하나에 둘이 같이 물려 있다.** 핸들 안내(서보·LED)와 초음파 거리

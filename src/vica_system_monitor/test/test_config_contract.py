@@ -118,12 +118,15 @@ def test_no_orphan_probe_definitions():
     params = load_probe_params()
     listed = set(params.get('topic_probe_names', []))
     listed |= set(params.get('process_probe_names', []))
+    # link 프로브(2026-09-02)도 같은 규칙을 받는다.
+    listed |= set(params.get('link_probe_names', []))
 
     scalars = {
         'diagnostic_period_sec',
         'process_scan_period_sec',
         'topic_probe_names',
         'process_probe_names',
+        'link_probe_names',
     }
 
     for key, value in params.items():
@@ -654,3 +657,43 @@ def test_voice_is_observable_but_not_required():
     assert comp['observable'] is True
     assert comp['required'] is False
     assert comp['severity'] == 2   # DEGRADED
+
+
+# -- 주행 명령 경로 감시 (2026-09-02) ---------------------------------------
+#
+# collision_monitor 가 활성화에 실패하면 /cmd_vel_req 발행자가 0 이 된다.
+# 그것이 로봇이 서 있을 때도 읽히는 유일한 신호다.
+
+
+def test_cmd_vel_req_link_is_watched():
+    """주행 명령이 나갈 길이 열렸는지 본다."""
+    params = load_probe_params()
+    assert 'cmd_vel_req_link' in params.get('link_probe_names', [])
+    spec = params['cmd_vel_req_link']
+    assert spec['topic'] == '/cmd_vel_req'
+    assert spec['component'] == 'navigation'
+    assert spec['min_publishers'] >= 1
+
+
+def test_cmd_vel_req_link_blocks_driving():
+    """길이 막히면 주행이 안 된다 — WARN 으로 두면 놓친다."""
+    from vica_system_monitor.fault_catalog import CATALOG, SEVERITY_STOP
+    code = load_probe_params()['cmd_vel_req_link']['fault_code']
+    assert CATALOG[code].severity == SEVERITY_STOP
+
+
+def test_cmd_vel_req_link_tells_what_to_do():
+    """원인을 짐작해 껐다 켜는 일이 없어야 한다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    spec = CATALOG[load_probe_params()['cmd_vel_req_link']['fault_code']]
+    assert 'collision_monitor' in spec.suggested_action
+    assert 'Nav2' in spec.suggested_action
+
+
+def test_link_probe_is_not_a_topic_probe():
+    """구독하면 안 된다. 그래프만 본다 — 대역폭을 쓰지 않는 것이 설계다."""
+    params = load_probe_params()
+    for name in params.get('link_probe_names', []):
+        assert name not in params.get('topic_probe_names', [])
+        assert 'msg_type' not in params[name]
+        assert 'min_hz' not in params[name]
