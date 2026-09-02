@@ -989,7 +989,35 @@ class MissionManagerNode(Node):
         now = self._now()
         if command == "cancel":
             # 앱 취소는 전면 개방 판 — 음성 취소(on_cancel_request)와 다르다.
-            return self.logic.on_app_cancel(now)
+            was_idle = self.logic.state is State.IDLE
+            result = self.logic.on_app_cancel(now)
+            if was_idle:
+                # 취소할 것이 없어 조용히 수락한 경우다. 그대로 두면 앱 화면이
+                # 로봇보다 뒤처져 있을 때(예: 종료 이벤트를 놓쳤을 때) 취소를
+                # 눌러도 아무 일이 없는 것처럼 보인다 — 2026-09-02 실기에서
+                # 홈 도착 뒤 정확히 그렇게 굳었다. 지금이 대기라는 사실을 한 번
+                # 알려 앱이 스스로 되맞추게 한다. goal 은 이미 없으므로
+                # destination 은 넣지 않는다.
+                #
+                # **왜 새 이름인가**(2026-09-02 사용자 판정, 유지 결정).
+                # 이 발행은 그날 보고된 결함의 수리가 아니다. 그 결함은 앱
+                # 상태 노드가 return_home_* 를 종료로 안 세던 것이고 거기서
+                # 이미 고쳤다. 이것은 **앞으로 어긋날 때를 위한 보험**이다 —
+                # /vica_goal_event 는 VOLATILE 이라 앱 노드가 재시작하면
+                # '출발'만 듣고 '도착'을 놓칠 수 있고, 그때 유일한 회복은
+                # goal_event_timeout_sec(600초)뿐이라 실기에서는 없는 것과
+                # 같다. 이 신호가 그 600초를 취소 버튼 한 번으로 줄인다.
+                #
+                # 기존 이름을 재사용하지 않은 이유: goal_canceled 로 보내면
+                # 앱이 팝업을 띄운다(needsPopup). 취소한 주행이 없는데 "주행이
+                # 취소되었습니다"는 거짓이고, 그렇게 쌓인 팝업은 관리자가 읽지
+                # 않고 닫는 습관을 만든다 — 성공을 팝업으로 안 알리는 것과
+                # 같은 이유다. 비용은 이름 하나가 3곳(이 노드·앱 enum·앱
+                # provider)에 퍼지는 것이고, 그 값을 치르기로 했다.
+                self._publish_goal_event(
+                    "state_idle", None, "취소할 주행이 없습니다(대기 중)."
+                )
+            return result
         if command == "pause":
             return self.logic.on_pause_request(now)
         if command == "resume":
@@ -1367,17 +1395,23 @@ class MissionManagerNode(Node):
         return self.get_clock().now().nanoseconds / 1e9
 
     def _publish_goal_event(self, event: str, destination, reason: str = "") -> None:
+        """goal 사건을 앱에 알린다. destination 이 None 이면 좌표 없이 보낸다.
+
+        목적지 없는 사건이 하나 있다 — 취소할 주행이 없을 때의 `state_idle`.
+        빈 값으로 채우는 이유는 앱이 키 부재와 빈 값을 다르게 다루지 않기
+        때문이고, 키를 빼면 옛 앱에서 KeyError 가 날 수 있어서다.
+        """
         msg = String()
         msg.data = json.dumps(
             {
                 "event": event,
                 "map_id": self._map_id,
-                "location_id": destination.id,
-                "destination_id": destination.id,
-                "name": destination.name,
-                "x": destination.pose.x,
-                "y": destination.pose.y,
-                "yaw": destination.pose.yaw_deg,
+                "location_id": destination.id if destination else "",
+                "destination_id": destination.id if destination else "",
+                "name": destination.name if destination else "",
+                "x": destination.pose.x if destination else 0.0,
+                "y": destination.pose.y if destination else 0.0,
+                "yaw": destination.pose.yaw_deg if destination else 0.0,
                 "reason": reason,
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
             },
