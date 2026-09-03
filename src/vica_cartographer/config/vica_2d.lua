@@ -132,8 +132,19 @@ TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 -- 0건 · 구속조건 수 급감 없음. 되돌릴 때는 이 한 줄을 지운다(기본 7.0).
 POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 3.0
 
--- Conservative loop-closure values for repeated indoor corridors.
-POSE_GRAPH.constraint_builder.min_score = 0.62
+-- [CM-3] loop closure 합격 점수 0.62 -> 0.70 (2026-09-03, CM-7 2회차)
+--
+-- CM-7(창 3 m) 1회차: 1 m 초과 48~59 % -> 12.2 %, 최대 7.85 -> 3.15 m 로 번짐은
+-- 크게 줄었지만, 가짜 매칭 532건 중 309건이 창 끝(2~3 m)에 몰렸다. 창은 "얼마나
+-- 멀리 틀리나"만 줄이고 틀린 매칭을 받는 버릇은 못 고친다. 그 회차 점수를
+-- 진짜(<=1 m, 중앙 71.0)와 가짜(>1 m, 중앙 67.0)로 가르면 0.70 에서
+-- 가짜 73 % 탈락 · 진짜 56 %(2168건) 유지다.
+--
+-- 위험: 정상 회차의 진짜 꿰매기도 같이 잘려 지도가 덜 닫힐 수 있다. 판정은
+-- 1 m 초과 건수가 줄면서 **구속조건 총수가 급감하지 않는 것** — 절반 밑으로
+-- 떨어지면 0.68 로 물러선다. 이 회차는 bag 필수(값별 offline 비교용).
+-- 근거: docs/cartographer_corridor_mapping.md CM-3 · CM-7 1회차 결과.
+POSE_GRAPH.constraint_builder.min_score = 0.70
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.66
 POSE_GRAPH.optimization_problem.huber_scale = 1e2
 POSE_GRAPH.optimize_every_n_nodes = 35
