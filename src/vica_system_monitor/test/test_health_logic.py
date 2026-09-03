@@ -665,3 +665,62 @@ def test_extra_faults_join_ranking_and_state():
     assert snapshot.state == STATE_DEGRADED
     # 부품 자체는 정상으로 남는다 — 관측 불가는 결함이 아니다.
     assert snapshot.readiness['motor'] == READY
+
+
+def test_warn_diagnostic_keeps_component_ready_and_state_ready():
+    """진단 경고(WARN)는 부품 등급으로 승격하지 않는다 (2026-09-03).
+
+    /odom 주기가 잠깐 처지면 어댑터가 WARN 을 낸다. 부품은 살아서 보고하는 중이므로
+    READY 를 유지하고 결함만 WARN 으로 올린다. 종전에는 STOP 으로 승격돼 앱에
+    "주행 불가"가 번갈아 떴다.
+    """
+    probes = [
+        probe(
+            'localization',
+            required=True,
+            ok=False,
+            severity=SEVERITY_STOP,
+            last_seen_ns=5 * SEC,
+            ever_ok=True,
+        )._replace(fault_code='DIAG_COMPONENT_WARN', detail='경고를 보고했습니다.'),
+    ]
+    snapshot = evaluate(probes, safety(), now_ns=6 * SEC, started_ns=0)
+    assert snapshot.readiness['localization'] == READY
+    assert [f.fault_code for f in snapshot.faults] == ['DIAG_COMPONENT_WARN']
+    assert snapshot.faults[0].severity == SEVERITY_WARN
+    assert snapshot.state == STATE_READY
+
+
+def test_error_diagnostic_still_escalates_to_policy_severity():
+    """ERROR·STALE 은 종전대로 부품 등급(STOP)으로 올라가 주행을 막는다."""
+    probes = [
+        probe(
+            'localization',
+            required=True,
+            ok=False,
+            severity=SEVERITY_STOP,
+            last_seen_ns=5 * SEC,
+            ever_ok=True,
+        )._replace(fault_code='DIAG_COMPONENT_STALE'),
+    ]
+    snapshot = evaluate(probes, safety(), now_ns=6 * SEC, started_ns=0)
+    assert snapshot.readiness['localization'] == NOT_READY
+    assert snapshot.faults[0].severity == SEVERITY_STOP
+    assert snapshot.state == STATE_STOPPED
+
+
+def test_stale_warn_diagnostic_is_not_a_free_pass():
+    """경고 항목이라도 신선하지 않으면 통과시키지 않는다."""
+    probes = [
+        probe(
+            'localization',
+            required=True,
+            ok=False,
+            severity=SEVERITY_STOP,
+            last_seen_ns=0,
+            timeout_ns=SEC,
+            ever_ok=True,
+        )._replace(fault_code='DIAG_COMPONENT_WARN'),
+    ]
+    snapshot = evaluate(probes, safety(), now_ns=10 * SEC, started_ns=0)
+    assert snapshot.readiness['localization'] == NOT_READY

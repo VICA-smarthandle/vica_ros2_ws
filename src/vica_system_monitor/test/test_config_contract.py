@@ -756,3 +756,10 @@ def test_monitor_declares_adapter_grace():
     params = load_monitor_params()
     assert 'adapter_grace_sec' in params
     assert float(params['adapter_grace_sec']) > 0.0
+
+
+def test_monitor_declares_raise_confirm_ticks():
+    """발생 확인 tick 이 설정에 있고 1 이상이다."""
+    params = load_monitor_params()
+    assert 'raise_confirm_ticks' in params
+    assert int(params['raise_confirm_ticks']) >= 1

@@ -36,6 +36,10 @@ UNKNOWN = 0
 NOT_READY = 1
 READY = 2
 
+# 진단이 WARN 으로 온 항목의 통과 코드(agg_parser.to_fault_code). 이 코드는 부품
+# 등급으로 승격하지 않는다 — 자세한 이유는 _judge_probe 에.
+WARN_PASSTHROUGH_CODE = 'DIAG_COMPONENT_WARN'
+
 # RobotHealth.msg의 STATE_* 상수와 같은 값이다.
 STATE_STARTING = 0
 STATE_READY = 1
@@ -199,6 +203,13 @@ def _judge_probe(
     if healthy:
         return READY, _no_fault()
 
+    # 경고는 경고로 둔다(2026-09-03). 진단이 WARN(예: /odom 주기가 잠깐 처짐)을 내면
+    # 부품은 살아서 보고하는 중이다 — READY 를 유지하고 결함만 WARN 등급으로 올린다.
+    # 종전에는 부품 정책 등급(위치추정=STOP)으로 승격돼 앱에 "주행 불가"가 20~40초씩
+    # 번갈아 떴다. 로봇은 정상 주행이었다. ERROR·STALE(정말 끊김)은 그대로 승격한다.
+    if fresh and item.fault_code == WARN_PASSTHROUGH_CODE:
+        return READY, _build_fault(item, severity=SEVERITY_WARN)
+
     # 기동 유예는 "아직 안 뜬 것"만 봐준다.
     #
     # 판정 기준이 신선도가 아니라 ever_ok인 이유: aggregator는 아직 뜨지 않은 부품에도
@@ -233,13 +244,16 @@ def _in_grace(now_ns: int, started_ns: int, grace_ns: int) -> bool:
     return elapsed < grace_ns
 
 
-def _build_fault(item: ComponentProbe) -> Fault:
-    """Turn a failing probe into a Fault using the catalog."""
+def _build_fault(item: ComponentProbe, severity: Optional[int] = None) -> Fault:
+    """Turn a failing probe into a Fault using the catalog.
+
+    ``severity`` 를 주면 부품 정책 등급 대신 그것을 쓴다(WARN 통과 경로).
+    """
     code = item.fault_code or _default_fault_code(item.name)
     description = describe(
         code,
         component=item.name,
-        severity=item.severity,
+        severity=item.severity if severity is None else severity,
         name=item.name,
         message=item.detail,
     )

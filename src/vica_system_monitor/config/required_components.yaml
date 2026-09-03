@@ -50,6 +50,10 @@ robot_health_monitor_node:
     # 까지 떨어진 기록이 있다. 지연시키는 것은 '해소'뿐이고 '발생'은 즉시 알린다 —
     # 결함을 늦게 지우는 것은 안전한 방향이다.
     clear_confirm_ticks: 2
+    # "발생"도 연속 3 tick(3초) 관측돼야 알린다(2026-09-03). 임계값 언저리에서 1~2초
+    # 튀는 주기 프로브가 발생/해소를 번갈아 내던 것을 막는다. 래치 결함(E-stop)은
+    # 이 값과 무관하게 즉시 알린다.
+    raise_confirm_ticks: 3
 
     # Nav2 lifecycle 상태 폴링 주기. GetState 서비스를 부른다.
     nav2_state_poll_period_sec: 2.0

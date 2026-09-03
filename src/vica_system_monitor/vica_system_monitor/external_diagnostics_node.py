@@ -189,10 +189,13 @@ class ExternalDiagnosticsNode(Node):
                     )
                 continue
 
+            # 창 10초(2026-09-03, 종전 5초). CPU 가 눌릴 때 /odom 이 1~2초 처지는 것이
+            # 5초 평균에서는 바로 드러나 경고가 번갈아 떴다. 10초 평균은 순간 변동을
+            # 묻되 진짜 끊김(0 Hz)은 그대로 잡는다.
             param = FrequencyStatusParam(
                 {'min': spec.min_hz, 'max': spec.max_hz},
                 tolerance=0.2,
-                window_size=5,
+                window_size=10,
             )
             label = f'{spec.component}: {spec.topic} frequency'
             diagnostic = HeaderlessTopicDiagnostic(label, self.updater, param)
