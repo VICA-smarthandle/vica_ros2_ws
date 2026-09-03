@@ -47,11 +47,25 @@ ekf_filter_node:
     # Canonical source: src/vica_localization/config/ekf.yaml
     # encoder_feedback publishes raw wheel odometry without TF.
     odom0: /wheel/odom
+    # [2026-09-03 회전(vyaw)을 바퀴에서 뺀다 — 방향은 자이로가 맡는다]
+    #
+    # 복도 매핑 bag(cm3_corridor, 14.5분, 출발점 복귀 = 정답 360°)에서 센서별
+    # 누적 회전: 자이로 +361.1° · 바퀴 +334.9°(7 % 과소) · EKF +343.8°.
+    # EKF 가 바퀴 쪽을 더 따라(자이로 쪽으로 34 %만) 복도 24 m 마다 약 4° 씩
+    # 휘어 그려졌다(두 회차 동일, 실측 폭은 양쪽 같음). 바퀴 과소는 모든 속도
+    # 에서 나타났고(비 0.87~0.97), wheel_base_m 은 8월 다른 바닥에서 이미 한 번
+    # 맞춘 값이라 장소마다 다시 틀어진다 — 강건한 축은 yaw 를 자이로에 맡기는 것.
+    #
+    # 바꾼 것: 아래 12번째 항목(vyaw) true -> false. 직진·횡(vx·vy)은 그대로.
+    # 자이로 편향은 어댑터가 기동 시 + 정차마다 재추정한다(이번 bag 120회).
+    # 판정: 제자리 10바퀴 벤치에서 EKF 누적 3600°±5° → 매핑 1회에서 복도 휨 소멸.
+    # 되돌리기: vyaw 를 true 로. 실패 신호는 정차 후 재출발에서 yaw 가 튀는 것
+    # (편향 재추정 오류)이다.
     odom0_config: [
       false, false, false,
       false, false, false,
       true,  true,  false,
-      false, false, true,
+      false, false, false,
       false, false, false
     ]
     odom0_differential: false
