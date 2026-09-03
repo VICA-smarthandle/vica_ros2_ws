@@ -575,6 +575,83 @@ class TestPauseResumeCancel:
         assert reason == GateReason.NOT_PAUSED
 
 
+class TestPauseDuringHomeReturn:
+    """관리자 홈 복귀도 앱 버튼으로 멈췄다 다시 보낼 수 있다 (2026-09-03).
+
+    배송을 마치고 홈으로 돌아가는 로봇을 잠깐 세울 길이 없었다. 재개는 반드시
+    RETURNING 으로 돌아가야 한다 — NAVIGATING 으로 재개하면 도착이
+    goal_succeeded 로 나가 앱 배송 카드가 '완료'로 못 넘어간다.
+    """
+
+    def _start_home_return(self):
+        logic = MissionLogic(return_destination=make_home())
+        accepted, _, _ = logic.on_return_home_request(True, 0.0)
+        assert accepted and logic.state == State.RETURNING
+        return logic
+
+    def test_pause_then_resume_stays_a_home_return(self):
+        logic = self._start_home_return()
+        actions, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.PAUSED
+        assert logic.paused_destination is logic.return_destination
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert cancels and cancels[0].event == "goal_paused"
+
+        actions, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.RETURNING
+        assert logic._returning_home is True
+        navigate = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigate) == 1
+        assert navigate[0].destination is logic.return_destination
+        assert logic.paused_destination is None
+        # 관리자 홈 복귀는 출발도 말없이 나간다 — 재개도 새 멘트가 없다.
+        assert not [a for a in actions if isinstance(a, Say)]
+
+        # 도착하면 홈 복귀로 끝난다. 재접근 억제도 걸지 않는다.
+        logic.on_tick(3.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert logic._suppressed_tracks == {}
+
+    def test_pause_is_refused_for_auto_return_after_approach(self):
+        # 접근 뒤 자동 복귀는 사람이 부른 주행이 아니다 — 재개할 주체가 없다.
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
+        logic._enter_returning(0.0)
+        assert logic.state == State.RETURNING and logic._returning_home is False
+        _, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.NOT_NAVIGATING
+        assert logic.state == State.RETURNING
+
+    def test_estop_while_paused_drops_the_home_return(self):
+        logic = self._start_home_return()
+        logic.on_pause_request(1.0)
+        logic.on_estop(True, 2.0)
+        assert logic.paused_destination is None
+        assert logic._paused_returning_home is False
+        logic.on_estop(False, 3.0)
+        logic.on_tick(10.0, NavStatus.NONE)
+        _, reason = logic.on_resume_request(True, 11.0)
+        assert reason == GateReason.NOT_PAUSED
+
+    def test_cancel_while_paused_goes_idle_and_forgets_home_return(self):
+        logic = self._start_home_return()
+        logic.on_pause_request(1.0)
+        _, reason = logic.on_app_cancel(2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert logic._paused_returning_home is False
+        assert logic._returning_home is False
+
+    def test_plain_navigation_pause_is_unchanged(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        assert logic._paused_returning_home is False
+        _, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK and logic.state == State.NAVIGATING
+
+
 class TestVoiceCancelConfirm:
     """음성 취소는 잘못 알아들으면 안내가 끊기므로 되물어 확인한다."""
 

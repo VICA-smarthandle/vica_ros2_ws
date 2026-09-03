@@ -480,13 +480,24 @@ def check_cancel_gate(state: State, estop_active: bool) -> GateReason:
     return GateReason.OK
 
 
-def check_pause_gate(state: State, estop_active: bool) -> GateReason:
-    """일시정지 게이트. 실제로 주행 중일 때만 멈출 수 있다."""
+def check_pause_gate(
+    state: State, estop_active: bool, returning_home: bool = False
+) -> GateReason:
+    """일시정지 게이트. 실제로 주행 중일 때만 멈출 수 있다.
+
+    ``returning_home`` 은 관리자가 앱에서 부른 홈 복귀 중이라는 뜻이다
+    (2026-09-03). 그 복귀도 앱 버튼으로 멈췄다 다시 보낼 수 있어야 한다 —
+    배송을 마치고 홈으로 돌아가는 로봇을 관리자가 잠깐 세울 길이 없었다.
+    접근 뒤 자동 복귀는 여전히 막는다. 그 복귀는 사람이 부른 주행이 아니라
+    "다시 출발"을 누를 주체가 없다.
+    """
     if estop_active or state == State.ESTOPPED:
         return GateReason.ESTOP_ACTIVE
-    if state != State.NAVIGATING:
-        return GateReason.NOT_NAVIGATING
-    return GateReason.OK
+    if state == State.NAVIGATING:
+        return GateReason.OK
+    if state == State.RETURNING and returning_home:
+        return GateReason.OK
+    return GateReason.NOT_NAVIGATING
 
 
 def check_resume_gate(
@@ -747,6 +758,12 @@ class MissionLogic:
         # 일시정지로 보관한 목적지. active_destination 은 _to_idle/_enter_estopped 에서
         # 비워지므로 재개할 목적지는 따로 들고 있어야 한다.
         self.paused_destination: Optional[Destination] = None
+        # 보관한 목적지가 관리자 홈 복귀였는가(2026-09-03). 재개할 때 일반 안내
+        # 주행(NAVIGATING)이 아니라 복귀(RETURNING)로 돌아가야 끝날 때
+        # return_home_* 이벤트가 나간다 — 앱의 배송 카드는 홈 복귀 중에 그
+        # 이름만 보고 '완료'로 넘어간다. 일반 주행으로 재개하면 도착이
+        # goal_succeeded 로 나가 카드가 영영 '홈 복귀 중'에 남는다.
+        self._paused_returning_home: bool = False
         # 음성 취소 재확인 대기 여부. 확인하는 동안에도 로봇은 계속 주행한다.
         self.cancel_confirm_pending: bool = False
 
@@ -1000,7 +1017,9 @@ class MissionLogic:
 
     def on_pause_request(self, now: float) -> tuple:
         """일시정지. goal 을 취소하되 목적지는 보관해 재개할 수 있게 둔다."""
-        reason = check_pause_gate(self.state, self.estop_active)
+        reason = check_pause_gate(
+            self.state, self.estop_active, returning_home=self._returning_home
+        )
         if reason != GateReason.OK:
             return [], reason
 
@@ -1009,6 +1028,12 @@ class MissionLogic:
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             CancelNav(destination, event="goal_paused"),
         ]
+        # 홈 복귀를 멈춘 것이면 그 사실을 보관분 쪽으로 옮긴다. RETURNING 을
+        # 떠나므로 현재 복귀 표시는 내리고, 재개할 때 _enter_returning 이 다시 켠다.
+        self._paused_returning_home = (
+            self.state == State.RETURNING and self._returning_home
+        )
+        self._returning_home = False
         self.state = State.PAUSED
         self.paused_destination = destination
         self.active_destination = None
@@ -1031,6 +1056,12 @@ class MissionLogic:
 
         destination = self.paused_destination
         assert destination is not None  # check_resume_gate 가 보장
+        if self._paused_returning_home:
+            # 홈 복귀를 이어간다. 관리자 홈 복귀는 출발도 말없이 나가므로
+            # 재개도 말없이 간다(새 멘트 없음). 좌표는 지금의 홈을 다시 읽는다.
+            self._paused_returning_home = False
+            self.paused_destination = None
+            return self._enter_returning(now, is_home=True), GateReason.OK
         self.state = State.NAVIGATING
         self.active_destination = destination
         self.paused_destination = None
@@ -1890,6 +1921,7 @@ class MissionLogic:
         # 보관한 목적지도 함께 버린다. 남겨두면 E-stop 뒤에 "다시 출발"이 통해
         # 이전 Goal 자동 재개 금지 원칙이 깨진다.
         self.paused_destination = None
+        self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
         self._confirming_dest_id = None
@@ -1914,6 +1946,7 @@ class MissionLogic:
         self.state = State.IDLE
         self.active_destination = None
         self.paused_destination = None
+        self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
         self._confirming_dest_id = None
