@@ -1026,7 +1026,8 @@ class MissionManagerNode(Node):
         E-stop 은 그대로 거부한다 — 배송이라고 벽 속으로 보내지는 않는다.
         """
         return self._handle_destination_request(
-            request, response, allow_private=True, label="배송 목적지"
+            request, response, allow_private=True, label="배송 목적지",
+            is_delivery=True,
         )
 
     def _handle_destination_request(
@@ -1035,6 +1036,7 @@ class MissionManagerNode(Node):
         response: RequestDestination.Response,
         allow_private: bool,
         label: str,
+        is_delivery: bool = False,
     ) -> RequestDestination.Response:
         try:
             request_id = str(UUID(request.request_id))
@@ -1068,7 +1070,7 @@ class MissionManagerNode(Node):
         before = self.logic.state
         actions, reason = self.logic.on_app_destination(
             destination, self.map_bounds, self._nav2_ready(), self._now(),
-            allow_private=allow_private,
+            allow_private=allow_private, is_delivery=is_delivery,
         )
         if reason != GateReason.OK:
             response.accepted = False

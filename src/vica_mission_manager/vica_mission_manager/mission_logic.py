@@ -263,6 +263,11 @@ def say_destination(template: str, name: str) -> str:
 
 
 MSG_START = "{name}{josa} 안내를 시작합니다."
+# 물류 배송 전용 출발 멘트 (2026-09-03 사용자 승인). 배송은 사람을 데려가는
+# 일이 아니라 물건을 옮기는 일이라 "안내"가 어색하다. 문장 틀만 다르고 조사
+# 계산(say_destination)은 그대로다 — 407호든 식당이든 받침에 맞게 붙는다.
+# 배송 경로(request_delivery)에서만 쓴다. 음성·원격 주행은 MSG_START 그대로.
+MSG_START_DELIVERY = "{name}{josa} 배달을 시작합니다."
 MSG_ARRIVED_FALLBACK = "{name}에 도착했습니다."
 MSG_BUSY = "지금 이동 중입니다. 먼저 현재 안내를 취소해 주세요."
 MSG_UNKNOWN_DEST = "아직 안내할 수 없는 곳입니다."
@@ -928,13 +933,20 @@ class MissionLogic:
 
     def on_app_destination(self, dest: Optional[Destination],
                            bounds: Optional[MapBounds], nav_ready: bool,
-                           now: float, allow_private: bool = False) -> tuple:
+                           now: float, allow_private: bool = False,
+                           is_delivery: bool = False) -> tuple:
         """앱(관리자) 새 목적지 — ESTOPPED 만 빼고 어느 상태든 선점한다.
 
         2026-08-31 사용자 결정: 관리자의 새 목적지는 내부적으로 전부 취소한
         뒤 즉시 출발한다. 멘트는 기존 출발 안내만 쓴다(신규 문구 없음 —
         사용자 결정). E-stop 래치만은 못 뚫는다(reset 경로 보호). 목적지
         품질 검증(공개·좌표·Nav2 준비)은 음성 게이트와 같은 기준이다.
+
+        ``is_delivery`` 는 출발 멘트만 가른다 — 배송이면 "배달을 시작합니다",
+        아니면 "안내를 시작합니다"(2026-09-03 사용자 승인). ``allow_private``
+        와 지금은 늘 같이 켜지지만 뜻이 달라 인자를 나눠 둔다: 하나는 권한,
+        하나는 말투다. 겸용하면 나중에 "배송인데 공개 목적지" 같은 경우에
+        조용히 어긋난다.
 
         ``allow_private`` 는 **물류 배송 전용**이다(2026-09-02 사용자 결정).
         배송은 교수 사무실처럼 private 로 저장된 곳으로 가는 일이 많다. 이
@@ -958,7 +970,8 @@ class MissionLogic:
         self.state = State.NAVIGATING
         self.active_destination = dest
         self._nav_from_app = True
-        actions.append(Say(say_destination(MSG_START, dest.name)))
+        template = MSG_START_DELIVERY if is_delivery else MSG_START
+        actions.append(Say(say_destination(template, dest.name)))
         actions.append(Navigate(dest))
         return actions, GateReason.OK
 

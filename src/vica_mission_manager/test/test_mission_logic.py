@@ -1422,6 +1422,48 @@ class TestConfirmReproposalIsAnswer:
         assert not any(isinstance(a, Navigate) for a in actions)
 
 
+class TestDeliveryStartMent:
+    """배송 출발 멘트는 "배달을 시작합니다" (2026-09-03 사용자 승인).
+
+    배송은 사람을 데려가는 일이 아니라 물건을 옮기는 일이라 "안내"가 어색하다.
+    가르는 것은 `is_delivery` 하나이며 `allow_private`(권한)와는 뜻이 다르다 —
+    지금은 늘 같이 켜지지만 겸용하면 나중에 조용히 어긋난다.
+    """
+
+    def _say(self, actions):
+        return next(a.text for a in actions if isinstance(a, Say))
+
+    def test_delivery_says_delivery(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_destination(
+            make_dest(name="407호"), BOUNDS, True, 0.0,
+            allow_private=True, is_delivery=True)
+        assert reason == GateReason.OK
+        assert self._say(actions) == "407호로 배달을 시작합니다."
+
+    def test_plain_app_request_still_says_guide(self):
+        """원격 주행은 그대로 "안내를 시작합니다" — 이 경계가 무너지면
+        안내 시나리오 전체의 말투가 배송으로 바뀐다."""
+        logic = MissionLogic()
+        actions, _ = logic.on_app_destination(
+            make_dest(name="407호"), BOUNDS, True, 0.0)
+        assert self._say(actions) == "407호로 안내를 시작합니다."
+
+    def test_voice_path_is_untouched(self):
+        """음성(LLM) 경로도 "안내" 그대로다 — 배송 표시가 닿지 않는 길이다."""
+        logic = MissionLogic()
+        actions = logic.on_intent(make_intent(), make_dest(name="407호"),
+                                  BOUNDS, True, 0.0)
+        assert self._say(actions) == "407호로 안내를 시작합니다."
+
+    def test_josa_follows_the_name(self):
+        """조사는 이름이 정한다 — 받침 있으면 '으로'."""
+        logic = MissionLogic()
+        actions, _ = logic.on_app_destination(
+            make_dest(name="식당"), BOUNDS, True, 0.0, is_delivery=True)
+        assert self._say(actions) == "식당으로 배달을 시작합니다."
+
+
 class TestDeliveryAllowsPrivate:
     """물류 배송(`/vica/mission/request_delivery`)만 private 목적지를 허용한다
     (2026-09-02). 일반 앱 요청은 그대로 거부하고, private 를 열어도 접근
