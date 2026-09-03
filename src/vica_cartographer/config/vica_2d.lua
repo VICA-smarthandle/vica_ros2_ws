@@ -116,6 +116,22 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.05
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.5)
 TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
 
+-- [CM-7] loop closure 검색창 7.0(기본) -> 3.0 (2026-09-03)
+--
+-- 9/3 복도 매핑 2회에서 translation 오차 최대가 매번 7 m 근처(7.27 / 7.85)
+-- = 이 창의 기본값. 8/12 실패도 7.01 이었다. 복도는 ±7 m 어디나 비슷해서
+-- 창 끝까지 미끄러진 가짜 매칭이 62~68 % 점수로 min_score(0.62)를 통과해
+-- 지도를 찢었다(1 m 초과 48~59 %). 창을 3 m 로 줄이면 가짜 매칭이 미끄러질
+-- 수 있는 최대 거리가 3 m 로 준다.
+--
+-- 2.0 이 아닌 이유: 진짜 보정(오도메트리 드리프트)이 창보다 크면 loop
+-- closure 를 아예 못 찾는다. 2.0 과 min_score 0.70(CM-3)은 이번 회차의
+-- bag 을 cartographer_offline_node 로 재생해 재주행 없이 비교한다.
+--
+-- 판정: docs/cartographer_corridor_mapping.md §6 — 최대 1 m 미만 · 1 m 초과
+-- 0건 · 구속조건 수 급감 없음. 되돌릴 때는 이 한 줄을 지운다(기본 7.0).
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 3.0
+
 -- Conservative loop-closure values for repeated indoor corridors.
 POSE_GRAPH.constraint_builder.min_score = 0.62
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.66
