@@ -333,15 +333,45 @@
   <child link="laser_frame"/>
 </joint>
 
-<!-- 초음파: 빔 축 = +x(전방), 수평. Range 메시지의 부채꼴이 이 frame 에서 그려진다. -->
-<link name="usonic_front_left"/>
+<!-- 초음파: 빔 축 = +x(전방), 수평. Range 메시지의 부채꼴이 이 frame 에서 그려진다.
+
+     visual 은 DYP-A22 일반 규격(방수 원통형)을 옮긴 것이다. 2026-09-02 추가.
+     [미검증] 실물을 재서 넣은 값이 아니다. 줄자로 확인하면 아래 두 값만 고친다.
+
+     링크 원점은 **센서 앞면**(측정 원점)이고 몸체는 그 뒤로 뻗는다. 그래서
+     원통 중심을 길이의 절반만큼 -x 로 물린다. 이걸 빼먹으면 실물보다 20 mm
+     앞으로 튀어나온 것처럼 그려져, 범퍼 앞면(usonic_x 0.305)과의 관계를 눈으로
+     확인할 때 잘못 읽게 된다.
+
+     URDF cylinder 의 축은 z 다. 빔 축 +x 에 맞추려면 y 로 90도 눕힌다.
+
+     collision 은 넣지 않는다. 주행 충돌 판정은 nav2 footprint 가 하고 URDF
+     collision 은 거기에 관여하지 않는다. 시각 확인이 목적이므로 보이는 것만 둔다. -->
+<xacro:property name="usonic_diameter" value="0.022" />
+<xacro:property name="usonic_length" value="0.020" />
+
+<xacro:macro name="usonic_visual">
+  <visual name="dyp_a22_body">
+    <origin xyz="${-usonic_length/2} 0 0" rpy="0 ${pi/2} 0"/>
+    <geometry>
+      <cylinder radius="${usonic_diameter/2}" length="${usonic_length}"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+</xacro:macro>
+
+<link name="usonic_front_left">
+  <xacro:usonic_visual/>
+</link>
 <joint name="usonic_front_left_joint" type="fixed">
   <origin xyz="${usonic_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="usonic_front_left"/>
 </joint>
 
-<link name="usonic_front_right"/>
+<link name="usonic_front_right">
+  <xacro:usonic_visual/>
+</link>
 <joint name="usonic_front_right_joint" type="fixed">
   <origin xyz="${usonic_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
   <parent link="base_link"/>

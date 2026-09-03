@@ -118,12 +118,15 @@ def test_no_orphan_probe_definitions():
     params = load_probe_params()
     listed = set(params.get('topic_probe_names', []))
     listed |= set(params.get('process_probe_names', []))
+    # link 프로브(2026-09-02)도 같은 규칙을 받는다.
+    listed |= set(params.get('link_probe_names', []))
 
     scalars = {
         'diagnostic_period_sec',
         'process_scan_period_sec',
         'topic_probe_names',
         'process_probe_names',
+        'link_probe_names',
     }
 
     for key, value in params.items():
@@ -556,3 +559,141 @@ def test_launch_uses_all_three_config_files():
         'required_components.yaml',
     ):
         assert name in text, f'{name}이 launch에 연결되지 않았습니다'
+
+
+# -- 관측 범위 전환 (2026-09-02) -------------------------------------------
+#
+# guidance 와 app 을 '관측 불가'에서 '관측 가능'으로 올렸다. 근거가 각각
+# 상향 통신(초음파 4.8Hz)과 브리지 상시 발행(/robot_status 2Hz)이라,
+# 그 근거가 사라지면 이 시험이 먼저 깨져야 한다.
+
+
+def _probe(name):
+    params = load_probe_params()
+    assert name in params.get('topic_probe_names', []), f'{name} 프로브가 없습니다'
+    return params[name]
+
+
+def test_guidance_is_observable_with_two_rungs():
+    """드라이버 생존과 아두이노 응답을 따로 본다 — 한 칸이면 구분이 안 된다."""
+    comp = load_monitor_params()['guidance']
+    assert comp['observable'] is True
+
+    state = _probe('handle_state')
+    uplink = _probe('handle_uplink')
+    assert state['component'] == 'guidance'
+    assert uplink['component'] == 'guidance'
+    # 서로 다른 토픽이어야 두 고장을 가른다.
+    assert state['topic'] != uplink['topic']
+
+
+def test_guidance_does_not_block_driving():
+    """핸들이 없어도 로봇은 달린다. STOP 으로 올리면 진짜 주행 결함과 섞인다."""
+    comp = load_monitor_params()['guidance']
+    assert comp['required'] is False
+    assert comp['severity'] == 2   # DEGRADED
+
+
+def test_app_bridge_is_observable_and_warn_only():
+    """브리지는 로봇 동작과 무관하다 — WARN 상한이다."""
+    comp = load_monitor_params()['app']
+    assert comp['observable'] is True
+    assert comp['required'] is False
+    assert comp['severity'] == 1   # WARN
+    assert _probe('app_bridge')['component'] == 'app'
+
+
+def test_new_probe_fault_codes_exist_in_catalog():
+    """문구 없는 결함 코드는 화면에 코드만 뜬다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    for name in ('handle_state', 'handle_uplink', 'app_bridge'):
+        code = _probe(name)['fault_code']
+        assert code in CATALOG, f'{code} 문구가 카탈로그에 없습니다'
+
+
+def test_new_fault_messages_say_whether_driving_is_affected():
+    """관리자가 로봇을 세우러 뛰어갈지 말지를 문구에서 바로 알아야 한다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    for code in ('GUIDANCE_NODE_SILENT', 'GUIDANCE_UPLINK_STALE', 'APP_BRIDGE_SILENT'):
+        assert '주행' in CATALOG[code].detail_template, f'{code} 에 주행 영향이 없습니다'
+
+
+def test_guidance_messages_name_both_handle_and_ultrasonic():
+    """아두이노 하나에 둘이 물려 있다. 하나만 적으면 나머지를 못 찾는다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    for code in ('GUIDANCE_NODE_SILENT', 'GUIDANCE_UPLINK_STALE'):
+        action = CATALOG[code].suggested_action
+        assert '초음파' in action, f'{code} 에 초음파 안내가 없습니다'
+
+
+# -- 음성: 노드 실행만 확인 (2026-09-02) ------------------------------------
+#
+# 마이크가 들리는지는 밖에서 볼 수 없다. 그래서 '실행만 확인'이라는 한계가
+# 화면에 남아 있어야 한다 — 초록불이 "음성 정상"으로 읽히면 안 된다.
+
+
+def test_voice_is_observed_by_process_only():
+    """주기 토픽이 없어 프로세스로만 본다."""
+    params = load_probe_params()
+    names = params.get('process_probe_names', [])
+    for name in ('voice_wakeword', 'voice_tts', 'voice_llm'):
+        assert name in names, f'{name} 프로브가 없습니다'
+        assert params[name]['component'] == 'voice'
+    # 음성은 topic_rate 로 볼 수 없다 — 말을 걸 때만 나오기 때문이다.
+    for name in params.get('topic_probe_names', []):
+        assert params[name]['component'] != 'voice'
+
+
+def test_voice_process_absence_is_a_fault():
+    """required 가 없으면 프로세스가 없어도 OK 로 지나가 죽음을 못 잡는다."""
+    params = load_probe_params()
+    for name in ('voice_wakeword', 'voice_tts', 'voice_llm'):
+        assert params[name].get('required') is True, f'{name} 에 required 가 없습니다'
+
+
+def test_voice_is_observable_but_not_required():
+    """실행 여부는 보되 주행을 막지 않는다."""
+    comp = load_monitor_params()['voice']
+    assert comp['observable'] is True
+    assert comp['required'] is False
+    assert comp['severity'] == 2   # DEGRADED
+
+
+# -- 주행 명령 경로 감시 (2026-09-02) ---------------------------------------
+#
+# collision_monitor 가 활성화에 실패하면 /cmd_vel_req 발행자가 0 이 된다.
+# 그것이 로봇이 서 있을 때도 읽히는 유일한 신호다.
+
+
+def test_cmd_vel_req_link_is_watched():
+    """주행 명령이 나갈 길이 열렸는지 본다."""
+    params = load_probe_params()
+    assert 'cmd_vel_req_link' in params.get('link_probe_names', [])
+    spec = params['cmd_vel_req_link']
+    assert spec['topic'] == '/cmd_vel_req'
+    assert spec['component'] == 'navigation'
+    assert spec['min_publishers'] >= 1
+
+
+def test_cmd_vel_req_link_blocks_driving():
+    """길이 막히면 주행이 안 된다 — WARN 으로 두면 놓친다."""
+    from vica_system_monitor.fault_catalog import CATALOG, SEVERITY_STOP
+    code = load_probe_params()['cmd_vel_req_link']['fault_code']
+    assert CATALOG[code].severity == SEVERITY_STOP
+
+
+def test_cmd_vel_req_link_tells_what_to_do():
+    """원인을 짐작해 껐다 켜는 일이 없어야 한다."""
+    from vica_system_monitor.fault_catalog import CATALOG
+    spec = CATALOG[load_probe_params()['cmd_vel_req_link']['fault_code']]
+    assert 'collision_monitor' in spec.suggested_action
+    assert 'Nav2' in spec.suggested_action
+
+
+def test_link_probe_is_not_a_topic_probe():
+    """구독하면 안 된다. 그래프만 본다 — 대역폭을 쓰지 않는 것이 설계다."""
+    params = load_probe_params()
+    for name in params.get('link_probe_names', []):
+        assert name not in params.get('topic_probe_names', [])
+        assert 'msg_type' not in params[name]
+        assert 'min_hz' not in params[name]

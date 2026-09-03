@@ -585,3 +585,61 @@ def test_bare_bringup_reports_starting_not_stopped():
     )
     assert snap.state == STATE_STARTING
     assert snap.faults == []
+
+
+# -- 감독 FAULT (2026-09-02) ------------------------------------------------
+#
+# 아무도 누르지 않았는데 주행이 막히는 유일한 안전 상태다. 종전에는 결함
+# 0건으로 지나가고 전체 등급만 DEGRADED 였다 — 화면이 이유를 말하지 않아
+# 관리자가 앱 비상정지를 걸었다 푸는 우회를 스스로 찾아내야 했다.
+
+
+def test_supervisor_fault_is_reported_as_a_fault():
+    """FAULT 는 결함으로 보고된다. 종전에는 조용히 지나갔다."""
+    snapshot = evaluate([probe('motor')], safety('FAULT'), now_ns=0, started_ns=0)
+
+    codes = [f.fault_code for f in snapshot.faults]
+    assert 'SAFETY_SUPERVISOR_FAULT' in codes
+
+
+def test_supervisor_fault_blocks_driving():
+    """주행 차단 등급이다. '일부 기능 저하'로 두면 알림 목록에도 안 남는다."""
+    snapshot = evaluate([probe('motor')], safety('FAULT'), now_ns=0, started_ns=0)
+
+    fault = next(
+        f for f in snapshot.faults if f.fault_code == 'SAFETY_SUPERVISOR_FAULT'
+    )
+    assert fault.severity == SEVERITY_STOP
+    assert snapshot.state == STATE_STOPPED
+
+
+def test_supervisor_fault_tells_the_operator_what_to_do():
+    """무엇을 할지가 문구에 있어야 한다 — 자동 복구를 넣지 않기로 했으므로."""
+    snapshot = evaluate([probe('motor')], safety('FAULT'), now_ns=0, started_ns=0)
+
+    fault = next(
+        f for f in snapshot.faults if f.fault_code == 'SAFETY_SUPERVISOR_FAULT'
+    )
+    assert 'FAULT' in fault.detail
+    assert '비상정지' in fault.suggested_action
+
+
+def test_supervisor_fault_is_not_latched():
+    """중앙 래치가 건 것이 아니다. 신호가 돌아오면 스스로 풀린다."""
+    snapshot = evaluate([probe('motor')], safety('FAULT'), now_ns=0, started_ns=0)
+
+    fault = next(
+        f for f in snapshot.faults if f.fault_code == 'SAFETY_SUPERVISOR_FAULT'
+    )
+    assert fault.latched is False
+
+
+def test_real_latch_still_wins_over_supervisor_fault():
+    """실제 래치가 걸려 있으면 그쪽이 먼저다 — 원인을 헷갈리게 하면 안 된다."""
+    snapshot = evaluate(
+        [probe('motor')], safety('FAULT', estop=True), now_ns=0, started_ns=0
+    )
+
+    codes = [f.fault_code for f in snapshot.faults]
+    assert 'SAFETY_ESTOP_LATCHED' in codes
+    assert 'SAFETY_SUPERVISOR_FAULT' not in codes

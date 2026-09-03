@@ -156,3 +156,67 @@ class TestGenerationBump:
         node = _bare_node(gen=5, accept=True)
         node._start_spin(SpinInPlace(yaw_rad=1.57))
         assert node._nav_gen == 6
+
+
+class TestIdleCancelSync:
+    """취소를 눌렀는데 취소할 주행이 없을 때 앱에 사실을 알리는지.
+
+    2026-09-02 실기: 홈 도착 뒤 앱이 계속 '주행 중'으로 굳었다. 로봇은 이미
+    IDLE 이라 취소가 조용히 수락되고 아무 이벤트도 안 나가, 앱의 유령 표시를
+    되맞출 길이 없었다. 이제 대기 사실을 한 번 알린다.
+    """
+
+    def _node_with_logic(self, state):
+        node = _bare_node()
+        node._map_id = 'm1'
+        # _bare_node 는 _publish_goal_event 를 이름만 기록하는 가짜로 덮는다.
+        # 여기서는 **실제로 나가는 JSON** 을 봐야 하므로 진짜 메서드를 되돌린다.
+        node._publish_goal_event = (
+            mm.MissionManagerNode._publish_goal_event.__get__(node)
+        )
+
+        class _FakeLogic:
+            def __init__(self, st):
+                self.state = st
+
+            def on_app_cancel(self, now):
+                from vica_mission_manager.mission_logic import GateReason
+                return [], GateReason.OK
+
+        node.logic = _FakeLogic(state)
+        node._now = lambda: 0.0
+        node._published = []
+
+        class _FakePub:
+            def __init__(self, sink):
+                self.sink = sink
+
+            def publish(self, msg):
+                self.sink.append(msg.data)
+
+        node.pub_goal_event = _FakePub(node._published)
+        return node
+
+    def test_idle_cancel_publishes_sync_event(self):
+        from vica_mission_manager.mission_logic import State
+        node = self._node_with_logic(State.IDLE)
+        node._run_mission_command('cancel')
+        assert any('state_idle' in data for data in node._published)
+
+    def test_driving_cancel_does_not_publish_sync_event(self):
+        """주행 중 취소는 종전 경로가 goal_canceled 를 낸다 — 두 번 알리면 안 된다."""
+        from vica_mission_manager.mission_logic import State
+        node = self._node_with_logic(State.NAVIGATING)
+        node._run_mission_command('cancel')
+        assert not any('state_idle' in data for data in node._published)
+
+    def test_sync_event_survives_missing_destination(self):
+        """목적지 없이 발행해도 죽지 않는다 — 이 이벤트에는 goal 이 없다."""
+        from vica_mission_manager.mission_logic import State
+        node = self._node_with_logic(State.IDLE)
+        node._run_mission_command('cancel')
+        import json
+        payload = json.loads(node._published[-1])
+        assert payload['event'] == 'state_idle'
+        assert payload['name'] == ''
+        assert payload['x'] == 0.0

@@ -41,6 +41,7 @@ from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default
 
 from .probe_config import (
     classify_zero_message,
+    parse_link_probe,
     parse_process_probe,
     parse_topic_probe,
     QOS_SENSOR_DATA,
@@ -62,9 +63,16 @@ _TOPIC_FIELDS = (
     ('fault_code', ''),
     ('optional', False),
 )
+_LINK_FIELDS = (
+    ('component', ''),
+    ('topic', ''),
+    ('min_publishers', 1.0),
+    ('fault_code', ''),
+)
 _PROCESS_FIELDS = (
     ('component', ''),
     ('cmdline_pattern', ''),
+    ('required', False),
     ('warn_percent', 0.0),
 )
 
@@ -79,6 +87,7 @@ class ExternalDiagnosticsNode(Node):
         self.declare_parameter('diagnostic_period_sec', 1.0)
         self.declare_parameter('process_scan_period_sec', 5.0)
         self.declare_parameter('topic_probe_names', [''])
+        self.declare_parameter('link_probe_names', [''])
         self.declare_parameter('process_probe_names', [''])
 
         # 노드가 죽지 않게 하는 것이 감시 도구의 첫 요건이다. 설정 오류는 로그로 남기고
@@ -97,6 +106,7 @@ class ExternalDiagnosticsNode(Node):
         self.skipped_probes: list = []
 
         self._build_topic_probes()
+        self._build_link_probes()
         self._build_process_probes()
 
         period = float(self.get_parameter('process_scan_period_sec').value)
@@ -175,6 +185,47 @@ class ExternalDiagnosticsNode(Node):
                 self._make_topic_callback(spec.name, diagnostic),
                 qos,
             )
+
+    def _build_link_probes(self) -> None:
+        """Register publisher-presence probes. 구독하지 않고 그래프만 본다."""
+        self.link_specs = []
+        names = [n for n in self.get_parameter('link_probe_names').value if n]
+
+        for name in names:
+            values = self._read_probe_values(name, _LINK_FIELDS)
+            spec, problems = parse_link_probe(name, values)
+            if problems:
+                self.config_problems.extend(problems)
+                continue
+            self.link_specs.append(spec)
+            self.updater.add(
+                f'{spec.component}: {spec.name} link',
+                self._make_link_task(spec),
+            )
+
+    def _make_link_task(self, spec):
+        """Build a diagnostic task reporting whether the topic has a publisher.
+
+        메시지를 구독하지 않는다. count_publishers 는 DDS 그래프 조회라 대역폭을
+        쓰지 않으며, **로봇이 서 있어도 판정된다** — 그것이 이 프로브의 존재
+        이유다(LinkProbeSpec docstring).
+        """
+
+        def task(stat: DiagnosticStatusWrapper) -> DiagnosticStatusWrapper:
+            count = self.count_publishers(spec.topic)
+            stat.add('topic', spec.topic)
+            stat.add('publishers', str(count))
+            stat.add('required', str(spec.min_publishers))
+            if count >= spec.min_publishers:
+                stat.summary(DiagnosticStatus.OK, f'발행자 {count}개')
+            else:
+                stat.summary(
+                    DiagnosticStatus.ERROR,
+                    f'발행자가 없습니다 (필요 {spec.min_publishers}개)',
+                )
+            return stat
+
+        return task
 
     def _build_process_probes(self) -> None:
         """Parse process probe specs. Sampling happens on a timer."""
@@ -324,6 +375,16 @@ class ExternalDiagnosticsNode(Node):
             pid = self.cpu_pid.get(spec.name)
 
             if pid is None:
+                if spec.required:
+                    # 이 프로세스는 있어야 한다. 부재 자체가 결함이다.
+                    # 주기 토픽이 없어 다른 관측 수단이 없는 부품에만 쓴다
+                    # (2026-09-02, 음성).
+                    stat.summary(
+                        DiagnosticStatus.ERROR,
+                        '노드가 실행되지 않고 있습니다',
+                    )
+                    stat.add('pattern', spec.cmdline_pattern)
+                    return stat
                 # 프로세스가 없다. Docker PID namespace 때문일 수도 있다.
                 # 결함이 아니라 미구성으로 보고한다.
                 stat.summary(
