@@ -211,6 +211,21 @@ def generate_launch_description():
                 )
             ]
 
+        # 아래 구조 타이머가 실행할 셸이다. 노드 이름은 관리자의 node_names 와
+        # 같은 순서(마스크 → 정보)다. 관리자를 거치지 않고 노드에 직접 묻는다.
+        keepout_rescue_sh = (
+            "for n in keepout_filter_mask_server keepout_costmap_filter_info_server; do "
+            "st=$(ros2 lifecycle get \"/$n\" 2>&1 | head -n 1 | awk '{print $1}'); "
+            "case \"$st\" in "
+            "active) echo \"[keepout] $n: 이미 active, 할 일 없음\";; "
+            "unconfigured) echo \"[keepout] $n: unconfigured, configure+activate 시킨다\"; "
+            "ros2 lifecycle set \"/$n\" configure && ros2 lifecycle set \"/$n\" activate;; "
+            "inactive) echo \"[keepout] $n: inactive, activate 시킨다\"; "
+            "ros2 lifecycle set \"/$n\" activate;; "
+            "*) echo \"[keepout] $n: 상태를 못 읽었다: $st\";; "
+            "esac; done"
+        )
+
         return [
             LogInfo(msg=f"[keepout] 마스크를 적용한다: {keepout_yaml}"),
             # 원본 지도를 읽는 map_server 와 별개인 두 번째 Map Server 다.
@@ -255,6 +270,41 @@ def generate_launch_description():
                     },
                 ],
                 respawn=False,
+            ),
+            # 관리자가 얼어붙었을 때를 위한 구조 타이머 (2026-09-03 실기 후).
+            #
+            # **무엇이 달랐나.** collision_monitor 쪽 12초 재시도는 관리자가
+            # get_state 응답을 2초만 기다리고 포기하기 때문에 통한다 — 포기한
+            # 관리자는 manage_nodes 를 다시 받을 수 있다. 그런데 오늘(17:20)
+            # keepout 관리자는 keepout_costmap_filter_info_server 의 **configure
+            # 응답**을 잃었다. change_state 에는 시간제한이 없다.
+            #
+            #     nav2_util/lifecycle_service_client.hpp 48행 change_state(transition)
+            #     → service_client.hpp 98행 invoke(request, response)
+            #     → spin_until_future_complete(future)   # 제한 없음, 무한 대기
+            #
+            # 관리자는 그 자리에서 영원히 멈추고(SIGKILL 로만 죽는다), manage_nodes
+            # 서비스도 같은 스레드·같은 callback group 이라 재시도 호출을 받지
+            # 못한다. 그래서 여기서는 관리자를 거치지 않고 **노드에 직접** 상태를
+            # 묻고 필요한 전이만 시킨다.
+            #
+            # **왜 무해한가.** 정상 회차(활성화 완료 +9초)에는 두 노드가 이미
+            # active 라 "할 일 없음" 두 줄만 찍힌다. 얼어붙은 회차에는 노드
+            # 자체는 전이를 멀쩡히 마친 상태(응답만 잃음)라 inactive → activate
+            # 한 번으로 마스크가 발행되고 KeepoutFilter 경고가 멎는다. 얼어붙은
+            # 관리자는 그대로 두며, 종료 때 launch 가 SIGKILL 까지 올라가느라
+            # 몇 초 더 걸릴 뿐이다. 12초는 아래 collision_monitor 재시도와 같은
+            # 실측 근거다.
+            TimerAction(
+                period=12.0,
+                actions=[
+                    ExecuteProcess(
+                        cmd=["bash", "-c", keepout_rescue_sh],
+                        name="keepout_rescue",
+                        output="screen",
+                        shell=False,
+                    ),
+                ],
             ),
         ]
 
