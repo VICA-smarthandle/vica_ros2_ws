@@ -17,6 +17,7 @@ ROS 의존이 없다. `DiagnosticStatus`의 name·level·message 세 값만 다�
 from typing import NamedTuple
 
 from .fault_catalog import COMPONENTS
+from .freshness import is_fresh_ns
 
 
 # diagnostic_msgs/DiagnosticStatus의 level 상수와 같은 값이다.
@@ -30,6 +31,20 @@ DIAG_FAULT_THRESHOLD = DIAG_WARN
 
 # 알 수 없는 name을 모으는 컴포넌트.
 FALLBACK_COMPONENT = 'monitor'
+
+# 외부 진단 어댑터(external_diagnostics_node)의 자기 진단 이름과 노드 이름.
+#
+# 어댑터가 죽으면 aggregator 는 그 노드 이름이 붙은 항목들을 전부 Stale·Missing·
+# "Node starting up" 으로 계속 발행한다. 그것을 부품 결함으로 그대로 올리면 앱은
+# "라이다·위치추정이 고장났다"고 읽는다(2026-09-03 실기 — 실제로는 어댑터가
+# 설정 오류로 기동 8초 만에 죽은 것이었다). 아래 함수들로 어댑터의 생사와 어댑터
+# 출신 항목을 가른다.
+EXTERNAL_ADAPTER_STATUS = 'external adapter'
+EXTERNAL_ADAPTER_NODE = 'external_diagnostics_node'
+
+# aggregator 가 "발행자가 없다"는 뜻으로 쓰는 요약어. 어댑터 자기 진단이 이 문구로
+# 오면 어댑터가 낸 것이 아니라 aggregator 가 빈자리를 채운 것이다.
+_ABSENCE_MESSAGES = ('missing', 'stale', 'node starting up')
 
 # name 조각(소문자) → 컴포넌트. 계층형·평면형 모두 이 표로 판정한다.
 # 왼쪽 항이 name 안에 부분 문자열로 있으면 매칭한다. **위쪽이 우선이다.**
@@ -104,6 +119,8 @@ _AGG_MESSAGES = {
     'ok': '정상입니다.',
     'no events recorded.': '아직 한 건도 수신하지 못했습니다.',
     'no events recorded': '아직 한 건도 수신하지 못했습니다.',
+    # expected 로 적어 둔 항목을 한 번도 못 받았을 때 aggregator 가 쓰는 문구.
+    'node starting up': '진단이 아직 오지 않았습니다.',
 }
 
 
@@ -152,6 +169,79 @@ def is_ignored(name: str) -> bool:
         return False
     lowered = name.lower()
     return any(frag in lowered for frag in IGNORED_NAME_FRAGMENTS)
+
+
+def is_external_adapter_status(name: str) -> bool:
+    """Report whether this is the adapter's own self-diagnostic item.
+
+    외부 진단 어댑터의 자기 진단 항목인가.
+    """
+    return bool(name) and EXTERNAL_ADAPTER_STATUS in name.lower()
+
+
+def is_from_external_adapter(name: str) -> bool:
+    """Report whether this item came from (or stands in for) the adapter.
+
+    외부 진단 어댑터가 낸, 또는 aggregator 가 그 자리를 비워 둔 항목인가.
+    """
+    return bool(name) and EXTERNAL_ADAPTER_NODE in name.lower()
+
+
+def is_group_item(name: str) -> bool:
+    """Report whether this is an aggregator group (path) item.
+
+    잎 항목은 마지막 조각에 'node: status' 꼴의 콜론이 있고, 그룹은 없다. 그룹은
+    자식의 최악값을 요약할 뿐 독립 근거가 아니다.
+    """
+    if not name:
+        return False
+    return ':' not in name.rstrip('/').rsplit('/', 1)[-1]
+
+
+def adapter_reporting(items, now_ns: int, timeout_ns: int) -> bool:
+    """Report whether the adapter is alive and publishing its own status.
+
+    어댑터가 살아서 자기 진단을 내고 있는가.
+
+    ``items`` 는 name → (DiagItem, seen_ns). 신선한 어댑터 자기 진단이 있고, 그것이
+    aggregator 의 빈자리 문구(Missing/Stale/Node starting up)가 아니며 Stale 등급이
+    아니면 살아 있다. 어댑터가 설정 오류를 ERROR 로 스스로 보고하는 경우는 살아 있는
+    것이다 — 그때는 프로브가 돌고 있다. 항목이 아예 없으면(기동 전) 죽은 것으로
+    보고, 기동 유예는 호출자가 준다.
+    """
+    for name, (item, seen_ns) in items.items():
+        if not is_external_adapter_status(name):
+            continue
+        if not is_fresh_ns(seen_ns, now_ns=now_ns, timeout_ns=timeout_ns):
+            continue
+        if item.level >= DIAG_STALE:
+            return False
+        return (item.message or '').strip().lower() not in _ABSENCE_MESSAGES
+    return False
+
+
+def worst_by_component(
+    items, now_ns: int, timeout_ns: int, exclude_adapter: bool = False
+) -> dict:
+    """Pick the most severe fresh item per component.
+
+    컴포넌트별로 가장 심한 신선한 항목을 고른다.
+
+    ``exclude_adapter`` 는 어댑터가 죽었을 때 쓴다. 어댑터 출신 항목과 그룹 항목을
+    빼고 고르면 "어댑터 말고 다른 근거가 있는가"가 남는다. 그룹을 빼는 이유: 그룹은
+    자식(어댑터 항목)의 최악값을 그대로 물려받아 같은 Stale 을 되풀이한다.
+    """
+    worst: dict = {}
+    for name, (item, seen_ns) in items.items():
+        if not is_fresh_ns(seen_ns, now_ns=now_ns, timeout_ns=timeout_ns):
+            continue
+        if exclude_adapter and (is_from_external_adapter(name) or is_group_item(name)):
+            continue
+        component = item.component
+        current = worst.get(component)
+        if current is None or item.level > current[0].level:
+            worst[component] = (item, seen_ns)
+    return worst
 
 
 def parse_name(name: str) -> str:

@@ -82,6 +82,9 @@ robot_health_monitor_node:
     # 진단 입력 자체가 끊긴 것을 감지하는 timeout.
     # aggregator가 죽으면 여기서 잡는다.
     diagnostics_timeout_sec: 5.0
+    # 진단 어댑터(external_diagnostics_node)가 기동 뒤 이 시간 안에 자기 진단을 내지
+    # 않으면 MONITOR_DIAG_INPUT_STALE 한 건으로 알린다. 한 번이라도 봤다 끊기면 즉시.
+    adapter_grace_sec: 30.0
 
     # TF 프레임. vica_nav2 설정 기준.
     map_frame: map

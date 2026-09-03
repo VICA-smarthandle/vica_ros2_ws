@@ -219,7 +219,7 @@ def test_camera_probes_are_optional():
 
 
 def test_nvblox_is_no_longer_watched():
-    """nvblox 감시가 되살아나지 않게 잠근다.
+    """Nvblox 감시가 되살아나지 않게 잠근다.
 
     Nav2의 global·local plugins 어디에도 nvblox_layer가 없다. 쓰지 않는 것을
     감시하면 앱에 결함이 상시로 떠서 사람이 결함 표시 자체를 무시하게 된다.
@@ -645,7 +645,7 @@ def test_voice_is_observed_by_process_only():
 
 
 def test_voice_process_absence_is_a_fault():
-    """required 가 없으면 프로세스가 없어도 OK 로 지나가 죽음을 못 잡는다."""
+    """Required 가 없으면 프로세스가 없어도 OK 로 지나가 죽음을 못 잡는다."""
     params = load_probe_params()
     for name in ('voice_wakeword', 'voice_tts', 'voice_llm'):
         assert params[name].get('required') is True, f'{name} 에 required 가 없습니다'
@@ -697,3 +697,62 @@ def test_link_probe_is_not_a_topic_probe():
         assert name not in params.get('topic_probe_names', [])
         assert 'msg_type' not in params[name]
         assert 'min_hz' not in params[name]
+
+
+# ---------------------------------------------------------------------------
+# 값의 종류 — 노드 기본값과 YAML 이 같은 종류여야 한다 (2026-09-03)
+# ---------------------------------------------------------------------------
+
+
+def _probe_blocks(params, list_key):
+    """이름 목록에 적힌 프로브 블록들을 (이름, 블록) 으로 돌려준다."""
+    return [(name, params[name]) for name in params.get(list_key, []) if name]
+
+
+def test_link_probe_min_publishers_is_a_whole_number():
+    """발행자 수는 정수다. 노드 기본값도 정수(1)라 YAML 도 1 로 적는다.
+
+    2026-09-03: `min_publishers: 1` 이 기본값 1.0 과 종류가 달라 rclpy 가 노드를
+    기동 단계에서 죽였다. 노드는 이제 dynamic_typing 으로 죽지 않지만, 종류를
+    맞춰 두는 것이 뜻에도 맞다.
+    """
+    params = load_probe_params()
+    for name, block in _probe_blocks(params, 'link_probe_names'):
+        value = block.get('min_publishers')
+        assert isinstance(value, int) and not isinstance(value, bool), (
+            f"'{name}'.min_publishers 는 정수여야 합니다: {value!r}"
+        )
+        assert value >= 1
+
+
+def test_topic_probe_rates_are_numbers_and_flags_are_booleans():
+    """주기 한계는 숫자, optional 은 참/거짓이다. 따옴표로 감싼 숫자는 거른다."""
+    params = load_probe_params()
+    for name, block in _probe_blocks(params, 'topic_probe_names'):
+        for field in ('min_hz', 'max_hz'):
+            value = block.get(field)
+            assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+                f"'{name}'.{field} 는 숫자여야 합니다: {value!r}"
+            )
+        if 'optional' in block:
+            assert isinstance(block['optional'], bool), f"'{name}'.optional"
+
+
+def test_process_probe_percent_is_a_number():
+    """CPU 경고 임계는 숫자, required 는 참/거짓이다."""
+    params = load_probe_params()
+    for name, block in _probe_blocks(params, 'process_probe_names'):
+        if 'warn_percent' in block:
+            value = block['warn_percent']
+            assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+                f"'{name}'.warn_percent 는 숫자여야 합니다: {value!r}"
+            )
+        if 'required' in block:
+            assert isinstance(block['required'], bool), f"'{name}'.required"
+
+
+def test_monitor_declares_adapter_grace():
+    """어댑터 사망 판정의 기동 유예가 설정에 있고 양수다."""
+    params = load_monitor_params()
+    assert 'adapter_grace_sec' in params
+    assert float(params['adapter_grace_sec']) > 0.0

@@ -18,7 +18,7 @@ READY 판정은 vica_system_health_monitoring_draft.md 7.2절을 그대로 옮�
    (SmartHandleState.msg 주석의 경고와 같은 문제).
 """
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from .fault_catalog import (
     describe,
@@ -129,8 +129,14 @@ def evaluate(
     safety: SafetyInput,
     now_ns: int,
     started_ns: int,
+    extra_faults: Iterable[Fault] = (),
 ) -> HealthSnapshot:
-    """Compute readiness, faults and the overall state for this tick."""
+    """Compute readiness, faults and the overall state for this tick.
+
+    ``extra_faults`` 는 부품 프로브 밖에서 판정한 결함이다(예: 진단 어댑터 사망).
+    등급 정렬과 전체 상태 계산에 똑같이 들어간다 — 따로 붙이면 화면의 상태 색과
+    결함 목록이 어긋난다.
+    """
     in_grace_globally = False
     readiness: Dict[str, int] = {}
     faults: List[Fault] = []
@@ -152,6 +158,7 @@ def evaluate(
     )
     if safety_fault is not None:
         faults.append(safety_fault)
+    faults.extend(extra_faults)
 
     faults.sort(key=lambda f: (-f.severity, f.component, f.fault_code))
 

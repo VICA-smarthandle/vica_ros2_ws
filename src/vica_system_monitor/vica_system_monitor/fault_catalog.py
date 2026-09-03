@@ -282,11 +282,17 @@ CATALOG: Dict[str, FaultSpec] = {
         '해당 노드 실행 상태를 확인해 주세요.',
     ),
     # --- 자기 진단 --------------------------------------------------------
+    # 진단 어댑터(external_diagnostics_node)가 죽었을 때 한 건으로 알린다. 부품
+    # 여섯 개를 "준비 안 됨"으로 뿌리는 대신이다(2026-09-03). DEGRADED 인 이유:
+    # 주행은 되지만 감시가 제한된 상태를 정직하게 보이되, 주행 불가(STOP)로 잠그면
+    # 오늘처럼 "잘 달리는데 앱은 고장이라 한다"가 된다.
     'MONITOR_DIAG_INPUT_STALE': FaultSpec(
         'monitor',
-        SEVERITY_WARN,
-        '진단 입력이 {age_sec}초 동안 수신되지 않았습니다. 상태 감시가 제한됩니다.',
-        'diagnostic aggregator 실행 상태를 확인해 주세요. 모터 안전 정지는 유지됩니다.',
+        SEVERITY_DEGRADED,
+        '{source} 진단이 {age_sec}초째 오지 않습니다. 그 진단에 기대는 부품'
+        '(라이다·위치추정·인지·안내·음성·앱)은 관측 불가로 표시합니다.',
+        'monitor 칸(⑪-1)에서 external_diagnostics_node 실행 상태를 확인해 주세요. '
+        '주행과 모터 안전 정지에는 영향이 없습니다.',
     ),
 }
 

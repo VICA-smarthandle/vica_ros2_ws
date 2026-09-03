@@ -13,6 +13,7 @@ from vica_system_monitor.freshness import sec_to_ns
 from vica_system_monitor.health_logic import (
     ComponentProbe,
     evaluate,
+    Fault,
     NOT_READY,
     READY,
     SafetyInput,
@@ -643,3 +644,24 @@ def test_real_latch_still_wins_over_supervisor_fault():
     codes = [f.fault_code for f in snapshot.faults]
     assert 'SAFETY_ESTOP_LATCHED' in codes
     assert 'SAFETY_SUPERVISOR_FAULT' not in codes
+
+
+def test_extra_faults_join_ranking_and_state():
+    """프로브 밖에서 판정한 결함(어댑터 사망)도 정렬과 전체 상태에 들어간다."""
+    probes = [probe('motor', last_seen_ns=5 * SEC, ever_ok=True)]
+    adapter_down = Fault(
+        component='monitor',
+        fault_code='MONITOR_DIAG_INPUT_STALE',
+        severity=SEVERITY_DEGRADED,
+        detail='external_diagnostics_node 진단이 12초째 오지 않습니다.',
+        suggested_action='monitor 칸을 확인해 주세요.',
+        latched=False,
+    )
+    snapshot = evaluate(
+        probes, safety(), now_ns=6 * SEC, started_ns=0, extra_faults=[adapter_down]
+    )
+    assert [f.fault_code for f in snapshot.faults] == ['MONITOR_DIAG_INPUT_STALE']
+    assert snapshot.highest_severity == SEVERITY_DEGRADED
+    assert snapshot.state == STATE_DEGRADED
+    # 부품 자체는 정상으로 남는다 — 관측 불가는 결함이 아니다.
+    assert snapshot.readiness['motor'] == READY

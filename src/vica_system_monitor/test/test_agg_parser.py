@@ -5,16 +5,22 @@ diagnostics_topic 파라미터로 aggregator를 우회해 단독 디버깅할 �
 """
 
 from vica_system_monitor.agg_parser import (
+    adapter_reporting,
     DIAG_ERROR,
     DIAG_OK,
     DIAG_STALE,
     DIAG_WARN,
     DiagItem,
+    from_status,
+    is_external_adapter_status,
+    is_from_external_adapter,
+    is_group_item,
     is_ignored,
     localize_message,
     normalize_level,
     parse_name,
     to_fault_code,
+    worst_by_component,
 )
 
 
@@ -277,3 +283,75 @@ def test_ignore_list_does_not_swallow_our_own_odom_probe():
         'external_diagnostics_node: localization:  odom frequency topic status'
     )
     assert not is_ignored('external_diagnostics_node: localization: ekf_node cpu')
+
+
+# ---------------------------------------------------------------------------
+# 진단 어댑터 사망 (2026-09-03)
+# ---------------------------------------------------------------------------
+
+_ADAPTER = '/VICA/Monitor/external_diagnostics_node: external adapter'
+_LIDAR_LEAF = (
+    '/VICA/Hardware/LiDAR/external_diagnostics_node: lidar: scan frequency topic status'
+)
+_LIDAR_GROUP = '/VICA/Hardware/LiDAR'
+_LOC_LEAF = '/VICA/Localization/external_diagnostics_node: localization: odom frequency'
+_LOC_OTHER = '/VICA/Localization/amcl: localization: pose status'
+
+
+def _items(*rows, seen_ns=10):
+    """(name, level, message) 를 모니터가 들고 있는 모양으로 만든다."""
+    return {
+        name: (from_status(name, level, message), seen_ns)
+        for name, level, message in rows
+    }
+
+
+def test_adapter_names_are_recognized():
+    """어댑터 자기 진단·어댑터 출신 항목·그룹 항목을 가른다."""
+    assert is_external_adapter_status(_ADAPTER)
+    assert not is_external_adapter_status(_LIDAR_LEAF)
+    assert is_from_external_adapter(_LIDAR_LEAF)
+    assert not is_from_external_adapter(_LOC_OTHER)
+    assert parse_name(_LOC_OTHER) == 'localization'
+    assert is_group_item(_LIDAR_GROUP)
+    assert not is_group_item(_LIDAR_LEAF)
+
+
+def test_adapter_reporting_true_only_for_its_own_fresh_status():
+    """어댑터가 낸 OK·WARN·ERROR 는 살아 있음, aggregator 의 빈자리 문구는 죽음이다."""
+    alive = _items((_ADAPTER, DIAG_OK, '어댑터 정상'))
+    assert adapter_reporting(alive, now_ns=11, timeout_ns=5)
+    self_error = _items((_ADAPTER, DIAG_ERROR, '설정 오류 1건'))
+    assert adapter_reporting(self_error, now_ns=11, timeout_ns=5)
+
+    missing = _items((_ADAPTER, DIAG_ERROR, 'Missing'))
+    assert not adapter_reporting(missing, now_ns=11, timeout_ns=5)
+    stale = _items((_ADAPTER, DIAG_STALE, 'Stale'))
+    assert not adapter_reporting(stale, now_ns=11, timeout_ns=5)
+    assert not adapter_reporting({}, now_ns=11, timeout_ns=5)
+    # 오래된 자기 진단은 근거가 아니다.
+    assert not adapter_reporting(alive, now_ns=100, timeout_ns=5)
+
+
+def test_worst_without_adapter_drops_adapter_leaves_and_groups():
+    """어댑터를 빼면 라이다는 근거가 없어지고, 위치추정은 amcl 근거가 남는다."""
+    items = _items(
+        (_ADAPTER, DIAG_ERROR, 'Missing'),
+        (_LIDAR_LEAF, DIAG_STALE, 'Stale'),
+        (_LIDAR_GROUP, DIAG_STALE, 'Stale'),
+        (_LOC_LEAF, DIAG_STALE, 'Node starting up'),
+        (_LOC_OTHER, DIAG_OK, '정상'),
+    )
+    everything = worst_by_component(items, now_ns=11, timeout_ns=5)
+    assert everything['lidar'][0].level == DIAG_STALE
+    assert everything['localization'][0].level == DIAG_STALE
+
+    others = worst_by_component(items, now_ns=11, timeout_ns=5, exclude_adapter=True)
+    assert 'lidar' not in others
+    assert others['localization'][0].level == DIAG_OK
+    assert others['localization'][0].name == _LOC_OTHER
+
+
+def test_node_starting_up_is_localized():
+    """Expected 항목을 한 번도 못 받았을 때의 문구도 한국어로 바꾼다."""
+    assert localize_message('Node starting up') == '진단이 아직 오지 않았습니다.'
