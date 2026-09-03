@@ -33,8 +33,13 @@ from diagnostic_updater import (
     HeaderlessTopicDiagnostic,
     Updater,
 )
+from rcl_interfaces.msg import ParameterDescriptor
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rclpy.exceptions import (
+    InvalidParameterTypeException,
+    ParameterAlreadyDeclaredException,
+)
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default
@@ -66,7 +71,7 @@ _TOPIC_FIELDS = (
 _LINK_FIELDS = (
     ('component', ''),
     ('topic', ''),
-    ('min_publishers', 1.0),
+    ('min_publishers', 1),
     ('fault_code', ''),
 )
 _PROCESS_FIELDS = (
@@ -125,18 +130,37 @@ class ExternalDiagnosticsNode(Node):
     # ------------------------------------------------------------------
     # 프로브 구성
     # ------------------------------------------------------------------
-    def _read_probe_values(self, name: str, fields) -> dict:
+    def _read_probe_values(self, name: str, fields):
         """Declare and read one probe's dotted parameters.
 
         ROS 2 파라미터는 중첩 리스트를 담을 수 없으므로 이름 목록 + dotted namespace를
         쓴다. diagnostic_aggregator의 analyzers 설정과 같은 방식이다.
+
+        읽지 못하면 None 을 돌려주고 config_problems 에 남긴다. 설정 실수 하나가 노드를
+        죽이면 진단 전체가 사라진다 — 2026-09-03 실기에서 `min_publishers: 1`(정수)이
+        기본값 1.0(실수)과 달라 rclpy 가 예외를 던졌고, 노드가 기동 8초 만에 죽어
+        부품 여섯 개가 "갱신 안 됨"으로 떴다. dynamic_typing 으로 정수·실수·문자열
+        차이를 타입 오류로 만들지 않고, 값의 해석은 parse_*_probe 에 맡긴다.
         """
         values = {}
         for field, default in fields:
             key = f'{name}.{field}'
-            if not self.has_parameter(key):
-                self.declare_parameter(key, default)
-            values[field] = self.get_parameter(key).value
+            try:
+                if not self.has_parameter(key):
+                    self.declare_parameter(
+                        key, default, ParameterDescriptor(dynamic_typing=True)
+                    )
+                values[field] = self.get_parameter(key).value
+            except (
+                InvalidParameterTypeException,
+                ParameterAlreadyDeclaredException,
+                TypeError,
+                ValueError,
+            ) as exc:
+                self.config_problems.append(
+                    f"'{key}': 파라미터를 읽지 못했습니다 ({exc})"
+                )
+                return None
         return values
 
     def _build_topic_probes(self) -> None:
@@ -145,6 +169,8 @@ class ExternalDiagnosticsNode(Node):
 
         for name in names:
             values = self._read_probe_values(name, _TOPIC_FIELDS)
+            if values is None:
+                continue
             spec, problems = parse_topic_probe(name, values)
             if problems:
                 self.config_problems.extend(problems)
@@ -163,10 +189,13 @@ class ExternalDiagnosticsNode(Node):
                     )
                 continue
 
+            # 창 10초(2026-09-03, 종전 5초). CPU 가 눌릴 때 /odom 이 1~2초 처지는 것이
+            # 5초 평균에서는 바로 드러나 경고가 번갈아 떴다. 10초 평균은 순간 변동을
+            # 묻되 진짜 끊김(0 Hz)은 그대로 잡는다.
             param = FrequencyStatusParam(
                 {'min': spec.min_hz, 'max': spec.max_hz},
                 tolerance=0.2,
-                window_size=5,
+                window_size=10,
             )
             label = f'{spec.component}: {spec.topic} frequency'
             diagnostic = HeaderlessTopicDiagnostic(label, self.updater, param)
@@ -193,6 +222,8 @@ class ExternalDiagnosticsNode(Node):
 
         for name in names:
             values = self._read_probe_values(name, _LINK_FIELDS)
+            if values is None:
+                continue
             spec, problems = parse_link_probe(name, values)
             if problems:
                 self.config_problems.extend(problems)
@@ -234,6 +265,8 @@ class ExternalDiagnosticsNode(Node):
 
         for name in names:
             values = self._read_probe_values(name, _PROCESS_FIELDS)
+            if values is None:
+                continue
             spec, problems = parse_process_probe(name, values)
             if problems:
                 self.config_problems.extend(problems)

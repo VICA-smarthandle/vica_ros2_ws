@@ -17,6 +17,10 @@ import yaml
 
 _MAP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _AUTHORIZATIONS = {"public", "private"}
+# 국내 휴대폰 번호. 숫자만 남긴 뒤 검사한다 — 앱이 '010-1234-5678' 로 보내도
+# 파일에는 '01012345678' 하나의 모양으로만 남아, 나중에 문자를 보낼 때 다시
+# 정리할 일이 없다. 앱의 core/contact_phone.dart 와 같은 규칙이다.
+_CONTACT_PHONE_PATTERN = re.compile(r"^01[016789][0-9]{7,8}$")
 
 
 def validate_map_id(map_id: str) -> str:
@@ -39,8 +43,30 @@ def validate_destination_id(destination_id: str) -> str:
     return value
 
 
+def normalize_contact_phone(raw: Any) -> str:
+    """도착 문자를 받을 연락처를 숫자만 남긴 문자열로 정규화한다.
+
+    비어 있으면 빈 문자열이다 — 연락처 없는 장소는 정상이며, 물류 배송의 대상에서만
+    빠진다. 값이 있는데 휴대폰 번호 모양이 아니면 거부한다. 잘못된 번호를 저장해
+    두면 로봇이 문 앞까지 가서 엉뚱한 곳에 문자를 보내거나 아예 못 보낸다.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    # 'abc' 처럼 숫자가 하나도 없는 값을 빈 값으로 눙치면, 오타가 조용히 사라져
+    # 관리자는 번호를 적었다고 믿는다. 무엇이든 적었으면 번호 모양이어야 한다.
+    digits = re.sub(r"[^0-9]", "", text)
+    if not _CONTACT_PHONE_PATTERN.fullmatch(digits):
+        raise ValueError("contact_phone은 010 등으로 시작하는 휴대폰 번호여야 합니다")
+    return digits
+
+
 def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
-    """전송 JSON을 영구 YAML에 저장할 목적지 항목으로 검증·정규화한다."""
+    """전송 JSON을 영구 YAML에 저장할 목적지 항목으로 검증·정규화한다.
+
+    **여기 적힌 키만 파일에 남는다.** 앱이 새 필드를 보내도 이 dict 에 넣지
+    않으면 조용히 사라진다 — 저장은 성공한 것처럼 보이는데 다시 불러오면 비어 있다.
+    """
     destination_id = validate_destination_id(raw.get("id", ""))
     name = str(raw.get("name", "")).strip()
     if not name:
@@ -80,6 +106,8 @@ def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
     if not all(math.isfinite(value) for value in (x, y, yaw)):
         raise ValueError("pose.x/y/yaw는 유한한 숫자여야 합니다")
 
+    contact_phone = normalize_contact_phone(raw.get("contact_phone"))
+
     return {
         "id": destination_id,
         "name": name,
@@ -100,6 +128,9 @@ def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
         },
         "confirm_prompt": str(raw.get("confirm_prompt", "") or "").strip(),
         "arrival_message": str(raw.get("arrival_message", "") or "").strip(),
+        # 물류 배송 도착 문자를 받을 번호. 로봇은 읽지 않고 앱만 쓴다.
+        # 개인정보라 로그에는 남기지 않는다 — 노드 로그는 id 만 찍는다.
+        "contact_phone": contact_phone,
     }
 
 

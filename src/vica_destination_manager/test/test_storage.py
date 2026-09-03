@@ -6,6 +6,7 @@ import yaml
 
 from vica_destination_manager.storage import (
     DestinationStorage,
+    normalize_contact_phone,
     normalize_destination,
     validate_map_id,
 )
@@ -61,3 +62,44 @@ def test_rejects_non_uuid_destination_id() -> None:
 def test_rejects_unsafe_map_id(map_id: str) -> None:
     with pytest.raises(ValueError):
         validate_map_id(map_id)
+
+
+# -- 연락처 (물류 배송 도착 문자) -------------------------------------------------
+#
+# **이 시험이 지키는 결함**: normalize_destination 은 적힌 키만 새 dict 로 만든다.
+# 앱이 contact_phone 을 보내도 여기 없으면 저장은 성공한 것처럼 보이고 다시
+# 불러오면 비어 있다. 왕복(저장 → 파일 → 읽기)으로 확인한다.
+
+
+def test_contact_phone_survives_round_trip(tmp_path: Path) -> None:
+    destination = make_destination()
+    destination["contact_phone"] = "010-1234-5678"
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    assert storage.read("map_1")[0]["contact_phone"] == "01012345678"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("01012345678", "01012345678"),
+        ("010-1234-5678", "01012345678"),
+        ("010 1234 5678", "01012345678"),
+        ("011-123-4567", "0111234567"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_contact_phone_is_normalized_to_digits(raw, expected) -> None:
+    assert normalize_contact_phone(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["02-123-4567", "1234", "0101234567890", "abc"])
+def test_rejects_non_mobile_contact_phone(raw: str) -> None:
+    with pytest.raises(ValueError, match="contact_phone"):
+        normalize_contact_phone(raw)
+
+
+def test_missing_contact_phone_defaults_to_empty() -> None:
+    # 연락처 없는 장소는 정상이다. 옛 파일에도 이 키가 없다.
+    assert normalize_destination(make_destination())["contact_phone"] == ""

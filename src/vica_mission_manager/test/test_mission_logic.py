@@ -575,6 +575,83 @@ class TestPauseResumeCancel:
         assert reason == GateReason.NOT_PAUSED
 
 
+class TestPauseDuringHomeReturn:
+    """관리자 홈 복귀도 앱 버튼으로 멈췄다 다시 보낼 수 있다 (2026-09-03).
+
+    배송을 마치고 홈으로 돌아가는 로봇을 잠깐 세울 길이 없었다. 재개는 반드시
+    RETURNING 으로 돌아가야 한다 — NAVIGATING 으로 재개하면 도착이
+    goal_succeeded 로 나가 앱 배송 카드가 '완료'로 못 넘어간다.
+    """
+
+    def _start_home_return(self):
+        logic = MissionLogic(return_destination=make_home())
+        accepted, _, _ = logic.on_return_home_request(True, 0.0)
+        assert accepted and logic.state == State.RETURNING
+        return logic
+
+    def test_pause_then_resume_stays_a_home_return(self):
+        logic = self._start_home_return()
+        actions, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.PAUSED
+        assert logic.paused_destination is logic.return_destination
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert cancels and cancels[0].event == "goal_paused"
+
+        actions, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.RETURNING
+        assert logic._returning_home is True
+        navigate = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigate) == 1
+        assert navigate[0].destination is logic.return_destination
+        assert logic.paused_destination is None
+        # 관리자 홈 복귀는 출발도 말없이 나간다 — 재개도 새 멘트가 없다.
+        assert not [a for a in actions if isinstance(a, Say)]
+
+        # 도착하면 홈 복귀로 끝난다. 재접근 억제도 걸지 않는다.
+        logic.on_tick(3.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert logic._suppressed_tracks == {}
+
+    def test_pause_is_refused_for_auto_return_after_approach(self):
+        # 접근 뒤 자동 복귀는 사람이 부른 주행이 아니다 — 재개할 주체가 없다.
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
+        logic._enter_returning(0.0)
+        assert logic.state == State.RETURNING and logic._returning_home is False
+        _, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.NOT_NAVIGATING
+        assert logic.state == State.RETURNING
+
+    def test_estop_while_paused_drops_the_home_return(self):
+        logic = self._start_home_return()
+        logic.on_pause_request(1.0)
+        logic.on_estop(True, 2.0)
+        assert logic.paused_destination is None
+        assert logic._paused_returning_home is False
+        logic.on_estop(False, 3.0)
+        logic.on_tick(10.0, NavStatus.NONE)
+        _, reason = logic.on_resume_request(True, 11.0)
+        assert reason == GateReason.NOT_PAUSED
+
+    def test_cancel_while_paused_goes_idle_and_forgets_home_return(self):
+        logic = self._start_home_return()
+        logic.on_pause_request(1.0)
+        _, reason = logic.on_app_cancel(2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert logic._paused_returning_home is False
+        assert logic._returning_home is False
+
+    def test_plain_navigation_pause_is_unchanged(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        assert logic._paused_returning_home is False
+        _, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK and logic.state == State.NAVIGATING
+
+
 class TestVoiceCancelConfirm:
     """음성 취소는 잘못 알아들으면 안내가 끊기므로 되물어 확인한다."""
 
@@ -1420,3 +1497,89 @@ class TestConfirmReproposalIsAnswer:
         assert logic.state == State.CONFIRMING
         assert logic.confirming_dest_id == "restroom"
         assert not any(isinstance(a, Navigate) for a in actions)
+
+
+class TestDeliveryStartMent:
+    """배송 출발 멘트는 "배달을 시작합니다" (2026-09-03 사용자 승인).
+
+    배송은 사람을 데려가는 일이 아니라 물건을 옮기는 일이라 "안내"가 어색하다.
+    가르는 것은 `is_delivery` 하나이며 `allow_private`(권한)와는 뜻이 다르다 —
+    지금은 늘 같이 켜지지만 겸용하면 나중에 조용히 어긋난다.
+    """
+
+    def _say(self, actions):
+        return next(a.text for a in actions if isinstance(a, Say))
+
+    def test_delivery_says_delivery(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_destination(
+            make_dest(name="407호"), BOUNDS, True, 0.0,
+            allow_private=True, is_delivery=True)
+        assert reason == GateReason.OK
+        assert self._say(actions) == "407호로 배달을 시작합니다."
+
+    def test_plain_app_request_still_says_guide(self):
+        """원격 주행은 그대로 "안내를 시작합니다" — 이 경계가 무너지면
+        안내 시나리오 전체의 말투가 배송으로 바뀐다."""
+        logic = MissionLogic()
+        actions, _ = logic.on_app_destination(
+            make_dest(name="407호"), BOUNDS, True, 0.0)
+        assert self._say(actions) == "407호로 안내를 시작합니다."
+
+    def test_voice_path_is_untouched(self):
+        """음성(LLM) 경로도 "안내" 그대로다 — 배송 표시가 닿지 않는 길이다."""
+        logic = MissionLogic()
+        actions = logic.on_intent(make_intent(), make_dest(name="407호"),
+                                  BOUNDS, True, 0.0)
+        assert self._say(actions) == "407호로 안내를 시작합니다."
+
+    def test_josa_follows_the_name(self):
+        """조사는 이름이 정한다 — 받침 있으면 '으로'."""
+        logic = MissionLogic()
+        actions, _ = logic.on_app_destination(
+            make_dest(name="식당"), BOUNDS, True, 0.0, is_delivery=True)
+        assert self._say(actions) == "식당으로 배달을 시작합니다."
+
+
+class TestDeliveryAllowsPrivate:
+    """물류 배송(`/vica/mission/request_delivery`)만 private 목적지를 허용한다
+    (2026-09-02). 일반 앱 요청은 그대로 거부하고, private 를 열어도 접근
+    불가·지도 밖·Nav2 미준비·E-stop 은 여전히 막는다."""
+
+    def test_plain_app_request_still_rejects_private(self):
+        logic = MissionLogic()
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0)
+        assert reason == GateReason.PRIVATE_DESTINATION
+
+    def test_delivery_accepts_private(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0,
+            allow_private=True)
+        assert reason == GateReason.OK
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic.state == State.NAVIGATING
+
+    def test_delivery_still_rejects_unapproachable(self):
+        logic = MissionLogic()
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private", is_approachable=False),
+            BOUNDS, True, 0.0, allow_private=True)
+        assert reason == GateReason.NOT_APPROACHABLE
+
+    def test_delivery_still_rejects_out_of_map(self):
+        logic = MissionLogic()
+        dest = make_dest(authorization="private",
+                         pose=Pose2D(x=99.0, y=99.0, yaw_deg=0.0, frame_id="map"))
+        _, reason = logic.on_app_destination(
+            dest, BOUNDS, True, 0.0, allow_private=True)
+        assert reason == GateReason.POSE_INVALID
+
+    def test_delivery_still_rejects_estop(self):
+        logic = MissionLogic()
+        logic.estop_active = True
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0,
+            allow_private=True)
+        assert reason == GateReason.ESTOP_ACTIVE

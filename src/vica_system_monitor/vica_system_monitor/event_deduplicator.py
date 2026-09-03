@@ -81,6 +81,9 @@ class _Record:
         self.last_notified_ns = now_ns
         # 연속으로 관측되지 않은 tick 수. clear_confirm_ticks 에 도달해야 해소로 본다.
         self.missed_ticks = 0
+        # 연속으로 관측된 tick 수와 "발생"을 이미 알렸는가(raise_confirm_ticks).
+        self.seen_ticks = 1
+        self.raised = False
 
     def snapshot(self, active: bool) -> ActiveFault:
         """Build an immutable view for publishing."""
@@ -106,6 +109,7 @@ class EventDeduplicator:
         reminder_interval_ns: int,
         latched_reminder_interval_ns: Optional[int] = None,
         clear_confirm_ticks: int = 1,
+        raise_confirm_ticks: int = 1,
     ) -> None:
         """Store the re-notification interval in integer nanoseconds.
 
@@ -119,6 +123,12 @@ class EventDeduplicator:
         self._reminder_interval_ns = reminder_interval_ns
         self._latched_reminder_interval_ns = latched_reminder_interval_ns
         self._clear_confirm_ticks = max(1, int(clear_confirm_ticks))
+        # "발생"을 확정하기까지 연속으로 관측되어야 하는 tick 수(2026-09-03).
+        # 임계값 언저리에서 1~2초 튀는 주기 프로브가 발생/해소를 번갈아 내던 것을
+        # 막는다. 1 이면 종전대로 첫 tick 에 알린다. **래치 결함(E-stop 계열)은
+        # 기다리지 않는다** — 관리자 reset 이 필요한 상태를 늦게 알리는 것이 더
+        # 위험하다(규칙 6).
+        self._raise_confirm_ticks = max(1, int(raise_confirm_ticks))
         self._records: Dict[Tuple[str, str], _Record] = {}
 
     def update(
@@ -143,7 +153,29 @@ class EventDeduplicator:
             if record is None:
                 record = _Record(observation, now_ns, wall_sec)
                 self._records[key] = record
-                events.append(Event(record.snapshot(active=True), TRANSITION_RAISED))
+                if self._confirms_raise(record):
+                    record.raised = True
+                    events.append(
+                        Event(record.snapshot(active=True), TRANSITION_RAISED)
+                    )
+                continue
+
+            record.seen_ticks += 1
+            if not record.raised:
+                # 아직 후보다. 이번 값으로 갱신하고 확인 tick 을 채웠는지만 본다.
+                record.severity = observation.severity
+                record.detail = observation.detail
+                record.suggested_action = observation.suggested_action
+                record.latched = observation.latched
+                record.occurrence_count += 1
+                record.last_seen_sec = wall_sec
+                record.missed_ticks = 0
+                if self._confirms_raise(record):
+                    record.raised = True
+                    record.last_notified_ns = now_ns
+                    events.append(
+                        Event(record.snapshot(active=True), TRANSITION_RAISED)
+                    )
                 continue
 
             previous_severity = record.severity
@@ -183,6 +215,10 @@ class EventDeduplicator:
             if key in seen_keys:
                 continue
             record = self._records[key]
+            if not record.raised:
+                # 확인 tick 을 못 채우고 사라진 후보. 알린 적이 없으니 해소도 없다.
+                self._records.pop(key)
+                continue
             record.missed_ticks += 1
             if record.missed_ticks < self._clear_confirm_ticks:
                 continue
@@ -191,6 +227,12 @@ class EventDeduplicator:
             events.append(Event(record.snapshot(active=False), TRANSITION_CLEARED))
 
         return events, self._active_faults()
+
+    def _confirms_raise(self, record: _Record) -> bool:
+        """Return True once a candidate has been seen long enough to announce."""
+        if record.latched:
+            return True
+        return record.seen_ticks >= self._raise_confirm_ticks
 
     def _reminder_due(self, record: _Record, now_ns: int) -> bool:
         """Return True when the re-notification interval has elapsed.
@@ -227,7 +269,12 @@ class EventDeduplicator:
 
     def _active_faults(self) -> List[ActiveFault]:
         """Return current faults, most severe first."""
-        faults = [record.snapshot(active=True) for record in self._records.values()]
+        # 확인 tick 을 못 채운 후보는 활성 목록에도 넣지 않는다.
+        faults = [
+            record.snapshot(active=True)
+            for record in self._records.values()
+            if record.raised
+        ]
         faults.sort(key=lambda fault: (-fault.severity, fault.component, fault.fault_code))
         return faults
 

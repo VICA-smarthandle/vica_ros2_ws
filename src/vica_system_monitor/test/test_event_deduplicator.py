@@ -497,3 +497,51 @@ def test_clear_confirm_ticks_below_one_is_treated_as_one():
     dedup.update([obs()], 0, 0.0)
     events, _ = dedup.update([], SEC, 1.0)
     assert [event.transition for event in events] == [TRANSITION_CLEARED]
+
+
+# ---------------------------------------------------------------------------
+# 발생 확인 tick (2026-09-03)
+# ---------------------------------------------------------------------------
+
+
+def test_raise_waits_for_consecutive_ticks():
+    """확인 tick 을 채우기 전에는 발생을 알리지도, 활성 목록에 넣지도 않는다."""
+    dedup = EventDeduplicator(REMINDER, clear_confirm_ticks=2, raise_confirm_ticks=3)
+    events, active = dedup.update([obs()], 1 * SEC, 1.0)
+    assert events == [] and active == []
+    events, active = dedup.update([obs()], 2 * SEC, 2.0)
+    assert events == [] and active == []
+    events, active = dedup.update([obs()], 3 * SEC, 3.0)
+    assert [e.transition for e in events] == [TRANSITION_RAISED]
+    assert len(active) == 1 and active[0].occurrence_count == 3
+
+
+def test_blip_shorter_than_confirm_never_announces():
+    """1~2초 튐은 발생도 해소도 남기지 않는다 — 번갈아 뜨던 알림의 원인이다."""
+    dedup = EventDeduplicator(REMINDER, clear_confirm_ticks=2, raise_confirm_ticks=3)
+    dedup.update([obs()], 1 * SEC, 1.0)
+    dedup.update([obs()], 2 * SEC, 2.0)
+    events, active = dedup.update([], 3 * SEC, 3.0)
+    assert events == [] and active == []
+    # 다시 시작하면 처음부터 센다.
+    events, _ = dedup.update([obs()], 4 * SEC, 4.0)
+    assert events == []
+
+
+def test_latched_fault_raises_immediately_despite_confirm():
+    """래치 결함(E-stop)은 확인 tick 을 기다리지 않는다(규칙 6)."""
+    dedup = EventDeduplicator(REMINDER, clear_confirm_ticks=2, raise_confirm_ticks=3)
+    events, active = dedup.update(
+        [obs(code='SAFETY_ESTOP_LATCHED', severity=SEVERITY_FAULT, latched=True)],
+        1 * SEC,
+        1.0,
+    )
+    assert [e.transition for e in events] == [TRANSITION_RAISED]
+    assert len(active) == 1
+
+
+def test_default_raise_confirm_keeps_old_behaviour():
+    """raise_confirm_ticks 기본값 1 은 종전과 같이 첫 tick 에 알린다."""
+    dedup = EventDeduplicator(REMINDER, clear_confirm_ticks=2)
+    events, _ = dedup.update([obs()], 1 * SEC, 1.0)
+    assert [e.transition for e in events] == [TRANSITION_RAISED]
