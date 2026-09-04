@@ -304,11 +304,19 @@ void applyState(uint8_t state) {
       servoMoveTo(SERVO_CENTER);
       break;
 
-    // ── 서보: 이대로 두어야 맞다 ──────────────────────────────────────
-    // 아래 두 case의 SERVO_RIGHT/SERVO_LEFT는 상수명과 반대로 보이지만 정상이다.
-    // 서보가 물리적으로 거꾸로 장착돼 있어 STATE_LEFT → SERVO_RIGHT 호출이
-    // 실제로는 서보를 왼쪽으로 움직인다. 2026-08-02 재실측에서도 그대로였다.
-    // 상수명에 맞춰 "고치면" 오히려 반대로 동작한다. **서보 줄은 건드리지 말 것.**
+    // ── 서보: 2026-09-04 에 상수명과 일치시켰다 ──────────────────────
+    // [정정] 2026-08-02 부터 여기에는 "서보가 거꾸로 장착돼 있으니 상수명과 반대로
+    // 부르는 것이 정상이다. 건드리지 말 것"이라고 적혀 있었다. **더는 맞지 않는다.**
+    // 사용자가 실물에서 서보 좌우가 뒤바뀐 것을 확인했고(LED 는 그대로 정상),
+    // 그래서 두 case 의 servoMoveTo 인자를 서로 맞바꿨다. 이제 상수명 그대로
+    // STATE_LEFT → SERVO_LEFT 다.
+    //
+    // 뒤집힘이 사라진 이유(장착 방향 변경·서보 교체 등)는 확인하지 않았다. 다만
+    // **보정 자리는 여전히 이 파일 한 곳뿐이다.** 다음에 또 반대로 보이면 고칠
+    // 곳은 여기이지 ROS 가 아니다 — 아두이노는 상태코드 하나로 LED 와 서보를 같은
+    // case 에서 정하므로, 상위에서 뒤집으면 LED 까지 함께 뒤집힌다(2026-08-01 사고).
+    //
+    // 확인 도구는 이미 있다: firmware/bench_test.py --hold 1 / --hold 2.
     //
     // ── LED: 좌우를 바로잡았다 (2026-08-02) ──────────────────────────
     // [정정 2026-08-02] 2026-07-28 주석의 "bench에서 좌/우 모두 LED 방향과 서보
@@ -319,8 +327,9 @@ void applyState(uint8_t state) {
     //   코드 2 STATE_RIGHT  서보 오른쪽 정상 · 주황 LED 왼쪽   반대
     //
     // 즉 D8(A)이 왼쪽이고 D9(B)가 오른쪽이다. 그 전 주석의 (좌측)/(우측) 표기가
-    // 반대로 적혀 있었다. 아래 두 case에서 **LED 두 줄만**(currentMode와
-    // setA/setB) 서로 맞바꿔 고쳤다. servoMoveTo 줄은 그대로 두었다.
+    // 반대로 적혀 있었다. 그때 고친 것은 **LED 두 줄만**(currentMode와 setA/setB)
+    // 이었고 servoMoveTo 는 2026-09-04 에 별도로 맞바꿨다(위 서보 절 참조).
+    // LED 줄은 지금도 그대로 유효하다 — 이번에 건드리지 않았다.
     //
     // currentMode는 주황 흐름선이 흐를 스트립을 정하고 setA/setB는 반대쪽을
     // 하늘색 상시 점등으로 둔다. 둘은 항상 짝을 이뤄 반대여야 한다.
@@ -335,13 +344,13 @@ void applyState(uint8_t state) {
     case STATE_LEFT:
       currentMode = WAVE_A;   // D8 = 왼쪽 (2026-08-02 실측)
       setB(SKY); setA(OFF);   // 주황이 흐르는 A는 끄고 반대쪽 B를 하늘색으로
-      servoMoveTo(SERVO_RIGHT);   // 실측: 서보가 왼쪽으로 이동 (정상). 건드리지 말 것
+      servoMoveTo(SERVO_LEFT);    // 2026-09-04 반전. 이전에는 SERVO_RIGHT 였다
       break;
 
     case STATE_RIGHT:
       currentMode = WAVE_B;   // D9 = 오른쪽 (2026-08-02 실측)
       setA(SKY); setB(OFF);
-      servoMoveTo(SERVO_LEFT);    // 실측: 서보가 오른쪽으로 이동 (정상). 건드리지 말 것
+      servoMoveTo(SERVO_RIGHT);   // 2026-09-04 반전. 이전에는 SERVO_LEFT 였다
       break;
 
     case STATE_ESTOP:
