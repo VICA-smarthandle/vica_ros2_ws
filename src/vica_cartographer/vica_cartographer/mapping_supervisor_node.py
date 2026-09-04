@@ -57,7 +57,9 @@ from .mapping_session import (
     is_stack_up,
     MappingState,
     missing_prerequisites,
-    normalise_map_name,
+    map_meta_document,
+    plan_map_save,
+    save_label,
     running_stacks,
     StopEscalation,
 )
@@ -91,6 +93,8 @@ class MappingSupervisorNode(Node):
 
         self.declare_parameter('launch_command', DEFAULT_LAUNCH)
         self.declare_parameter('save_script', '')
+        # 표시 이름(maps/<id>.meta.json)을 쓸 곳. 비우면 $VICA_ROS_WS/maps.
+        self.declare_parameter('maps_dir', '')
         self.declare_parameter('prerequisite_nodes', DEFAULT_PREREQUISITES)
         self.declare_parameter('status_period_sec', 1.0)
         # launch 를 띄우고 cartographer 가 올라오기를 기다리는 시한.
@@ -101,6 +105,8 @@ class MappingSupervisorNode(Node):
         self.state = MappingState.IDLE
         self.detail = ''
         self.map_id = ''
+        # 사람이 적은 표시 이름(한글 가능). id 와 같으면 따로 없는 것이다.
+        self.map_name = ''
         self.started_at = None
         self._process = None
         self._pgid = None
@@ -171,6 +177,7 @@ class MappingSupervisorNode(Node):
                 'state': self.state.value,
                 'detail': self.detail,
                 'map_id': self.map_id,
+                'map_name': self.map_name or self.map_id,
                 'started_at': self.started_at or '',
                 'nav2_running': stacks['nav2'],
                 'mapping_running': stacks['mapping'],
@@ -262,6 +269,7 @@ class MappingSupervisorNode(Node):
                 return response
 
             self.map_id = ''
+            self.map_name = ''
             self.started_at = datetime.now().isoformat(timespec='seconds')
             self._set_state(MappingState.STARTING, '스택을 띄우는 중입니다.')
 
@@ -304,8 +312,9 @@ class MappingSupervisorNode(Node):
                 response.message = f'지금은 저장할 수 없습니다(상태: {self.state.value}).'
                 return response
 
-            map_id, error = normalise_map_name(
-                request.name, datetime.now().strftime('%m%d')
+            now = datetime.now()
+            map_id, display_name, error = plan_map_save(
+                request.name, now.strftime('%m%d'), now.strftime('%H%M%S')
             )
             if map_id is None:
                 response.accepted = False
@@ -322,17 +331,19 @@ class MappingSupervisorNode(Node):
                 return response
 
             self.map_id = map_id
-            self._set_state(MappingState.SAVING, f'{map_id} 저장 중입니다.')
+            self.map_name = display_name
+            label = save_label(map_id, display_name)
+            self._set_state(MappingState.SAVING, f'{label} 저장 중입니다.')
 
         threading.Thread(
             target=self._run_save,
-            args=(str(script), map_id),
+            args=(str(script), map_id, display_name),
             name='vica_map_save',
             daemon=True,
         ).start()
 
         response.accepted = True
-        response.message = f'{map_id} 저장을 시작했습니다.'
+        response.message = f'{label} 저장을 시작했습니다.'
         response.map_id = map_id
         return response
 
@@ -350,7 +361,42 @@ class MappingSupervisorNode(Node):
         path = Path(root) / 'scripts' / 'vica_map_save.sh'
         return path if path.exists() else None
 
-    def _run_save(self, script: str, map_id: str) -> None:
+    def _resolve_maps_dir(self):
+        explicit = str(self.get_parameter('maps_dir').value).strip()
+        if explicit:
+            return Path(explicit)
+        workspace = os.environ.get('VICA_ROS_WS', '').strip()
+        if workspace:
+            return Path(workspace) / 'maps'
+        root = os.environ.get('VICA_ROOT', '').strip()
+        if root:
+            return Path(root) / 'vica_ros2_ws' / 'maps'
+        return None
+
+    def _write_map_meta(self, map_id: str, display_name: str) -> None:
+        """Leave maps/<id>.meta.json. 실패해도 저장은 성공이다 — id 는 그대로 쓴다.
+
+        저장 스크립트는 id 만 받는다(영문 규칙 그대로). 표시 이름은 저장이 확인된
+        뒤 옆 파일로 남기고, map_list_node 와 scripts/vica_map_resolve.py 가 읽는다.
+        """
+        if not display_name or display_name == map_id:
+            return
+        maps_dir = self._resolve_maps_dir()
+        if maps_dir is None:
+            self.get_logger().warn('maps 디렉터리를 몰라 표시 이름을 남기지 못했습니다.')
+            return
+        path = maps_dir / f'{map_id}.meta.json'
+        document = map_meta_document(
+            map_id, display_name, datetime.now().isoformat(timespec='seconds')
+        )
+        try:
+            path.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
+            )
+        except OSError as error:
+            self.get_logger().warn(f'{path} 를 쓰지 못했습니다: {error}')
+
+    def _run_save(self, script: str, map_id: str, display_name: str) -> None:
         """Run vica_map_save.sh and report the result. 콜백 밖에서 돈다."""
         try:
             result = subprocess.run(  # noqa: S603
@@ -367,14 +413,18 @@ class MappingSupervisorNode(Node):
         except OSError as error:
             ok, detail = False, f'저장 스크립트를 실행하지 못했습니다: {error}'
 
+        if ok:
+            self._write_map_meta(map_id, display_name)
+
+        label = save_label(map_id, display_name)
         with self._lock:
             if ok:
-                self._set_state(MappingState.MAPPING, f'{map_id} 저장 완료. {detail}')
+                self._set_state(MappingState.MAPPING, f'{label} 저장 완료. {detail}')
             else:
                 # 실패하면 상태를 MAPPING 으로 되돌린다. 지도는 아직 메모리에 있고
                 # 다시 저장할 수 있다.
                 self._set_state(
-                    MappingState.MAPPING, f'{map_id} 저장 실패. {detail}'
+                    MappingState.MAPPING, f'{label} 저장 실패. {detail}'
                 )
         if ok:
             # **저장이 확인됐을 때만** 미리보기를 지운다. 실패했을 때 지우면

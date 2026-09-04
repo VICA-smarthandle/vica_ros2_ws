@@ -1,11 +1,13 @@
 # 지금 그리고 있는 지도를 저장한다. mapping_supervisor_node 가 처리한다.
 #
-# name 규칙은 scripts/vica_map_save.sh 와 같아야 한다. 그 스크립트가
-#   [[ ! "$NAME" =~ ^[A-Za-z0-9_-]+$ ]] 이면 거부
-# 하기 때문이다. ROS 의 map yaml 과 앱의 HTTP 경로가 이 이름을 그대로 쓴다.
-# 앱이 저장 버튼을 누른 뒤에 거부당하면 지도를 날리므로 입력칸에서 미리 같은 검사를 한다.
+# name 은 사람이 적은 이름이다. 한글·공백도 된다(2026-09-04).
 #
-# 날짜는 서버가 붙인다. "위치는 사람이, 날짜는 자동"이 운영 규칙이다.
+#   영문·숫자·_·- 만이면   옛 규칙 그대로 id 가 된다: lobby -> lobby_0904
+#   그 밖(한글 등)이면      표시 이름으로만 쓰고 id 는 map_<날짜>_<시각> 으로 자동 생성
+#
+# id 만 파일·yaml·HTTP 경로·터미널에 들어간다(scripts/vica_map_save.sh 의
+# ^[A-Za-z0-9_-]+$ 규칙은 그대로). 표시 이름은 maps/<id>.meta.json 에 남고
+# 지도 목록의 map_name 으로 앱에 보인다. 규칙은 mapping_session.plan_map_save 가 정한다.
 string name
 ---
 bool accepted

@@ -13,7 +13,10 @@ from vica_cartographer.mapping_session import (
     is_stack_up,
     MappingState,
     missing_prerequisites,
+    map_meta_document,
     normalise_map_name,
+    plan_map_save,
+    save_label,
     running_stacks,
     StopEscalation,
 )
@@ -203,3 +206,45 @@ def test_nothing_above_sigkill():
     stop.escalate_signal(108.0)
     stop.escalate_signal(116.0)
     assert stop.escalate_signal(999.0) is None
+
+
+# ---------------------------------------------------------------------------
+# 표시 이름(한글) / 자동 id — 2026-09-04
+# ---------------------------------------------------------------------------
+
+
+def test_ascii_name_keeps_the_old_id_rule():
+    assert plan_map_save('lobby', '0904', '151230') == ('lobby_0904', 'lobby_0904', '')
+
+
+def test_hangul_name_becomes_display_name_with_generated_id():
+    map_id, display, error = plan_map_save('병원 2층', '0904', '151230')
+    assert (map_id, display, error) == ('map_0904_151230', '병원 2층', '')
+
+
+def test_display_name_is_nfc_normalised():
+    # macOS 는 '병'을 자모로 풀어(NFD) 보낼 수 있다. 눈엔 같은데 바이트가 다르면
+    # 터미네이터에서 이름으로 찾을 때 못 찾는다.
+    import unicodedata
+    decomposed = unicodedata.normalize('NFD', '병원')
+    assert decomposed != '병원'
+    assert plan_map_save(decomposed, '0904', '151230')[1] == '병원'
+
+
+def test_display_name_rejects_paths_and_length():
+    assert plan_map_save('병원/2층', '0904', '151230')[0] is None
+    assert plan_map_save('가' * 41, '0904', '151230')[0] is None
+    assert plan_map_save('가' * 40, '0904', '151230')[0] == 'map_0904_151230'
+
+
+def test_save_label_shows_id_only_when_names_differ():
+    assert save_label('lobby_0904', 'lobby_0904') == 'lobby_0904'
+    assert save_label('map_0904_151230', '병원 2층') == '병원 2층 (map_0904_151230)'
+
+
+def test_meta_document_carries_both_names():
+    assert map_meta_document('map_0904_151230', '병원 2층', '2026-09-04T15:12:30') == {
+        'map_id': 'map_0904_151230',
+        'display_name': '병원 2층',
+        'saved_at': '2026-09-04T15:12:30',
+    }
