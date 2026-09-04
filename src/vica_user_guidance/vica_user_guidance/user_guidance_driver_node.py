@@ -115,6 +115,13 @@ class UserGuidanceDriverNode(Node):
         self.create_subscription(TurnGuide, "/vica/turn_guide", self.cb_turn, 10)
         self.create_subscription(Bool, "/estop_state", self.cb_estop, 10)
         self.create_subscription(String, "/vica_goal_event", self.cb_goal, 10)
+        # 햅틱 수동 명령 (2026-09-04). 주행 중에는 이 노드가 포트를 잡고 있어
+        # bench_test.py 가 못 붙는다 — 그래서 여기를 거친다. **수동 전용**이며
+        # 이 노드는 스스로 보내지 않는다. 자동 트리거(ESTOP·ARRIVED)는 별도
+        # 결정 사항이다.
+        self.create_subscription(
+            String, "/vica/haptic_request", self.cb_haptic_request, 10
+        )
 
         self.pub_state = self.create_publisher(
             SmartHandleState, "/vica/smart_handle_state", 10
@@ -283,6 +290,36 @@ class UserGuidanceDriverNode(Node):
         msg.last_state_code = self.link.last_state_code
         msg.write_error_count = self.link.write_error_count
         self.pub_state.publish(msg)
+
+    # ── 햅틱 ───────────────────────────────────────────
+
+    HAPTIC_PATTERNS = {
+        "short": protocol.HAPTIC_CMD_SHORT,
+        "long": protocol.HAPTIC_CMD_LONG,
+    }
+
+    def cb_haptic_request(self, msg: String) -> None:
+        """진동모터 수동 명령. 패턴 이름 하나를 받아 바이트 하나를 흘려보낸다.
+
+        10 Hz 상태코드 사이에 끼워 넣는 것이라 LED·서보에는 영향이 없다 — 펌웨어가
+        이 바이트를 applyState() 로 보내지 않는다. send() 가 아니라 send_raw() 를
+        쓰는 이유는 last_state_code 를 더럽히지 않기 위해서다.
+        """
+        name = msg.data.strip().lower()
+        code = self.HAPTIC_PATTERNS.get(name)
+        if code is None:
+            self.get_logger().warn(
+                f"[HAPTIC] 모르는 패턴 '{msg.data}' — "
+                f"{sorted(self.HAPTIC_PATTERNS)} 중 하나여야 합니다. 무시합니다."
+            )
+            return
+        ok = self.link.send_raw(code, self.now_ns())
+        if ok:
+            self.get_logger().info(f"[HAPTIC] {name} (0x{code:02X}) 전송")
+        else:
+            self.get_logger().warn(
+                f"[HAPTIC] {name} 전송 실패 — 포트 상태 fault={self.link.fault_code}"
+            )
 
     # ── 초음파 ─────────────────────────────────────────
 

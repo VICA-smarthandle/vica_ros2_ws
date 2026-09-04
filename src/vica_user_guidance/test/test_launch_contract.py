@@ -234,3 +234,23 @@ def test_serial_port_is_not_an_enumeration_dependent_path():
     ]
     assert not configured.startswith("/dev/ttyUSB")
     assert not configured.startswith("/dev/ttyACM")
+
+
+def test_driver_haptic_request_is_manual_only():
+    """/vica/haptic_request 를 구독해 send_raw 로만 보낸다. 스스로 발행하지 않는다.
+
+    자동 트리거(ESTOP·ARRIVED 진입 시 진동)는 별도 결정 사항이다. 이 시험은
+    '노드가 햅틱을 제 판단으로 쏘는 경로가 없다'를 고정한다 — 그 경로가 생기면
+    사용자 요구("내가 신호 줄 때만 울린다")가 깨진다.
+    """
+    text = read(NODE_DIR / "user_guidance_driver_node.py")
+    assert 'create_subscription(\n            String, "/vica/haptic_request"' in text
+    assert 'create_publisher(String, "/vica/haptic_request"' not in text
+    # 햅틱 바이트는 send() 가 아니라 send_raw() 로만 나간다 — last_state_code 보호
+    assert "self.link.send_raw(code" in text
+    # strip_comments_and_docstrings 는 토큰 사이에 공백을 넣어 되붙이므로
+    # "send_raw(" 가 아니라 토큰 "send_raw" 를 센다.
+    code = strip_comments_and_docstrings(text)
+    assert code.count("send_raw") == 1, (
+        "send_raw 호출이 한 곳(cb_haptic_request)이 아니다 — 자동 트리거 의심"
+    )
