@@ -192,12 +192,12 @@ unsigned long touchSentAt  = 0;
 // 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
 // 멈춘다.
 #define HAPTIC_PIN            10
-#define HAPTIC_CMD_SHORT      0x10   // 150ms on/off x3 (도착 패턴)
-#define HAPTIC_CMD_LONG       0x11   // 800ms x1 (비상 패턴)
-#define HAPTIC_SHORT_ON_MS    150
+#define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
+#define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (비상 패턴)
+#define HAPTIC_SHORT_ON_MS    300   // 2026-09-04 150->300. 모터가 회전 올라올 시간(50~100ms)을 준다
 #define HAPTIC_SHORT_OFF_MS   150
 #define HAPTIC_SHORT_COUNT    3
-#define HAPTIC_LONG_ON_MS     800
+#define HAPTIC_LONG_ON_MS     1200  // 2026-09-04 800->1200. 사용자 "더 강하게"
 
 uint8_t       hapticLeft  = 0;      // 남은 ON 횟수
 bool          hapticOn    = false;  // 지금 HIGH 인가

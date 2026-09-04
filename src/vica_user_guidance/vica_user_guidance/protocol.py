@@ -87,12 +87,12 @@ FIRMWARE_TOUCH_PERIOD_MS: int = 50   # 20Hz. 판정 유예 0.5초에 10프레임
 # 울리는 것(7/28 계획서 6.2절)은 별도 결정 사항이며 아직 넣지 않았다.
 #
 # 패턴은 계획서 6.2절 그대로다. 사용자 요구: "비상제동 = 긴 진동 / 도착 = 짧은 3회".
-HAPTIC_CMD_SHORT: int = 0x10     # 150ms on / 150ms off x 3회 (도착 패턴)
-HAPTIC_CMD_LONG: int = 0x11      # 800ms on x 1회 (비상 패턴)
-FIRMWARE_HAPTIC_SHORT_ON_MS: int = 150
+HAPTIC_CMD_SHORT: int = 0x10     # 300ms on / 150ms off x 3회 (도착 패턴)
+HAPTIC_CMD_LONG: int = 0x11      # 1200ms on x 1회 (비상 패턴)
+FIRMWARE_HAPTIC_SHORT_ON_MS: int = 300   # 2026-09-04 150->300. 회전 올라올 시간
 FIRMWARE_HAPTIC_SHORT_OFF_MS: int = 150
 FIRMWARE_HAPTIC_SHORT_COUNT: int = 3
-FIRMWARE_HAPTIC_LONG_ON_MS: int = 800
+FIRMWARE_HAPTIC_LONG_ON_MS: int = 1200   # 2026-09-04 800->1200
 
 
 def firmware_arrival_duration_sec() -> float:
