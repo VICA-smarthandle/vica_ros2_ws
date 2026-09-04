@@ -25,6 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/RequestDestination.srv"
   "srv/MissionCommand.srv"
   "srv/DeleteMap.srv"
+  "srv/RenameMap.srv"
   "srv/SaveMap.srv"
   "srv/PoseCheck.srv"
   "srv/PoseCommit.srv"
