@@ -62,6 +62,22 @@ US_DIST_MAX_MM: int = 3000   # 유효 실거리 상한
 US_CLEAR_MM: int = 3001      # 범위 내 에코 없음 — max_range 로 발행해 부채꼴을 지운다
 FIRMWARE_US_CYCLE_MS: int = 210  # GAP 5 + WAIT 100, 2채널. 프레임 약 4.8Hz
 
+# ── 상향 터치 프레임 (아두이노 → 젯슨, 2026-09-04 신설) ────────────────
+# 정본은 펌웨어 touchSendFrame()이다. 5바이트: AA 56 seq flags xor
+# (xor 는 seq^flags 2바이트).
+#
+# [왜 초음파 프레임에 얹지 않았나] 둘은 주기가 다르다. 초음파 4.8Hz 는 측정
+# 시간이 정하는 물리 한계인데, 손 놓음 판정 유예는 0.5초라 그사이 샘플이 2~3개
+# 뿐이다. 한 프레임만 놓쳐도 판정이 흔들린다.
+#
+# [왜 헤더를 갈랐나] 8바이트를 9바이트로 늘리면 헤더가 같아, 옛 파서가 체크섬
+# 실패 -> 1바이트 밀기를 반복하며 **초음파까지 함께** 멈춘다. 로그에는 아무것도
+# 안 남는다. 헤더를 가르면 옛/새 어느 조합도 상대 프레임을 조용히 무시할 뿐이다.
+TOUCH_FRAME_HEADER: bytes = b"\xaa\x56"
+TOUCH_FRAME_LEN: int = 5
+TOUCH_FLAG_CONTACT: int = 0x01   # bit0 = 잡고 있음. bit1~7 예약(0)
+FIRMWARE_TOUCH_PERIOD_MS: int = 50   # 20Hz. 판정 유예 0.5초에 10프레임
+
 
 def firmware_arrival_duration_sec() -> float:
     """도착 애니메이션이 스스로 복귀할 때까지의 실제 재생 시간(초).

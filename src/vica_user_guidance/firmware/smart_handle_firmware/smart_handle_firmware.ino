@@ -148,6 +148,32 @@ bool arriveTailPending = false;
 #define US_FRAME_H1   0xAA
 #define US_FRAME_H2   0x55
 
+// ── 터치센서 (D10, 2026-09-04) ────────────────────────────────────────
+// 정전식 모듈이라 **잡으면 HIGH** 다(실물 확인). 손잡이를 쥐었는지만 본다.
+//
+// 상향 프레임 5B: AA 56 seq flags xor (xor 는 seq^flags).
+// 초음파 프레임(AA 55)에 얹지 않고 헤더를 가른 이유는 두 가지다.
+//   * 주기가 다르다. 초음파 4.8Hz 는 측정 시간이 정하는 물리 한계인데, 손 놓음
+//     판정 유예는 0.5초라 그사이 샘플이 2~3개뿐이다.
+//   * 8B 를 9B 로 늘리면 헤더가 같아, 옛 젯슨 파서가 체크섬 실패와 재동기를
+//     반복하며 **초음파까지 함께** 조용히 멈춘다.
+//
+// [판정은 여기서 하지 않는다] 3초 진입도 0.5초 놓침도 mission_manager 몫이다.
+// 이 펌웨어는 "그 순간 잡고 있나"만 20Hz 로 보낸다. 아래 디바운스는 접점 잡음을
+// 없애는 것이지 판정이 아니다 — 사람 손의 3초·0.5초와는 두 자릿수 차이다.
+#define TOUCH_PIN        10
+#define TOUCH_FRAME_H1   0xAA
+#define TOUCH_FRAME_H2   0x56
+#define TOUCH_FLAG_ON    0x01
+#define TOUCH_PERIOD_MS  50   // 20Hz. 판정 유예 0.5초에 10프레임
+#define TOUCH_DEBOUNCE_MS 20  // 접점 잡음만 누른다
+
+uint8_t       touchSeq     = 0;
+bool          touchStable  = false;  // 디바운스를 통과한 값
+bool          touchRaw     = false;  // 직전에 읽은 원시값
+unsigned long touchRawAt   = 0;      // 원시값이 바뀐 시각
+unsigned long touchSentAt  = 0;
+
 const uint8_t US_ADDR7[US_N] = { 0x68, 0x74 };
 
 enum UsPhase { US_TRIG, US_WAIT, US_READ };
@@ -219,6 +245,32 @@ void usSendFrame() {
   f[6] = usDist[1] >> 8;
   f[7] = f[2] ^ f[3] ^ f[4] ^ f[5] ^ f[6];
   Serial.write(f, 8);
+}
+
+// 터치 원시값을 읽어 디바운스만 통과시킨다. 판정은 하지 않는다.
+void touchPoll() {
+  unsigned long now = millis();
+
+  bool raw = (digitalRead(TOUCH_PIN) == HIGH);   // 정전식: 잡으면 HIGH
+  if (raw != touchRaw) {
+    touchRaw   = raw;
+    touchRawAt = now;
+  } else if (raw != touchStable && now - touchRawAt >= TOUCH_DEBOUNCE_MS) {
+    touchStable = raw;
+  }
+
+  // 주기 송신. 상태가 안 바뀌어도 계속 보낸다 — 젯슨이 "언제까지 살아 있었나"로
+  // 상향 신선도를 판정하기 때문이다. 조용하면 끊긴 것과 구분이 안 된다.
+  if (now - touchSentAt < TOUCH_PERIOD_MS) return;
+  touchSentAt = now;
+
+  uint8_t f[5];
+  f[0] = TOUCH_FRAME_H1;
+  f[1] = TOUCH_FRAME_H2;
+  f[2] = touchSeq++;
+  f[3] = touchStable ? TOUCH_FLAG_ON : 0x00;
+  f[4] = f[2] ^ f[3];
+  Serial.write(f, 5);
 }
 
 // 트리거 실패도 WAIT 를 그대로 거친다 — 센서가 빠져 있어도 주기가 흔들리지
@@ -391,6 +443,10 @@ void setup() {
 
   lastRxMillis = millis();
 
+  // 터치센서. 정전식 모듈이 스스로 HIGH/LOW 를 밀어주므로 풀업을 쓰지 않는다.
+  pinMode(TOUCH_PIN, INPUT);
+  touchSentAt = millis();
+
   // ── 초음파 I2C ──
   // 케이블이 길어 데이터시트 상한(100kHz)의 절반으로 시작한다(§4.2-4).
   // setWireTimeout: SDA 락업 시 25ms 후 자동 복구 — 없으면 loop() 전체가 멎어
@@ -436,6 +492,11 @@ void loop() {
   // ── 초음파 순차 측정 (논블로킹) ─────────
   // 링크 상태와 무관하게 돈다. 젯슨이 조용해도 측정·송신은 계속한다.
   usTask(now);
+
+  // ── 터치센서 (논블로킹) ────────────────
+  // 초음파와 같은 이유로 링크 상태와 무관하게 돈다. 젯슨은 이 프레임이
+  // 끊기는 것으로 상향 두절을 판정하므로, 조용해지면 안 된다.
+  touchPoll();
 
   // ── 서보 슬로우 이동 ───────────────────
   // 한 번에 돌리지 않고 14ms마다 1도씩. 사용자 손목에 충격을 주지 않는다.
