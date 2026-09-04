@@ -78,6 +78,22 @@ TOUCH_FRAME_LEN: int = 5
 TOUCH_FLAG_CONTACT: int = 0x01   # bit0 = 잡고 있음. bit1~7 예약(0)
 FIRMWARE_TOUCH_PERIOD_MS: int = 50   # 20Hz. 판정 유예 0.5초에 10프레임
 
+# ── 하향 햅틱 명령 (젯슨 → 아두이노, 2026-09-04 신설) ──────────────────
+# 상태코드(0~7)와 겹치지 않는 별도 바이트다. applyState()를 거치지 않으므로
+# LED·서보는 그대로이고 D10 의 진동모터만 패턴대로 떨린다.
+#
+# **수동 전용이다.** 드라이버 노드는 이 바이트를 보내지 않는다(SENDABLE_STATE_CODES
+# 에 없다). bench_test.py --haptic 으로만 쏜다. ESTOP·ARRIVED 진입 시 자동으로
+# 울리는 것(7/28 계획서 6.2절)은 별도 결정 사항이며 아직 넣지 않았다.
+#
+# 패턴은 계획서 6.2절 그대로다. 사용자 요구: "비상제동 = 긴 진동 / 도착 = 짧은 3회".
+HAPTIC_CMD_SHORT: int = 0x10     # 150ms on / 150ms off x 3회 (도착 패턴)
+HAPTIC_CMD_LONG: int = 0x11      # 800ms on x 1회 (비상 패턴)
+FIRMWARE_HAPTIC_SHORT_ON_MS: int = 150
+FIRMWARE_HAPTIC_SHORT_OFF_MS: int = 150
+FIRMWARE_HAPTIC_SHORT_COUNT: int = 3
+FIRMWARE_HAPTIC_LONG_ON_MS: int = 800
+
 
 def firmware_arrival_duration_sec() -> float:
     """도착 애니메이션이 스스로 복귀할 때까지의 실제 재생 시간(초).

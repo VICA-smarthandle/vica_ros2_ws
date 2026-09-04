@@ -161,7 +161,11 @@ bool arriveTailPending = false;
 // [판정은 여기서 하지 않는다] 3초 진입도 0.5초 놓침도 mission_manager 몫이다.
 // 이 펌웨어는 "그 순간 잡고 있나"만 20Hz 로 보낸다. 아래 디바운스는 접점 잡음을
 // 없애는 것이지 판정이 아니다 — 사람 손의 3초·0.5초와는 두 자릿수 차이다.
-#define TOUCH_PIN        10
+// [정정 2026-09-04] 처음엔 D10 이라 들었으나 D10 에 붙은 것은 진동모터였다.
+// 진짜 터치센서는 아직 미장착이다. D11 은 자리표시일 뿐 아무것도 안 달려 있어
+// 떠 있는 값을 읽는다 — 젯슨 쪽 touch_enabled 가 false 라 무시된다. 센서를
+// 달면 이 번호만 그 핀으로 고친다.
+#define TOUCH_PIN        11
 #define TOUCH_FRAME_H1   0xAA
 #define TOUCH_FRAME_H2   0x56
 #define TOUCH_FLAG_ON    0x01
@@ -173,6 +177,60 @@ bool          touchStable  = false;  // 디바운스를 통과한 값
 bool          touchRaw     = false;  // 직전에 읽은 원시값
 unsigned long touchRawAt   = 0;      // 원시값이 바뀐 시각
 unsigned long touchSentAt  = 0;
+
+// ── 진동모터 (D10, 2026-09-04) ─────────────────────────────────────────
+// MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). 나노 GPIO 로 모터를
+// 직접 구동하지 않는다 — 전류 초과. 플라이백 다이오드가 드라이버 쪽에 있다.
+//
+// **수동 명령 전용이다.** 젯슨이 0x10/0x11 을 보내면 그 패턴대로 한 번 떨린다.
+// 상태코드(0~7)와 겹치지 않는 별도 바이트라 applyState() 를 거치지 않는다 —
+// LED·서보는 그대로다. 드라이버 노드는 이 바이트를 안 보내며 bench_test.py
+// --haptic 으로만 쏜다. ESTOP·ARRIVED 진입 시 자동으로 울리는 것(계획서 6.2절)은
+// 별도 결정 사항이라 아직 넣지 않았다. 넣게 되면 applyState() 의 해당 case 에서
+// hapticStart() 를 부르면 된다.
+//
+// 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
+// 멈춘다.
+#define HAPTIC_PIN            10
+#define HAPTIC_CMD_SHORT      0x10   // 150ms on/off x3 (도착 패턴)
+#define HAPTIC_CMD_LONG       0x11   // 800ms x1 (비상 패턴)
+#define HAPTIC_SHORT_ON_MS    150
+#define HAPTIC_SHORT_OFF_MS   150
+#define HAPTIC_SHORT_COUNT    3
+#define HAPTIC_LONG_ON_MS     800
+
+uint8_t       hapticLeft  = 0;      // 남은 ON 횟수
+bool          hapticOn    = false;  // 지금 HIGH 인가
+unsigned long hapticAt    = 0;      // 마지막 전환 시각
+unsigned int  hapticOnMs  = 0;
+unsigned int  hapticOffMs = 0;
+
+void hapticStart(uint8_t count, unsigned int onMs, unsigned int offMs) {
+  // 진행 중이면 새 명령이 덮어쓴다. 겹쳐 쌓지 않는다 — 누적하면 사용자가
+  // 몇 번 떨렸는지로 상황을 못 읽는다.
+  hapticLeft  = count;
+  hapticOnMs  = onMs;
+  hapticOffMs = offMs;
+  hapticOn    = true;
+  hapticAt    = millis();
+  digitalWrite(HAPTIC_PIN, HIGH);
+  hapticLeft--;
+}
+
+void hapticTask(unsigned long now) {
+  if (hapticOn) {
+    if (now - hapticAt >= hapticOnMs) {
+      digitalWrite(HAPTIC_PIN, LOW);
+      hapticOn = false;
+      hapticAt = now;
+    }
+  } else if (hapticLeft > 0 && now - hapticAt >= hapticOffMs) {
+    digitalWrite(HAPTIC_PIN, HIGH);
+    hapticOn = true;
+    hapticAt = now;
+    hapticLeft--;
+  }
+}
 
 const uint8_t US_ADDR7[US_N] = { 0x68, 0x74 };
 
@@ -447,6 +505,10 @@ void setup() {
   pinMode(TOUCH_PIN, INPUT);
   touchSentAt = millis();
 
+  // 진동모터. 부팅 직후 게이트가 떠서 모터가 헛돌지 않게 먼저 LOW 로 잡는다.
+  pinMode(HAPTIC_PIN, OUTPUT);
+  digitalWrite(HAPTIC_PIN, LOW);
+
   // ── 초음파 I2C ──
   // 케이블이 길어 데이터시트 상한(100kHz)의 절반으로 시작한다(§4.2-4).
   // setWireTimeout: SDA 락업 시 25ms 후 자동 복구 — 없으면 loop() 전체가 멎어
@@ -471,13 +533,19 @@ void loop() {
   // ── 시리얼 수신 (1바이트 상태 코드) ────
   if (Serial.available()) {
     int b = Serial.read();
-    if (b >= STATE_MIN && b <= STATE_MAX) {
+    if (b == HAPTIC_CMD_SHORT) {
+      // 햅틱 명령은 워치독을 건드리지 않는다. 링크 생존 판정은 상태코드에만
+      // 묶여 있어야 "젯슨이 살아서 상태를 보내고 있다"는 뜻이 유지된다.
+      hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
+    } else if (b == HAPTIC_CMD_LONG) {
+      hapticStart(1, HAPTIC_LONG_ON_MS, 0);
+    } else if (b >= STATE_MIN && b <= STATE_MAX) {
       lastRxMillis    = now;
       watchdogTripped = false;
       everConnected   = true;   // 최초 1회만 의미 있음
       applyState((uint8_t)b);
     }
-    // 범위 밖 값은 버린다. 잘못된 명령으로 오작동하지 않게 하는 안전장치.
+    // 그 밖의 값은 버린다. 잘못된 명령으로 오작동하지 않게 하는 안전장치.
   }
 
   // ── 워치독: 수신 중 단절만 감지 ────────
@@ -497,6 +565,9 @@ void loop() {
   // 초음파와 같은 이유로 링크 상태와 무관하게 돈다. 젯슨은 이 프레임이
   // 끊기는 것으로 상향 두절을 판정하므로, 조용해지면 안 된다.
   touchPoll();
+
+  // ── 진동 패턴 (논블로킹) ────────────────
+  hapticTask(now);
 
   // ── 서보 슬로우 이동 ───────────────────
   // 한 번에 돌리지 않고 14ms마다 1도씩. 사용자 손목에 충격을 주지 않는다.

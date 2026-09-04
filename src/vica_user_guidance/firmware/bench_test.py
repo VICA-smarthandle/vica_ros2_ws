@@ -50,6 +50,14 @@ STATE_NAMES = {
 
 SEND_HZ = 10.0  # ROS 드라이버 노드와 동일한 주기
 
+# 햅틱 수동 명령 (smart_handle_firmware.ino HAPTIC_CMD_* / protocol.py 와 일치).
+# 상태코드가 아니라 applyState() 를 거치지 않는다 — LED·서보는 그대로, D10 의
+# 진동모터만 패턴대로 한 번 떨린다. 드라이버 노드는 이 바이트를 보내지 않는다.
+HAPTIC_CMDS = {
+    "short": (0x10, "150ms on/off x3 — 도착 패턴"),
+    "long":  (0x11, "800ms x1 — 비상 패턴"),
+}
+
 # 펌웨어 WATCHDOG_TIMEOUT_MS와 일치해야 한다 (8번 항목 안내 문구용)
 WATCHDOG_TIMEOUT_MS = 1500
 
@@ -273,6 +281,8 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="전체 순차 실행")
     parser.add_argument("--send", type=int, help="상태코드 1회 전송")
     parser.add_argument("--hold", type=int, help="상태코드를 10Hz로 계속 전송")
+    parser.add_argument("--haptic", choices=sorted(HAPTIC_CMDS),
+                        help="진동모터 수동 시험: short(도착 3회) / long(비상 1회)")
     parser.add_argument("--dry-run", action="store_true",
                         help="포트를 열지 않고 전송 내용만 출력")
     args = parser.parse_args()
@@ -281,12 +291,21 @@ def main() -> int:
         print_list()
         return 0
 
-    if not any([args.case, args.all, args.send is not None, args.hold is not None]):
+    if not any([args.case, args.all, args.send is not None,
+                args.hold is not None, args.haptic]):
         parser.print_help()
         return 1
 
     b = Bench(args.port, args.baud, args.dry_run)
     try:
+        if args.haptic:
+            code, desc = HAPTIC_CMDS[args.haptic]
+            b.send(code)
+            print(f"전송: 0x{code:02X} 햅틱 {args.haptic} ({desc})")
+            print("  로봇과 분리한 상태에서 모터가 그 패턴대로 떨리면 정상입니다.")
+            print("  핸들 노드가 떠 있으면 포트를 못 열어 실패합니다 — 노드를 먼저 내리세요.")
+            return 0
+
         if args.send is not None:
             b.send(args.send)
             print(f"전송: {args.send} ({STATE_NAMES.get(args.send, '?')})")
