@@ -16,6 +16,7 @@ rosbridge 로 격자를 그대로 보내는 것(JSON 703 KB, cbor-raw 247 KB)보
 PNG 를 HTTP 로 내려받는 편이 150배 넘게 싸다.
 """
 
+import math
 import struct
 import zlib
 
@@ -100,3 +101,37 @@ def grid_to_png(data, width: int, height: int, level: int = 6) -> bytes:
     return encode_png_gray(
         occupancy_to_gray(data, width, height), width, height, level
     )
+
+
+# 로봇 자세는 이 시간보다 오래되면 JSON 에 싣지 않는다. Cartographer 는 살아
+# 있는 동안 /tracked_pose 를 100 Hz 로 내므로, 이만큼 끊겼다는 것은 죽었거나
+# 아직 시작하지 않았다는 뜻이다. 굳은 화살표를 보여주는 것보다 없는 편이 낫다.
+POSE_MAX_AGE_SEC = 5.0
+
+
+def quaternion_to_yaw_degrees(x: float, y: float, z: float, w: float) -> float:
+    """Return the heading (rotation about Z) in degrees, counter-clockwise positive.
+
+    앱은 /robot_status 의 yaw 와 같은 규약(도 단위, 반시계 양수)을 기대한다.
+    VICA_Supervisor/ros2/vica_status_app_node.py 의 같은 이름 함수와 같은 식이다.
+    """
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.degrees(math.atan2(siny_cosp, cosy_cosp))
+
+
+def robot_pose_fields(pose, age_sec, max_age_sec: float = POSE_MAX_AGE_SEC) -> dict:
+    """Return the preview JSON fields for the robot pose, or {} when unknown.
+
+    pose 는 (x, y, yaw_deg) 이고 age_sec 는 마지막 수신 뒤 지난 시간이다.
+    시간이 거꾸로 가면(음수) 방금 받은 것으로 본다. 필드가 없으면 앱은
+    화살표를 그리지 않고 "로봇 위치 없음"을 적는다.
+    """
+    if pose is None or age_sec is None or age_sec > max_age_sec:
+        return {}
+    x, y, yaw = pose
+    return {
+        'robot_x': round(float(x), 3),
+        'robot_y': round(float(y), 3),
+        'robot_yaw': round(float(yaw), 2),
+    }
