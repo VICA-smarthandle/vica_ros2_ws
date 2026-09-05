@@ -84,7 +84,13 @@ user_guidance_driver_node:
     # false 로 두면 uplink_fresh=false·user_contact=false 로 "터치 기능 없음"을
     # 알린다. 09-04 에는 false 로 뒀을 때 노드가 죽는 결함이 있었다 — 지금은
     # 어느 값이든 살아 있는지 시험이 고정한다.
-    touch_enabled: true
+    #
+    # 2026-09-05 false 로 확정(사용자): 실기에서 D11 이 한 번도 LOW 가 안 됐다
+    # (원시 관찰 2,400 프레임 중 0). 노드·펌웨어는 무죄, 센서 부품·배선 쪽이다.
+    # true 로 두면 "센서는 살아 있는데 손이 없다"로 보여 2단계가 헷갈린다.
+    # 정식 터치 모듈(VCC·GND·OUT)을 D11 에 달고 ~/touch_monitor.py 로 LOW 가
+    # 보이면 이 한 줄만 true 로 되돌린다. 펌웨어·노드 코드는 그대로다.
+    touch_enabled: false
 
     # 상향 신선도 시한. 이 시간 안에 터치 프레임이 안 오면 uplink_fresh=false 이고
     # user_contact 는 강제로 false 가 된다 — 죽은 센서가 "잡고 있다"고 말하면 안 된다.
