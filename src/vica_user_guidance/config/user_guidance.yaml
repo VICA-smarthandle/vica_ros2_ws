@@ -67,7 +67,35 @@ user_guidance_driver_node:
     # 설계 정본: docs/handoff_jetson_ultrasonic_i2c.md §6.4
     # 같은 포트의 상향 8B 프레임(약 4.8Hz)을 읽어 sensor_msgs/Range 로 발행한다.
     ultrasonic_enabled: true
-    ultrasonic_rate_hz: 20.0     # 폴링 주기. 프레임 4.8Hz 의 4배
+    ultrasonic_rate_hz: 20.0     # (남겨둔 값 — 실제 읽기 주기는 uplink_rate_hz 다)
+
+    # ── 상향 공통 (2026-09-04) ──────────────────────────────────────────
+    # 시리얼은 한 스트림이라 초음파와 터치가 각자 read 하면 서로 바이트를 뺏는다.
+    # 읽기는 uplink_loop 한 곳에서만 하고 두 누적기에 같은 바이트를 먹인다.
+    uplink_rate_hz: 20.0
+
+    # ── 터치센서 (D11, 2026-09-05) ──────────────────────────────────────
+    # active-low 센서(idle HIGH / 터치 LOW). 극성과 '터치 중 튐'은 펌웨어가
+    # 시간 브리지(200ms)로 정리해 프레임 bit0 로 올린다. 이 노드는 그 비트만 믿는다.
+    #
+    # **판정은 여기서 하지 않는다.** 모드 진입 3초와 손 놓음 0.5초는
+    # mission_manager 몫이다(2단계). 이 노드는 "그 순간 잡고 있나"까지만 말한다.
+    #
+    # false 로 두면 uplink_fresh=false·user_contact=false 로 "터치 기능 없음"을
+    # 알린다. 09-04 에는 false 로 뒀을 때 노드가 죽는 결함이 있었다 — 지금은
+    # 어느 값이든 살아 있는지 시험이 고정한다.
+    touch_enabled: true
+
+    # 상향 신선도 시한. 이 시간 안에 터치 프레임이 안 오면 uplink_fresh=false 이고
+    # user_contact 는 강제로 false 가 된다 — 죽은 센서가 "잡고 있다"고 말하면 안 된다.
+    # 초음파 stale(2.0)과 따로 둔다. 20Hz 면 0.5초에 프레임 10개다.
+    touch_stale_sec: 0.5
+
+    # 터치가 바뀐 순간 진단을 한 번 더 발행하는 최소 간격. 주기 발행 2Hz 만으로는
+    # 0.5초 판정에 샘플이 1개뿐이라 즉시 발행을 더하는데, 손을 빠르게 두드리면
+    # system_monitor 의 handle_state 프로브(max_hz 4.0)를 넘길 수 있다. 100ms 면
+    # 상위 지연은 충분히 작고 프로브 상한도 안 넘는다.
+    touch_publish_min_interval_sec: 0.1
     # 채널 순서 고정: [front_left(I2C 0x68), front_right(0x74)] — 실측 확정
     ultrasonic_topics: [/ultrasonic/front_left, /ultrasonic/front_right]
     # URDF 링크 이름과 반드시 일치해야 한다. 다르면 TF 를 못 찾아 costmap 이 버린다.

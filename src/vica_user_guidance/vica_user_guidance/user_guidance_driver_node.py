@@ -27,7 +27,8 @@ from .guidance_priority import (
     resolve_state_code,
 )
 from .serial_link import SerialLink
-from .timebase import sec_to_ns
+from .timebase import is_fresh_ns, sec_to_ns
+from .touch_frame import TouchFrameAccumulator, resolve_contact
 from .ultrasonic_frame import FrameAccumulator
 
 
@@ -58,6 +59,11 @@ class UserGuidanceDriverNode(Node):
         # 열 수 없다.
         self.declare_parameter("ultrasonic_enabled", True)
         self.declare_parameter("ultrasonic_rate_hz", 20.0)  # 프레임 4.8Hz 의 4배
+        # 상향 읽기 주기. 초음파·터치가 이 한 루프를 공유한다(스트림이 하나다).
+        self.declare_parameter("uplink_rate_hz", 20.0)
+        self.declare_parameter("touch_enabled", True)
+        self.declare_parameter("touch_stale_sec", 0.5)
+        self.declare_parameter("touch_publish_min_interval_sec", 0.1)
         self.declare_parameter(
             "ultrasonic_topics", ["/ultrasonic/front_left", "/ultrasonic/front_right"]
         )
@@ -133,9 +139,36 @@ class UserGuidanceDriverNode(Node):
             clock=self.steady_clock,
         )
 
+        # ── 터치 상태는 enable 여부와 무관하게 **먼저** 초기화한다 ──────────
+        # 2026-09-04 사고: touch_enabled=false 면 _setup_touch() 를 건너뛰는데
+        # diag_loop 가 그 안에서만 만들어지던 touch_contact 를 읽어 첫 진단 tick 에
+        # 노드가 죽었다(AttributeError) → 펌웨어 워치독 → 빨간불. 진단이 읽는
+        # 필드는 어떤 설정에서도 존재해야 한다.
+        self.touch_enabled = bool(self.get_parameter("touch_enabled").value)
+        self.touch_contact = False
+        self.touch_last_frame_ns = None
+        self.touch_stale_ns = sec_to_ns(
+            float(self.get_parameter("touch_stale_sec").value)
+        )
+        self.touch_pub_min_ns = sec_to_ns(
+            float(self.get_parameter("touch_publish_min_interval_sec").value)
+        )
+        self._touch_pub_last_ns = None
+
+        # 상향 시리얼은 한 스트림이다. 초음파와 터치가 각자 read 하면 서로 바이트를
+        # 뺏어 양쪽 다 프레임이 깨진다. 읽기는 uplink_loop 한 곳에서만 하고, 읽은
+        # 바이트를 두 누적기에 먹인다.
         self.us_enabled = bool(self.get_parameter("ultrasonic_enabled").value)
         if self.us_enabled:
             self._setup_ultrasonic()
+        if self.touch_enabled:
+            self._setup_touch()
+        if self.us_enabled or self.touch_enabled:
+            self.create_timer(
+                1.0 / float(self.get_parameter("uplink_rate_hz").value),
+                self.uplink_loop,
+                clock=self.steady_clock,
+            )
 
         self.get_logger().info(
             "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event"
@@ -256,8 +289,15 @@ class UserGuidanceDriverNode(Node):
 
         connected = self.link.connected
         msg.connected = connected
-        msg.user_contact = False    # 터치센서 미장착 확정
-        # 상향 통신이 없어 실제 관측이 아니다. connected와 같은 값이며 [미검증]이다.
+
+        # 터치는 상향이 살아 있을 때만 사실이다. stale 인데 마지막 값을 그대로 내면
+        # 죽은 센서가 "잡고 있다"고 말하게 된다 — 모드가 그 값으로 갈리므로
+        # 반드시 false 로 떨어뜨린다. 두 필드 모두 __init__ 에서 무조건 초기화된
+        # 값을 읽으므로 touch_enabled 가 어느 쪽이든 여기서 죽지 않는다.
+        msg.uplink_fresh = self._uplink_fresh(self.now_ns())
+        msg.user_contact = resolve_contact(self.touch_contact, msg.uplink_fresh)
+
+        # 서보·LED 는 상향으로 관측하지 않는다. connected와 같은 값이며 [미검증]이다.
         msg.servo_ok = connected
         msg.left_led_ok = connected
         msg.right_led_ok = connected
@@ -331,28 +371,63 @@ class UserGuidanceDriverNode(Node):
         self.us_pubs = [self.create_publisher(Range, t, 10) for t in topics]
         self.us_last_frame_ns = None
         self.us_stale_warned = False
-
-        self.create_timer(
-            1.0 / float(self.get_parameter("ultrasonic_rate_hz").value),
-            self.ultrasonic_loop,
-            clock=self.steady_clock,
-        )
         self.get_logger().info(f"Ultrasonic Range publishing: {topics}")
 
-    def ultrasonic_loop(self) -> None:
-        """상향 프레임을 읽어 채널별 Range 로 발행한다.
+    # ── 터치 ───────────────────────────────────────────
 
-        발행은 프레임 수신에만 의존한다 — 프레임이 끊기면 저절로 발행이 멎고,
-        costmap 은 stale 판정으로 스스로 값을 만료시킨다. 마지막 값 재발행이나
+    def _setup_touch(self) -> None:
+        self.touch_acc = TouchFrameAccumulator()
+        self.get_logger().info(
+            "Touch sensor uplink enabled (D11, active-low, firmware 200ms bridge)"
+        )
+
+    def _uplink_fresh(self, now_ns: int) -> bool:
+        """상향 터치 프레임이 최근에 왔는가.
+
+        초음파의 stale 시한(2.0초)과 따로 둔다. 터치는 20Hz 라 훨씬 짧아도 되고,
+        길게 잡으면 죽은 센서를 오래 살아 있다고 말하게 된다.
+        touch_enabled=false 면 프레임을 안 읽으므로 항상 False 다.
+        """
+        if not self.touch_enabled:
+            return False
+        return is_fresh_ns(self.touch_last_frame_ns, now_ns, self.touch_stale_ns)
+
+    # ── 상향 공통 ──────────────────────────────────────
+
+    def uplink_loop(self) -> None:
+        """상향 시리얼을 한 번 읽어 초음파·터치 누적기에 함께 먹인다.
+
+        [중요] 읽기는 여기 한 곳뿐이다. 두 곳에서 read 하면 한쪽이 상대의 바이트를
+        가져가 양쪽 프레임이 모두 깨진다. 두 누적기는 각자 자기 헤더만 찾고 나머지
+        바이트는 1개씩 버리므로, 같은 스트림을 두 번 훑어도 서로를 삼키지 않는다.
+
+        초음파 발행은 프레임 수신에만 의존한다 — 프레임이 끊기면 저절로 발행이
+        멎고, costmap 은 stale 판정으로 스스로 값을 만료시킨다. 마지막 값 재발행이나
         range=0 발행은 하지 않는다(인수인계 문서 §4.1 채택 항목).
         """
         now = self.now_ns()
         data = self.link.read_available(now)
-        for frame in self.us_acc.feed(data):
-            self.us_last_frame_ns = now
-            self.us_stale_warned = False
-            self._publish_ranges(frame)
-        self._warn_if_ultrasonic_stale(now)
+
+        if self.us_enabled:
+            for frame in self.us_acc.feed(data):
+                self.us_last_frame_ns = now
+                self.us_stale_warned = False
+                self._publish_ranges(frame)
+            self._warn_if_ultrasonic_stale(now)
+
+        if self.touch_enabled:
+            for frame in self.touch_acc.feed(data):
+                self.touch_last_frame_ns = now
+                if frame.touched != self.touch_contact:
+                    self.touch_contact = frame.touched
+                    # 주기 발행(2Hz)만으로는 0.5초 판정에 샘플이 1개뿐이다. 바뀐
+                    # 순간 한 번 더 내되, 손을 빠르게 두드려도 system_monitor 의
+                    # handle_state 프로브 상한(4Hz)을 넘기지 않게 최소 간격을 둔다.
+                    if not is_fresh_ns(
+                        self._touch_pub_last_ns, now, self.touch_pub_min_ns
+                    ):
+                        self._touch_pub_last_ns = now
+                        self.diag_loop()
 
     def _publish_ranges(self, frame) -> None:
         stamp_base = self.get_clock().now()

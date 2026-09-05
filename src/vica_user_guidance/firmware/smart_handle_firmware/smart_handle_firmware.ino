@@ -148,8 +148,14 @@ bool arriveTailPending = false;
 #define US_FRAME_H1   0xAA
 #define US_FRAME_H2   0x55
 
-// ── 터치센서 (D10, 2026-09-04) ────────────────────────────────────────
-// 정전식 모듈이라 **잡으면 HIGH** 다(실물 확인). 손잡이를 쥐었는지만 본다.
+// ── 터치센서 (D11, 2026-09-05 인수인계 문서 기준) ──────────────────────
+// **idle HIGH / 터치 LOW** 인 active-low 타입이다. 2026-09-04 에 "잡으면 HIGH"
+// 로 잘못 알고 짰던 것을 문서 실측(idle=HIGH, touch=LOW, idle noise 0/994)
+// 으로 바로잡았다.
+//
+// INPUT_PULLUP 을 쓴다 — OUT 선이 빠지면 핀이 HIGH 로 뜨므로 **단선 = 놓음**이
+// 되어 07-30 결정의 NC fail-safe 가 그대로 성립한다. 풀업 없이 INPUT 이면
+// 단선 시 값이 떠서 '잡음'으로 오판할 수 있다.
 //
 // 상향 프레임 5B: AA 56 seq flags xor (xor 는 seq^flags).
 // 초음파 프레임(AA 55)에 얹지 않고 헤더를 가른 이유는 두 가지다.
@@ -159,23 +165,27 @@ bool arriveTailPending = false;
 //     반복하며 **초음파까지 함께** 조용히 멈춘다.
 //
 // [판정은 여기서 하지 않는다] 3초 진입도 0.5초 놓침도 mission_manager 몫이다.
-// 이 펌웨어는 "그 순간 잡고 있나"만 20Hz 로 보낸다. 아래 디바운스는 접점 잡음을
-// 없애는 것이지 판정이 아니다 — 사람 손의 3초·0.5초와는 두 자릿수 차이다.
-// [정정 2026-09-04] 처음엔 D10 이라 들었으나 D10 에 붙은 것은 진동모터였다.
-// 진짜 터치센서는 아직 미장착이다. D11 은 자리표시일 뿐 아무것도 안 달려 있어
-// 떠 있는 값을 읽는다 — 젯슨 쪽 touch_enabled 가 false 라 무시된다. 센서를
-// 달면 이 번호만 그 핀으로 고친다.
+// 이 펌웨어는 "그 순간 잡고 있나"만 20Hz 로 보낸다.
+//
+// [시간 브리지] 이 센서는 **터치 중에 출력이 LOW/HIGH 로 빠르게 튄다.** 반면
+// idle 은 994회 측정에서 흔들림 0 이었다(인수인계 문서 §2). 그래서 디바운스도
+// 적분 필터도 실패했다 — 튀는 신호를 세면 여러 번 발동하거나 아예 무반응이 된다.
+// 신호를 세지 않고 **마지막으로 LOW 를 본 시각** 하나만 기억한다.
+//     touched = (now - lastLowMs < TOUCH_HOLD_MS)
+// 평소엔 LOW 가 절대 안 나오므로 LOW 가 한 번이라도 보이면 진짜 터치고, 터치 중
+// HIGH 가 끼어들어도 200ms 안에 다음 LOW 가 오면 끊기지 않는다. 채터링을
+// 필터링하는 게 아니라 무시하는 구조다. 이것도 판정이 아니라 신호 정리다 —
+// 사람 손의 3초·0.5초와는 자릿수가 다르다.
 #define TOUCH_PIN        11
 #define TOUCH_FRAME_H1   0xAA
 #define TOUCH_FRAME_H2   0x56
 #define TOUCH_FLAG_ON    0x01
-#define TOUCH_PERIOD_MS  50   // 20Hz. 판정 유예 0.5초에 10프레임
-#define TOUCH_DEBOUNCE_MS 20  // 접점 잡음만 누른다
+#define TOUCH_PERIOD_MS  50    // 20Hz. 판정 유예 0.5초에 10프레임
+#define TOUCH_HOLD_MS    200   // LOW 본 뒤 '잡음' 유지. 터치 중 끊기면 올린다
 
 uint8_t       touchSeq     = 0;
-bool          touchStable  = false;  // 디바운스를 통과한 값
-bool          touchRaw     = false;  // 직전에 읽은 원시값
-unsigned long touchRawAt   = 0;      // 원시값이 바뀐 시각
+unsigned long touchLastLow = 0;      // 마지막으로 LOW(터치)를 본 시각
+bool          touchSeenLow = false;  // 부팅 후 LOW 를 한 번이라도 봤나
 unsigned long touchSentAt  = 0;
 
 // ── 진동모터 (D10, 2026-09-04) ─────────────────────────────────────────
@@ -305,17 +315,17 @@ void usSendFrame() {
   Serial.write(f, 8);
 }
 
-// 터치 원시값을 읽어 디바운스만 통과시킨다. 판정은 하지 않는다.
+// 터치 원시값을 읽어 시간 브리지만 통과시킨다. 판정은 하지 않는다.
 void touchPoll() {
   unsigned long now = millis();
 
-  bool raw = (digitalRead(TOUCH_PIN) == HIGH);   // 정전식: 잡으면 HIGH
-  if (raw != touchRaw) {
-    touchRaw   = raw;
-    touchRawAt = now;
-  } else if (raw != touchStable && now - touchRawAt >= TOUCH_DEBOUNCE_MS) {
-    touchStable = raw;
+  if (digitalRead(TOUCH_PIN) == LOW) {   // active-low: LOW = 잡음
+    touchLastLow = now;
+    touchSeenLow = true;
   }
+  // 부팅 직후 touchLastLow 가 0 이면 now-0 < HOLD 가 잠깐 참이 되어 "잡음"으로
+  // 시작한다. LOW 를 한 번이라도 본 뒤에만 브리지를 적용한다.
+  bool touched = touchSeenLow && (now - touchLastLow < TOUCH_HOLD_MS);
 
   // 주기 송신. 상태가 안 바뀌어도 계속 보낸다 — 젯슨이 "언제까지 살아 있었나"로
   // 상향 신선도를 판정하기 때문이다. 조용하면 끊긴 것과 구분이 안 된다.
@@ -326,7 +336,7 @@ void touchPoll() {
   f[0] = TOUCH_FRAME_H1;
   f[1] = TOUCH_FRAME_H2;
   f[2] = touchSeq++;
-  f[3] = touchStable ? TOUCH_FLAG_ON : 0x00;
+  f[3] = touched ? TOUCH_FLAG_ON : 0x00;
   f[4] = f[2] ^ f[3];
   Serial.write(f, 5);
 }
@@ -501,8 +511,9 @@ void setup() {
 
   lastRxMillis = millis();
 
-  // 터치센서. 정전식 모듈이 스스로 HIGH/LOW 를 밀어주므로 풀업을 쓰지 않는다.
-  pinMode(TOUCH_PIN, INPUT);
+  // 터치센서. active-low 라 풀업을 켠다 — OUT 선이 빠지면 HIGH 로 떠서
+  // '놓음'으로 읽힌다(단선 = 놓음, fail-safe).
+  pinMode(TOUCH_PIN, INPUT_PULLUP);
   touchSentAt = millis();
 
   // 진동모터. 부팅 직후 게이트가 떠서 모터가 헛돌지 않게 먼저 LOW 로 잡는다.

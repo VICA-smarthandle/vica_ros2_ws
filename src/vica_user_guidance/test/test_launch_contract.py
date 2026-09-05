@@ -254,3 +254,24 @@ def test_driver_haptic_request_is_manual_only():
     assert code.count("send_raw") == 1, (
         "send_raw 호출이 한 곳(cb_haptic_request)이 아니다 — 자동 트리거 의심"
     )
+
+
+def test_touch_state_is_initialised_before_any_enable_branch():
+    """diag_loop 가 읽는 터치 필드는 touch_enabled 값과 무관하게 __init__ 에서 먼저 만든다.
+
+    2026-09-04 사고: touch_enabled=false 면 _setup_touch() 를 건너뛰는데 diag_loop 가
+    그 안에서만 만들어지던 touch_contact 를 읽어 첫 진단 tick 에 노드가 죽었다
+    (AttributeError) → 펌웨어 워치독 1.5초 → 빨간불. 진단이 읽는 필드는 어떤 설정에서도
+    존재해야 한다. 이 시험은 그 초기화가 enable 분기보다 **앞에** 있음을 고정한다.
+    """
+    text = read(NODE_DIR / "user_guidance_driver_node.py")
+    init_contact = text.index("self.touch_contact = False")
+    init_last = text.index("self.touch_last_frame_ns = None")
+    enable_branch = text.index("if self.touch_enabled:\n            self._setup_touch()")
+    assert init_contact < enable_branch, "touch_contact 초기화가 enable 분기 뒤에 있다"
+    assert init_last < enable_branch, "touch_last_frame_ns 초기화가 enable 분기 뒤에 있다"
+    # diag_loop 는 이 둘만 읽는다 — _setup_touch 안에서 새 필드를 만들어 diag_loop 가
+    # 읽게 하면 같은 사고가 재발한다.
+    setup_body = text.split("def _setup_touch(self)")[1].split("def ")[0]
+    assert "self.touch_contact" not in setup_body
+    assert "self.touch_last_frame_ns" not in setup_body
