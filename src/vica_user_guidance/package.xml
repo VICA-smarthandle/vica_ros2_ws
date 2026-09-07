@@ -11,6 +11,9 @@
   <depend>std_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>vica_interfaces</depend>
+  <!-- 초음파 Range 를 발행하기 전에 odom -> usonic_* 변환 가능 여부를 본다
+       (range_tf_gate, 2026-09-07). -->
+  <depend>tf2_ros</depend>
 
   <!-- vica_safety에 의존하지 않는다. guidance는 권한 없는 출력 계층이므로
        안전 계층에 대한 역방향 의존을 만들지 않는다. 시간 판정 계약은

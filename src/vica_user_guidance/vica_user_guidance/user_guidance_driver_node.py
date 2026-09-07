@@ -14,8 +14,10 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from vica_interfaces.msg import SmartHandleState, TurnGuide
 
@@ -26,6 +28,7 @@ from .guidance_priority import (
     parse_goal_event,
     resolve_state_code,
 )
+from .range_tf_gate import RangeTfGate
 from .serial_link import SerialLink
 from .timebase import is_fresh_ns, sec_to_ns
 from .touch_frame import TouchFrameAccumulator, resolve_contact
@@ -78,6 +81,13 @@ class UserGuidanceDriverNode(Node):
         # costmap 이 낡은 값을 새것으로 착각한다.
         self.declare_parameter("ultrasonic_measurement_delay_ms", [210, 105])
         self.declare_parameter("ultrasonic_stale_warn_sec", 2.0)
+        # TF 가 없는 동안에는 Range 를 보내지 않는다(range_tf_gate 참고).
+        # 2026-09-07: TF 34 초 공백에서 Nav2 RangeSensorLayer 가 미포착 예외로
+        # controller_server 를 죽였다. 문제가 생기면 이 값을 false 로 되돌린다.
+        self.declare_parameter("ultrasonic_tf_gate", True)
+        # local_costmap 의 global_frame 과 같아야 한다. 그 층이 조회하는 변환을
+        # 우리가 미리 대신 확인하는 것이므로, 다른 프레임을 보면 의미가 없다.
+        self.declare_parameter("ultrasonic_tf_target_frame", "odom")
 
         self.cue_timeout_ns = sec_to_ns(
             float(self.get_parameter("cue_timeout_sec").value)
@@ -371,7 +381,24 @@ class UserGuidanceDriverNode(Node):
         self.us_pubs = [self.create_publisher(Range, t, 10) for t in topics]
         self.us_last_frame_ns = None
         self.us_stale_warned = False
-        self.get_logger().info(f"Ultrasonic Range publishing: {topics}")
+
+        # TF 게이트. 조회는 여기서 tf2 로 하고, 판정은 range_tf_gate 가 한다.
+        self.us_tf_gate_enabled = bool(
+            self.get_parameter("ultrasonic_tf_gate").value
+        )
+        self.us_tf_target = str(
+            self.get_parameter("ultrasonic_tf_target_frame").value
+        )
+        self.us_gate = RangeTfGate(channels=protocol.US_CHANNELS)
+        if self.us_tf_gate_enabled:
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        self.get_logger().info(
+            f"Ultrasonic Range publishing: {topics} "
+            f"(TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
+            f", 기준 프레임 {self.us_tf_target})"
+        )
 
     # ── 터치 ───────────────────────────────────────────
 
@@ -429,6 +456,44 @@ class UserGuidanceDriverNode(Node):
                         self._touch_pub_last_ns = now
                         self.diag_loop()
 
+    def _range_tf_ok(self, ch: int, stamp) -> bool:
+        """이 stamp 로 `odom -> usonic_*` 를 조회할 수 있는가.
+
+        Nav2 의 RangeSensorLayer 가 곧 할 조회를 우리가 먼저 해 보는 것이다.
+        여기서 안 되면 그쪽에서도 안 되고, 그쪽은 실패를 예외로 던진 뒤 아무도
+        잡지 않아 프로세스가 죽는다(2026-09-07).
+        """
+        if not self.us_tf_gate_enabled:
+            return True
+        try:
+            return bool(
+                self.tf_buffer.can_transform(
+                    self.us_tf_target,
+                    self.us_frame_ids[ch],
+                    Time.from_msg(stamp),
+                )
+            )
+        except TransformException:
+            # 프레임 이름이 아직 그래프에 없는 경우 등. 못 하는 것은 확실하다.
+            return False
+
+    def _log_range_gate(self, ch: int) -> None:
+        """게이트 상태가 바뀐 순간에만 1회 남긴다(10 Hz 로그 폭주 방지)."""
+        changed = self.us_gate.take_transition(ch)
+        if changed is None:
+            return
+        frame_id = self.us_frame_ids[ch]
+        if changed:
+            self.get_logger().info(
+                f"[초음파] {frame_id} TF 복귀 — Range 발행 재개 "
+                f"(보류한 프레임 {self.us_gate.blocked_count(ch)}개)"
+            )
+        else:
+            self.get_logger().warn(
+                f"[초음파] {frame_id} TF 없음 — Range 발행 보류 "
+                "(odom 끊김 동안 Nav2 컨트롤러를 지킨다)"
+            )
+
     def _publish_ranges(self, frame) -> None:
         stamp_base = self.get_clock().now()
         for ch, mm in enumerate(frame.distances_mm):
@@ -436,10 +501,16 @@ class UserGuidanceDriverNode(Node):
                 # 채널 무효(3회 연속 실패) — 그 채널만 건너뛴다. 한 센서 고장이
                 # 다른 채널을 죽이지 않는다.
                 continue
-            msg = Range()
-            msg.header.stamp = (
+            stamp = (
                 stamp_base - Duration(nanoseconds=self.us_delay_ns[ch])
             ).to_msg()
+            # TF 가 없으면 보내지 않는다. 보내는 순간 Nav2 쪽에서 예외가 난다.
+            allowed = self.us_gate.allow(ch, self._range_tf_ok(ch, stamp))
+            self._log_range_gate(ch)
+            if not allowed:
+                continue
+            msg = Range()
+            msg.header.stamp = stamp
             msg.header.frame_id = self.us_frame_ids[ch]
             msg.radiation_type = Range.ULTRASOUND
             msg.field_of_view = self.us_fov
