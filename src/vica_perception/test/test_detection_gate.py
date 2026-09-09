@@ -83,7 +83,7 @@ def test_default_thresholds_match_design_doc():
     assert DEFAULT_STILL_WINDOW_S == 3.0
     assert DEFAULT_MAX_DISPLACEMENT_M == 0.3
     assert DEFAULT_MIN_DISTANCE_M == 1.5
-    assert DEFAULT_MAX_DISTANCE_M == 4.0
+    assert DEFAULT_MAX_DISTANCE_M == 8.0
 
 
 def test_thresholds_are_overridable():
@@ -278,9 +278,14 @@ def test_too_near_is_rejected():
 
 
 def test_too_far_is_rejected():
-    """4.0 m 를 넘으면 도착까지 10초를 넘겨 상황이 이미 달라진다(§6.1)."""
+    """8.0 m 를 넘으면 거리 추정이 흔들려 정지 판정이 서지 않는다(2026-09-09 실측).
+
+    종전 상한은 4.0 m 였고 근거는 "도착까지 10초"였다. 실측에서 8 m 를 넘는
+    순간 stable 이 0 % 로 무너지는 것이 확인되어, 기준을 시간이 아니라
+    **센서가 믿을 만하게 보는 한계**로 옮겼다.
+    """
     gate = DetectionGate()
-    verdict = feed_still(gate, 0.0, 3.0, distance_m=4.01)
+    verdict = feed_still(gate, 0.0, 3.0, distance_m=8.01)
     assert verdict.approachable is False
     assert verdict.reason is GateReason.TOO_FAR
 
@@ -288,7 +293,7 @@ def test_too_far_is_rejected():
 def test_distance_uses_the_latest_sample():
     """범위 판정은 '지금 출발할 가치가 있는가'이므로 최신 거리로 본다."""
     gate = DetectionGate()
-    feed_still(gate, 0.0, 3.0, distance_m=4.5)
+    feed_still(gate, 0.0, 3.0, distance_m=8.5)
     verdict = gate.observe(sample(3.2, distance_m=3.0))
     assert verdict.approachable is True
 
