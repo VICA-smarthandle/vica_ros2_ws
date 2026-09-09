@@ -44,6 +44,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
+            # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
+            # 등록 목적지와 달리 감속 사다리 없이 처음부터 끝까지 이 값이다.
+            # 2026-09-09 실측: 이 값이 접근 19.6 초의 주범이다(knob·Nav2 아님).
+            DeclareLaunchArgument(
+                "person_approach_speed_percent", default_value="60.0"),
             # 접근 감속 단계. 두 배열은 순번끼리 짝이며 개수가 같아야 한다.
             # 잔여거리가 1.0 m 이하면 80 %, 0.5 m 이하면 60 %로 최대속도 상한을
             # 내린다. 한 번 내려간 제한은 그 Goal 동안 풀리지 않는다.
@@ -88,6 +93,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
             DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
+            # 접근(거절·무응답) 뒤 홈 복귀. 2026-09-04 사용자 결정으로 기본 켬 —
+            # 촬영에서 "물러납니다" 하고 제자리에 서 있는 것이 어색했다.
+            # 끄려면 auto_return_home:=false. 켜면 사람이 부르지 않아도 로봇이
+            # 홈까지 달리므로, 통행이 잦은 곳에서는 끄는 편이 안전하다.
+            DeclareLaunchArgument("auto_return_home", default_value="true"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -103,6 +113,10 @@ def generate_launch_description() -> LaunchDescription:
                         "estop_release_grace_sec": LaunchConfiguration(
                             "estop_release_grace_sec"
                         ),
+                        "person_approach_speed_percent": ParameterValue(
+                            LaunchConfiguration("person_approach_speed_percent"),
+                            value_type=float,
+                        ),
                         # 노드는 double 배열로 선언한다. launch 인자는 문자열이라
                         # value_type 을 지정해야 "[1.5, 1.0, 0.5]" 가 배열로 해석된다.
                         "approach_slowdown_distances_m": ParameterValue(
@@ -115,6 +129,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),
+                        "auto_return_home": ParameterValue(
+                            LaunchConfiguration("auto_return_home"),
+                            value_type=bool,
+                        ),
                     }
                 ],
             ),
