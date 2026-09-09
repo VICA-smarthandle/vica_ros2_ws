@@ -51,6 +51,7 @@ from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
     MSG_APPROACH_QUESTION,
+    PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -112,6 +113,15 @@ class MissionManagerNode(Node):
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
+        # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
+        # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
+        # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
+        # (knob 35 % 도 Nav2 요청도 아니었다 — 0.5 x 60 % = 0.30 이 그대로 나갔다).
+        # 올리면 빨라지지만 **사람에게 다가오는 속도**라 위협감을 함께 봐야 한다.
+        # 도착 직전 1.1 m 는 collision_monitor 가 0.12 m/s 로 따로 줄이므로 그
+        # 구간(약 9초)은 이 값과 무관하다.
+        self.declare_parameter(
+            "person_approach_speed_percent", PERSON_APPROACH_SPEED_PERCENT)
         self.declare_parameter("estop_release_grace_sec", 1.0)
         # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
         # 0 으로 두면 종전처럼 실패를 안내하고 끝낸다.
@@ -200,6 +210,8 @@ class MissionManagerNode(Node):
             # 쓰고 노드가 읽는다 — 두 구현이 같은 형식을 쓴다.
             return_destination=home,
             auto_return_home=bool(self.get_parameter("auto_return_home").value),
+            person_approach_speed_percent=float(
+                self.get_parameter("person_approach_speed_percent").value),
         )
         if arrival_dialog:
             self.get_logger().info(
