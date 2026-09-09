@@ -44,11 +44,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
-            # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
+            # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 100 % = 0.5 m/s.
             # 등록 목적지와 달리 감속 사다리 없이 처음부터 끝까지 이 값이다.
-            # 2026-09-09 실측: 이 값이 접근 19.6 초의 주범이다(knob·Nav2 아님).
+            # 2026-09-09 실기: 60 % 일 때 접근 19.6 초 -> 100 % 에서 7.9 초.
             DeclareLaunchArgument(
-                "person_approach_speed_percent", default_value="60.0"),
+                "person_approach_speed_percent", default_value="100.0"),
             # 접근 감속 단계. 두 배열은 순번끼리 짝이며 개수가 같아야 한다.
             # 잔여거리가 1.0 m 이하면 80 %, 0.5 m 이하면 60 %로 최대속도 상한을
             # 내린다. 한 번 내려간 제한은 그 Goal 동안 풀리지 않는다.
