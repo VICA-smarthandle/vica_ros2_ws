@@ -32,6 +32,7 @@ from vica_mission_manager.mission_logic import (
     SEEK_LOOK_SEC,
     SEEK_MIN_YAW_RAD,
     SEEK_TURN_TIMEOUT_SEC,
+    USER_ATTACHED_SUPPRESS_SEC,
     WAKE_CONSUMED_GUARD_SEC,
     doa_to_spin_yaw,
     wrap_to_pi,
@@ -1455,6 +1456,83 @@ class TestWakeConsumedGuardsWakeDoa:
         assert logic.state == State.IDLE
         actions = logic.on_wake_doa(
             90.0, True, 1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
+        assert logic.state == State.SEEKING
+        assert any(isinstance(a, SpinInPlace) for a in actions)
+
+
+class TestUserAttachedSuppressesWakeDoa:
+    """접근 회전이 끝나 사용자가 손잡이를 받아든 직후도 C1 과 같은 사고
+    조건이다(2026-09-10 사용자 결정) — 이 전이는 wake 가 아니라 회전 완료가
+    일으킨 것이라 _wake_consumed_at 도장이 안 찍힌다. 재청취 창이 만료된
+    뒤 "비카야, 화장실"처럼 부르면 DOA≈180(핸들 쪽)이 그대로 SEEKING 을
+    열어, 손잡이를 잡고 로봇 옆에 선 사용자 앞에서 최대 180도 제자리
+    회전이 다시 터진다."""
+
+    def _accept_and_finish_turn(self, logic, t_answer=1.0, t_done=2.0,
+                                 nav_status=NavStatus.SUCCEEDED):
+        logic.on_approach_answer(True, t_answer)
+        assert logic.state == State.TURNING
+        logic.on_tick(t_done, nav_status)
+        assert logic.state == State.IDLE
+
+    def test_wake_doa_right_after_turn_done_is_rejected(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
+        actions = logic.on_wake_doa(180.0, True, 2.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_wake_doa_rejected_even_when_turn_failed(self):
+        """회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다."""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0,
+                                      nav_status=NavStatus.FAILED)
+        actions = logic.on_wake_doa(180.0, True, 2.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_wake_doa_opens_after_silent_suppress_window(self):
+        """아무도 말을 걸지 않은 채 60초가 다 지나면 다른 사람의 호출을
+        다시 받는다 — 되감기가 없었던 경우."""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
+        actions = logic.on_wake_doa(
+            180.0, True, 2.0 + USER_ATTACHED_SUPPRESS_SEC + 0.01)
+        assert logic.state == State.SEEKING
+        assert any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_wake_rewinds_the_suppress_window(self):
+        """붙어 있는 사용자가 만료 직전에 다시 말을 걸면 시계가 되감긴다 —
+        원래 만료 시각을 지나도 여전히 막혀야 한다."""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
+        original_expiry = logic._user_attached_until
+        assert original_expiry == pytest.approx(2.0 + USER_ATTACHED_SUPPRESS_SEC)
+        logic.on_wake(original_expiry - 1.0)          # 만료 직전에 다시 말함
+        actions = logic.on_wake_doa(180.0, True, original_expiry + 1.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_decline_path_is_not_suppressed(self):
+        """거절 경로는 RETURNING 으로 빠지므로 억제를 걸지 않는다 — 찾기
+        모드는 원래 IDLE 에서만 열리니 복귀가 끝나기 전까지는 자동으로
+        막힌다. 복귀가 끝나 IDLE 이 되면 다른 사람의 호출은 그대로 들어야
+        한다(2026-09-10 사용자 결정)."""
+        logic = MissionLogic()   # 홈 미지정 — 제자리에서 복귀가 곧바로 끝난다
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        logic.on_approach_answer(False, 1.0)
+        assert logic.state == State.RETURNING
+        logic.on_tick(1.1, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(180.0, True, 1.11)
         assert logic.state == State.SEEKING
         assert any(isinstance(a, SpinInPlace) for a in actions)
 

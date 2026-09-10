@@ -394,6 +394,38 @@ WAKE_CONSUMED_GUARD_SEC = 2.0
 # 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
 # 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
 REAPPROACH_SUPPRESS_SEC = 60.0
+# 접근 회전이 끝나 사용자가 손잡이를 받아든 뒤 이만큼은 wake_doa 를 거절한다
+# (2026-09-10 사용자 결정). 이 전이는 wake 가 아니라 회전 완료가 일으킨
+# 것이라 WAKE_CONSUMED_GUARD_SEC 도장(_wake_consumed_at)이 안 찍힌다 —
+# 재청취 창이 만료된 뒤 "비카야, 화장실"처럼 부르면 DOA≈180(핸들 쪽)이
+# 그대로 SEEKING 을 열어, 손잡이를 잡고 로봇 옆에 선 사용자 앞에서 같은
+# 사고가 재현된다.
+#
+# 60초인 이유는 둘이다. 하나, 같은 뜻(방금 상대한 사람을 다시 사고 대상으로
+# 만들지 않는다)의 REAPPROACH_SUPPRESS_SEC 이 이미 60초라 — 임시방편에
+# 숫자를 하나 더 만들지 않고 맞춘다. 둘, 이 규칙 전체가 터치센서가 붙기
+# 전까지의 임시방편이라 — 정식 판정(터치)이 들어올 때 시나리오를 다시
+# 정리하기로 했고, 그 전에 이 숫자만 정교하게 다듬는 것은 값어치가 없다.
+#
+# on_wake 는 이 억제가 이미 살아 있을 때만 now + USER_ATTACHED_SUPPRESS_SEC
+# 로 되감는다(on_wake 참고) — 사용자가 그 사이 다시 말을 걸면 대화가 이어지는
+# 한 계속 막힌다.
+#
+# [남은 위험] 온보딩 질문("어디로 가고 싶으신가요?") 뒤에는 mission_logic 이
+# 거는 시간 제한이 아예 없다 — _to_idle() 이 모든 마감시각을 지우고, on_tick
+# 의 IDLE 분기는 _seek_deadline 만 본다. 그래서 사용자가 **아무 말 없이
+# 60초를 넘긴 뒤** "비카야"라고 부르면 이 억제는 이미 풀려 있어 회전이
+# 그대로 열린다. 되감기는 그 사이 사용자가 말을 걸었을 때만 돕는다 — 침묵이
+# 길어지는 경우까지는 못 막는다.
+#
+# [임시방편] 이 판정의 참뜻은 "사용자가 지금 손잡이를 잡고 있는가"이고,
+# 정답은 터치센서(SmartHandleState.user_contact)다. 그 센서는 지금 하드웨어
+# 결함으로 꺼져 있고(handle-touch-sensor-resume 메모리), 고장이 위험한
+# 쪽으로 난다 — 신호가 안 오면 규약상 항상 false, 즉 "아무도 안 잡았다"로
+# 읽힌다. 그래서 지금은 시간(+되감기)으로 어림한다. 터치센서가 살아나도 이
+# 상수는 지워지는 게 아니라 **덧대는** 조건이 된다 — 시간이 지나도 센서가
+# 여전히 접촉을 본다면 억제를 풀면 안 된다.
+USER_ATTACHED_SUPPRESS_SEC = 60.0
 # 사람에게 다가가는 구간의 최대속도 상한. 주행 상한 0.5 m/s 의 100 % = 0.5 m/s 다.
 # 마지막 1.1 m 는 collision_monitor 의 PolygonSlow 가 0.2 m/s 로 한 번 더
 # 줄인다(설계 6.4절) — 그 구간은 이 값과 무관하다.
@@ -784,6 +816,17 @@ class MissionLogic:
         # 이 시각으로부터 WAKE_CONSUMED_GUARD_SEC 이내면 거절한다 — 두 토픽의
         # 도착 순서와 무관하게 결과가 같아지게 하려는 것이다.
         self._wake_consumed_at: Optional[float] = None
+        # 접근 회전이 끝나 사용자가 손잡이를 받아든 것으로 보는 만료 시각
+        # (USER_ATTACHED_SUPPRESS_SEC). on_wake_doa 가 이 값이 살아 있는 동안
+        # 거절한다. _to_idle() 은 이 값을 비우지 않는다 — 회전 완료가 곧장
+        # _to_idle() 을 부르므로 거기서 지우면 억제가 걸리기도 전에 사라진다.
+        # on_wake 는 이 값이 이미 살아 있을 때만 now + USER_ATTACHED_SUPPRESS_SEC
+        # 로 되감는다 — 사용자가 계속 말을 거는 동안은 대화가 이어지는 한
+        # 막힌 채로 있고, 말이 없으면 이 값을 지나는 순간 자연히 풀린다.
+        # 만료는 시간 비교(now 와의 대소)만으로 판정하므로 별도로 None 처리할
+        # 지점이 필요 없다 — 지울 곳을 하나라도 놓치면 억제가 예상보다 오래
+        # 남거나 일찍 사라지는 실수가 생기는데, 그 실수 자체를 없앤 것이다.
+        self._user_attached_until: Optional[float] = None
         # 원래 자세로 돌아가기 위해 돌아야 할 누적 각도. 탐색 창 중에 다시
         # 부르면 또 돌므로 덮어쓰지 않고 더한다. None 이면 지금이 복귀 회전이다.
         self._seek_return_yaw: Optional[float] = None
@@ -1360,6 +1403,11 @@ class MissionLogic:
         마디(짧은 "그래" 오전사 등)가 옛 질문의 답으로 오인 접수된다.
         접는 멘트는 없다: 사용자는 이미 새 말을 하려는 참이다.
         RETURNING 의 복귀 브레이크는 노드가 on_return_brake 로 따로 보낸다.
+
+        접근 온보딩 직후 억제(`_user_attached_until`)가 살아 있으면 되감는다
+        (USER_ATTACHED_SUPPRESS_SEC 근거 참고) — 붙어 있는 사용자가 계속
+        말을 거는 동안은 대화가 이어지는 한 계속 막고, 조용해지면 그 값을
+        새로 만들지 않으므로 결국 시간이 다 되어 풀린다.
         """
         if self.state == State.WAITING:
             # 각성 질문("다시 안내를 시작할까요?")은 2026-09-01 삭제(A안) —
@@ -1389,7 +1437,31 @@ class MissionLogic:
             self._to_idle()
             self._wake_consumed_at = now
             return []
+        if self.user_attached_guard_active(now):
+            # 되감기. 새로 억제를 걸지는 않는다(이미 살아 있을 때만) — 없던
+            # 억제를 여기서 새로 만들면 접근·온보딩과 무관한 "비카야"에도
+            # USER_ATTACHED_SUPPRESS_SEC 짜리 억제가 생긴다.
+            self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
         return []
+
+    def wake_guard_active(self, now: float) -> bool:
+        """`_wake_consumed_at` 직후 가드가 지금 유효한가.
+
+        on_wake_doa 안과 진단 로그(mission_manager_node._on_wake_doa)가 정확히
+        같은 조건으로 판정하게 하려고 메서드로 뺐다 — 로그가 이 조건을 따로
+        베끼면 언젠가 어긋나고, 그러면 로그가 실제 관문과 다른 이야기를 하게
+        된다.
+        """
+        return (self._wake_consumed_at is not None
+                and now - self._wake_consumed_at < WAKE_CONSUMED_GUARD_SEC)
+
+    def user_attached_guard_active(self, now: float) -> bool:
+        """접근 온보딩 직후 억제(`_user_attached_until`)가 지금 유효한가.
+
+        이유는 wake_guard_active 와 같다.
+        """
+        return (self._user_attached_until is not None
+                and now < self._user_attached_until)
 
     def on_wake_doa(self, doa_deg: float, nav_ready: bool, now: float) -> list:
         """"비카야"가 온 방향으로 고개를 돌린다 (호출 접근 설계 §4).
@@ -1406,11 +1478,17 @@ class MissionLogic:
         state 만으로는 "방금 접힌 옛 대화"와 "진짜 새 호출"을 구분 못 한다.
         그래서 wake/on_return_brake 가 상태를 바꾼 시각을 함께 본다 — 그 직후
         WAKE_CONSUMED_GUARD_SEC 이내면 옛 대화의 여진으로 보고 거절한다.
+
+        같은 이유로, 접근 온보딩 직후(USER_ATTACHED_SUPPRESS_SEC 이내)도
+        거절한다. 이 전이는 wake 가 아니라 회전 완료(on_tick 의 TURNING
+        분기)가 일으킨 것이라 _wake_consumed_at 도장이 없다 — 손잡이를 막
+        받아든 사용자 옆에서 같은 사고가 재현되는 것을 막는다.
         """
         if self.state != State.IDLE or self.estop_active or not nav_ready:
             return []
-        if (self._wake_consumed_at is not None
-                and now - self._wake_consumed_at < WAKE_CONSUMED_GUARD_SEC):
+        if self.wake_guard_active(now):
+            return []
+        if self.user_attached_guard_active(now):
             return []
         yaw = doa_to_spin_yaw(doa_deg, self.wake_doa_sign)
         # 돌아야 할 만큼 돌았다고 치고 복귀각을 먼저 누적한다 — 창 중에 다시
@@ -1759,6 +1837,11 @@ class MissionLogic:
                 # 창이 열리고, 회전으로 사용자가 핸들 방향에 정렬됐으므로
                 # DOA 방향 관문도 자연히 유효해진다.
                 self._to_idle()
+                # 사용자가 손잡이를 받아든 시점이다 — 재청취 창이 만료된 뒤
+                # 다른 "비카야"가 이 사람을 새 호출로 오인하지 않도록 얼마간
+                # wake_doa 를 거절한다. _to_idle() 은 이 값을 지우지 않으므로
+                # 호출 순서는 상관없다.
+                self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 온보딩 질문이
                 # 완료를 대신한다.
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
@@ -1768,6 +1851,9 @@ class MissionLogic:
                 # 수락한 사람을 침묵 속에 버려두지 않도록 온보딩은 한다.
                 # (핸들 방향은 어긋났을 수 있다 - 안내 실패는 아니다.)
                 self._to_idle()
+                # 회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다 —
+                # 위와 같은 억제를 건다.
+                self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif (self._turn_deadline is not None
