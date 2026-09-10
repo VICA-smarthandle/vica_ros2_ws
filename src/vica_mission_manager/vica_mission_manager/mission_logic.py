@@ -1300,6 +1300,9 @@ class MissionLogic:
                 # 회전이 없으면 회전 예고는 거짓말 — 온보딩으로 바로 간다.
                 # 온보딩 끝은 질문이라 expects_reply 로 재청취 창이 열린다.
                 self._to_idle()
+                # 회전을 껐어도 사용자는 이미 승낙하고 그 자리에 있다 —
+                # State.TURNING 을 거치는 길과 같은 억제를 건다.
+                self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 return [Say(MSG_APPROACH_ONBOARDING, priority="response",
                             expects_reply=True)]
             self.state = State.TURNING

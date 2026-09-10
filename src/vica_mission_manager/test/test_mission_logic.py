@@ -1536,6 +1536,18 @@ class TestUserAttachedSuppressesWakeDoa:
         assert logic.state == State.SEEKING
         assert any(isinstance(a, SpinInPlace) for a in actions)
 
+    def test_zero_yaw_shortcut_still_suppresses(self):
+        """회전량을 0으로 꺼도(예: 좁은 곳) 승낙한 사용자는 그 자리에 있다 —
+        State.TURNING 을 거치지 않는 지름길에도 같은 억제가 걸려야 한다."""
+        logic = MissionLogic(return_destination=make_home(),
+                              approach_turn_yaw_rad=0.0)
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        logic.on_approach_answer(True, 1.0)
+        assert logic.state == State.IDLE   # 회전 없이 바로 온보딩
+        actions = logic.on_wake_doa(180.0, True, 1.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
 
 class TestReturnBrakeGuardsWakeDoa:
     """on_return_brake 도 _wake_consumed_at 도장을 찍는다 — 복귀 중
