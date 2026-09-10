@@ -51,6 +51,7 @@ from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
     HANDLE_SIDE_MIN_YAW_RAD,
+    Haptic,
     MSG_APPROACH_QUESTION,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
@@ -376,6 +377,10 @@ class MissionManagerNode(Node):
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
         self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
+        # 손잡이 진동 요청 (2026-09-10). 진동 모터는 아직 미장착이라 지금은
+        # 받는 쪽이 없지만, 장착되면 그대로 동작하도록 미리 배선해 둔다 —
+        # user_guidance_driver_node 가 /vica/haptic_request 를 구독한다.
+        self.pub_haptic = self.create_publisher(String, "/vica/haptic_request", 10)
         self.pub_state = self.create_publisher(RobotState, "/vica/robot_state", 10)
         self.pub_goal_event = self.create_publisher(String, "/vica_goal_event", 10)
         self.pub_speed_limit = self.create_publisher(
@@ -1294,6 +1299,11 @@ class MissionManagerNode(Node):
                 self._start_spin(action)
             elif isinstance(action, SetNavSpeedLimit):
                 self._publish_nav_speed_limit(action.percent)
+            elif isinstance(action, Haptic):
+                out = String()
+                out.data = action.pattern
+                self.pub_haptic.publish(out)
+                self.get_logger().info(f"진동 요청: {action.pattern}")
 
     def _publish_nav_speed_limit(self, percent: float) -> None:
         msg = SpeedLimit()

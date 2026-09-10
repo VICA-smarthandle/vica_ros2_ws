@@ -233,7 +233,19 @@ class SetNavSpeedLimit:
     percent: float
 
 
-Action = Union[Say, Navigate, CancelNav, SetNavSpeedLimit]
+@dataclass(frozen=True)
+class Haptic:
+    """손잡이 진동 요청. 노드가 패턴 이름을 그대로 /vica/haptic_request 에
+    발행한다 — 이 모듈은 그 토픽도, 값을 해석하는 펌웨어도 모른다.
+
+    쓸 수 있는 패턴은 드라이버가 아는 두 개뿐이다("short"/"long", 2026-09-10
+    사용자 결정 — HAPTIC_PATTERN_HANDLE_HINT 참고).
+    """
+
+    pattern: str
+
+
+Action = Union[Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic]
 
 
 # ---- 멘트 (v1 임시 카피 — 시각장애인 관점 감수는 미결 사항 #4) ----------------
@@ -352,6 +364,16 @@ MSG_APPROACH_ONBOARDING = (
 )
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
 MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
+
+# 손잡이 위치 안내 (사용자 승인 문구, 2026-09-10 사용자 결정). 회전 여부와
+# 무관하게 수락 직후·온보딩 직전에 항상 나간다 — 회전해서 손잡이를 내준
+# 경우도 시각장애인은 그 사실을 알 방법이 없다. 같은 순간 HAPTIC_PATTERN_
+# HANDLE_HINT 진동이 울려야 "진동이 나는 곳"이 거짓말이 되지 않는다.
+MSG_HANDLE_HINT = "손잡이는 지금 계신 쪽에 있습니다. 진동이 나는 곳을 잡아주세요."
+# 진동 드라이버가 아는 패턴은 "short"/"long" 둘뿐이다
+# (user_guidance_driver_node.HAPTIC_PATTERNS). 손잡이를 찾는 신호라 짧은
+# 진동은 지나치기 쉬워 "long" 을 쓴다.
+HAPTIC_PATTERN_HANDLE_HINT = "long"
 
 # 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
@@ -1471,8 +1493,14 @@ class MissionLogic:
                 # 회전을 껐어도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # State.TURNING 을 거치는 길과 같은 억제를 건다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
-                return [Say(MSG_APPROACH_ONBOARDING, priority="response",
-                            expects_reply=True)]
+                # 손잡이 위치 안내 + 진동 (2026-09-10 사용자 결정): 회전이
+                # 없어도 사용자는 손잡이가 어디인지 모른다 — 온보딩보다 먼저.
+                return [
+                    Say(MSG_HANDLE_HINT, priority="response"),
+                    Haptic(HAPTIC_PATTERN_HANDLE_HINT),
+                    Say(MSG_APPROACH_ONBOARDING, priority="response",
+                        expects_reply=True),
+                ]
             self.state = State.TURNING
             self.active_destination = None
             self._response_deadline = None
@@ -2082,6 +2110,10 @@ class MissionLogic:
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 온보딩 질문이
                 # 완료를 대신한다.
+                # 손잡이 위치 안내 + 진동 (2026-09-10 사용자 결정): 온보딩
+                # 앞에서 손잡이가 어디인지 말하고 같은 순간 진동을 울린다.
+                actions.append(Say(MSG_HANDLE_HINT, priority="response"))
+                actions.append(Haptic(HAPTIC_PATTERN_HANDLE_HINT))
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
@@ -2092,6 +2124,10 @@ class MissionLogic:
                 # 회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # 위와 같은 억제를 건다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
+                # 회전이 실패해도 손잡이 안내·진동은 그대로 나간다 — 사용자는
+                # 이미 승낙하고 서 있다(2026-09-10 사용자 결정).
+                actions.append(Say(MSG_HANDLE_HINT, priority="response"))
+                actions.append(Haptic(HAPTIC_PATTERN_HANDLE_HINT))
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif (self._turn_deadline is not None
