@@ -311,8 +311,10 @@ class MissionManagerNode(Node):
             callback_group=self._main_group,
         )
         # 호출이 온 방향. 대기 중에만 받아 그쪽으로 고개를 돌린다
-        # (호출 접근 설계). /vica/wake 와 도착 순서는 상관없다 — IDLE 에서
-        # /vica/wake 는 아무 일도 하지 않고, 새 흐름은 이 토픽만으로 열린다.
+        # (호출 접근 설계). 같은 콜백 그룹이라 /vica/wake 가 먼저 처리되는데,
+        # 그 처리 직후(WAKE_CONSUMED_GUARD_SEC 이내)의 이 토픽은 on_wake_doa
+        # 가 시각으로 거절한다 — 두 토픽의 도착 순서와 무관하게 새 호출만
+        # SEEKING 을 연다(2026-09-10 재현).
         self.create_subscription(
             Float32, "/vica/wake_doa", self._on_wake_doa, 10,
             callback_group=self._main_group,

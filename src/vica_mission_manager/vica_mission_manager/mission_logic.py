@@ -375,6 +375,14 @@ SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC
 # 이보다 작은 회전은 하지 않는다. DOA 퍼짐이 ±4~16° 라 10° 미만은 잡음이고,
 # 0 에 가까운 spin 은 behavior server 가 거부하거나 즉시 끝나 무의미하다.
 SEEK_MIN_YAW_RAD = math.radians(10.0)
+# 같은 호출의 /vica/wake 와 /vica/wake_doa 는 몇 ms 간격으로 온다(2026-09-10
+# 실기 재현). 콜백이 같은 MutuallyExclusive 그룹이라 wake 가 먼저 상태를
+# IDLE 로 내린 뒤에야 wake_doa 가 처리될 수 있는데, 그때 IDLE 만 보고 통과
+# 시키면 "옛 대화를 접었을 뿐"인 wake 를 새 호출로 오인해 SEEKING 이 열린다
+# — 사람이 핸들을 잡고 로봇 뒤에 서 있을 때 "비카야"로 최대 180도 제자리
+# 회전이 터지는 사고. 2.0초는 같은 호출의 두 토픽 간격을 넉넉히 덮으면서
+# 진짜 새 호출(수 초 뒤)까지 막기에는 짧다.
+WAKE_CONSUMED_GUARD_SEC = 2.0
 # 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
 # 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
 REAPPROACH_SUPPRESS_SEC = 60.0
@@ -764,6 +772,10 @@ class MissionLogic:
         # 이고 노드가 파라미터로 넣어 준다.
         self.wake_doa_sign = wake_doa_sign
         self.seek_look_sec = seek_look_sec
+        # on_wake/on_return_brake 가 실제로 상태를 바꾼 시각. on_wake_doa 가
+        # 이 시각으로부터 WAKE_CONSUMED_GUARD_SEC 이내면 거절한다 — 두 토픽의
+        # 도착 순서와 무관하게 결과가 같아지게 하려는 것이다.
+        self._wake_consumed_at: Optional[float] = None
         # 원래 자세로 돌아가기 위해 돌아야 할 누적 각도. 탐색 창 중에 다시
         # 부르면 또 돌므로 덮어쓰지 않고 더한다. None 이면 지금이 복귀 회전이다.
         self._seek_return_yaw: Optional[float] = None
@@ -1334,13 +1346,17 @@ class MissionLogic:
             self._wait_until = None
             self._reset_arrival_dialog()
             self._to_idle()
+            # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
+            self._wake_consumed_at = now
             return []
         if self.state == State.CONFIRMING:
             self._to_idle()
+            self._wake_consumed_at = now
             return []
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             self._reset_arrival_dialog()
             self._to_idle()
+            self._wake_consumed_at = now
             return []
         if self.state == State.AWAITING_USER:
             # 같은 사람을 곧장 다시 쫓지 않게 억제하고 제자리에 선다 —
@@ -1348,6 +1364,7 @@ class MissionLogic:
             self._suppress_track(self.approach_track_id, now)
             self._approach.reset()
             self._to_idle()
+            self._wake_consumed_at = now
             return []
         return []
 
@@ -1359,8 +1376,18 @@ class MissionLogic:
 
         마이크는 거리를 모르고 각도도 ±4~16° 라, 소리로 목표점을 만들지
         않는다. 돌아서 카메라가 확인한 뒤에야 기존 접근 경로가 이어받는다.
+
+        /vica/wake 와 이 토픽은 같은 호출에서 수 ms 간격으로 오고 처리 순서가
+        보장되지 않는다(2026-09-10 실기 재현). wake 가 먼저 오면 위 state != IDLE
+        관문이 거절하지만, wake 가 답-대기 상태를 IDLE 로 접은 **직후**라면
+        state 만으로는 "방금 접힌 옛 대화"와 "진짜 새 호출"을 구분 못 한다.
+        그래서 wake/on_return_brake 가 상태를 바꾼 시각을 함께 본다 — 그 직후
+        WAKE_CONSUMED_GUARD_SEC 이내면 옛 대화의 여진으로 보고 거절한다.
         """
         if self.state != State.IDLE or self.estop_active or not nav_ready:
+            return []
+        if (self._wake_consumed_at is not None
+                and now - self._wake_consumed_at < WAKE_CONSUMED_GUARD_SEC):
             return []
         yaw = doa_to_spin_yaw(doa_deg, self.wake_doa_sign)
         # 돌아야 할 만큼 돌았다고 치고 복귀각을 먼저 누적한다 — 창 중에 다시
@@ -1481,6 +1508,8 @@ class MissionLogic:
         긴급어("멈춰")는 별도 경로로 어느 상태든 항상 통한다."""
         if self.state != State.RETURNING:
             return []
+        # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
+        self._wake_consumed_at = now
         cancel_dest = self.active_destination
         self.active_destination = None
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]

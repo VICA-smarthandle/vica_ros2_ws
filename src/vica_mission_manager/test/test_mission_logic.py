@@ -32,6 +32,7 @@ from vica_mission_manager.mission_logic import (
     SEEK_LOOK_SEC,
     SEEK_MIN_YAW_RAD,
     SEEK_TURN_TIMEOUT_SEC,
+    WAKE_CONSUMED_GUARD_SEC,
     doa_to_spin_yaw,
     wrap_to_pi,
 )
@@ -1399,6 +1400,63 @@ class TestWakeFoldsStaleQuestions:
         assert logic.on_wake(6.0) == []
         assert logic.state == State.IDLE         # 물러나지 않고 제자리
         assert logic.on_approach_answer(True, 7.0) == []
+
+
+class TestWakeConsumedGuardsWakeDoa:
+    """wake·wake_doa 는 같은 콜백 그룹이라 wake 가 먼저 상태를
+    IDLE 로 내린다. 그 직후의 wake_doa 를 state == IDLE 만으로 통과시키면
+    "옛 대화를 접었을 뿐"인 wake 를 새 호출로 오인해 SEEKING 이 열린다 —
+    사람이 핸들을 잡고 로봇 뒤에 서 있을 때 최대 180도 제자리 회전이 터지는
+    사고. wake/on_return_brake 가 상태를 바꾼 시각을 함께 봐야 두 토픽의
+    도착 순서와 무관하게 결과가 같아진다."""
+
+    def test_wake_doa_right_after_waiting_wake_does_not_open_seeking(self):
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        logic.on_wake(10.0)
+        assert logic.state == State.IDLE
+        # 같은 호출의 wake_doa 가 수 ms 뒤 도착했다고 가정한다.
+        actions = logic.on_wake_doa(90.0, True, 10.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_wake_doa_right_after_asking_next_wake_does_not_open_seeking(self):
+        logic = MissionLogic(arrival_dialog=True)
+        logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 0.0)
+        logic.on_tick(1.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.ASKING_NEXT
+        logic.on_wake(1.001)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 1.002)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_old_on_wake_behavior_is_unchanged(self):
+        """on_wake 자체(답-대기 상태를 IDLE 로 접기)는 그대로다 — 막히는 것은
+        그 직후의 wake_doa 뿐이다."""
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        assert logic.on_wake(1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_state_order_first_is_rejected_by_state_gate(self):
+        """wake_doa 가 먼저 오면(아직 옛 상태) 기존 state 관문이 거절한다 —
+        시각 관문과 무관한 경로도 여전히 막힌다."""
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        assert logic.on_wake_doa(90.0, True, 10.0) == []
+        assert logic.state == State.WAITING
+
+    def test_guard_expires_and_a_real_new_call_opens_seeking(self):
+        """2초가 지난 뒤는 진짜 새 호출이다 — 과도한 봉쇄가 아니다."""
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        logic.on_wake(1.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(
+            90.0, True, 1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
+        assert logic.state == State.SEEKING
+        assert any(isinstance(a, SpinInPlace) for a in actions)
 
 
 class TestConfirmReproposalIsAnswer:
