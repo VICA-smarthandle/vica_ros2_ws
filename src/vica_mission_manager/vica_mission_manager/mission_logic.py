@@ -406,9 +406,13 @@ TRACK_ID_NONE = 0
 APPROACH_DESTINATION_PREFIX = "approach:"
 APPROACH_DESTINATION_NAME = "접근 대상"
 
-# 접근 세 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이 이 셋이다.
+# 접근 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이다. SEEKING
+# 이 빠지면 회전 중 음성 목적지 요청이 그대로 통과해 Navigate 가 나가고,
+# 진행 중인 SpinInPlace 를 취소하지 않은 채 두 goal 이 동시에 나가게 된다
+# (TURNING 과 같은 처리 — 리뷰 라운드 1 결함 1).
 _APPROACH_STATES = (
-    State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING
+    State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING,
+    State.SEEKING,
 )
 # Nav2 goal 이 살아 있는 상태. E-stop·긴급어가 goal 을 취소해야 하는 구간이다.
 _GOAL_ACTIVE_STATES = (
@@ -1512,8 +1516,9 @@ class MissionLogic:
             return []
 
         actions: list = []
-        # 접근·복귀 중에도 goal 이 살아 있다. 로봇이 사람을 향해 움직이는 구간이
-        # 있으므로 여기서 취소가 빠지면 긴급어 경로가 죽는다(설계 7절).
+        # 접근·복귀·탐색(SEEKING) 중에도 goal 이 살아 있다. 로봇이 사람을 향해
+        # 움직이거나 소리 쪽으로 도는 구간이 있으므로 여기서 취소가 빠지면
+        # 긴급어 경로가 죽는다(설계 7절).
         if self.state in _GOAL_ACTIVE_STATES:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
