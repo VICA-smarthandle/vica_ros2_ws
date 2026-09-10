@@ -98,6 +98,17 @@ def generate_launch_description() -> LaunchDescription:
             # 끄려면 auto_return_home:=false. 켜면 사람이 부르지 않아도 로봇이
             # 홈까지 달리므로, 통행이 잦은 곳에서는 끄는 편이 안전하다.
             DeclareLaunchArgument("auto_return_home", default_value="true"),
+            # 마이크 각도 증가 방향(+1 반시계 / -1 시계, 호출 접근 설계 §5).
+            # 실측값 +1.0 확정(2026-09-10, 컨트롤러가 사용자와 2회 걷기 측정) —
+            # 로봇을 마주 보고 사용자 기준 오른쪽으로 이동 -> 마이크 각도 0°에서
+            # 119°로 증가 -> 반시계 증가 -> Nav2 규약과 같은 부호. 틀리면
+            # 로봇이 호출 방향의 정반대로 돈다.
+            DeclareLaunchArgument("wake_doa_sign", default_value="1.0"),
+            # 고개를 돌린 뒤 사람을 찾는 시간(초). 회전 완료 갱신(1 Hz, 최대
+            # 1.0 s)과 detection_gate 의 stable 1.0 s + still window 3.0 s 를
+            # 더한 바닥값이 4.2~4.5 s 라 여유가 1.5 s 뿐이었다 — 8.0 으로 올린다
+            # (2026-09-10 재검토. 근거는 mission_logic.SEEK_LOOK_SEC 주석).
+            DeclareLaunchArgument("seek_look_sec", default_value="8.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -132,6 +143,14 @@ def generate_launch_description() -> LaunchDescription:
                         "auto_return_home": ParameterValue(
                             LaunchConfiguration("auto_return_home"),
                             value_type=bool,
+                        ),
+                        "wake_doa_sign": ParameterValue(
+                            LaunchConfiguration("wake_doa_sign"),
+                            value_type=float,
+                        ),
+                        "seek_look_sec": ParameterValue(
+                            LaunchConfiguration("seek_look_sec"),
+                            value_type=float,
                         ),
                     }
                 ],
