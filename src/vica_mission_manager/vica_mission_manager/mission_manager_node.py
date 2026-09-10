@@ -1296,10 +1296,11 @@ class MissionManagerNode(Node):
                 self._nav_gen += 1
         if accepted:
             self.get_logger().info(
-                f"제자리 회전 시작: {action.yaw_rad:.2f} rad (핸들을 사람 쪽으로)"
+                f"제자리 회전 시작: {action.yaw_rad:+.2f} rad "
+                f"({math.degrees(action.yaw_rad):+.0f}°) — {action.reason}"
             )
         else:
-            self.get_logger().error("Spin 거부됨 - 회전 없이 접근을 끝낸다")
+            self.get_logger().error(f"Spin 거부됨 ({action.reason}) - 회전 없이 넘어간다")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
     def _cancel_nav(self, destination=None, event: str = "goal_canceled") -> None:

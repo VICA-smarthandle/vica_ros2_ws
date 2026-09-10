@@ -217,6 +217,13 @@ class SpinInPlace:
     """
 
     yaw_rad: float
+    # 이 회전이 무엇인지. 로그에만 쓴다.
+    #
+    # 지금 제자리 회전은 세 종류다(수락 뒤 핸들 내주기·호출 방향 보기·못 찾아
+    # 원위치). 셋이 같은 문구로 찍히면 실기에서 "왜 돌았는지"를 사후에 가릴 수
+    # 없다 — 특히 호출 회전과 그 8초 뒤의 원위치 회전은 밖에서 보면 "부르지도
+    # 않았는데 또 돌았다"로 보인다 (2026-09-10 실기 관찰).
+    reason: str = "회전"
 
 
 @dataclass(frozen=True)
@@ -1311,7 +1318,7 @@ class MissionLogic:
             self._turn_deadline = now + APPROACH_TURN_TIMEOUT_SEC
             return [
                 Say(MSG_APPROACH_ACCEPTED, priority="response"),
-                SpinInPlace(self.approach_turn_yaw_rad),
+                SpinInPlace(self.approach_turn_yaw_rad, reason="수락 — 핸들을 사람 쪽으로"),
             ]
 
         actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
@@ -1515,7 +1522,7 @@ class MissionLogic:
         self._seek_return_yaw = back
         self._seek_deadline = None
         self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
-        return [SpinInPlace(yaw)]
+        return [SpinInPlace(yaw, reason="호출 방향으로")]
 
     def on_arrival_answer(self, intent: "IntentData", now: float,
                           next_dest: Optional[Destination] = None) -> list:
@@ -1840,7 +1847,7 @@ class MissionLogic:
                 if back is not None and abs(back) >= SEEK_MIN_YAW_RAD:
                     self.state = State.SEEKING
                     self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
-                    actions.append(SpinInPlace(back))
+                    actions.append(SpinInPlace(back, reason="못 찾아 원위치로"))
 
         elif self.state == State.TURNING:
             if nav_status == NavStatus.SUCCEEDED:
