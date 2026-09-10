@@ -1655,10 +1655,15 @@ class TestSeekLookWindow:
         assert logic._seek_return_yaw is None
 
     def test_calling_again_accumulates_the_way_back(self):
-        """두 번 부르면 두 번 돈다. 복귀각은 덮어쓰지 않고 더한다."""
+        """두 번 부르면 두 번 돈다 — 두 번째 SpinInPlace 발행 자체를 단언한다
+        (상태·필드만 보면 액션이 안 나가도 통과해버린다, 2026-09-10 재검토).
+        복귀각은 덮어쓰지 않고 더한다."""
         logic = MissionLogic(wake_doa_sign=1.0)
         seek_and_finish_turn(logic, doa=90.0, t0=1.0)        # +90도
-        logic.on_wake_doa(90.0, True, 3.0)                   # 또 +90도
+        actions = logic.on_wake_doa(90.0, True, 3.0)         # 또 +90도
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi / 2)
         assert logic.state == State.SEEKING
         assert logic._seek_return_yaw == pytest.approx(-math.pi)
 
@@ -1695,3 +1700,19 @@ class TestSeekLookWindow:
         logic.on_tick(2.0, NavStatus.FAILED)
         assert logic.state == State.IDLE
         assert logic._seek_deadline is not None
+
+    def test_small_accumulated_back_does_not_spin(self):
+        """설계 5요점: 복귀 회전도 10도 미만이면 생략한다 — 정면 근처 호출이
+        반복돼 잔여각이 작게 남아도 창 만료에 SpinInPlace 가 나가면 안 된다.
+        회귀하면 사람 옆에서 5도짜리 잔여 회전이 튀어나온다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(3.0, True, 1.0)     # 정면 근처(10도 미만): 회전 없음
+        assert logic.state == State.IDLE
+        logic.on_wake_doa(3.0, True, 2.0)     # 다시 정면 근처: 누적 back -6도
+        assert logic.state == State.IDLE
+        assert abs(logic._seek_return_yaw) < SEEK_MIN_YAW_RAD
+        actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
