@@ -365,10 +365,18 @@ APPROACH_TURN_TIMEOUT_SEC = 15.0
 # 호출 접근(설계 2026-09-10). "비카야"를 듣고 그쪽으로 고개를 돌린 뒤,
 # 카메라가 사람을 찾을 때까지 기다리는 시간.
 #
-# 6.0 인 이유: 회전이 끝나야 탐지가 쓸모 있어지고, detection_gate 는 5 Hz
-# 로 stable 1.0 s + still window 3.0 s 를 본다. 그보다 짧으면 사람이 서
-# 있는데도 창이 먼저 닫힌다. 실측으로 확정한다 [TARGET].
-SEEK_LOOK_SEC = 6.0
+# 8.0 인 이유(2026-09-10 재검토 — 처음 잡은 6.0 은 여유가 1.5 s 뿐이었다):
+# 바닥값은 stable 1.0 s + still window 3.0 s(detection_gate, 5 Hz) 만이 아니다.
+#   - /vica/robot_state 는 1 Hz 발행이라 회전 종료(is_moving=false) 갱신이
+#     최대 1.0 s 늦는다 — 그동안 YOLO 는 여전히 꺼져 있다(SEEKING 진입·이탈
+#     즉시 발행으로 이 지연은 회수했지만, 값 자체는 그 지연 없이도 여유가
+#     있도록 넉넉히 잡는다).
+#   - 회전 중 추론이 끊겨 있었으므로 stable 3.0 s 는 창이 열린 뒤 새로
+#     쌓인다.
+# 바닥값 ≈ 1.0 + 0.2 + 3.0 ≈ 4.2~4.5 s. 젯슨 CPU 경합으로 프레임 간격이
+# detection_gap 0.6 s 를 한 번만 넘겨도 연속이 깨져 처음부터 다시 세므로,
+# 8.0 으로 올려 여유를 둔다. 실측으로 더 정한다 [TARGET].
+SEEK_LOOK_SEC = 8.0
 # 회전이 시작조차 안 됐을 때(노드 결함 등) 상태에서 빠져나오는 시계.
 # 접근 수락 회전과 같은 값을 쓴다 — 같은 Spin 액션이다.
 SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC

@@ -65,9 +65,11 @@ from .mission_logic import (
     SetNavSpeedLimit,
     SpinInPlace,
     Pose2D,
+    SEEK_MIN_YAW_RAD,
     State,
     _REJECT_MESSAGES,
     check_gate,
+    doa_to_spin_yaw,
     yaw_deg_to_quaternion,
 )
 
@@ -116,8 +118,9 @@ class MissionManagerNode(Node):
         # 마이크 각도 증가 방향. +1 반시계 / -1 시계 — 장비 실측값이다
         # (호출 접근 설계 §5). 틀리면 로봇이 호출 방향의 정반대로 돈다.
         self.declare_parameter("wake_doa_sign", 1.0)
-        # 고개를 돌린 뒤 사람을 찾는 시간(초).
-        self.declare_parameter("seek_look_sec", 6.0)
+        # 고개를 돌린 뒤 사람을 찾는 시간(초). 8.0 근거는
+        # mission_logic.SEEK_LOOK_SEC 주석(2026-09-10 재검토).
+        self.declare_parameter("seek_look_sec", 8.0)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -598,15 +601,39 @@ class MissionManagerNode(Node):
                 f"'비카야': {before.value} -> {self.logic.state.value}")
 
     def _on_wake_doa(self, msg: Float32) -> None:
-        """/vica/wake_doa — 호출 방향으로 고개를 돌린다 (IDLE 에서만)."""
+        """/vica/wake_doa — 호출 방향으로 고개를 돌린다 (IDLE 에서만).
+
+        받았지만 아무 일도 안 한 경우(10도 미만이라 회전 생략·IDLE 아님·
+        E-stop·nav 미준비·방금 wake 소비 직후)까지 전부 한 줄로 남긴다 —
+        이것은 멘트가 아니라 로그다. 실기에서 "안 돌았다"의 원인(부호
+        오류·관문 거절·사각지대)을 가릴 유일한 단서이며, 실기 검증만 남은
+        브랜치에서는 이 로그가 전제다.
+        """
         before = self.logic.state
-        actions = self.logic.on_wake_doa(
-            float(msg.data), self._nav2_ready(), self._now())
-        if actions or before != self.logic.state:
-            self._run_actions(actions)
-            self.get_logger().info(
-                f"'비카야' 방향 {msg.data:.0f}°: "
-                f"{before.value} -> {self.logic.state.value}")
+        nav_ready = self._nav2_ready()
+        actions = self.logic.on_wake_doa(float(msg.data), nav_ready, self._now())
+        self._run_actions(actions)
+        if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
+            # SEEKING 진입은 YOLO 를 끈다(is_moving). /vica/robot_state 는
+            # 1 Hz 라 최대 1초 늦게 갱신되면 seek_look_sec 창이 그만큼 줄어든다
+            # — 즉시 갱신해 그 지연을 회수한다(2026-09-10 재검토).
+            self._publish_robot_state()
+        yaw_rad = doa_to_spin_yaw(float(msg.data), self.logic.wake_doa_sign)
+        if any(isinstance(a, SpinInPlace) for a in actions):
+            verdict = "회전 시작"
+        elif before != State.IDLE:
+            verdict = f"거절(대기 중 아님, state={before.value})"
+        elif self.logic.estop_active:
+            verdict = "거절(E-stop)"
+        elif not nav_ready:
+            verdict = "거절(nav 미준비)"
+        elif abs(yaw_rad) < SEEK_MIN_YAW_RAD:
+            verdict = "생략(10도 미만, 창만 유지)"
+        else:
+            verdict = "거절(방금 wake 소비 직후로 추정)"
+        self.get_logger().info(
+            f"'비카야' 방향 doa={msg.data:.0f}° yaw={math.degrees(yaw_rad):.0f}°: "
+            f"{before.value} -> {self.logic.state.value} ({verdict})")
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
@@ -1134,12 +1161,18 @@ class MissionManagerNode(Node):
         self._run_actions(actions)
 
     def _tick(self) -> None:
+        before = self.logic.state
         status = self._poll_nav_status()
         distance = (
             self._nav_distance_remaining() if status == NavStatus.RUNNING else None
         )
         actions = self.logic.on_tick(self._now(), status, distance)
         self._run_actions(actions)
+        if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
+            # SEEKING 진입·이탈은 여기서도 일어난다(탐색 창 닫힘, 복귀 회전
+            # 시작·종료). /vica/robot_state 1 Hz 의 최대 1초 지연을 즉시
+            # 갱신으로 회수한다 — _on_wake_doa 와 같은 이유(2026-09-10 재검토).
+            self._publish_robot_state()
 
     def _publish_robot_state(self) -> None:
         msg = RobotState()
