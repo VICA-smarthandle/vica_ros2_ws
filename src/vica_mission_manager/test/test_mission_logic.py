@@ -1465,3 +1465,59 @@ class TestWrapToPi:
 
     def test_wraps_negative(self):
         assert wrap_to_pi(math.radians(-270.0)) == pytest.approx(math.radians(90.0))
+
+
+class TestSeekEntry:
+    """"비카야" 방향으로 고개 돌리기 — 대기 중에만 연다."""
+
+    def test_wake_doa_turns_toward_the_sound(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(90.0, True, 1.0)
+        assert logic.state == State.SEEKING
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi / 2)
+
+    def test_no_new_ment(self):
+        """호출 응답 "네?"는 음성이 이미 했다. 미션은 말하지 않는다."""
+        logic = MissionLogic()
+        actions = logic.on_wake_doa(90.0, True, 1.0)
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_remembers_how_to_get_back(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(90.0, True, 1.0)
+        assert logic._seek_return_yaw == pytest.approx(-math.pi / 2)
+
+    def test_sound_from_the_front_does_not_spin(self):
+        """이미 그쪽을 보고 있다 — 돌지 않고 찾기만 한다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(3.0, True, 1.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic._seek_deadline == pytest.approx(1.0 + SEEK_LOOK_SEC)
+
+    def test_ignored_while_guiding(self):
+        """안내 중 "비카야"는 기존 사용자의 명령이다 — 고개를 돌리면 안 된다."""
+        logic = MissionLogic()
+        logic.state = State.NAVIGATING
+        assert logic.on_wake_doa(90.0, True, 1.0) == []
+        assert logic.state == State.NAVIGATING
+
+    def test_ignored_while_estopped(self):
+        logic = MissionLogic()
+        logic.estop_active = True
+        assert logic.on_wake_doa(90.0, True, 1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_ignored_when_nav_not_ready(self):
+        logic = MissionLogic()
+        assert logic.on_wake_doa(90.0, False, 1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_seeking_holds_a_live_goal(self):
+        """E-stop 이 회전을 취소할 수 있어야 한다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        actions = logic.on_estop(True, 2.0)
+        assert any(isinstance(a, CancelNav) for a in actions)

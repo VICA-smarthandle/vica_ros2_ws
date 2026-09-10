@@ -46,6 +46,9 @@ class State(str, Enum):
     # 정지 거리 1.1 m 가 이 회전의 반경 기준으로 설계돼 있다(설계 6.3절).
     TURNING = "turning"
     RETURNING = "returning"
+    # "비카야"를 듣고 그 방향으로 고개를 돌리는 중(또는 못 찾고 되돌아 도는
+    # 중). 안내 받는 사용자가 아직 없는 구간이다 (호출 접근 설계 §4).
+    SEEKING = "seeking"
     # ---- 목적지 도착 후 대화 (2026-08-30, arrival-dialog-flow) ------------------
     #
     # 도착하면 유형별로 묻고(ASKING_NEXT), 대기를 고르면 시간을 묻고
@@ -409,7 +412,8 @@ _APPROACH_STATES = (
 )
 # Nav2 goal 이 살아 있는 상태. E-stop·긴급어가 goal 을 취소해야 하는 구간이다.
 _GOAL_ACTIVE_STATES = (
-    State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING
+    State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING,
+    State.SEEKING,
 )
 
 _REJECT_MESSAGES = {
@@ -697,6 +701,8 @@ class MissionLogic:
         auto_return_home: bool = False,
         approach_turn_yaw_rad: float = math.pi,
         arrival_dialog: bool = False,
+        wake_doa_sign: float = 1.0,
+        seek_look_sec: float = SEEK_LOOK_SEC,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -750,6 +756,16 @@ class MissionLogic:
         self._returning_home: bool = False
         # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
         self.approach_turn_yaw_rad = approach_turn_yaw_rad
+        # 호출 접근. 마이크 각도 증가 방향(+1 반시계 / -1 시계)은 장비 실측값
+        # 이고 노드가 파라미터로 넣어 준다.
+        self.wake_doa_sign = wake_doa_sign
+        self.seek_look_sec = seek_look_sec
+        # 원래 자세로 돌아가기 위해 돌아야 할 누적 각도. 탐색 창 중에 다시
+        # 부르면 또 돌므로 덮어쓰지 않고 더한다. None 이면 지금이 복귀 회전이다.
+        self._seek_return_yaw: Optional[float] = None
+        # 회전을 마치고 사람을 찾는 창의 만료 시각. 이 값이 살아 있는 동안
+        # 상태는 IDLE 이다 — 접근 관문을 건드리지 않으려는 설계다.
+        self._seek_deadline: Optional[float] = None
         self._turn_deadline: Optional[float] = None
         # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
         self._estop_announced = False
@@ -1330,6 +1346,32 @@ class MissionLogic:
             self._to_idle()
             return []
         return []
+
+    def on_wake_doa(self, doa_deg: float, nav_ready: bool, now: float) -> list:
+        """"비카야"가 온 방향으로 고개를 돌린다 (호출 접근 설계 §4).
+
+        대기 중에만 연다. 다른 상태의 호출은 기존 on_wake 의 몫이다 —
+        안내 중 "비카야"는 지금 안내받는 사용자의 명령이지 새 부름이 아니다.
+
+        마이크는 거리를 모르고 각도도 ±4~16° 라, 소리로 목표점을 만들지
+        않는다. 돌아서 카메라가 확인한 뒤에야 기존 접근 경로가 이어받는다.
+        """
+        if self.state != State.IDLE or self.estop_active or not nav_ready:
+            return []
+        yaw = doa_to_spin_yaw(doa_deg, self.wake_doa_sign)
+        # 돌아야 할 만큼 돌았다고 치고 복귀각을 먼저 누적한다 — 창 중에 다시
+        # 부르면 또 돌기 때문에 덮어쓰면 원래 자세로 못 돌아온다.
+        back = wrap_to_pi((self._seek_return_yaw or 0.0) - yaw)
+        if abs(yaw) < SEEK_MIN_YAW_RAD:
+            # 이미 그쪽을 보고 있다. 돌지 않고 찾는 창만 연다.
+            self._seek_return_yaw = back
+            self._seek_deadline = now + self.seek_look_sec
+            return []
+        self.state = State.SEEKING
+        self._seek_return_yaw = back
+        self._seek_deadline = None
+        self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
+        return [SpinInPlace(yaw)]
 
     def on_arrival_answer(self, intent: "IntentData", now: float,
                           next_dest: Optional[Destination] = None) -> list:
@@ -1938,6 +1980,8 @@ class MissionLogic:
         self._estop_entered_at = None
         self._estop_clear_since = None
         self._turn_deadline = None
+        self._seek_return_yaw = None
+        self._seek_deadline = None
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
