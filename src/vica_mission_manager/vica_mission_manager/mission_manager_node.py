@@ -65,7 +65,6 @@ from .mission_logic import (
     SetNavSpeedLimit,
     SpinInPlace,
     Pose2D,
-    SEEK_MIN_YAW_RAD,
     State,
     _REJECT_MESSAGES,
     check_gate,
@@ -604,14 +603,21 @@ class MissionManagerNode(Node):
         """/vica/wake_doa — 호출 방향으로 고개를 돌린다 (IDLE 에서만).
 
         받았지만 아무 일도 안 한 경우(10도 미만이라 회전 생략·IDLE 아님·
-        E-stop·nav 미준비·방금 wake 소비 직후)까지 전부 한 줄로 남긴다 —
-        이것은 멘트가 아니라 로그다. 실기에서 "안 돌았다"의 원인(부호
-        오류·관문 거절·사각지대)을 가릴 유일한 단서이며, 실기 검증만 남은
-        브랜치에서는 이 로그가 전제다.
+        E-stop·nav 미준비·방금 wake 소비 직후·접근 온보딩 직후)까지 전부
+        한 줄로 남긴다 — 이것은 멘트가 아니라 로그다. 실기에서 "안 돌았다"의
+        원인(부호 오류·관문 거절·사각지대)을 가릴 유일한 단서이며, 실기
+        검증만 남은 브랜치에서는 이 로그가 전제다.
+
+        판정 분기는 on_wake_doa 안의 실제 관문 순서(state/estop/nav_ready →
+        wake 소비 직후 → 접근 온보딩 직후 → 10도 미만)를 그대로 따른다 —
+        순서가 어긋나면 시각 관문이 거절했는데도 "10도 미만" 으로 잘못
+        찍힌다. wake_guard_active/user_attached_guard_active 는 on_wake_doa
+        가 쓰는 것과 같은 메서드라 로그와 실제 판정이 갈라질 일이 없다.
         """
+        now = self._now()
         before = self.logic.state
         nav_ready = self._nav2_ready()
-        actions = self.logic.on_wake_doa(float(msg.data), nav_ready, self._now())
+        actions = self.logic.on_wake_doa(float(msg.data), nav_ready, now)
         self._run_actions(actions)
         if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
             # SEEKING 진입은 YOLO 를 끈다(is_moving). /vica/robot_state 는
@@ -627,10 +633,12 @@ class MissionManagerNode(Node):
             verdict = "거절(E-stop)"
         elif not nav_ready:
             verdict = "거절(nav 미준비)"
-        elif abs(yaw_rad) < SEEK_MIN_YAW_RAD:
-            verdict = "생략(10도 미만, 창만 유지)"
-        else:
+        elif self.logic.wake_guard_active(now):
             verdict = "거절(방금 wake 소비 직후로 추정)"
+        elif self.logic.user_attached_guard_active(now):
+            verdict = "거절(안내 시작 직후)"
+        else:
+            verdict = "생략(10도 미만, 창만 유지)"
         self.get_logger().info(
             f"'비카야' 방향 doa={msg.data:.0f}° yaw={math.degrees(yaw_rad):.0f}°: "
             f"{before.value} -> {self.logic.state.value} ({verdict})")
