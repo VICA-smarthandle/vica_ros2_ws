@@ -395,7 +395,8 @@ SEEK_MIN_YAW_RAD = math.radians(10.0)
 # 벌어진다. 같은 MutuallyExclusive 그룹에서 알려진 최악값이
 # mission_manager_node._nav_lock_timeout_sec(2.0초, cancelTask 응답을
 # 기다리는 상한)이다 — 젯슨 CPU 경합에서 이 콜백이 wake 와 wake_doa 사이에
-# 끼어 꽉 채워 걸리면 옛 2.0초 가드와 정확히 같아져 C1 사고가 되살아난다.
+# 끼어 꽉 채워 걸리면 옛 2.0초 가드와 정확히 같아져, 사람이 핸들을 잡은 채
+# 최대 180도 제자리 회전이 도는 사고가 되살아난다.
 # 3.0초는 그 최악값보다 크게 잡아 여유를 둔 값이다. 같은 호출의 두 토픽
 # 간격을 넉넉히 덮으면서 진짜 새 호출(수 초 뒤)까지 막기에는 여전히 짧다.
 WAKE_CONSUMED_GUARD_SEC = 3.0

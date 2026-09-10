@@ -1461,8 +1461,8 @@ class TestWakeConsumedGuardsWakeDoa:
 
 
 class TestUserAttachedSuppressesWakeDoa:
-    """접근 회전이 끝나 사용자가 손잡이를 받아든 직후도 C1 과 같은 사고
-    조건이다(2026-09-10 사용자 결정) — 이 전이는 wake 가 아니라 회전 완료가
+    """접근 회전이 끝나 사용자가 손잡이를 받아든 직후도 같은 사고 조건이다
+    (2026-09-10 사용자 결정) — 이 전이는 wake 가 아니라 회전 완료가
     일으킨 것이라 _wake_consumed_at 도장이 안 찍힌다. 재청취 창이 만료된
     뒤 "비카야, 화장실"처럼 부르면 DOA≈180(핸들 쪽)이 그대로 SEEKING 을
     열어, 손잡이를 잡고 로봇 옆에 선 사용자 앞에서 최대 180도 제자리
