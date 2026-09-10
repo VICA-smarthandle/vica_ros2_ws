@@ -442,6 +442,26 @@ REAPPROACH_SUPPRESS_SEC = 60.0
 # 상수는 지워지는 게 아니라 **덧대는** 조건이 된다 — 시간이 지나도 센서가
 # 여전히 접촉을 본다면 억제를 풀면 안 된다.
 USER_ATTACHED_SUPPRESS_SEC = 60.0
+# 근접 호출(2026-09-10 확장). 탐색 창(IDLE + _seek_deadline) 중 detection_gate 가
+# 거리 하나만으로 TOO_NEAR 거절한 결과(stable=true·approachable=false·
+# distance_m)가 person_detection 원본 토픽으로 들어오면, Mission 이 그 값을 직접
+# 보고 판단한다 — 접근 goal(1.1 m)이 이미 지나간 자리인 사람에게 걸어가는 대신
+# 그 자리에서 바로 질문한다. 부른 사람이 코앞에 있는데 8초 동안 쳐다보기만 하다
+# 말없이 돌아가는 동작(2026-09-10 실기 관찰)을 없앤다.
+#
+# vica_perception.detection_gate.DEFAULT_MIN_DISTANCE_M 과 값은 같지만(1.5) 별개
+# 상수다 — Mission 은 그 감지기 상수를 알 수 없다(패키지 경계, vica_perception 은
+# 이 저장소에서도 건드리지 않는다). 두 값이 우연히 같을 뿐 하나가 다른 하나를
+# 참조하지 않는다 — detection_gate 쪽을 조정해도 이 값은 저절로 안 따라간다.
+NEAR_CALL_MAX_M = 1.5
+# 이보다 가까우면 수락해도 회전하지 않는다(2026-09-10 사용자 결정, 안전).
+# 손잡이가 뒤로 길게 나와 있어 제자리 회전의 실제 스윕이 차체보다 크다 — 이
+# 거리에서 180도를 돌면 손잡이가 사람을 칠 수 있다. Nav2 의 Spin 은 회전 중
+# costmap 충돌을 스스로 검사하지만, 코앞 사람은 costmap 에 잘 안 잡힌다는 실측
+# 기록이 있어(잔상 15.8초, close-person-leaks-into-static) 그 검사에 기댈 수
+# 없다. 이 거리면 사용자가 로봇에 손이 닿으므로 더듬어 손잡이를 찾을 수 있고,
+# 나중에 햅틱이 붙으면 그 단계가 쉬워진다.
+NEAR_CALL_NO_SPIN_M = 1.0
 # 사람에게 다가가는 구간의 최대속도 상한. 주행 상한 0.5 m/s 의 100 % = 0.5 m/s 다.
 # 마지막 1.1 m 는 collision_monitor 의 PolygonSlow 가 0.2 m/s 로 한 번 더
 # 줄인다(설계 6.4절) — 그 구간은 이 값과 무관하다.
@@ -771,6 +791,8 @@ class MissionLogic:
         arrival_dialog: bool = False,
         wake_doa_sign: float = 1.0,
         seek_look_sec: float = SEEK_LOOK_SEC,
+        near_call_max_m: float = NEAR_CALL_MAX_M,
+        near_call_no_spin_m: float = NEAR_CALL_NO_SPIN_M,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -828,6 +850,9 @@ class MissionLogic:
         # 이고 노드가 파라미터로 넣어 준다.
         self.wake_doa_sign = wake_doa_sign
         self.seek_look_sec = seek_look_sec
+        # 근접 호출 임계값. 근거는 위 상수 정의에 있다.
+        self.near_call_max_m = near_call_max_m
+        self.near_call_no_spin_m = near_call_no_spin_m
         # on_wake/on_return_brake 가 실제로 상태를 바꾼 시각. on_wake_doa 가
         # 이 시각으로부터 WAKE_CONSUMED_GUARD_SEC 이내면 거절한다 — 두 토픽의
         # 도착 순서와 무관하게 결과가 같아지게 하려는 것이다.
@@ -850,6 +875,11 @@ class MissionLogic:
         # 상태는 IDLE 이다 — 접근 관문을 건드리지 않으려는 설계다.
         self._seek_deadline: Optional[float] = None
         self._turn_deadline: Optional[float] = None
+        # 근접 호출로 들어온 AWAITING_USER 에서 수락해도 회전을 생략할지.
+        # on_person_detection 이 거리로 정하고 on_approach_answer 가 소비한다.
+        # AWAITING_USER 로 새로 들어올 때마다(정상 접근·근접 호출 두 진입점
+        # 모두) 다시 명시적으로 정해지므로 묵은 값이 남을 자리가 없다.
+        self._near_call_no_spin: bool = False
         # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
         self._estop_announced = False
 
@@ -1287,6 +1317,75 @@ class MissionLogic:
         self._response_deadline = now + self.approach_response_timeout_sec
         return []
 
+    def _enter_awaiting_user(self, now: float) -> list:
+        """질문을 던지고 AWAITING_USER 로 들어간다.
+
+        걸어서 도착한 정상 접근(on_tick 의 APPROACHING→SUCCEEDED)과 코앞이라
+        걸어가지 않는 근접 호출(on_person_detection) 둘 다 여기로 온다 — 질문
+        멘트·재청취·탈출용 안전망(APPROACH_QUESTION_STUCK_SEC)이 두 경로에서
+        완전히 같기 때문이다. 회전 여부(_near_call_no_spin)는 호출부가 이 함수
+        호출 전후로 각자 정한다 — 여기서는 다루지 않는다.
+        """
+        self.state = State.AWAITING_USER
+        # 여기서는 탈출용 안전망만 건다. 진짜 응답 8초는 질문 재생이 끝난
+        # 시점(on_approach_question_spoken)부터 — 도착 후 대화와 같은 방식.
+        # 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
+        self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
+        self._approach.reset()
+        return [
+            SetNavSpeedLimit(NO_SPEED_LIMIT),
+            Say(MSG_APPROACH_QUESTION, priority="response", expects_reply=True),
+        ]
+
+    def on_person_detection(
+        self,
+        track_id: int,
+        distance_m: float,
+        stable: bool,
+        approachable: bool,
+        now: float,
+    ) -> list:
+        """/vica/person_detection 원본 결과 (근접 호출, 2026-09-10 확장).
+
+        탐색 창(IDLE + `_seek_deadline` 살아있음) 중에만 본다 — 그 밖에서는
+        기존 동작이 전부 그대로여야 한다. `approachable=true` 는 다루지 않는다
+        — RequestApproach service 를 거치는 기존 경로(_on_approach_request)가
+        그대로 처리한다.
+
+        detection_gate 는 신뢰도·추적·안정(1초)·정지(3초창 0.3 m) 관문을 전부
+        통과시킨 뒤 거리 하나만으로 TOO_NEAR 거절한다 — 즉 `approachable=false`
+        인데 `stable=true`면 "코앞에 서 있는 진짜 사람"이라는 뜻이다. 그 값을
+        안 쓰고 버리면 로봇이 8초 동안 사람을 보면서도 아무 말 없이 원위치로
+        돌아가는 동작이 된다(부른 사람 관점에선 "쳐다보고 무시").
+
+        `distance_m` 이 `near_call_max_m` 이상이면(또는 NaN·억제 중이면) 이
+        경로가 관여할 일이 아니다 — 그 거리는 접근 goal(1.1 m)을 만들 수 있는
+        자리라 기존 탐지→요청→접근 경로가 담당한다.
+        """
+        if self.state != State.IDLE or self._seek_deadline is None:
+            return []
+        if approachable or not stable:
+            return []
+        if track_id == TRACK_ID_NONE:
+            return []
+        if math.isnan(distance_m) or distance_m >= self.near_call_max_m:
+            return []
+        if self.estop_active:
+            return []
+        self._prune_suppressed(now)
+        if self._is_suppressed(track_id, now):
+            return []
+
+        # 대화가 시작됐다 — 복귀 회전이 나가면 안 된다(사람에게 응대하러
+        # 갔으므로). _to_idle() 을 부르지 않는다 — 그 함수는 state 도 IDLE 로
+        # 내리는데, 여기서는 AWAITING_USER 로 곧장 들어가야 한다.
+        self._seek_deadline = None
+        self._seek_return_yaw = None
+        self.approach_track_id = track_id
+        self.active_destination = None
+        self._near_call_no_spin = distance_m < self.near_call_no_spin_m
+        return self._enter_awaiting_user(now)
+
     def on_approach_answer(self, affirmative: bool, now: float) -> list:
         """접근 질문에 대한 사람의 답. 여기서는 갈래만 만든다.
 
@@ -1303,9 +1402,12 @@ class MissionLogic:
             # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 회전 전에 건다.
             track_id = self.approach_track_id
             self._suppress_track(track_id, now)
-            if self.approach_turn_yaw_rad == 0.0:
+            if self.approach_turn_yaw_rad == 0.0 or self._near_call_no_spin:
                 # 회전이 없으면 회전 예고는 거짓말 — 온보딩으로 바로 간다.
                 # 온보딩 끝은 질문이라 expects_reply 로 재청취 창이 열린다.
+                # _near_call_no_spin(근접 호출 1.0 m 미만)도 같은 길을 탄다 —
+                # 손잡이가 뒤로 길게 나와 있어 이 거리의 180도 회전은 손잡이가
+                # 사람을 칠 수 있다(NEAR_CALL_NO_SPIN_M 근거 참고).
                 self._to_idle()
                 # 회전을 껐어도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # State.TURNING 을 거치는 길과 같은 억제를 건다.
@@ -1797,21 +1899,11 @@ class MissionLogic:
         elif self.state == State.APPROACHING:
             if nav_status == NavStatus.SUCCEEDED:
                 # 사람 앞 1.1 m 에 섰다. 여기서부터 주도권은 음성 쪽으로 넘어가고
-                # Mission 은 타임아웃만 센다(설계 4절).
-                self.state = State.AWAITING_USER
-                # 여기서는 탈출용 안전망만 건다. 진짜 응답 8초는 질문 재생이
-                # 끝난 시점(on_approach_question_spoken)부터 — 도착 후 대화와
-                # 같은 방식. 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
-                self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
-                self._approach.reset()
-                actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                actions.append(
-                    Say(
-                        MSG_APPROACH_QUESTION,
-                        priority="response",
-                        expects_reply=True,
-                    )
-                )
+                # Mission 은 타임아웃만 센다(설계 4절). 걸어서 도착했으니 정상
+                # 접근이다 — 근접 호출(on_person_detection)의 회전 생략은 이
+                # 경로와 무관하다(도착 거리 1.1 m > near_call_no_spin_m 1.0 m).
+                self._near_call_no_spin = False
+                actions.extend(self._enter_awaiting_user(now))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
                 # 접근은 재시도하지 않는다. 등록 목적지는 제자리에 있지만 사람은
                 # 3초 뒤 그 자리에 없다. 실패하면 돌아가서 다시 탐지하는 편이
@@ -2193,3 +2285,7 @@ class MissionLogic:
         self.approach_goal_pose = None
         self._response_deadline = None
         self._nav_from_app = False
+        # 다음 AWAITING_USER 진입(정상 접근·근접 호출 어느 쪽이든)이 각자 다시
+        # 명시적으로 정하므로, 여기서 지우지 않아도 안전과는 무관하다 —
+        # 다만 묵은 값을 들고 있을 이유도 없어 다른 접근 상태값들과 함께 비운다.
+        self._near_call_no_spin = False

@@ -5,11 +5,13 @@ import pytest
 
 from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
+    APPROACH_QUESTION_STUCK_SEC,
     SpinInPlace,
     StopSpeech,
     MSG_APPROACH_QUESTION,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
+    MSG_APPROACH_NO_ANSWER,
     MSG_APPROACH_ONBOARDING,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -34,6 +36,8 @@ from vica_mission_manager.mission_logic import (
     SEEK_TURN_TIMEOUT_SEC,
     USER_ATTACHED_SUPPRESS_SEC,
     WAKE_CONSUMED_GUARD_SEC,
+    NEAR_CALL_MAX_M,
+    NEAR_CALL_NO_SPIN_M,
     doa_to_spin_yaw,
     wrap_to_pi,
 )
@@ -1837,3 +1841,181 @@ class TestSeekLookWindow:
         assert logic.state == State.IDLE
         assert logic._seek_deadline is None
         assert logic._seek_return_yaw is None
+
+
+class TestNearCallApproach:
+    """부른 사람이 코앞(near_call_max_m 안)이면 접근 goal(1.1 m)이 이미 지나간
+    자리다 — 걸어가지 않고 그 자리에서 바로 질문한다. detection_gate 가 신뢰도·
+    추적·안정·정지 관문을 전부 통과시킨 뒤 거리 하나만으로 TOO_NEAR 거절한 결과
+    (stable=true·approachable=false·distance_m)를 Mission 이 직접 받는다."""
+
+    def test_near_person_skips_navigate_and_asks(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_QUESTION
+        assert says[0].expects_reply is True
+
+    def test_near_person_accept_turns_then_onboards(self):
+        """1.0~1.5 m: 걸어가지 않고 질문 -> 수락 시 180도 회전 -> 온보딩."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        actions = logic.on_approach_answer(True, 4.0)
+        assert logic.state == State.TURNING
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        onboarding_actions = logic.on_tick(6.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        says = [a for a in onboarding_actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_ONBOARDING
+
+    def test_very_near_person_accept_skips_spin(self):
+        """1.0 m 미만: 수락해도 회전 없이 바로 온보딩 (손잡이가 사람을 칠 위험,
+        2026-09-10 사용자 결정)."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=0.6, stable=True, approachable=False, now=3.0)
+        actions = logic.on_approach_answer(True, 4.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_ONBOARDING
+
+    def test_approachable_person_not_handled_here(self):
+        """approachable=true 는 기존 접근 요청 service 경로가 처리한다 —
+        이 새 경로는 관여하지 않는다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=True, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_ignored_outside_seek_window(self):
+        """탐색 창 밖(그냥 IDLE)에서 같은 감지가 와도 아무 일도 없다."""
+        logic = MissionLogic()
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=1.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_ignored_while_still_seeking(self):
+        """회전이 아직 끝나지 않은 SEEKING 중에는 관여하지 않는다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        assert logic.state == State.SEEKING
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=1.5)
+        assert actions == []
+        assert logic.state == State.SEEKING
+
+    def test_no_return_spin_once_conversation_starts(self):
+        """새 경로로 대화가 시작되면 복귀 회전이 발행되지 않는다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        seek_and_finish_turn(logic, doa=90.0, t0=1.0)
+        assert logic._seek_deadline is not None
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+        later = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        assert not any(isinstance(a, SpinInPlace) for a in later)
+
+    def test_nan_distance_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=float("nan"), stable=True, approachable=False,
+            now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_suppressed_track_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic._suppress_track(7, 2.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_too_far_for_near_call_ignored(self):
+        """near_call_max_m(1.5) 이상은 접근 goal 을 만들 수 있는 거리다 —
+        이 경로가 관여하지 않는다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.5, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_unstable_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=False, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_track_id_none_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=0, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_estop_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.estop_active = True
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_declined_suppresses_track(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        logic.on_approach_answer(False, 4.0)
+        logic.on_tick(4.5, NavStatus.NONE)   # RETURNING -> IDLE (목적지 없음)
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=7), BOUNDS, True, 5.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    def test_no_answer_still_works(self):
+        """무응답 사다리는 기존 그대로 재사용된다."""
+        logic = MissionLogic(return_destination=make_home(),
+                             approach_response_timeout_sec=8.0)
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        actions = logic.on_tick(3.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+
+    def test_custom_thresholds(self):
+        logic = MissionLogic(near_call_max_m=2.0, near_call_no_spin_m=1.5)
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.8, stable=True, approachable=False, now=3.0)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_default_thresholds_match_module_constants(self):
+        logic = MissionLogic()
+        assert logic.near_call_max_m == NEAR_CALL_MAX_M
+        assert logic.near_call_no_spin_m == NEAR_CALL_NO_SPIN_M

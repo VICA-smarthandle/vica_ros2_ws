@@ -109,6 +109,15 @@ def generate_launch_description() -> LaunchDescription:
             # 더한 바닥값이 4.2~4.5 s 라 여유가 1.5 s 뿐이었다 — 8.0 으로 올린다
             # (2026-09-10 재검토. 근거는 mission_logic.SEEK_LOOK_SEC 주석).
             DeclareLaunchArgument("seek_look_sec", default_value="8.0"),
+            # 근접 호출(2026-09-10 확장). 부른 사람이 이보다 가까우면 접근 goal
+            # (1.1 m)이 이미 지나간 자리라 걸어가지 않고 그 자리에서 바로
+            # 질문한다. vica_perception detection_gate 의 min_distance_m 과 값은
+            # 같지만(1.5) 별개 파라미터다 — Mission 은 그 감지기 상수를 모른다.
+            DeclareLaunchArgument("near_call_max_m", default_value="1.5"),
+            # 이보다 가까우면 수락해도 회전하지 않는다 — 손잡이가 뒤로 길게 나와
+            # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
+            # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
+            DeclareLaunchArgument("near_call_no_spin_m", default_value="1.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -150,6 +159,14 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "seek_look_sec": ParameterValue(
                             LaunchConfiguration("seek_look_sec"),
+                            value_type=float,
+                        ),
+                        "near_call_max_m": ParameterValue(
+                            LaunchConfiguration("near_call_max_m"),
+                            value_type=float,
+                        ),
+                        "near_call_no_spin_m": ParameterValue(
+                            LaunchConfiguration("near_call_no_spin_m"),
                             value_type=float,
                         ),
                     }

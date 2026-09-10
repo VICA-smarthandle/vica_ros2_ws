@@ -51,6 +51,8 @@ from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
     MSG_APPROACH_QUESTION,
+    NEAR_CALL_MAX_M,
+    NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
     CancelNav,
@@ -120,6 +122,15 @@ class MissionManagerNode(Node):
         # 고개를 돌린 뒤 사람을 찾는 시간(초). 8.0 근거는
         # mission_logic.SEEK_LOOK_SEC 주석(2026-09-10 재검토).
         self.declare_parameter("seek_look_sec", 8.0)
+        # 근접 호출(2026-09-10 확장). 부른 사람이 이보다 가까우면 접근 goal
+        # (1.1 m)이 이미 지나간 자리라 걸어가지 않고 그 자리에서 바로 질문한다.
+        # detection_gate.DEFAULT_MIN_DISTANCE_M 과 값은 같지만(1.5) 별개
+        # 파라미터다 — Mission 은 그 감지기 상수를 알 수 없다(패키지 경계).
+        self.declare_parameter("near_call_max_m", NEAR_CALL_MAX_M)
+        # 이보다 가까우면 수락해도 회전하지 않는다 — 손잡이가 뒤로 길게 나와
+        # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
+        # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
+        self.declare_parameter("near_call_no_spin_m", NEAR_CALL_NO_SPIN_M)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -210,6 +221,9 @@ class MissionManagerNode(Node):
                 float(self.get_parameter("approach_turn_yaw_deg").value)),
             wake_doa_sign=float(self.get_parameter("wake_doa_sign").value),
             seek_look_sec=float(self.get_parameter("seek_look_sec").value),
+            near_call_max_m=float(self.get_parameter("near_call_max_m").value),
+            near_call_no_spin_m=float(
+                self.get_parameter("near_call_no_spin_m").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -319,6 +333,15 @@ class MissionManagerNode(Node):
         # SEEKING 을 연다(2026-09-10 재현).
         self.create_subscription(
             Float32, "/vica/wake_doa", self._on_wake_doa, 10,
+            callback_group=self._main_group,
+        )
+        # 근접 호출(2026-09-10 확장). detection_gate 가 거리 하나만으로
+        # TOO_NEAR 거절한 원본 결과를 여기서 직접 본다 — RequestApproach
+        # service 는 person_detector_node 가 approachable=true 일 때만 부르므로
+        # TOO_NEAR 는 그 service 로 오지 않는다. mission_logic.on_person_detection
+        # 이 탐색 창(IDLE + _seek_deadline) 밖에서는 아무 일도 하지 않는다.
+        self.create_subscription(
+            PersonDetection, "/vica/person_detection", self._on_person_detection, 10,
             callback_group=self._main_group,
         )
         # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
@@ -642,6 +665,30 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"'비카야' 방향 doa={msg.data:.0f}° yaw={math.degrees(yaw_rad):.0f}°: "
             f"{before.value} -> {self.logic.state.value} ({verdict})")
+
+    def _on_person_detection(self, msg: PersonDetection) -> None:
+        """/vica/person_detection 원본 결과 (근접 호출, 2026-09-10 확장).
+
+        탐색 창 밖에서는 mission_logic.on_person_detection 이 빈 목록을 돌려주고
+        상태도 그대로다 — 5 Hz 로 늘 들어오는 이 콜백이 평소에는 아무 일도 안
+        하는 것이 정상이다. 로그는 상태가 실제로 바뀐 경우에만 남긴다(그 외는
+        5 Hz 소음이 된다).
+        """
+        before = self.logic.state
+        actions = self.logic.on_person_detection(
+            track_id=msg.track_id,
+            distance_m=msg.distance_m,
+            stable=msg.stable,
+            approachable=msg.approachable,
+            now=self._now(),
+        )
+        if before == self.logic.state:
+            return
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"근접 호출: track={msg.track_id} dist={msg.distance_m:.2f}m "
+            f"{before.value} -> {self.logic.state.value}"
+        )
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
