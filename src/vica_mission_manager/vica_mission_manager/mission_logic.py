@@ -312,6 +312,13 @@ MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아�
 
 WAIT_MINUTES_CAP = 30
 LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유예
+# 홈 복귀 재개 (2026-09-10 사용자 결정). 복귀 중 호출("비카야")로 브레이크가
+# 걸리면(on_return_brake) 그 순간부터 이 시간만큼 침묵하면 떠나기 예고를
+# 낸다(멘트는 MSG_LEAVING_NOTICE 재사용) — 청취 창(음성 쪽, 약 8초)의 길이는
+# 이 모듈이 모른다. 기준은 항상 "호출이 브레이크를 건 시각" 또는(회전이
+# 끼어들었으면) "그 회전을 마치고 IDLE 로 돌아온 시각" 이며, 절대 두 구간을
+# 이어 붙여 세지 않는다.
+RETURN_RESUME_SEC = 15.0
 # 귀 홀드 (2026-08-30): 무응답 시계는 귀가 바쁜 동안 멈춘다 — 답이 STT·LLM
 # 을 통과하는 동안 8초가 먼저 울려 떠나던 결함. closed(전사 성공) 후 LLM
 # 처리 유예, open 이 닫힘 신호를 잃어도 상한 뒤엔 떠난다(무한 대기 방지).
@@ -793,6 +800,7 @@ class MissionLogic:
         seek_look_sec: float = SEEK_LOOK_SEC,
         near_call_max_m: float = NEAR_CALL_MAX_M,
         near_call_no_spin_m: float = NEAR_CALL_NO_SPIN_M,
+        return_resume_sec: float = RETURN_RESUME_SEC,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -853,6 +861,8 @@ class MissionLogic:
         # 근접 호출 임계값. 근거는 위 상수 정의에 있다.
         self.near_call_max_m = near_call_max_m
         self.near_call_no_spin_m = near_call_no_spin_m
+        # 홈 복귀 재개. 근거는 RETURN_RESUME_SEC 주석에 있다.
+        self.return_resume_sec = return_resume_sec
         # on_wake/on_return_brake 가 실제로 상태를 바꾼 시각. on_wake_doa 가
         # 이 시각으로부터 WAKE_CONSUMED_GUARD_SEC 이내면 거절한다 — 두 토픽의
         # 도착 순서와 무관하게 결과가 같아지게 하려는 것이다.
@@ -875,6 +885,16 @@ class MissionLogic:
         # 상태는 IDLE 이다 — 접근 관문을 건드리지 않으려는 설계다.
         self._seek_deadline: Optional[float] = None
         self._turn_deadline: Optional[float] = None
+        # 홈 복귀 재개(2026-09-10). "복귀가 끊겨 있다"는 사실과 "언제 재개할지"
+        # 를 따로 든다 — 탐색 회전(SEEKING)이 끼어들어도 사실은 살아남아야
+        # 하고, 시각은 회전이 끝나 IDLE 로 돌아온 시점 기준으로 다시 잡아야
+        # 한다. _return_interrupted 는 _to_idle() 이 지우지 않는다(그게
+        # 이 기능의 요점이다) — 지우는 자리는 on_intent·on_app_destination
+        # (새 목적지로 주행 시작)과 on_return_home_request(관리자 직접 복귀
+        # 명령), 그리고 이 사다리 자신이 실제로 복귀를 재개하는 순간뿐이다.
+        self._return_interrupted: bool = False
+        self._return_resume_deadline: Optional[float] = None
+        self._return_notice_given: bool = False
         # 근접 호출로 들어온 AWAITING_USER 에서 수락해도 회전을 생략할지.
         # on_person_detection 이 거리로 정하고 on_approach_answer 가 소비한다.
         # AWAITING_USER 로 새로 들어올 때마다(정상 접근·근접 호출 두 진입점
@@ -1020,6 +1040,12 @@ class MissionLogic:
         # 한참 뒤 낡은 복귀각으로 갑자기 도는 사고가 난다(2026-09-10 재현).
         self._seek_deadline = None
         self._seek_return_yaw = None
+        # 끊긴 복귀를 잊는다 — 이번이 그 재개다(음성으로 새 목적지를 받았으니
+        # 사용자는 이미 응답한 것이다). 안 지우면 이번 안내를 마치고 한참 뒤
+        # 낡은 복귀 사다리가 갑자기 홈으로 떠난다.
+        self._return_interrupted = False
+        self._return_resume_deadline = None
+        self._return_notice_given = False
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(say_destination(MSG_START, dest.name)),
@@ -1126,6 +1152,11 @@ class MissionLogic:
         self.state = State.NAVIGATING
         self.active_destination = dest
         self._nav_from_app = True
+        # 끊긴 복귀를 잊는다 — 관리자가 새 목적지로 선점했으니 이번이 그
+        # 재개다(on_intent 와 같은 이유, 2026-09-10).
+        self._return_interrupted = False
+        self._return_resume_deadline = None
+        self._return_notice_given = False
         actions.append(Say(say_destination(MSG_START, dest.name)))
         actions.append(Navigate(dest))
         return actions, GateReason.OK
@@ -1746,6 +1777,12 @@ class MissionLogic:
         else:
             self._reset_arrival_dialog()
             self._to_idle()
+            # 복귀가 끊긴 채로 IDLE 에 섰다 — 재개 사다리를 지금 이 시각
+            # 기준으로 건다(청취 창이 몇 초든 이 시각과 무관하다, 근거는
+            # RETURN_RESUME_SEC 주석). on_tick 의 IDLE 분기가 이어받는다.
+            self._return_interrupted = True
+            self._return_resume_deadline = now + self.return_resume_sec
+            self._return_notice_given = False
         return actions
 
     def _reset_arrival_dialog(self) -> None:
@@ -1940,6 +1977,27 @@ class MissionLogic:
                     self.state = State.SEEKING
                     self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
                     actions.append(SpinInPlace(back, reason="못 찾아 원위치로"))
+
+            # 복귀 재개 사다리 (2026-09-10). 위 탐색 창 처리가 이번 tick 에
+            # SEEKING 을 새로 열었을 수 있으므로 state 를 다시 본다 — 그
+            # 상태에서 아래를 마저 돌리면 방금 낸 SpinInPlace 위에 _go_home 의
+            # Navigate 가 겹친다. 탐색 창(_seek_deadline)과는 필드가 달라
+            # 서로 방해하지 않는다.
+            if self.state == State.IDLE and self._return_interrupted:
+                if self._return_resume_deadline is None:
+                    # 회전이 끼어들었다 IDLE 로 막 돌아온 시점 — 여기서부터
+                    # 다시 잰다(호출 시각부터 누적하지 않는다).
+                    self._return_resume_deadline = now + self.return_resume_sec
+                elif now >= self._return_resume_deadline:
+                    if not self._return_notice_given:
+                        self._return_notice_given = True
+                        self._return_resume_deadline = now + LEAVING_GRACE_SEC
+                        actions.append(Say(MSG_LEAVING_NOTICE, priority="response"))
+                    else:
+                        self._return_interrupted = False
+                        self._return_resume_deadline = None
+                        self._return_notice_given = False
+                        actions.extend(self._go_home(now))
 
         elif self.state == State.TURNING:
             if nav_status == NavStatus.SUCCEEDED:
@@ -2153,6 +2211,11 @@ class MissionLogic:
         )
         if reason is not GateReason.OK:
             return False, reason, []
+        # 끊긴 복귀를 잊는다 — 관리자가 지금 직접 복귀를 명령했으니 이번이
+        # 그 재개다(on_intent 와 같은 이유, 2026-09-10).
+        self._return_interrupted = False
+        self._return_resume_deadline = None
+        self._return_notice_given = False
         return True, reason, self._enter_returning(now, is_home=True)
 
     def _enter_returning(
@@ -2267,6 +2330,11 @@ class MissionLogic:
         self._turn_deadline = None
         self._seek_return_yaw = None
         self._seek_deadline = None
+        # 복귀 재개 사다리의 "언제"만 지운다 — 탐색 회전이 여기를 지나갈 때마다
+        # 시계를 멈추기 위해서다. "사실"(_return_interrupted)은 남겨 둔다:
+        # 여기서 같이 지우면 회전 한 번으로 끊긴 복귀를 영영 잊는다(설계 요점).
+        self._return_resume_deadline = None
+        self._return_notice_given = False
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()

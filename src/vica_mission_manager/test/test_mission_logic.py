@@ -38,6 +38,9 @@ from vica_mission_manager.mission_logic import (
     WAKE_CONSUMED_GUARD_SEC,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
+    LEAVING_GRACE_SEC,
+    MSG_LEAVING_NOTICE,
+    RETURN_RESUME_SEC,
     doa_to_spin_yaw,
     wrap_to_pi,
 )
@@ -1565,6 +1568,141 @@ class TestReturnBrakeGuardsWakeDoa:
         assert logic.state == State.IDLE
         actions = logic.on_wake_doa(90.0, True, 10.001)
         assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+
+class TestReturnResumeAfterCallInterrupt:
+    """복귀 중 호출로 끊긴 뒤 무기한 정지하지 않고 결국 복귀를 재개한다
+    (2026-09-10 사용자 승인 흐름). 기준 시각은 항상 on_return_brake 가 불린
+    순간이다 — 청취 창(음성 쪽, 약 8초)의 길이는 이 모듈이 모른다."""
+
+    def test_silence_for_15s_gives_leaving_notice(self):
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        assert logic.state == State.IDLE
+        # 15초 직전까지는 조용하다.
+        assert logic.on_tick(RETURN_RESUME_SEC - 0.1, NavStatus.NONE) == []
+        assert logic.state == State.IDLE
+        # 딱 15초에 떠나기 예고 — 아직 복귀를 재개하지는 않는다.
+        actions = logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        assert any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
+        )
+        assert logic.state == State.IDLE
+
+    def test_resume_after_notice_grace_elapses(self):
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)   # 예고
+        # 유예 직전까지는 아직 제자리다.
+        assert logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC - 0.1, NavStatus.NONE
+        ) == []
+        assert logic.state == State.IDLE
+        # 유예가 다 되면 복귀를 재개한다.
+        actions = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE
+        )
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+
+    def test_answer_within_grace_cancels_the_resume(self):
+        """예고 뒤 유예 안에 목적지를 말하면 복귀로 새지 않는다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)   # 예고, 유예 시작
+        answer_t = RETURN_RESUME_SEC + 1.0   # 유예(3초) 안
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, answer_t)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+        # 유예가 다 지나도 복귀로 새지 않는다 — 이미 새 안내 중이다.
+        later = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC + 5.0, NavStatus.RUNNING
+        )
+        assert logic.state == State.NAVIGATING
+        assert not any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
+        )
+
+    def test_answer_within_15s_skips_notice_and_resume_entirely(self):
+        """15초 안에 목적지를 말하면 예고도 복귀도 없다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 5.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+        later = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC + 5.0, NavStatus.RUNNING
+        )
+        assert logic.state == State.NAVIGATING
+        assert not any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
+        )
+
+    def test_seeking_interlude_still_ends_in_resume(self):
+        """Ruling: 복귀 중 호출 → 회전(SEEKING) → 못 찾고 IDLE 복귀 → 그래도
+        결국 복귀가 재개된다. 회전 중에는 시계가 멈추고, IDLE 로 돌아온
+        시점부터 15초를 다시 잰다(호출 시각부터 누적하지 않는다) —
+        회전 왕복만으로 16초 가까이 걸릴 수 있어 누적하면 IDLE 에 오자마자
+        곧바로 예고가 나가 사용자가 말할 틈이 없어진다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        assert logic._return_interrupted is True
+
+        # 두 번째 "비카야"(방향 포함)로 회전이 끼어든다. WAKE_CONSUMED_GUARD_SEC
+        # (3초) 뒤라야 방금 브레이크 소비의 여진이 아니라 진짜 새 호출로 받는다.
+        seek_and_finish_turn(logic, doa=90.0, t0=4.0)
+        assert logic.state == State.IDLE
+        # 회전을 거치는 동안 사다리 시계는 지워졌다(_to_idle 이 지운다).
+        assert logic._return_resume_deadline is None
+        assert logic._return_interrupted is True   # 사실은 살아남는다
+
+        # 아무도 못 찾아 탐색 창이 닫히고 원위치로 다시 돈다.
+        logic.on_tick(5.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        assert logic.state == State.SEEKING
+        idle_at = 20.0
+        logic.on_tick(idle_at, NavStatus.SUCCEEDED)   # 원위치 회전 완료
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        assert logic._return_resume_deadline is None
+
+        # 다음 tick 에서 이 시점 기준으로 15초 사다리가 새로 걸린다.
+        logic.on_tick(idle_at + 0.1, NavStatus.NONE)
+        assert logic._return_resume_deadline == pytest.approx(
+            idle_at + 0.1 + RETURN_RESUME_SEC
+        )
+
+        t_notice = idle_at + 0.1 + RETURN_RESUME_SEC
+        actions = logic.on_tick(t_notice, NavStatus.NONE)
+        assert any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
+        )
+        actions = logic.on_tick(t_notice + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        assert logic._return_interrupted is False
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_plain_idle_never_starts_the_timer(self):
+        """복귀 중이 아니었던 평범한 IDLE 에서는 이 사다리가 아예 안 걸린다."""
+        logic = MissionLogic(return_destination=make_home())
+        assert logic.state == State.IDLE
+        actions = logic.on_tick(1000.0, NavStatus.NONE)
+        assert actions == []
+        assert logic._return_interrupted is False
+        assert logic._return_resume_deadline is None
         assert logic.state == State.IDLE
 
 

@@ -54,6 +54,7 @@ from .mission_logic import (
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
+    RETURN_RESUME_SEC,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -131,6 +132,11 @@ class MissionManagerNode(Node):
         # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
         # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
         self.declare_parameter("near_call_no_spin_m", NEAR_CALL_NO_SPIN_M)
+        # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기 예고를
+        # 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC 뒤 복귀를 재개한다
+        # (2026-09-10 사용자 승인 흐름). 기준은 브레이크가 걸린 시각 —
+        # 청취 창(음성 쪽) 길이와는 무관하다.
+        self.declare_parameter("return_resume_sec", RETURN_RESUME_SEC)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -224,6 +230,7 @@ class MissionManagerNode(Node):
             near_call_max_m=float(self.get_parameter("near_call_max_m").value),
             near_call_no_spin_m=float(
                 self.get_parameter("near_call_no_spin_m").value),
+            return_resume_sec=float(self.get_parameter("return_resume_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,

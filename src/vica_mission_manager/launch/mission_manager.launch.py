@@ -118,6 +118,11 @@ def generate_launch_description() -> LaunchDescription:
             # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
             # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
             DeclareLaunchArgument("near_call_no_spin_m", default_value="1.0"),
+            # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기
+            # 예고를 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC(3초)
+            # 뒤 복귀를 재개한다(2026-09-10 사용자 승인 흐름). 기준은
+            # 브레이크가 걸린 시각 — 청취 창(음성 쪽) 길이와는 무관하다.
+            DeclareLaunchArgument("return_resume_sec", default_value="15.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -167,6 +172,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "near_call_no_spin_m": ParameterValue(
                             LaunchConfiguration("near_call_no_spin_m"),
+                            value_type=float,
+                        ),
+                        "return_resume_sec": ParameterValue(
+                            LaunchConfiguration("return_resume_sec"),
                             value_type=float,
                         ),
                     }
