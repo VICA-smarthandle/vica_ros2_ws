@@ -1650,50 +1650,108 @@ class TestReturnResumeAfterCallInterrupt:
             isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
         )
 
-    def test_seeking_interlude_still_ends_in_resume(self):
-        """Ruling: 복귀 중 호출 → 회전(SEEKING) → 못 찾고 IDLE 복귀 → 그래도
-        결국 복귀가 재개된다. 회전 중에는 시계가 멈추고, IDLE 로 돌아온
-        시점부터 15초를 다시 잰다(호출 시각부터 누적하지 않는다) —
-        회전 왕복만으로 16초 가까이 걸릴 수 있어 누적하면 IDLE 에 오자마자
-        곧바로 예고가 나가 사용자가 말할 틈이 없어진다."""
+    def test_call_during_return_wait_is_rejected_and_ladder_still_resumes(self):
+        """2026-09-10 사용자 결정: 복귀 재개 사다리가 도는 동안은 회전 자체를
+        거절한다 — 오탐 한 번이 회전 왕복(최대 16초)과 사다리 재대기
+        (18초)를 더해 30초 넘게 로봇을 통행로에 붙잡을 수 있어서다. 두
+        번째 호출이 방향을 담고 와도 SEEKING 이 열리지 않고, 사다리는 첫
+        호출(on_return_brake) 시각 기준으로 그대로 돌아 복귀로 끝난다.
+        (이 시험은 원래 "회전이 끼어들어도 결국 재개된다"를 봤다 — 그
+        회전 자체가 없어졌으므로 지금은 "회전이 거절된다"를 보도록
+        뜻을 바꿨다.)"""
         logic = MissionLogic(return_destination=make_home())
         logic.state = State.RETURNING
         logic.active_destination = make_home()
         logic.on_return_brake(0.0)
         assert logic._return_interrupted is True
 
-        # 두 번째 "비카야"(방향 포함)로 회전이 끼어든다. WAKE_CONSUMED_GUARD_SEC
-        # (3초) 뒤라야 방금 브레이크 소비의 여진이 아니라 진짜 새 호출로 받는다.
-        seek_and_finish_turn(logic, doa=90.0, t0=4.0)
-        assert logic.state == State.IDLE
-        # 회전을 거치는 동안 사다리 시계는 지워졌다(_to_idle 이 지운다).
-        assert logic._return_resume_deadline is None
-        assert logic._return_interrupted is True   # 사실은 살아남는다
-
-        # 아무도 못 찾아 탐색 창이 닫히고 원위치로 다시 돈다.
-        logic.on_tick(5.0 + SEEK_LOOK_SEC, NavStatus.NONE)
-        assert logic.state == State.SEEKING
-        idle_at = 20.0
-        logic.on_tick(idle_at, NavStatus.SUCCEEDED)   # 원위치 회전 완료
+        # 두 번째 "비카야"(방향 포함) — WAKE_CONSUMED_GUARD_SEC(3초) 지난
+        # 뒤라 방금 브레이크 소비의 여진이 아니라 진짜 새 호출인데도 거절된다.
+        actions = logic.on_wake_doa(90.0, True, 4.0)
+        assert actions == []
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
         assert logic.state == State.IDLE
         assert logic._seek_deadline is None
-        assert logic._return_resume_deadline is None
+        assert logic._return_resume_deadline == pytest.approx(RETURN_RESUME_SEC)
 
-        # 다음 tick 에서 이 시점 기준으로 15초 사다리가 새로 걸린다.
-        logic.on_tick(idle_at + 0.1, NavStatus.NONE)
-        assert logic._return_resume_deadline == pytest.approx(
-            idle_at + 0.1 + RETURN_RESUME_SEC
-        )
-
-        t_notice = idle_at + 0.1 + RETURN_RESUME_SEC
-        actions = logic.on_tick(t_notice, NavStatus.NONE)
+        # 사다리는 회전 없이, 첫 호출 시각 기준으로 그대로 돈다.
+        actions = logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
         assert any(
             isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
         )
-        actions = logic.on_tick(t_notice + LEAVING_GRACE_SEC, NavStatus.NONE)
+        actions = logic.on_tick(RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE)
         assert logic.state == State.RETURNING
         assert logic._return_interrupted is False
         assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_frontal_call_during_return_wait_is_also_rejected(self):
+        """회전 거절을 넣기 전에는 on_wake_doa 의 무회전 분기(정면 ±10도,
+        SEEK_MIN_YAW_RAD 미만)가 _to_idle() 을 거치지 않고 _seek_deadline
+        만 직접 열어, 탐색 창이 열려 있는 도중에 복귀 사다리가 예고를
+        말하고 떠나는 결함이 있었다(재현: on_return_brake(0.0) 뒤 t=10
+        정면 호출로 _seek_deadline=18, t=15 IDLE tick 이 예고 발화, t=18
+        창 종료와 _go_home 이 같은 tick 에 겹침). _return_interrupted 동안
+        on_wake_doa 자체를 거절하는 것으로 이 분기도 뿌리에서 함께
+        막힌다 — 탐색 창이 아예 안 열리고, 두 시계는 절대 같은 IDLE
+        위에서 만나지 않는다(SEEK_LOOK_SEC 주석 참고)."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+
+        # 정면 호출(회전 없이 탐색 창만 여는 분기) — 역시 거절된다.
+        actions = logic.on_wake_doa(3.0, True, 10.0)
+        assert actions == []
+        assert logic._seek_deadline is None
+        assert logic.state == State.IDLE
+
+        # 사다리는 겹침 없이 정상 진행한다.
+        actions = logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        assert any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
+        )
+        actions = logic.on_tick(RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+
+    def test_app_cancel_during_return_wait_clears_the_ladder(self):
+        """2026-09-10 사용자 결정: 관리자 취소가 IDLE 에서 GateReason.OK
+        만 돌려주고 조용히 수락하던 기존 동작 때문에, 사다리가 그대로
+        돌아 18초 뒤 로봇이 취소를 무시한 것처럼 출발하던 결함. 지금은
+        취소가 사다리도 함께 청산한다 — 사람이 명시적으로 내린 지시이니,
+        그 뒤 로봇이 제자리에 계속 서 있는 것이 맞다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        assert logic._return_interrupted is True
+
+        actions, reason = logic.on_app_cancel(5.0)
+        assert reason == GateReason.OK
+        assert logic._return_interrupted is False
+        assert logic._return_resume_deadline is None
+
+        # 유예가 다 지나도 복귀로 새지 않는다 — 취소가 끝이다.
+        later = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC + 5.0, NavStatus.NONE
+        )
+        assert logic.state == State.IDLE
+        assert not any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
+        )
+
+    def test_app_destination_during_return_wait_clears_the_ladder(self):
+        """on_app_destination 의 청산은 on_intent 와 같은 패턴
+        (_force_clear_all 에 모음)이라 위험은 낮았지만 코드 검토로만
+        확인돼 있었다 — 한 줄 시험으로 실제 동작을 확인한다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+
+        actions, reason = logic.on_app_destination(make_dest(), BOUNDS, True, 5.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.NAVIGATING
+        assert logic._return_interrupted is False
 
     def test_plain_idle_never_starts_the_timer(self):
         """복귀 중이 아니었던 평범한 IDLE 에서는 이 사다리가 아예 안 걸린다."""

@@ -391,6 +391,11 @@ APPROACH_TURN_TIMEOUT_SEC = 15.0
 # detection_gap 0.6 s 를 한 번만 넘겨도 연속이 깨져 처음부터 다시 세므로,
 # 8.0 으로 올려 여유를 둔다. 실측으로 더 정한다 [TARGET].
 SEEK_LOOK_SEC = 8.0
+# 이 값과 RETURN_RESUME_SEC(복귀 재개 사다리) 은 서로 대소를 지킬 필요가
+# 없다 — on_wake_doa 가 _return_interrupted 동안 호출 자체를 거절해
+# (2026-09-10 사용자 결정) 탐색 창이 그 사다리와 아예 같은 IDLE 위에 놓이지
+# 않기 때문이다. 이 값을 올려도 사다리와의 우연한 여유(예전엔 8.0 < 15.0
+# 에만 기대고 있었다)를 다시 계산할 필요가 없다.
 # 회전이 시작조차 안 됐을 때(노드 결함 등) 상태에서 빠져나오는 시계.
 # 접근 수락 회전과 같은 값을 쓴다 — 같은 Spin 액션이다.
 SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC
@@ -1043,9 +1048,7 @@ class MissionLogic:
         # 끊긴 복귀를 잊는다 — 이번이 그 재개다(음성으로 새 목적지를 받았으니
         # 사용자는 이미 응답한 것이다). 안 지우면 이번 안내를 마치고 한참 뒤
         # 낡은 복귀 사다리가 갑자기 홈으로 떠난다.
-        self._return_interrupted = False
-        self._return_resume_deadline = None
-        self._return_notice_given = False
+        self._forget_interrupted_return()
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(say_destination(MSG_START, dest.name)),
@@ -1058,6 +1061,12 @@ class MissionLogic:
         if self.state != State.CONFIRMING:
             return None
         return self._confirming_dest_id
+
+    @property
+    def return_interrupted(self) -> bool:
+        """복귀 재개 사다리가 도는 중인가. on_wake_doa 와 노드의 진단 로그가
+        같은 값을 보게 하려고 공개한다(wake_guard_active 와 같은 이유)."""
+        return self._return_interrupted
 
     def on_confirm_answer(
         self,
@@ -1124,6 +1133,10 @@ class MissionLogic:
             actions.append(CancelNav(self.active_destination))
         self._reset_arrival_dialog()
         self._to_idle()   # 보관 목적지·재시도 예약·확인 대기까지 전부 정리
+        # 끊긴 복귀 재개 사다리도 함께 청산한다(2026-09-10 사용자 결정) —
+        # 앱 선점·취소는 사용자가 명시적으로 내린 지시라, 그 뒤 로봇이
+        # 서 있는 것은 정당하다.
+        self._forget_interrupted_return()
         return actions
 
     def on_app_destination(self, dest: Optional[Destination],
@@ -1148,15 +1161,12 @@ class MissionLogic:
             return [], GateReason.POSE_INVALID
         if not nav_ready:
             return [], GateReason.NAV_NOT_READY
+        # 끊긴 복귀를 잊는다 — 관리자가 새 목적지로 선점했으니 이번이 그
+        # 재개다(on_intent 와 같은 이유). _force_clear_all 이 한다.
         actions = self._force_clear_all(now)
         self.state = State.NAVIGATING
         self.active_destination = dest
         self._nav_from_app = True
-        # 끊긴 복귀를 잊는다 — 관리자가 새 목적지로 선점했으니 이번이 그
-        # 재개다(on_intent 와 같은 이유, 2026-09-10).
-        self._return_interrupted = False
-        self._return_resume_deadline = None
-        self._return_notice_given = False
         actions.append(Say(say_destination(MSG_START, dest.name)))
         actions.append(Navigate(dest))
         return actions, GateReason.OK
@@ -1179,6 +1189,10 @@ class MissionLogic:
         if self.estop_active or self.state == State.ESTOPPED:
             return [], GateReason.ESTOP_ACTIVE
         if self.state == State.IDLE:
+            # 끊긴 복귀 재개 사다리가 도는 중일 수 있다(2026-09-10 사용자
+            # 결정) — 조용히 수락하는 척만 하고 사다리를 그대로 두면 18초
+            # 뒤 로봇이 취소를 무시한 것처럼 보인다.
+            self._forget_interrupted_return()
             return [], GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
         actions = self._force_clear_all(now)
         actions.append(Say(MSG_CANCELED, priority="response"))
@@ -1635,8 +1649,21 @@ class MissionLogic:
         거절한다. 이 전이는 wake 가 아니라 회전 완료(on_tick 의 TURNING
         분기)가 일으킨 것이라 _wake_consumed_at 도장이 없다 — 손잡이를 막
         받아든 사용자 옆에서 같은 사고가 재현되는 것을 막는다.
+
+        복귀 재개 사다리가 도는 동안(_return_interrupted)도 통째로 거절한다
+        (2026-09-10 사용자 결정). 회전이면 왕복 최대 16초, 못 찾으면 사다리가
+        다시 18초를 센다 — 오탐 한 번이 30초 넘게 로봇을 통행로에 붙잡을 수
+        있어 "부른 쪽을 본다"의 이득보다 위험이 크다는 판단이다. 이 관문
+        하나로 무회전 분기(정면 호출, 아래 SEEK_MIN_YAW_RAD 미만)가 탐색
+        창(_seek_deadline)만 여는 경로도 함께 막힌다 — 그 경로는 state 를
+        IDLE 에 둔 채 _to_idle() 을 거치지 않아, 이 관문이 없으면 탐색 창과
+        복귀 사다리(_return_resume_deadline)가 같은 IDLE 위에서 겹쳤다.
+        SEEK_LOOK_SEC 이 RETURN_RESUME_SEC 보다 얼마나 작은지와 무관하게
+        막히므로, 둘 중 어느 값을 나중에 올려도 이 관문은 그대로 유효하다.
         """
         if self.state != State.IDLE or self.estop_active or not nav_ready:
+            return []
+        if self._return_interrupted:
             return []
         if self.wake_guard_active(now):
             return []
@@ -1793,6 +1820,18 @@ class MissionLogic:
         self._leaving_deadline = None
         self._wait_until = None
         self._response_deadline = None
+
+    def _forget_interrupted_return(self) -> None:
+        """복귀 재개 사다리를 청산한다 — "복귀가 끊겨 있다"는 사실과 그
+        시각을 모두 지운다. 부르는 자리: 사다리 자신이 실제로 복귀를
+        재개할 때 · 새 목적지로 주행을 시작할 때(음성·앱) · 관리자가
+        복귀나 취소를 직접 명령할 때. `_to_idle()` 은 이 사실을 지우지
+        않는다(탐색 회전 등 다른 경로로 IDLE 을 거칠 때도 복귀가 잊히면
+        안 되기 때문) — 그래서 지우는 자리를 여기 한 곳에 모아 둔다.
+        """
+        self._return_interrupted = False
+        self._return_resume_deadline = None
+        self._return_notice_given = False
 
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
@@ -1994,9 +2033,7 @@ class MissionLogic:
                         self._return_resume_deadline = now + LEAVING_GRACE_SEC
                         actions.append(Say(MSG_LEAVING_NOTICE, priority="response"))
                     else:
-                        self._return_interrupted = False
-                        self._return_resume_deadline = None
-                        self._return_notice_given = False
+                        self._forget_interrupted_return()
                         actions.extend(self._go_home(now))
 
         elif self.state == State.TURNING:
@@ -2212,10 +2249,8 @@ class MissionLogic:
         if reason is not GateReason.OK:
             return False, reason, []
         # 끊긴 복귀를 잊는다 — 관리자가 지금 직접 복귀를 명령했으니 이번이
-        # 그 재개다(on_intent 와 같은 이유, 2026-09-10).
-        self._return_interrupted = False
-        self._return_resume_deadline = None
-        self._return_notice_given = False
+        # 그 재개다(on_intent 와 같은 이유).
+        self._forget_interrupted_return()
         return True, reason, self._enter_returning(now, is_home=True)
 
     def _enter_returning(
