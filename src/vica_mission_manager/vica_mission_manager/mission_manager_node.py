@@ -32,7 +32,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.msg import PersonDetection
@@ -51,7 +51,10 @@ from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
     MSG_APPROACH_QUESTION,
+    NEAR_CALL_MAX_M,
+    NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
+    RETURN_RESUME_SEC,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -68,6 +71,7 @@ from .mission_logic import (
     State,
     _REJECT_MESSAGES,
     check_gate,
+    doa_to_spin_yaw,
     yaw_deg_to_quaternion,
 )
 
@@ -113,6 +117,26 @@ class MissionManagerNode(Node):
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
+        # 마이크 각도 증가 방향. +1 반시계 / -1 시계 — 장비 실측값이다
+        # (호출 접근 설계 §5). 틀리면 로봇이 호출 방향의 정반대로 돈다.
+        self.declare_parameter("wake_doa_sign", 1.0)
+        # 고개를 돌린 뒤 사람을 찾는 시간(초). 8.0 근거는
+        # mission_logic.SEEK_LOOK_SEC 주석(2026-09-10 재검토).
+        self.declare_parameter("seek_look_sec", 8.0)
+        # 근접 호출(2026-09-10 확장). 부른 사람이 이보다 가까우면 접근 goal
+        # (1.1 m)이 이미 지나간 자리라 걸어가지 않고 그 자리에서 바로 질문한다.
+        # detection_gate.DEFAULT_MIN_DISTANCE_M 과 값은 같지만(1.5) 별개
+        # 파라미터다 — Mission 은 그 감지기 상수를 알 수 없다(패키지 경계).
+        self.declare_parameter("near_call_max_m", NEAR_CALL_MAX_M)
+        # 이보다 가까우면 수락해도 회전하지 않는다 — 손잡이가 뒤로 길게 나와
+        # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
+        # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
+        self.declare_parameter("near_call_no_spin_m", NEAR_CALL_NO_SPIN_M)
+        # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기 예고를
+        # 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC 뒤 복귀를 재개한다
+        # (2026-09-10 사용자 승인 흐름). 기준은 브레이크가 걸린 시각 —
+        # 청취 창(음성 쪽) 길이와는 무관하다.
+        self.declare_parameter("return_resume_sec", RETURN_RESUME_SEC)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -201,6 +225,12 @@ class MissionManagerNode(Node):
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
             approach_turn_yaw_rad=math.radians(
                 float(self.get_parameter("approach_turn_yaw_deg").value)),
+            wake_doa_sign=float(self.get_parameter("wake_doa_sign").value),
+            seek_look_sec=float(self.get_parameter("seek_look_sec").value),
+            near_call_max_m=float(self.get_parameter("near_call_max_m").value),
+            near_call_no_spin_m=float(
+                self.get_parameter("near_call_no_spin_m").value),
+            return_resume_sec=float(self.get_parameter("return_resume_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -301,6 +331,24 @@ class MissionManagerNode(Node):
         # 웨이크워드 호출. WAITING 각성·복귀 브레이크(도착 후 대화)에 쓴다.
         self.create_subscription(
             String, "/vica/wake", self._on_wake, 10,
+            callback_group=self._main_group,
+        )
+        # 호출이 온 방향. 대기 중에만 받아 그쪽으로 고개를 돌린다
+        # (호출 접근 설계). 같은 콜백 그룹이라 /vica/wake 가 먼저 처리되는데,
+        # 그 처리 직후(WAKE_CONSUMED_GUARD_SEC 이내)의 이 토픽은 on_wake_doa
+        # 가 시각으로 거절한다 — 두 토픽의 도착 순서와 무관하게 새 호출만
+        # SEEKING 을 연다(2026-09-10 재현).
+        self.create_subscription(
+            Float32, "/vica/wake_doa", self._on_wake_doa, 10,
+            callback_group=self._main_group,
+        )
+        # 근접 호출(2026-09-10 확장). detection_gate 가 거리 하나만으로
+        # TOO_NEAR 거절한 원본 결과를 여기서 직접 본다 — RequestApproach
+        # service 는 person_detector_node 가 approachable=true 일 때만 부르므로
+        # TOO_NEAR 는 그 service 로 오지 않는다. mission_logic.on_person_detection
+        # 이 탐색 창(IDLE + _seek_deadline) 밖에서는 아무 일도 하지 않는다.
+        self.create_subscription(
+            PersonDetection, "/vica/person_detection", self._on_person_detection, 10,
             callback_group=self._main_group,
         )
         # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
@@ -580,6 +628,77 @@ class MissionManagerNode(Node):
             self._run_actions(actions)
             self.get_logger().info(
                 f"'비카야': {before.value} -> {self.logic.state.value}")
+
+    def _on_wake_doa(self, msg: Float32) -> None:
+        """/vica/wake_doa — 호출 방향으로 고개를 돌린다 (IDLE 에서만).
+
+        받았지만 아무 일도 안 한 경우(10도 미만이라 회전 생략·IDLE 아님·
+        E-stop·nav 미준비·복귀 대기 중·방금 wake 소비 직후·접근 온보딩
+        직후)까지 전부 한 줄로 남긴다 — 이것은 멘트가 아니라 로그다. 실기에서
+        "안 돌았다"의 원인(부호 오류·관문 거절·사각지대)을 가릴 유일한
+        단서이며, 실기 검증만 남은 브랜치에서는 이 로그가 전제다.
+
+        판정 분기는 on_wake_doa 안의 실제 관문 순서(state/estop/nav_ready →
+        복귀 대기 중 → wake 소비 직후 → 접근 온보딩 직후 → 10도 미만)를
+        그대로 따른다 — 순서가 어긋나면 시각 관문이 거절했는데도 "10도
+        미만" 으로 잘못 찍힌다. return_interrupted/wake_guard_active/
+        user_attached_guard_active 는 on_wake_doa 가 쓰는 것과 같은
+        속성·메서드라 로그와 실제 판정이 갈라질 일이 없다.
+        """
+        now = self._now()
+        before = self.logic.state
+        nav_ready = self._nav2_ready()
+        actions = self.logic.on_wake_doa(float(msg.data), nav_ready, now)
+        self._run_actions(actions)
+        if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
+            # SEEKING 진입은 YOLO 를 끈다(is_moving). /vica/robot_state 는
+            # 1 Hz 라 최대 1초 늦게 갱신되면 seek_look_sec 창이 그만큼 줄어든다
+            # — 즉시 갱신해 그 지연을 회수한다(2026-09-10 재검토).
+            self._publish_robot_state()
+        yaw_rad = doa_to_spin_yaw(float(msg.data), self.logic.wake_doa_sign)
+        if any(isinstance(a, SpinInPlace) for a in actions):
+            verdict = "회전 시작"
+        elif before != State.IDLE:
+            verdict = f"거절(대기 중 아님, state={before.value})"
+        elif self.logic.estop_active:
+            verdict = "거절(E-stop)"
+        elif not nav_ready:
+            verdict = "거절(nav 미준비)"
+        elif self.logic.return_interrupted:
+            verdict = "거절(복귀 대기 중)"
+        elif self.logic.wake_guard_active(now):
+            verdict = "거절(방금 wake 소비 직후로 추정)"
+        elif self.logic.user_attached_guard_active(now):
+            verdict = "거절(안내 시작 직후)"
+        else:
+            verdict = "생략(10도 미만, 창만 유지)"
+        self.get_logger().info(
+            f"'비카야' 방향 doa={msg.data:.0f}° yaw={math.degrees(yaw_rad):.0f}°: "
+            f"{before.value} -> {self.logic.state.value} ({verdict})")
+
+    def _on_person_detection(self, msg: PersonDetection) -> None:
+        """/vica/person_detection 원본 결과 (근접 호출, 2026-09-10 확장).
+
+        탐색 창 밖에서는 mission_logic.on_person_detection 이 빈 목록을 돌려주고
+        상태도 그대로다 — 5 Hz 로 늘 들어오는 이 콜백이 평소에는 아무 일도 안
+        하는 것이 정상이다. 로그는 상태가 실제로 바뀐 경우에만 남긴다(그 외는
+        5 Hz 소음이 된다).
+        """
+        before = self.logic.state
+        actions = self.logic.on_person_detection(
+            track_id=msg.track_id,
+            distance_m=msg.distance_m,
+            stable=msg.stable,
+            approachable=msg.approachable,
+            now=self._now(),
+        )
+        if before == self.logic.state:
+            return
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"근접 호출: track={msg.track_id} dist={msg.distance_m:.2f}m "
+            f"{before.value} -> {self.logic.state.value}"
+        )
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
@@ -1107,18 +1226,29 @@ class MissionManagerNode(Node):
         self._run_actions(actions)
 
     def _tick(self) -> None:
+        before = self.logic.state
         status = self._poll_nav_status()
         distance = (
             self._nav_distance_remaining() if status == NavStatus.RUNNING else None
         )
         actions = self.logic.on_tick(self._now(), status, distance)
         self._run_actions(actions)
+        if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
+            # SEEKING 진입·이탈은 여기서도 일어난다(탐색 창 닫힘, 복귀 회전
+            # 시작·종료). /vica/robot_state 1 Hz 의 최대 1초 지연을 즉시
+            # 갱신으로 회수한다 — _on_wake_doa 와 같은 이유(2026-09-10 재검토).
+            self._publish_robot_state()
 
     def _publish_robot_state(self) -> None:
         msg = RobotState()
         msg.current_floor = int(self.get_parameter("current_floor").value)
         msg.current_building = str(self.get_parameter("current_building").value)
-        msg.is_moving = self.logic.state == State.NAVIGATING
+        # SEEKING(제자리 회전) 중 영상은 화면이 통째로 흐른다. detection_gate 의
+        # 변위 관문(0.3 m)이 어차피 트랙을 계속 깨뜨리므로, 쓰이지 않을 추론에
+        # CPU 를 쓰지 않는다 — 이 로봇의 제1 병목은 CPU 다.
+        # APPROACHING 을 넣지 않는 것은 의도된 현행 유지다: 접근 중에는 목표점
+        # 갱신에 탐지가 필요하다.
+        msg.is_moving = self.logic.state in (State.NAVIGATING, State.SEEKING)
         # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
         msg.is_paused = self.logic.state == State.PAUSED
         self.pub_state.publish(msg)
@@ -1223,10 +1353,11 @@ class MissionManagerNode(Node):
                 self._nav_gen += 1
         if accepted:
             self.get_logger().info(
-                f"제자리 회전 시작: {action.yaw_rad:.2f} rad (핸들을 사람 쪽으로)"
+                f"제자리 회전 시작: {action.yaw_rad:+.2f} rad "
+                f"({math.degrees(action.yaw_rad):+.0f}°) — {action.reason}"
             )
         else:
-            self.get_logger().error("Spin 거부됨 - 회전 없이 접근을 끝낸다")
+            self.get_logger().error(f"Spin 거부됨 ({action.reason}) - 회전 없이 넘어간다")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
 
     def _cancel_nav(self, destination=None, event: str = "goal_canceled") -> None:
