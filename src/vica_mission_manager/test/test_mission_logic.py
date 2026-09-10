@@ -1582,7 +1582,7 @@ class TestSeekEntry:
 
     def test_destination_request_rejected_while_seeking(self):
         """회전 중 목적지 요청을 받아 버리면 SpinInPlace 를 취소하지 않은 채
-        Navigate 가 나가 두 goal 이 동시에 발행된다 (리뷰 라운드 1 결함 1).
+        Navigate 가 나가 두 goal 이 동시에 발행된다 (설계 4절, 2026-09-10).
         TURNING 과 같은 처리 — 새 멘트 없이 기존 MSG_APPROACH_BUSY 를 쓴다."""
         logic = MissionLogic()
         logic.on_wake_doa(90.0, True, 1.0)

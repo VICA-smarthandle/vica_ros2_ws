@@ -425,7 +425,7 @@ APPROACH_DESTINATION_NAME = "접근 대상"
 # 접근 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이다. SEEKING
 # 이 빠지면 회전 중 음성 목적지 요청이 그대로 통과해 Navigate 가 나가고,
 # 진행 중인 SpinInPlace 를 취소하지 않은 채 두 goal 이 동시에 나가게 된다
-# (TURNING 과 같은 처리 — 리뷰 라운드 1 결함 1).
+# (TURNING 과 같은 처리 — 설계 4절, 2026-09-10).
 _APPROACH_STATES = (
     State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING,
     State.SEEKING,
@@ -874,9 +874,12 @@ class MissionLogic:
             return [Say(MSG_BUSY, priority="response")]
 
         if self.state in _APPROACH_STATES:
-            # 접근·질문·복귀 중에는 새 목적지를 받지 않는다. 특히
-            # AWAITING_USER 는 방금 던진 질문의 답을 기다리는 구간이라, 그 자리에
-            # 다른 목적지를 끼워 넣으면 누구의 요청인지 알 수 없게 된다(설계 4절).
+            # 접근·질문·회전(TURNING)·탐색(SEEKING)·복귀 중에는 새 목적지를
+            # 받지 않는다. 특히 AWAITING_USER 는 방금 던진 질문의 답을
+            # 기다리는 구간이라, 그 자리에 다른 목적지를 끼워 넣으면 누구의
+            # 요청인지 알 수 없게 된다(설계 4절). TURNING·SEEKING 은 진행 중인
+            # SpinInPlace 를 취소하지 않은 채 Navigate 가 나가는 사고를 막는다
+            # (설계 4절, 2026-09-10).
             return [Say(MSG_APPROACH_BUSY, priority="response")]
 
         if intent.need_confirm:
