@@ -1537,6 +1537,37 @@ class TestUserAttachedSuppressesWakeDoa:
         assert any(isinstance(a, SpinInPlace) for a in actions)
 
 
+class TestReturnBrakeGuardsWakeDoa:
+    """on_return_brake 도 _wake_consumed_at 도장을 찍는다 — 복귀 중
+    "비카야"로 브레이크를 밟은 직후 같은 콜백 그룹 경합으로 wake_doa 가
+    뒤따라오면, 도장이 없으면 그 소비를 새 호출로 오인해 SEEKING 이 열린다."""
+
+    def test_wake_doa_right_after_return_brake_does_not_open_seeking(self):
+        logic = MissionLogic()
+        logic.state = State.RETURNING
+        logic.on_return_brake(10.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 10.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+
+class TestAwaitingUserWakeGuardsWakeDoa:
+    """사람 1.1 m 앞에서 질문 대기 중(AWAITING_USER)의 "비카야"도 on_wake 가
+    _to_idle() 뒤 _wake_consumed_at 도장을 찍는 자리다 — 뒤따라온 wake_doa 가
+    이 소비를 새 호출로 오인하면 방금 접근한 사람 앞에서 SEEKING 이 열린다."""
+
+    def test_wake_doa_right_after_awaiting_user_wake_does_not_open_seeking(self):
+        logic = MissionLogic()
+        logic.state = State.AWAITING_USER
+        logic.approach_track_id = 7
+        logic.on_wake(10.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 10.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+
 class TestConfirmReproposalIsAnswer:
     """확인 중 같은 목적지의 재제안(confirm=True)은 답이다 (2026-09-01) —
     LLM 이 "응 화장실로 가자"를 재제안으로 되돌려도 출발해야 한다."""
