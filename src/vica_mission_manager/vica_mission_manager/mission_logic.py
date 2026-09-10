@@ -1669,6 +1669,37 @@ class MissionLogic:
                 # 빠르고, 같은 자리로 되풀이 진입하면 통행에 방해가 된다.
                 actions.extend(self._enter_returning(now))
 
+        elif self.state == State.SEEKING:
+            if nav_status in (NavStatus.SUCCEEDED, NavStatus.FAILED,
+                              NavStatus.CANCELED):
+                # 복귀각이 남아 있으면 방금 것은 '가는' 회전이다 — IDLE 로
+                # 내려놓고 사람을 찾는 창을 연다. IDLE 이어야 접근 관문을
+                # 그대로 통과한다. 없으면 방금 것이 복귀 회전이라 끝이다.
+                #
+                # 회전이 거부돼도(FAILED) 찾아는 본다. 카메라가 이미 사람을
+                # 보고 있을 수 있고, 못 봐도 창이 닫히면 조용히 끝난다.
+                back = self._seek_return_yaw
+                self._to_idle()
+                if back is not None:
+                    self._seek_return_yaw = back
+                    self._seek_deadline = now + self.seek_look_sec
+            elif (self._turn_deadline is not None
+                  and now >= self._turn_deadline):
+                # spin 이 시작조차 안 됐다. 시계로 탈출한다.
+                self._to_idle()
+
+        elif self.state == State.IDLE:
+            # 찾는 창이 닫혔다. 아무도 못 찾았으니 조용히 원래 자세로.
+            # 되돌리지 않으면 오작동 한 번에 카메라가 벽만 보는 자세로 굳는다.
+            if self._seek_deadline is not None and now >= self._seek_deadline:
+                back = self._seek_return_yaw
+                self._seek_deadline = None
+                self._seek_return_yaw = None
+                if back is not None and abs(back) >= SEEK_MIN_YAW_RAD:
+                    self.state = State.SEEKING
+                    self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
+                    actions.append(SpinInPlace(back))
+
         elif self.state == State.TURNING:
             if nav_status == NavStatus.SUCCEEDED:
                 # 회전 완료 훅 (approach-voice-flow.md 확정 흐름): 완료를 알리고

@@ -1533,3 +1533,82 @@ class TestSeekEntry:
         assert not any(isinstance(a, Navigate) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
         assert len(says) == 1
+
+
+def seek_and_finish_turn(logic, doa=90.0, t0=1.0):
+    """호출 -> 회전 -> 회전 완료. 탐색 창이 열린 IDLE 을 만든다."""
+    logic.on_wake_doa(doa, True, t0)
+    logic.on_tick(t0 + 1.0, NavStatus.SUCCEEDED)
+    return logic
+
+
+class TestSeekLookWindow:
+    def test_turn_done_returns_to_idle_with_a_window(self):
+        """IDLE 로 내려오는 것이 요점이다 — 접근 관문은 IDLE 만 통과시킨다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline == pytest.approx(2.0 + SEEK_LOOK_SEC)
+
+    def test_person_found_cancels_the_way_back(self):
+        """사람에게 갔으면 되돌아가지 않는다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions, reason = logic.on_approach_request(
+            make_approach(), BOUNDS, True, 3.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.APPROACHING
+        # 창이 만료될 시각을 지나도 복귀 회전이 없다.
+        later = logic.on_tick(30.0, NavStatus.RUNNING)
+        assert not any(isinstance(a, SpinInPlace) for a in later)
+
+    def test_nobody_found_turns_back_quietly(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        seek_and_finish_turn(logic, doa=90.0, t0=1.0)
+        actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(-math.pi / 2)
+        assert logic.state == State.SEEKING
+        # 조용히. 복도 소음 오인에 로봇이 말을 걸면 주변을 놀래킨다.
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_back_home_ends_in_idle(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)   # 복귀 회전 시작
+        logic.on_tick(20.0, NavStatus.SUCCEEDED)             # 복귀 회전 완료
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
+    def test_calling_again_accumulates_the_way_back(self):
+        """두 번 부르면 두 번 돈다. 복귀각은 덮어쓰지 않고 더한다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        seek_and_finish_turn(logic, doa=90.0, t0=1.0)        # +90도
+        logic.on_wake_doa(90.0, True, 3.0)                   # 또 +90도
+        assert logic.state == State.SEEKING
+        assert logic._seek_return_yaw == pytest.approx(-math.pi)
+
+    def test_a_new_errand_wins(self):
+        """탐색 창 중에 할 일이 생기면 제자리 돌기를 시작하지 않는다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.RUNNING)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_spin_that_never_started_escapes_by_clock(self):
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        logic.on_tick(1.0 + SEEK_TURN_TIMEOUT_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_failed_turn_still_looks(self):
+        """회전이 거부돼도 찾아는 본다 — 카메라가 이미 사람을 볼 수도 있다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        logic.on_tick(2.0, NavStatus.FAILED)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is not None
