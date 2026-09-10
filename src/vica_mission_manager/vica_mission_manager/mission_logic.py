@@ -359,6 +359,19 @@ APPROACH_QUESTION_STUCK_SEC = 30.0
 # 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
 # 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
 APPROACH_TURN_TIMEOUT_SEC = 15.0
+# 호출 접근(설계 2026-09-10). "비카야"를 듣고 그쪽으로 고개를 돌린 뒤,
+# 카메라가 사람을 찾을 때까지 기다리는 시간.
+#
+# 6.0 인 이유: 회전이 끝나야 탐지가 쓸모 있어지고, detection_gate 는 5 Hz
+# 로 stable 1.0 s + still window 3.0 s 를 본다. 그보다 짧으면 사람이 서
+# 있는데도 창이 먼저 닫힌다. 실측으로 확정한다 [TARGET].
+SEEK_LOOK_SEC = 6.0
+# 회전이 시작조차 안 됐을 때(노드 결함 등) 상태에서 빠져나오는 시계.
+# 접근 수락 회전과 같은 값을 쓴다 — 같은 Spin 액션이다.
+SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC
+# 이보다 작은 회전은 하지 않는다. DOA 퍼짐이 ±4~16° 라 10° 미만은 잡음이고,
+# 0 에 가까운 spin 은 behavior server 가 거부하거나 즉시 끝나 무의미하다.
+SEEK_MIN_YAW_RAD = math.radians(10.0)
 # 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
 # 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
 REAPPROACH_SUPPRESS_SEC = 60.0
@@ -630,6 +643,21 @@ def check_approach_cancel_gate(state: State, estop_active: bool) -> GateReason:
     if state not in (State.APPROACHING, State.AWAITING_USER):
         return GateReason.NOT_APPROACHING
     return GateReason.OK
+
+
+def wrap_to_pi(rad: float) -> float:
+    """각도를 -π~π 로 접는다 — 언제나 짧은 쪽으로 돈다."""
+    return math.atan2(math.sin(rad), math.cos(rad))
+
+
+def doa_to_spin_yaw(doa_deg: float, sign: float = 1.0) -> float:
+    """마이크 DOA(0~359°, 정면 0 / 핸들 180)를 제자리 회전량(rad)으로.
+
+    SpinInPlace 는 양수 = 반시계다. sign 은 마이크 각도가 반시계로
+    커지면 +1, 시계로 커지면 -1 이며 장비마다 실측으로 정한다 — 틀리면
+    로봇이 정확히 반대로 돈다.
+    """
+    return wrap_to_pi(math.radians(float(doa_deg) * float(sign)))
 
 
 def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:

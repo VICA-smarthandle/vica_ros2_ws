@@ -29,6 +29,11 @@ from vica_mission_manager.mission_logic import (
     check_gate,
     pose_valid,
     yaw_deg_to_quaternion,
+    SEEK_LOOK_SEC,
+    SEEK_MIN_YAW_RAD,
+    SEEK_TURN_TIMEOUT_SEC,
+    doa_to_spin_yaw,
+    wrap_to_pi,
 )
 
 BOUNDS = MapBounds(min_x=-15.1, min_y=-8.59, max_x=10.0, max_y=8.0)
@@ -1420,3 +1425,43 @@ class TestConfirmReproposalIsAnswer:
         assert logic.state == State.CONFIRMING
         assert logic.confirming_dest_id == "restroom"
         assert not any(isinstance(a, Navigate) for a in actions)
+
+
+class TestDoaToSpinYaw:
+    """마이크 각도(0~359°, 정면 0) -> SpinInPlace 회전량(rad, 양수=반시계).
+
+    sign 은 마이크 각도가 반시계로 커지면 +1, 시계로 커지면 -1 이다.
+    이 부호를 틀리면 로봇이 정확히 반대로 돈다 (설계 §5, 실측으로 정한다).
+    """
+
+    def test_front_is_no_turn(self):
+        assert doa_to_spin_yaw(0.0, 1.0) == pytest.approx(0.0)
+
+    def test_ccw_mic_left_turns_left(self):
+        assert doa_to_spin_yaw(90.0, 1.0) == pytest.approx(math.pi / 2)
+
+    def test_cw_mic_left_turns_right(self):
+        """부호가 반대면 같은 각도가 반대쪽 회전이 된다."""
+        assert doa_to_spin_yaw(90.0, -1.0) == pytest.approx(-math.pi / 2)
+
+    def test_takes_the_short_way_round(self):
+        """270° 는 왼쪽으로 270° 가 아니라 오른쪽으로 90° 다."""
+        assert doa_to_spin_yaw(270.0, 1.0) == pytest.approx(-math.pi / 2)
+
+    def test_behind_is_half_turn(self):
+        """뒤(핸들 쪽)는 어느 방향으로 돌든 180° 다."""
+        assert abs(doa_to_spin_yaw(180.0, 1.0)) == pytest.approx(math.pi)
+
+    def test_just_left_of_front(self):
+        assert doa_to_spin_yaw(359.0, 1.0) == pytest.approx(math.radians(-1.0))
+
+
+class TestWrapToPi:
+    def test_leaves_small_angles_alone(self):
+        assert wrap_to_pi(1.0) == pytest.approx(1.0)
+
+    def test_wraps_over_half_turn(self):
+        assert wrap_to_pi(math.radians(270.0)) == pytest.approx(math.radians(-90.0))
+
+    def test_wraps_negative(self):
+        assert wrap_to_pi(math.radians(-270.0)) == pytest.approx(math.radians(90.0))
