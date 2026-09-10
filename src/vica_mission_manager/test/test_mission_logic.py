@@ -1592,6 +1592,20 @@ class TestSeekEntry:
         says = [a for a in actions if isinstance(a, Say)]
         assert len(says) == 1
 
+    def test_app_preempt_cancels_the_spin_while_seeking(self):
+        """음성 경로(위 시험)는 SEEKING 을 거부하는데, 앱 선점 경로
+        (_force_clear_all)는 예전엔 등록 목적지 상태만 CancelNav 를 내 SEEKING 의
+        spin 을 못 끊었다 — Navigate 가 그 위에 그대로 나가 두 goal 이
+        동시에 /cmd_vel_req 에 붙는 사고였다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        assert logic.state == State.SEEKING
+        actions, reason = logic.on_app_destination(make_dest(), BOUNDS, True, 2.0)
+        assert reason == GateReason.OK
+        assert any(isinstance(a, CancelNav) for a in actions)
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic.state == State.NAVIGATING
+
 
 def seek_and_finish_turn(logic, doa=90.0, t0=1.0):
     """호출 -> 회전 -> 회전 완료. 탐색 창이 열린 IDLE 을 만든다."""
@@ -1656,6 +1670,17 @@ class TestSeekLookWindow:
         assert logic.state == State.NAVIGATING
         actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.RUNNING)
         assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_new_errand_clears_the_seek_window(self):
+        """낡은 창이 안내 한 판을 살아남으면 안 된다 — test_a_new_errand_wins
+        는 그 시점 상태가 NAVIGATING 이라 창이 안 비워져도 통과해버린다. 이 창이
+        남으면 이번 안내가 끝나고 한참 뒤 IDLE 에서 낡은 복귀각으로 갑자기 돈다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        assert logic._seek_deadline is not None
+        logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 3.0)
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
 
     def test_spin_that_never_started_escapes_by_clock(self):
         logic = MissionLogic()

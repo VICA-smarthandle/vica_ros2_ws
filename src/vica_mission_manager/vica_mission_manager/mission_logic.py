@@ -915,6 +915,11 @@ class MissionLogic:
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
+        # 탐색 창(SEEKING)이 열린 채로 이 길을 타면 창이 살아남는다 — 이 길은
+        # _to_idle() 을 거치지 않기 때문이다. 비우지 않으면 이번 안내가 끝나고
+        # 한참 뒤 낡은 복귀각으로 갑자기 도는 사고가 난다(2026-09-10 재현).
+        self._seek_deadline = None
+        self._seek_return_yaw = None
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(say_destination(MSG_START, dest.name)),
@@ -979,15 +984,17 @@ class MissionLogic:
         """진행 중인 모든 활동을 강제 정리한다 (앱 선점·전체 취소 전용).
 
         상태별 정리가 흩어지면 하나를 빠뜨려 유령(낡은 타이머·보관 목적지)이
-        생긴다 — 한곳에 모은다. Nav2 goal 이 있는 상태만 CancelNav 를 낸다.
-        TURNING 의 spin 은 nav goal 이 아니라 여기서 못 끊는다 — 몇 초짜리라
-        새 Navigate 가 큐에서 자연히 이어받는다.
+        생긴다 — 한곳에 모은다. goal 이 살아 있는 상태(_GOAL_ACTIVE_STATES) 는
+        전부 CancelNav 를 낸다 — TURNING·SEEKING 의 spin 도 nav goal 과 같은
+        Nav2 task 라 여기서 끊긴다(2026-09-10 재현: 예전엔 등록 목적지 상태만
+        취소해 SEEKING 중 앱 선점이 spin 을 못 끊고 Navigate 와 함께 나가
+        /cmd_vel_req 에 두 발행자가 붙었다). `CancelNav(None)` 이 안전한 것은
+        on_emergency 의 E-stop 경로가 이미 증명한다.
         """
         # 말부터 끊는다 — 이후 붙는 새 멘트(취소 확인·새 안내 시작)가
         # 낡은 멘트 뒤에 줄 서지 않게 한다 (2026-09-01 큐 청소).
         actions: list = [StopSpeech(), SetNavSpeedLimit(NO_SPEED_LIMIT)]
-        if (self.state in (State.NAVIGATING, State.APPROACHING, State.RETURNING)
-                and self.active_destination is not None):
+        if self.state in _GOAL_ACTIVE_STATES:
             actions.append(CancelNav(self.active_destination))
         self._reset_arrival_dialog()
         self._to_idle()   # 보관 목적지·재시도 예약·확인 대기까지 전부 정리
@@ -1291,6 +1298,11 @@ class MissionLogic:
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             self._reset_arrival_dialog()
             self.state = State.IDLE
+            # _to_idle() 을 거치지 않는 유일한 IDLE 진입로라 탐색 창이 안
+            # 비워진다 — 안내 한 판이 통째로 지난 뒤 낡은 복귀각으로 갑자기
+            # 도는 사고로 이어진다(2026-09-10 재현).
+            self._seek_deadline = None
+            self._seek_return_yaw = None
 
     def _ask_arrival(self, dest: Optional[Destination], now: float,
                      arrival_text: str = "") -> list:
