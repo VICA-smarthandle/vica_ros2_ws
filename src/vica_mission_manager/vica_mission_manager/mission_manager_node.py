@@ -32,7 +32,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.msg import PersonDetection
@@ -113,6 +113,11 @@ class MissionManagerNode(Node):
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
+        # 마이크 각도 증가 방향. +1 반시계 / -1 시계 — 장비 실측값이다
+        # (호출 접근 설계 §5). 틀리면 로봇이 호출 방향의 정반대로 돈다.
+        self.declare_parameter("wake_doa_sign", 1.0)
+        # 고개를 돌린 뒤 사람을 찾는 시간(초).
+        self.declare_parameter("seek_look_sec", 6.0)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -201,6 +206,8 @@ class MissionManagerNode(Node):
             confirm_timeout_sec=float(self.get_parameter("confirm_timeout_sec").value),
             approach_turn_yaw_rad=math.radians(
                 float(self.get_parameter("approach_turn_yaw_deg").value)),
+            wake_doa_sign=float(self.get_parameter("wake_doa_sign").value),
+            seek_look_sec=float(self.get_parameter("seek_look_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -301,6 +308,13 @@ class MissionManagerNode(Node):
         # 웨이크워드 호출. WAITING 각성·복귀 브레이크(도착 후 대화)에 쓴다.
         self.create_subscription(
             String, "/vica/wake", self._on_wake, 10,
+            callback_group=self._main_group,
+        )
+        # 호출이 온 방향. 대기 중에만 받아 그쪽으로 고개를 돌린다
+        # (호출 접근 설계). /vica/wake 와 도착 순서는 상관없다 — IDLE 에서
+        # /vica/wake 는 아무 일도 하지 않고, 새 흐름은 이 토픽만으로 열린다.
+        self.create_subscription(
+            Float32, "/vica/wake_doa", self._on_wake_doa, 10,
             callback_group=self._main_group,
         )
         # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
@@ -580,6 +594,17 @@ class MissionManagerNode(Node):
             self._run_actions(actions)
             self.get_logger().info(
                 f"'비카야': {before.value} -> {self.logic.state.value}")
+
+    def _on_wake_doa(self, msg: Float32) -> None:
+        """/vica/wake_doa — 호출 방향으로 고개를 돌린다 (IDLE 에서만)."""
+        before = self.logic.state
+        actions = self.logic.on_wake_doa(
+            float(msg.data), self._nav2_ready(), self._now())
+        if actions or before != self.logic.state:
+            self._run_actions(actions)
+            self.get_logger().info(
+                f"'비카야' 방향 {msg.data:.0f}°: "
+                f"{before.value} -> {self.logic.state.value}")
 
     def _on_voice_mission_command(self, msg: VicaIntent) -> None:
         """음성으로 온 취소·일시정지·재개를 처리한다.
@@ -1118,7 +1143,12 @@ class MissionManagerNode(Node):
         msg = RobotState()
         msg.current_floor = int(self.get_parameter("current_floor").value)
         msg.current_building = str(self.get_parameter("current_building").value)
-        msg.is_moving = self.logic.state == State.NAVIGATING
+        # SEEKING(제자리 회전) 중 영상은 화면이 통째로 흐른다. detection_gate 의
+        # 변위 관문(0.3 m)이 어차피 트랙을 계속 깨뜨리므로, 쓰이지 않을 추론에
+        # CPU 를 쓰지 않는다 — 이 로봇의 제1 병목은 CPU 다.
+        # APPROACHING 을 넣지 않는 것은 의도된 현행 유지다: 접근 중에는 목표점
+        # 갱신에 탐지가 필요하다.
+        msg.is_moving = self.logic.state in (State.NAVIGATING, State.SEEKING)
         # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
         msg.is_paused = self.logic.state == State.PAUSED
         self.pub_state.publish(msg)
