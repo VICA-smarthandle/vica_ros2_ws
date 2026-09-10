@@ -50,6 +50,7 @@ from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
+    HANDLE_SIDE_MIN_YAW_RAD,
     MSG_APPROACH_QUESTION,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
@@ -132,6 +133,12 @@ class MissionManagerNode(Node):
         # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
         # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
         self.declare_parameter("near_call_no_spin_m", NEAR_CALL_NO_SPIN_M)
+        # 핸들 쪽(로봇 뒤) 호출 사각지대(도) — 위 정면 사각지대(SEEK_MIN_YAW_RAD,
+        # 10°)의 거울쌍이다. 회전량이 이보다 크면(부채꼴 180°±45°) 소리가
+        # 핸들 옆에서 왔다는 뜻이라 카메라 확인 없이 곧바로 접근 질문을 낸다
+        # (mission_logic.HANDLE_SIDE_MIN_YAW_RAD 주석, 2026-09-10 사용자 결정).
+        self.declare_parameter(
+            "handle_side_min_yaw_deg", math.degrees(HANDLE_SIDE_MIN_YAW_RAD))
         # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기 예고를
         # 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC 뒤 복귀를 재개한다
         # (2026-09-10 사용자 승인 흐름). 기준은 브레이크가 걸린 시각 —
@@ -231,6 +238,8 @@ class MissionManagerNode(Node):
             near_call_no_spin_m=float(
                 self.get_parameter("near_call_no_spin_m").value),
             return_resume_sec=float(self.get_parameter("return_resume_sec").value),
+            handle_side_min_yaw_rad=math.radians(
+                float(self.get_parameter("handle_side_min_yaw_deg").value)),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -639,11 +648,15 @@ class MissionManagerNode(Node):
         단서이며, 실기 검증만 남은 브랜치에서는 이 로그가 전제다.
 
         판정 분기는 on_wake_doa 안의 실제 관문 순서(state/estop/nav_ready →
-        복귀 대기 중 → wake 소비 직후 → 접근 온보딩 직후 → 10도 미만)를
-        그대로 따른다 — 순서가 어긋나면 시각 관문이 거절했는데도 "10도
-        미만" 으로 잘못 찍힌다. return_interrupted/wake_guard_active/
+        복귀 대기 중 → wake 소비 직후 → 접근 온보딩 직후 → 10도 미만 →
+        180도 근방)를 그대로 따른다 — 순서가 어긋나면 시각 관문이 거절했는데도
+        "10도 미만" 으로 잘못 찍힌다. return_interrupted/wake_guard_active/
         user_attached_guard_active 는 on_wake_doa 가 쓰는 것과 같은
         속성·메서드라 로그와 실제 판정이 갈라질 일이 없다.
+
+        핸들 쪽(180°±45°, HANDLE_SIDE_MIN_YAW_RAD) 판정은 회전 없이 상태가
+        곧장 AWAITING_USER 로 바뀌는 것으로 알아본다 — SpinInPlace 가 없다는
+        점은 정면 사각지대("생략, 10도 미만")와 같지만 상태 전이가 다르다.
         """
         now = self._now()
         before = self.logic.state
@@ -658,6 +671,8 @@ class MissionManagerNode(Node):
         yaw_rad = doa_to_spin_yaw(float(msg.data), self.logic.wake_doa_sign)
         if any(isinstance(a, SpinInPlace) for a in actions):
             verdict = "회전 시작"
+        elif before == State.IDLE and self.logic.state == State.AWAITING_USER:
+            verdict = "핸들 쪽 — 회전 없이 곧바로 질문"
         elif before != State.IDLE:
             verdict = f"거절(대기 중 아님, state={before.value})"
         elif self.logic.estop_active:

@@ -402,6 +402,15 @@ SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC
 # 이보다 작은 회전은 하지 않는다. DOA 퍼짐이 ±4~16° 라 10° 미만은 잡음이고,
 # 0 에 가까운 spin 은 behavior server 가 거부하거나 즉시 끝나 무의미하다.
 SEEK_MIN_YAW_RAD = math.radians(10.0)
+# 위 SEEK_MIN_YAW_RAD(정면 사각지대)의 거울쌍 — 핸들 쪽(로봇 뒤) 사각지대다.
+# 이보다 큰 회전량(180°에 가까움)이면 소리가 핸들 부채꼴에서 왔다는 뜻이고,
+# 그 자체가 "이미 핸들 옆에 서 있다"는 증거라 카메라 확인 없이 곧바로 접근
+# 질문을 낸다 — 돌면 오히려 핸들을 사람에게서 빼앗는다(2026-09-10 사용자
+# 결정). 부채꼴 180°±45°, 즉 135°가 경계다.
+#
+# 폭의 근거(2026-09-10 실기): 뒤에서 부른 호출의 DOA 가 163°·181°·185°·
+# 160°·172° 로 전부 180±20° 안에 들어왔다. ±45° 면 넉넉한 여유다.
+HANDLE_SIDE_MIN_YAW_RAD = math.radians(135.0)
 # 같은 호출의 /vica/wake 와 /vica/wake_doa 는 몇 ms 간격으로 온다(2026-09-10
 # 실기 재현). 콜백이 같은 MutuallyExclusive 그룹이라 wake 가 먼저 상태를
 # IDLE 로 내린 뒤에야 wake_doa 가 처리될 수 있는데, 그때 IDLE 만 보고 통과
@@ -806,6 +815,7 @@ class MissionLogic:
         near_call_max_m: float = NEAR_CALL_MAX_M,
         near_call_no_spin_m: float = NEAR_CALL_NO_SPIN_M,
         return_resume_sec: float = RETURN_RESUME_SEC,
+        handle_side_min_yaw_rad: float = HANDLE_SIDE_MIN_YAW_RAD,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -868,6 +878,9 @@ class MissionLogic:
         self.near_call_no_spin_m = near_call_no_spin_m
         # 홈 복귀 재개. 근거는 RETURN_RESUME_SEC 주석에 있다.
         self.return_resume_sec = return_resume_sec
+        # 핸들 쪽 호출 사각지대(위 SEEK_MIN_YAW_RAD 의 거울쌍). 근거는
+        # HANDLE_SIDE_MIN_YAW_RAD 주석에 있다. 실기에서 폭을 조정한다.
+        self.handle_side_min_yaw_rad = handle_side_min_yaw_rad
         # on_wake/on_return_brake 가 실제로 상태를 바꾼 시각. on_wake_doa 가
         # 이 시각으로부터 WAKE_CONSUMED_GUARD_SEC 이내면 거절한다 — 두 토픽의
         # 도착 순서와 무관하게 결과가 같아지게 하려는 것이다.
@@ -1365,9 +1378,10 @@ class MissionLogic:
     def _enter_awaiting_user(self, now: float) -> list:
         """질문을 던지고 AWAITING_USER 로 들어간다.
 
-        걸어서 도착한 정상 접근(on_tick 의 APPROACHING→SUCCEEDED)과 코앞이라
-        걸어가지 않는 근접 호출(on_person_detection) 둘 다 여기로 온다 — 질문
-        멘트·재청취·탈출용 안전망(APPROACH_QUESTION_STUCK_SEC)이 두 경로에서
+        걸어서 도착한 정상 접근(on_tick 의 APPROACHING→SUCCEEDED), 코앞이라
+        걸어가지 않는 근접 호출(on_person_detection), 핸들 쪽에서 와 카메라
+        확인도 없이 곧장 들어오는 호출(on_wake_doa) 셋 다 여기로 온다 — 질문
+        멘트·재청취·탈출용 안전망(APPROACH_QUESTION_STUCK_SEC)이 세 경로에서
         완전히 같기 때문이다. 회전 여부(_near_call_no_spin)는 호출부가 이 함수
         호출 전후로 각자 정한다 — 여기서는 다루지 않는다.
         """
@@ -1660,6 +1674,15 @@ class MissionLogic:
         복귀 사다리(_return_resume_deadline)가 같은 IDLE 위에서 겹쳤다.
         SEEK_LOOK_SEC 이 RETURN_RESUME_SEC 보다 얼마나 작은지와 무관하게
         막히므로, 둘 중 어느 값을 나중에 올려도 이 관문은 그대로 유효하다.
+
+        핸들 쪽 사각지대(HANDLE_SIDE_MIN_YAW_RAD, 위 정면 사각지대의 거울쌍):
+        회전량이 180°에 가까우면(부채꼴 180°±45°) 소리가 핸들 옆에서 왔다는
+        뜻이고, 그 자체가 "이미 핸들 옆에 서 있다"는 증거라 카메라 확인을
+        기다리지 않고 곧바로 접근 질문으로 들어간다(2026-09-10 사용자 결정).
+        여기서 만들어진 대화는 track_id 가 없다 — 카메라로 확인한 적이 없기
+        때문이다(approach_track_id=None). 수락해도 회전하지 않는다
+        (_near_call_no_spin 재사용 — 이름은 "근접"이지만 뜻은 같다: 이미
+        올바른 자리에 있으니 180도를 돌리지 않는다).
         """
         if self.state != State.IDLE or self.estop_active or not nav_ready:
             return []
@@ -1678,6 +1701,15 @@ class MissionLogic:
             self._seek_return_yaw = back
             self._seek_deadline = now + self.seek_look_sec
             return []
+        if abs(yaw) > self.handle_side_min_yaw_rad:
+            # 핸들 쪽이다. 돌지 않고 곧바로 질문한다 — 탐색 창(_seek_deadline)
+            # 도 열지 않는다: 카메라로 찾을 필요가 없다.
+            self._seek_return_yaw = None
+            self._seek_deadline = None
+            self.approach_track_id = None
+            self.active_destination = None
+            self._near_call_no_spin = True
+            return self._enter_awaiting_user(now)
         self.state = State.SEEKING
         self._seek_return_yaw = back
         self._seek_deadline = None

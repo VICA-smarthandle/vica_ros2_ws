@@ -31,6 +31,7 @@ from vica_mission_manager.mission_logic import (
     check_gate,
     pose_valid,
     yaw_deg_to_quaternion,
+    HANDLE_SIDE_MIN_YAW_RAD,
     SEEK_LOOK_SEC,
     SEEK_MIN_YAW_RAD,
     SEEK_TURN_TIMEOUT_SEC,
@@ -1503,15 +1504,19 @@ class TestUserAttachedSuppressesWakeDoa:
 
     def test_wake_doa_opens_after_silent_suppress_window(self):
         """아무도 말을 걸지 않은 채 60초가 다 지나면 다른 사람의 호출을
-        다시 받는다 — 되감기가 없었던 경우."""
+        다시 받는다 — 되감기가 없었던 경우. doa=180(핸들 쪽)은 이제
+        HANDLE_SIDE_MIN_YAW_RAD 에 걸려 회전 대신 곧바로 접근 질문이
+        나간다(핸들 쪽 호출, 2026-09-10 확장) — "받는다"의 증거가
+        SpinInPlace 에서 AWAITING_USER 전이로 바뀌었을 뿐, 억제가 풀렸다는
+        뜻은 그대로다."""
         logic = MissionLogic(return_destination=make_home())
         start_approach(logic)
         arrive_and_ask(logic, t=1.0)
         self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
         actions = logic.on_wake_doa(
             180.0, True, 2.0 + USER_ATTACHED_SUPPRESS_SEC + 0.01)
-        assert logic.state == State.SEEKING
-        assert any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
 
     def test_wake_rewinds_the_suppress_window(self):
         """붙어 있는 사용자가 만료 직전에 다시 말을 걸면 시계가 되감긴다 —
@@ -1531,7 +1536,9 @@ class TestUserAttachedSuppressesWakeDoa:
         """거절 경로는 RETURNING 으로 빠지므로 억제를 걸지 않는다 — 찾기
         모드는 원래 IDLE 에서만 열리니 복귀가 끝나기 전까지는 자동으로
         막힌다. 복귀가 끝나 IDLE 이 되면 다른 사람의 호출은 그대로 들어야
-        한다(2026-09-10 사용자 결정)."""
+        한다(2026-09-10 사용자 결정). doa=180(핸들 쪽)은 이제
+        HANDLE_SIDE_MIN_YAW_RAD 에 걸려 회전 대신 곧바로 접근 질문이
+        나간다(핸들 쪽 호출, 2026-09-10 확장)."""
         logic = MissionLogic()   # 홈 미지정 — 제자리에서 복귀가 곧바로 끝난다
         start_approach(logic)
         arrive_and_ask(logic, t=1.0)
@@ -1540,8 +1547,8 @@ class TestUserAttachedSuppressesWakeDoa:
         logic.on_tick(1.1, NavStatus.NONE)
         assert logic.state == State.IDLE
         actions = logic.on_wake_doa(180.0, True, 1.11)
-        assert logic.state == State.SEEKING
-        assert any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
 
     def test_zero_yaw_shortcut_still_suppresses(self):
         """회전량을 0으로 꺼도(예: 좁은 곳) 승낙한 사용자는 그 자리에 있다 —
@@ -2215,3 +2222,99 @@ class TestNearCallApproach:
         logic = MissionLogic()
         assert logic.near_call_max_m == NEAR_CALL_MAX_M
         assert logic.near_call_no_spin_m == NEAR_CALL_NO_SPIN_M
+
+
+class TestHandleSideCall:
+    """핸들 쪽(로봇 뒤 180°±45°)에서 온 호출은 회전하지 않고 곧바로 접근
+    질문을 낸다 — 위 TestSeekEntry 의 정면 사각지대(SEEK_MIN_YAW_RAD)와
+    거울쌍이다(2026-09-10 사용자 결정). 손잡이가 로봇 뒤에 있어, 소리가 그
+    부채꼴에서 왔다는 사실 자체가 "이미 핸들 옆에 서 있다"는 증거다 — 카메라
+    확인(SEEKING 회전)을 기다리면 오히려 핸들을 사람에게서 빼앗는다."""
+
+    def test_call_near_180_skips_spin_and_asks_immediately(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(175.0, True, 1.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.AWAITING_USER
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_QUESTION
+        assert says[0].expects_reply is True
+
+    def test_boundary_just_inside_skips_spin(self):
+        """|yaw| = 136° (경계 135° 바로 안쪽) — 핸들 쪽으로 보고 돌지 않는다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(136.0, True, 1.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.AWAITING_USER
+
+    def test_boundary_just_outside_spins(self):
+        """|yaw| = 134° (경계 135° 바로 밖) — 평소처럼 그쪽으로 돈다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(134.0, True, 1.0)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert logic.state == State.SEEKING
+
+    def test_front_blind_spot_unaffected(self):
+        """정면 사각지대(10도 미만)는 기존 동작 그대로 — 탐색 창만 연다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(3.0, True, 1.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic._seek_deadline == pytest.approx(1.0 + SEEK_LOOK_SEC)
+
+    def test_no_track_id_recorded_for_handle_side_call(self):
+        """카메라 확인 없이 들어오므로 approach_track_id 가 없다(함정 1번)."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic.approach_track_id is None
+
+    def test_seek_window_state_cleared_on_entry(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
+    def test_accept_does_not_spin_and_goes_to_onboarding(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(True, 2.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_ONBOARDING
+
+    def test_decline_does_not_crash_without_a_track(self):
+        """approach_track_id 가 None 인 채로 거절 -> 복귀 사다리를 타야 한다
+        (함정 1번). 걸어간 적이 없으므로 홈이 지정돼 있지 않으면 제자리에서
+        끝난다 — 기존 근접 호출 거절과 같은 처리다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(False, 2.0)
+        assert logic.state == State.RETURNING
+        assert not any(isinstance(a, Navigate) for a in actions)
+        logic.on_tick(2.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        assert logic._suppressed_tracks == {}
+
+    def test_existing_gates_still_block_handle_side_calls(self):
+        """E-stop 이 걸려 있으면 핸들 쪽 호출도 여전히 거절된다 — 관문 순서가
+        yaw 판정보다 앞이어야 한다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.estop_active = True
+        assert logic.on_wake_doa(175.0, True, 1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_default_threshold_matches_module_constant(self):
+        logic = MissionLogic()
+        assert logic.handle_side_min_yaw_rad == HANDLE_SIDE_MIN_YAW_RAD
+
+    def test_custom_threshold_is_configurable(self):
+        """실기에서 부채꼴 폭을 조정할 수 있어야 한다."""
+        logic = MissionLogic(wake_doa_sign=1.0,
+                             handle_side_min_yaw_rad=math.radians(150.0))
+        # 140° 는 기본 임계(135°)면 핸들 쪽이지만, 150°로 좁히면 아니다.
+        actions = logic.on_wake_doa(140.0, True, 1.0)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert logic.state == State.SEEKING

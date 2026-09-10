@@ -118,6 +118,13 @@ def generate_launch_description() -> LaunchDescription:
             # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
             # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
             DeclareLaunchArgument("near_call_no_spin_m", default_value="1.0"),
+            # 핸들 쪽(로봇 뒤) 호출 사각지대(도) — 정면 사각지대(10°)의
+            # 거울쌍이다. 회전량이 이보다 크면(부채꼴 180°±45°) 소리가 핸들
+            # 옆에서 왔다는 뜻이라 카메라 확인 없이 곧바로 접근 질문을 낸다
+            # (mission_logic.HANDLE_SIDE_MIN_YAW_RAD 주석, 2026-09-10 사용자
+            # 결정). 실기에서 뒤쪽 호출의 DOA 가 163°~185° 안에 들어와 ±45°는
+            # 넉넉한 여유다 — 실기에서 폭을 조정한다.
+            DeclareLaunchArgument("handle_side_min_yaw_deg", default_value="135.0"),
             # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기
             # 예고를 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC(3초)
             # 뒤 복귀를 재개한다(2026-09-10 사용자 승인 흐름). 기준은
@@ -172,6 +179,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "near_call_no_spin_m": ParameterValue(
                             LaunchConfiguration("near_call_no_spin_m"),
+                            value_type=float,
+                        ),
+                        "handle_side_min_yaw_deg": ParameterValue(
+                            LaunchConfiguration("handle_side_min_yaw_deg"),
                             value_type=float,
                         ),
                         "return_resume_sec": ParameterValue(
