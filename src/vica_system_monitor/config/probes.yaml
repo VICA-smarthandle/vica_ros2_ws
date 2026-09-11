@@ -1,0 +1,105 @@
+external_diagnostics_node:
+  ros__parameters:
+    diagnostic_period_sec: 1.0
+
+    process_scan_period_sec: 5.0
+
+    topic_probe_names:
+      - lidar_scan
+      - depth_scan
+      - camera_depth
+      - camera_color
+      - odom
+      - wheel_odom
+
+    lidar_scan:
+      component: lidar
+      topic: /scan
+      msg_type: sensor_msgs/msg/LaserScan
+      qos: sensor_data
+      min_hz: 7.0
+      max_hz: 15.0
+      fault_code: LIDAR_SCAN_STALE
+      optional: false
+
+    depth_scan:
+      component: perception
+      topic: /camera/depth_scan
+      msg_type: sensor_msgs/msg/LaserScan
+      qos: sensor_data
+      min_hz: 3.0
+      max_hz: 40.0
+      fault_code: DEPTH_SCAN_STALE
+      optional: true
+
+    camera_depth:
+      component: perception
+      topic: /camera/camera/depth/camera_info
+      msg_type: sensor_msgs/msg/CameraInfo
+      qos: sensor_data
+      min_hz: 10.0
+      max_hz: 35.0
+      fault_code: CAMERA_DEPTH_STALE
+      optional: true
+
+    camera_color:
+      component: perception
+      topic: /camera/camera/color/camera_info
+      msg_type: sensor_msgs/msg/CameraInfo
+      qos: sensor_data
+      min_hz: 10.0
+      max_hz: 35.0
+      fault_code: CAMERA_COLOR_STALE
+      optional: true
+
+    odom:
+      component: localization
+      topic: /odom
+      msg_type: nav_msgs/msg/Odometry
+      qos: default
+      min_hz: 20.0
+      max_hz: 35.0
+      fault_code: LOCALIZATION_ODOM_STALE
+      optional: false
+
+    wheel_odom:
+      component: localization
+      topic: /wheel/odom
+      msg_type: nav_msgs/msg/Odometry
+      qos: default
+      min_hz: 5.0
+      max_hz: 40.0
+      fault_code: LOCALIZATION_WHEEL_ODOM_STALE
+      optional: false
+
+    process_probe_names:
+      - imu_adapter
+      - ekf_node
+      - controller_server
+      - motor_node
+      - realsense_node
+
+    imu_adapter:
+      component: localization
+      cmdline_pattern: imu_base_link_adapter
+      warn_percent: 55.0
+
+    ekf_node:
+      component: localization
+      cmdline_pattern: ekf_node
+      warn_percent: 20.0
+
+    controller_server:
+      component: navigation
+      cmdline_pattern: controller_server
+      warn_percent: 90.0
+
+    motor_node:
+      component: motor
+      cmdline_pattern: mdrobot_can_keyboard_knob_node
+      warn_percent: 25.0
+
+    realsense_node:
+      component: perception
+      cmdline_pattern: realsense2_camera_node
+      warn_percent: 60.0

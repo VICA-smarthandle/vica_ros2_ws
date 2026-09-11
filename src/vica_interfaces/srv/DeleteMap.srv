@@ -1,0 +1,6 @@
+string map_id
+bool delete_destinations
+---
+bool accepted
+string message
+string[] removed

@@ -1,0 +1,8 @@
+string intent
+string destination_candidate
+string matched_destination_id
+float32 confidence
+bool need_confirm
+string reply
+string safety_flag
+int32 wait_minutes

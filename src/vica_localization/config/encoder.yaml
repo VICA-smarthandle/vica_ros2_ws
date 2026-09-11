@@ -1,0 +1,18 @@
+encoder_feedback:
+  ros__parameters:
+    can_iface: can1
+    driver_id: 1
+    driver_response_id: 1793
+    ticks_per_rev: 61.2
+    wheel_radius_m: 0.065
+    wheel_base_m: 0.37
+    right_sign: 1.0
+    left_sign: 1.0
+    odom_frame: odom
+    base_frame: base_footprint
+    odom_topic: /wheel/odom
+
+    publish_tf: false
+
+    request_position_feedback: false
+    request_hz: 20.0

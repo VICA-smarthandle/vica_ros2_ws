@@ -1,0 +1,268 @@
+"""시리얼 전송 래퍼 테스트."""
+
+import pytest
+
+from vica_user_guidance import protocol
+from vica_user_guidance.serial_link import SerialLink
+
+SEC = 1_000_000_000
+NOW = 10 * SEC
+
+
+class FakePort:
+    """pyserial Serial의 최소 대역. write 실패를 흉내낼 수 있다."""
+
+    def __init__(self, fail_write=False):
+        self.written = []
+        self.fail_write = fail_write
+        self.closed = False
+
+    def write(self, data):
+        if self.fail_write:
+            raise OSError("write failed")
+        self.written.append(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def test_disabled_link_reports_not_configured():
+    """enable_serial=False면 pyserial을 쓰지 않고 fault만 보고한다."""
+    link = SerialLink(port="/dev/null", baudrate=115200, enabled=False)
+    assert link.connected is False
+    assert link.fault_code == protocol_fault("NOT_CONFIGURED")
+    assert link.send(protocol.STATE_NORMAL, NOW) is False
+
+
+def protocol_fault(name):
+    """SmartHandleState.msg의 fault_code 상수값과 일치시킨다."""
+    return {"NONE": 0, "PORT_OPEN": 1, "WRITE_FAIL": 2, "NOT_CONFIGURED": 3}[name]
+
+
+class FakeReadPort(FakePort):
+    """수신까지 흉내내는 포트. read 실패를 시킬 수 있다."""
+
+    def __init__(self, rx=b"", fail_read=False):
+        super().__init__()
+        self.rx = rx
+        self.fail_read = fail_read
+
+    @property
+    def in_waiting(self):
+        if self.fail_read:
+            raise OSError("read failed")
+        return len(self.rx)
+
+    def read(self, n):
+        data, self.rx = self.rx[:n], self.rx[n:]
+        return data
+
+
+def test_read_available_returns_buffered_bytes():
+    port = FakeReadPort(rx=b"\xaa\x55\x01")
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.read_available(NOW) == b"\xaa\x55\x01"
+    assert link.read_available(NOW) == b""
+
+
+def test_read_available_when_disconnected_returns_empty():
+    link = SerialLink(port="/dev/null", baudrate=115200, enabled=False)
+    assert link.read_available(NOW) == b""
+
+
+def test_read_failure_closes_port_and_sets_fault():
+    """수신 중 단절도 전송 실패처럼 포트를 닫아야 재연결이 살아난다."""
+    port = FakeReadPort(fail_read=True)
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.read_available(NOW) == b""
+    assert link.connected is False
+    assert port.closed is True
+    assert link.fault_code == protocol_fault("WRITE_FAIL")
+
+
+def test_port_open_failure_does_not_raise():
+    """포트 open 실패는 예외가 아니라 fault로 보고한다."""
+
+    def failing_factory(**kwargs):
+        raise OSError("no such device")
+
+    link = SerialLink(
+        port="/dev/nonexistent",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=failing_factory,
+    )
+    assert link.connected is False
+    assert link.fault_code == protocol_fault("PORT_OPEN")
+
+
+def test_successful_send_writes_one_byte():
+    """정상 전송은 1바이트를 쓰고 last_state_code를 갱신한다."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=lambda **kw: port,
+    )
+    assert link.connected is True
+    assert link.send(protocol.STATE_LEFT, NOW) is True
+    assert port.written == [bytes([protocol.STATE_LEFT])]
+    assert link.last_state_code == protocol.STATE_LEFT
+    assert link.fault_code == protocol_fault("NONE")
+
+
+def test_write_failure_sets_fault_and_counts():
+    """write 실패는 fault_code와 누적 카운터로 보고한다."""
+    port = FakePort(fail_write=True)
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=lambda **kw: port,
+    )
+    assert link.send(protocol.STATE_NORMAL, NOW) is False
+    assert link.fault_code == protocol_fault("WRITE_FAIL")
+    assert link.write_error_count == 1
+    assert link.connected is False
+
+
+def test_link_lost_code_is_rejected():
+    """코드 4 전송은 프로그래밍 오류다."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=lambda **kw: port,
+    )
+    with pytest.raises(ValueError):
+        link.send(protocol.STATE_LINK_LOST, NOW)
+    assert port.written == []
+
+
+def test_unimplemented_charging_codes_rejected():
+    """펌웨어 미구현 코드도 거부한다."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=lambda **kw: port,
+    )
+    with pytest.raises(ValueError):
+        link.send(protocol.STATE_CHARGING, NOW)
+
+
+def test_reconnect_respects_backoff_interval():
+    """backoff 간격 이전에는 재연결을 시도하지 않는다."""
+    attempts = []
+
+    def counting_factory(**kwargs):
+        attempts.append(1)
+        raise OSError("still gone")
+
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=counting_factory,
+        reconnect_interval_ns=2 * SEC,
+    )
+    first = len(attempts)
+
+    link.maybe_reconnect(NOW + SEC)
+    assert len(attempts) == first
+
+    link.maybe_reconnect(NOW + 3 * SEC)
+    assert len(attempts) == first + 1
+
+
+def test_reconnect_recovers_connection():
+    """재연결에 성공하면 connected가 복구된다."""
+    port = FakePort()
+    state = {"fail": True}
+
+    def flaky_factory(**kwargs):
+        if state["fail"]:
+            raise OSError("not yet")
+        return port
+
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=flaky_factory,
+        reconnect_interval_ns=SEC,
+    )
+    assert link.connected is False
+
+    link.maybe_reconnect(NOW)
+    assert link.connected is False
+
+    state["fail"] = False
+    link.maybe_reconnect(NOW + 2 * SEC)
+    assert link.connected is True
+    assert link.fault_code == protocol_fault("NONE")
+
+
+def test_close_is_safe_when_never_opened():
+    """열린 적 없어도 close가 예외를 던지지 않는다."""
+    link = SerialLink(port="/dev/null", baudrate=115200, enabled=False)
+    link.close()
+
+
+def test_close_closes_underlying_port():
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=lambda **kw: port,
+    )
+    link.close()
+    assert port.closed is True
+    assert link.connected is False
+
+
+def test_send_raw_writes_byte_but_keeps_last_state_code():
+    """햅틱 바이트는 last_state_code 를 더럽히지 않는다."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.send(protocol.STATE_LEFT, NOW) is True
+    assert link.send_raw(protocol.HAPTIC_CMD_LONG, NOW) is True
+    assert port.written[-1] == bytes([protocol.HAPTIC_CMD_LONG])
+    assert link.last_state_code == protocol.STATE_LEFT
+
+
+def test_send_raw_rejects_state_code_range():
+    """상태코드 범위(0~7)는 send_raw 로 못 보낸다 — 워치독 계약(코드 4 금지) 우회 방지."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    with pytest.raises(ValueError):
+        link.send_raw(protocol.STATE_LINK_LOST, NOW)
+    assert port.written == []
+
+
+def test_send_raw_write_failure_is_counted_and_faulted():
+    """write 예외는 send() 와 같게 다룬다 — 세고, fault 로 표시하고, 포트를 닫는다."""
+    port = FakePort(fail_write=True)
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.send_raw(protocol.HAPTIC_CMD_SHORT, NOW) is False
+    assert link.write_error_count == 1
+    assert link.fault_code == protocol_fault("WRITE_FAIL")
+    assert link.connected is False

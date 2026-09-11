@@ -1,0 +1,5 @@
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+# Canonical launch. It remaps odometry/filtered to /odom and keeps encoder TF off.
+ros2 launch vica_localization wheel_ekf.launch.py

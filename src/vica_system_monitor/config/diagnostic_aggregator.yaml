@@ -1,0 +1,82 @@
+aggregator_node:
+  ros__parameters:
+    path: VICA
+
+    pub_rate: 1.0
+
+    analyzers:
+      hardware:
+        type: diagnostic_aggregator/AnalyzerGroup
+        path: Hardware
+        analyzers:
+          motor:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: Motor
+            contains: ['mdrobot', 'motor:']
+            expected: ['mdrobot_can_keyboard_knob_node: CAN link']
+            timeout: 5.0
+
+          lidar:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: LiDAR
+            contains: ['lidar:']
+            timeout: 5.0
+
+          perception:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: Perception
+            contains: ['perception:']
+            timeout: 5.0
+
+          smart_handle:
+            type: diagnostic_aggregator/GenericAnalyzer
+            path: SmartHandle
+            contains: ['guidance:', 'smart_handle']
+            timeout: 5.0
+
+      safety:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Safety
+        contains: ['safety:', 'emergency']
+        expected:
+          - 'emergency_stop_node: safety: estop latch'
+          - 'safety_supervisor_node: safety: cmd_vel gate'
+          - 'app_emergency_node: safety: app bridge'
+        timeout: 5.0
+
+      localization:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Localization
+        contains: ['localization:']
+        timeout: 5.0
+
+      navigation:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Navigation
+        contains: ['navigation:', 'mission']
+        timeout: 5.0
+
+      voice:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Voice
+        contains: ['voice:', 'stt', 'tts']
+        timeout: 10.0
+
+      app:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: App
+        contains: ['app:', 'rosbridge', 'vica_supervisor']
+        timeout: 10.0
+
+      computer:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Computer
+        contains: ['computer:', 'cpu_monitor', 'ram_monitor']
+        timeout: 10.0
+
+      monitor:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Monitor
+        contains: ['external adapter', 'monitor:', 'system_monitor']
+        expected: ['external_diagnostics_node: external adapter']
+        timeout: 5.0

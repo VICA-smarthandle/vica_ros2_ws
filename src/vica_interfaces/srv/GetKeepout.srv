@@ -1,0 +1,9 @@
+string map_id
+---
+bool accepted
+string reason
+string message
+
+string zones_json
+
+bool mask_exists

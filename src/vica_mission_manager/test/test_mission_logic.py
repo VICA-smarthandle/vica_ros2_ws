@@ -1,0 +1,2482 @@
+"""mission_logic 순수 로직 unit test (테스트 계획: 게이트 16+조합, 상태 전이, deg→쿼터니언)."""
+import math
+
+import pytest
+
+from vica_mission_manager.mission_logic import (
+    APPROACH_TURN_TIMEOUT_SEC,
+    APPROACH_QUESTION_STUCK_SEC,
+    HAPTIC_PATTERN_HANDLE_HINT,
+    Haptic,
+    SpinInPlace,
+    StopSpeech,
+    MSG_APPROACH_QUESTION,
+    MSG_APPROACH_ACCEPTED,
+    MSG_APPROACH_DECLINED,
+    MSG_APPROACH_NO_ANSWER,
+    MSG_APPROACH_ONBOARDING,
+    MSG_HANDLE_HINT,
+    PERSON_APPROACH_SPEED_PERCENT,
+    ApproachRequest,
+    CancelNav,
+    Destination,
+    GateReason,
+    IntentData,
+    MapBounds,
+    MissionLogic,
+    Navigate,
+    NavStatus,
+    Pose2D,
+    Say,
+    SetNavSpeedLimit,
+    State,
+    check_approach_gate,
+    check_gate,
+    pose_valid,
+    yaw_deg_to_quaternion,
+    HANDLE_SIDE_MIN_YAW_RAD,
+    SEEK_LOOK_SEC,
+    SEEK_MIN_YAW_RAD,
+    SEEK_TURN_TIMEOUT_SEC,
+    USER_ATTACHED_SUPPRESS_SEC,
+    WAKE_CONSUMED_GUARD_SEC,
+    NEAR_CALL_MAX_M,
+    NEAR_CALL_NO_SPIN_M,
+    LEAVING_GRACE_SEC,
+    MSG_LEAVING_NOTICE,
+    RETURN_RESUME_SEC,
+    MSG_DEST_RETRY,
+    DEST_PROMPT_FALLBACK_SEC,
+    DEST_ANSWER_WAIT_SEC,
+    DEST_RETRY_RETURN_SEC,
+    doa_to_spin_yaw,
+    wrap_to_pi,
+)
+
+BOUNDS = MapBounds(min_x=-15.1, min_y=-8.59, max_x=10.0, max_y=8.0)
+
+
+def make_dest(**kw):
+    defaults = dict(
+        id="room_407",
+        name="윤지영 교수님 사무실",
+        pose=Pose2D(x=3.0, y=2.0, yaw_deg=90.0, frame_id="map"),
+        is_approachable=True,
+        calibrated=True,
+        arrival_message="윤지영 교수님 사무실 앞에 도착했습니다.",
+    )
+    defaults.update(kw)
+    return Destination(**defaults)
+
+
+def make_intent(**kw):
+    defaults = dict(
+        intent="navigate",
+        matched_destination_id="room_407",
+        need_confirm=False,
+        safety_flag="normal",
+    )
+    defaults.update(kw)
+    return IntentData(**defaults)
+
+
+class TestGate:
+    def test_all_pass(self):
+        assert check_gate(make_intent(), make_dest(), BOUNDS, False, True) == GateReason.OK
+
+    @pytest.mark.parametrize("intent_type", ["question", "clarify", "unknown", ""])
+    def test_not_navigate(self, intent_type):
+        r = check_gate(make_intent(intent=intent_type), make_dest(), BOUNDS, False, True)
+        assert r == GateReason.NOT_NAVIGATE
+
+    def test_no_matched_id(self):
+        r = check_gate(make_intent(matched_destination_id=""), make_dest(), BOUNDS, False, True)
+        assert r == GateReason.NO_MATCHED_ID
+
+    def test_need_confirm(self):
+        r = check_gate(make_intent(need_confirm=True), make_dest(), BOUNDS, False, True)
+        assert r == GateReason.NEED_CONFIRM
+
+    @pytest.mark.parametrize("flag", ["emergency", "", "warn"])
+    def test_safety_flag(self, flag):
+        r = check_gate(make_intent(safety_flag=flag), make_dest(), BOUNDS, False, True)
+        assert r == GateReason.SAFETY_FLAG
+
+    def test_estop_active(self):
+        assert (
+            check_gate(make_intent(), make_dest(), BOUNDS, True, True)
+            == GateReason.ESTOP_ACTIVE
+        )
+
+    def test_unknown_destination(self):
+        assert check_gate(make_intent(), None, BOUNDS, False, True) == GateReason.UNKNOWN_DESTINATION
+
+    def test_private_destination(self):
+        dest = make_dest(authorization="private")
+        assert (
+            check_gate(make_intent(), dest, BOUNDS, False, True)
+            == GateReason.PRIVATE_DESTINATION
+        )
+
+    def test_not_approachable(self):
+        dest = make_dest(is_approachable=False)
+        assert check_gate(make_intent(), dest, BOUNDS, False, True) == GateReason.NOT_APPROACHABLE
+
+    def test_pose_zero_placeholder(self):
+        dest = make_dest(pose=Pose2D(0.0, 0.0, 0.0), calibrated=None)
+        assert check_gate(make_intent(), dest, BOUNDS, False, True) == GateReason.POSE_INVALID
+
+    def test_pose_calibrated_false(self):
+        dest = make_dest(calibrated=False)
+        assert check_gate(make_intent(), dest, BOUNDS, False, True) == GateReason.POSE_INVALID
+
+    def test_pose_wrong_frame(self):
+        dest = make_dest(pose=Pose2D(3.0, 2.0, 0.0, frame_id="odom"))
+        assert check_gate(make_intent(), dest, BOUNDS, False, True) == GateReason.POSE_INVALID
+
+    @pytest.mark.parametrize("x,y", [(100.0, 0.0), (0.0, 100.0), (-20.0, 0.0), (0.0, -20.0)])
+    def test_pose_out_of_bounds(self, x, y):
+        dest = make_dest(pose=Pose2D(x, y, 0.0))
+        assert check_gate(make_intent(), dest, BOUNDS, False, True) == GateReason.POSE_INVALID
+
+    def test_nav_not_ready(self):
+        assert (
+            check_gate(make_intent(), make_dest(), BOUNDS, False, False)
+            == GateReason.NAV_NOT_READY
+        )
+
+    def test_bounds_none_skips_bounds_check(self):
+        dest = make_dest(pose=Pose2D(100.0, 100.0, 0.0))
+        assert check_gate(make_intent(), dest, None, False, True) == GateReason.OK
+
+    def test_priority_not_navigate_before_others(self):
+        r = check_gate(
+            make_intent(intent="question", matched_destination_id=""),
+            None, BOUNDS, True, False,
+        )
+        assert r == GateReason.NOT_NAVIGATE
+
+
+class TestPoseValid:
+    def test_valid(self):
+        assert pose_valid(make_dest(), BOUNDS)
+
+    def test_calibrated_none_nonzero_pose_ok(self):
+        assert pose_valid(make_dest(calibrated=None), BOUNDS)
+
+    def test_boundary_inclusive(self):
+        dest = make_dest(pose=Pose2D(BOUNDS.max_x, BOUNDS.max_y, 0.0))
+        assert pose_valid(dest, BOUNDS)
+
+
+class TestYawConversion:
+    @pytest.mark.parametrize(
+        "deg,expect_z,expect_w",
+        [
+            (0.0, 0.0, 1.0),
+            (90.0, math.sin(math.pi / 4), math.cos(math.pi / 4)),
+            (180.0, 1.0, 0.0),
+            (-90.0, -math.sin(math.pi / 4), math.cos(math.pi / 4)),
+            (360.0, 0.0, -1.0),
+        ],
+    )
+    def test_values(self, deg, expect_z, expect_w):
+        x, y, z, w = yaw_deg_to_quaternion(deg)
+        assert x == 0.0 and y == 0.0
+        assert z == pytest.approx(expect_z, abs=1e-9)
+        assert w == pytest.approx(expect_w, abs=1e-9)
+
+    def test_unit_norm(self):
+        for deg in (-720.5, -33.3, 0.0, 45.0, 123.4, 719.9):
+            x, y, z, w = yaw_deg_to_quaternion(deg)
+            assert math.hypot(z, w) == pytest.approx(1.0)
+
+
+def start_navigation(logic, t=0.0):
+    actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, t)
+    assert logic.state == State.NAVIGATING
+    return actions
+
+
+class TestTransitions:
+    def test_idle_direct_navigate(self):
+        logic = MissionLogic()
+        actions = start_navigation(logic)
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_confirm_then_same_dest_navigates(self):
+        logic = MissionLogic()
+        assert logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0) == []
+        assert logic.state == State.CONFIRMING
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 5.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_confirm_timeout_30s(self):
+        logic = MissionLogic(confirm_timeout_sec=30.0)
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.on_tick(29.9, NavStatus.NONE) == []
+        assert logic.state == State.CONFIRMING
+        actions = logic.on_tick(30.0, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_confirm_affirm_starts_navigation(self):
+        """확인 질문의 "네"는 LLM 추측 없이 그 목적지로 바로 확정 출발한다"""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.confirming_dest_id == "room_407"
+        actions = logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_confirm_deny_cancels_quietly_to_idle(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        actions = logic.on_confirm_answer(False, make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, Say) for a in actions)
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_confirm_answer_ignored_outside_confirming(self):
+        logic = MissionLogic()
+        assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 0.0) == []
+        assert logic.state == State.IDLE
+        assert logic.confirming_dest_id is None
+
+    def test_confirm_affirm_without_dest_keeps_waiting(self):
+        """목적지를 되찾지 못하면 아무 데나 출발하지 않고 확인 상태를 유지한다"""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.on_confirm_answer(True, None, BOUNDS, True, 3.0) == []
+        assert logic.state == State.CONFIRMING
+        assert logic.on_confirm_answer(
+            True, make_dest(id="restroom"), BOUNDS, True, 4.0) == []
+        assert logic.state == State.CONFIRMING
+
+    def test_confirm_affirm_still_passes_gate(self):
+        """확인 답이라도 게이트는 그대로 밟는다 — nav 미준비면 출발하지 않는다."""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        actions = logic.on_confirm_answer(True, make_dest(), BOUNDS, False, 3.0)
+        assert logic.state != State.NAVIGATING
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_stale_confirm_different_dest_rejected(self):
+        logic = MissionLogic()
+        logic.on_intent(
+            make_intent(need_confirm=True, matched_destination_id="restroom"),
+            make_dest(id="restroom"), BOUNDS, True, 0.0,
+        )
+        actions = logic.on_intent(make_intent(matched_destination_id="room_407"),
+                                  make_dest(), BOUNDS, True, 5.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Say) for a in actions)
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_navigating_rejects_new_navigate(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
+                                  make_dest(id="restroom"), BOUNDS, True, 1.0)
+        assert logic.state == State.NAVIGATING
+        assert actions and isinstance(actions[0], Say)
+
+    def test_nav_success_arrival_message_then_idle(self):
+        logic = MissionLogic(dwell_sec=2.0)
+        start_navigation(logic)
+        actions = logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.ARRIVED
+        assert any("도착" in a.text for a in actions if isinstance(a, Say))
+        logic.on_tick(12.0, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_nav_failure_then_idle(self):
+        """재시도를 끄면 실패 뒤 dwell 만큼 머물고 IDLE 로 간다."""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=0)
+        start_navigation(logic)
+        actions = logic.on_tick(10.0, NavStatus.FAILED)
+        assert logic.state == State.FAILED
+        assert any(isinstance(a, Say) for a in actions)
+        logic.on_tick(12.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_nav_failure_retries_same_destination(self):
+        """실패하면 같은 목적지로 스스로 다시 나선다."""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=2, nav_retry_delay_sec=3.0)
+        started = start_navigation(logic)
+        dest = [a for a in started if isinstance(a, Navigate)][0].destination
+        logic.on_tick(10.0, NavStatus.FAILED)
+        assert logic.state == State.FAILED
+
+        logic.on_tick(12.5, NavStatus.NONE)
+        assert logic.state == State.FAILED
+
+        actions = logic.on_tick(13.5, NavStatus.NONE)
+        assert logic.state == State.NAVIGATING
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.id == dest.id
+        assert logic.active_destination is not None
+
+    def test_nav_retry_stops_at_limit(self):
+        """한도를 넘으면 안내하고 멈춘다. 통과 불가능한 자리에서 영원히"""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=1, nav_retry_delay_sec=1.0)
+        start_navigation(logic)
+        logic.on_tick(10.0, NavStatus.FAILED)
+        logic.on_tick(11.5, NavStatus.NONE)
+        assert logic.state == State.NAVIGATING
+
+        actions = logic.on_tick(20.0, NavStatus.FAILED)
+        assert logic.state == State.FAILED
+        assert any("실패" in a.text for a in actions if isinstance(a, Say))
+        logic.on_tick(22.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_user_cancel_is_not_retried(self):
+        """사용자가 거둔 목표를 로봇이 되살리면 안 된다."""
+        logic = MissionLogic(dwell_sec=2.0, nav_retry_limit=2, nav_retry_delay_sec=1.0)
+        start_navigation(logic)
+        logic.on_tick(10.0, NavStatus.CANCELED)
+        assert logic.state == State.FAILED
+        logic.on_tick(12.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_question_during_confirming_keeps_state(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert logic.on_intent(make_intent(intent="question"), None, BOUNDS, True, 5.0) == []
+        assert logic.state == State.CONFIRMING
+
+
+class TestEmergency:
+    def test_hard_keyword_cancels_and_estops(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_emergency("멈춰", 5.0)
+        assert logic.state == State.ESTOPPED
+        assert any(isinstance(a, CancelNav) for a in actions)
+        assert any(isinstance(a, Say) for a in actions)
+
+    @pytest.mark.parametrize("kw", ["멈춰", "정지", "스탑", "스톱", "안돼", "위험해"])
+    def test_all_hard_keywords(self, kw):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_emergency(kw, 5.0)
+        assert logic.state == State.ESTOPPED
+
+    @pytest.mark.parametrize("kw", ["천천히", "느리게", "잠깐", "아무말"])
+    def test_soft_keywords_ignored_v1(self, kw):
+        logic = MissionLogic()
+        start_navigation(logic)
+        assert logic.on_emergency(kw, 5.0) == []
+        assert logic.state == State.NAVIGATING
+
+    def test_estop_latch_true_while_navigating(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_estop(True, 5.0)
+        assert logic.state == State.ESTOPPED
+        assert any(isinstance(a, CancelNav) for a in actions)
+
+    def test_estopped_rejects_navigate(self):
+        logic = MissionLogic()
+        logic.on_estop(True, 0.0)
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 1.0)
+        assert logic.state == State.ESTOPPED
+        assert actions and isinstance(actions[0], Say)
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_estop_release_needs_grace_and_no_auto_resume(self):
+        logic = MissionLogic(estop_release_grace_sec=2.0)
+        start_navigation(logic)
+        logic.on_estop(True, 5.0)
+        logic.on_estop(False, 6.0)
+        assert logic.on_tick(7.9, NavStatus.NONE) == []
+        assert logic.state == State.ESTOPPED
+        actions = logic.on_tick(8.0, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, Say) for a in actions)
+        assert logic.active_destination is None
+
+    def test_voice_only_estop_without_latch_releases_after_grace(self):
+        logic = MissionLogic(estop_release_grace_sec=2.0)
+        start_navigation(logic)
+        logic.on_emergency("멈춰", 5.0)
+        assert logic.on_tick(6.9, NavStatus.NONE) == []
+        logic.on_tick(7.0, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_estop_reasserted_resets_release(self):
+        logic = MissionLogic(estop_release_grace_sec=2.0)
+        logic.on_estop(True, 0.0)
+        logic.on_estop(False, 1.0)
+        logic.on_estop(True, 2.0)
+        logic.on_tick(10.0, NavStatus.NONE)
+        assert logic.state == State.ESTOPPED
+
+    def test_estop_say_has_emergency_priority(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_emergency("멈춰", 5.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and all(s.priority == "emergency" for s in says)
+
+    def test_reject_say_has_response_priority(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
+                                  make_dest(id="restroom"), BOUNDS, True, 1.0)
+        assert actions[0].priority == "response"
+
+    def test_start_and_arrival_say_are_narration(self):
+        logic = MissionLogic()
+        actions = start_navigation(logic)
+        assert all(s.priority == "narration" for s in actions if isinstance(s, Say))
+        actions = logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        assert all(s.priority == "narration" for s in actions if isinstance(s, Say))
+
+    def test_nav_failed_say_is_not_narration(self):
+        """주행 실패 안내는 큐 정원 초과로 버려지면 안 된다 (tts_queue._trim)."""
+        logic = MissionLogic(nav_retry_limit=0)
+        start_navigation(logic)
+        actions = logic.on_tick(10.0, NavStatus.FAILED)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says, "주행 실패 시 안내가 없다"
+        assert all(s.priority == "response" for s in says)
+
+    def test_estop_released_say_preempts_estop_ment(self):
+        """해제 안내는 emergency 등급 — 걸림 멘트가 아직 재생 중이면 끊고"""
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_estop(True, 1.0)
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(2.0 + logic.estop_release_grace_sec, NavStatus.NONE)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says, "비상 멈춤 해제 안내가 없다"
+        assert all(s.priority == "emergency" for s in says)
+
+    def test_estop_latch_spam_says_once(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        first = logic.on_estop(True, 0.0)
+        assert any(isinstance(a, Say) for a in first)
+        assert logic.on_estop(True, 0.05) == []
+        assert logic.on_estop(True, 0.10) == []
+
+
+class TestPauseResumeCancel:
+    """안전 사건이 아닌 목표 조작. E-stop 과 달리 래치도 reset 도 없다."""
+
+    def test_pause_keeps_destination_and_resume_returns_to_it(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        dest = logic.active_destination
+
+        actions, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.PAUSED
+        assert logic.paused_destination is dest
+        assert logic.active_destination is None
+
+        actions, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.NAVIGATING
+        navigate = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigate) == 1
+        assert navigate[0].destination is dest
+        assert logic.paused_destination is None
+
+    def test_pause_emits_paused_event_not_canceled(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_pause_request(1.0)
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert len(cancels) == 1
+        assert cancels[0].event == "goal_paused"
+
+    def test_estop_discards_paused_destination(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        logic.on_estop(True, 2.0)
+        assert logic.state == State.ESTOPPED
+        assert logic.paused_destination is None
+
+        _, reason = logic.on_resume_request(True, 3.0)
+        assert reason == GateReason.ESTOP_ACTIVE
+
+        logic.on_estop(False, 4.0)
+        logic.on_tick(10.0, NavStatus.NONE)
+        _, reason = logic.on_resume_request(True, 11.0)
+        assert reason == GateReason.NOT_PAUSED
+
+    @pytest.mark.parametrize(
+        "command", ["on_cancel_request", "on_pause_request"]
+    )
+    def test_estop_blocks_cancel_and_pause(self, command):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_estop(True, 1.0)
+        _, reason = getattr(logic, command)(2.0)
+        assert reason == GateReason.ESTOP_ACTIVE
+
+    def test_cancel_requires_active_navigation(self):
+        logic = MissionLogic()
+        _, reason = logic.on_cancel_request(0.0)
+        assert reason == GateReason.NOT_NAVIGATING
+
+    def test_cancel_clears_everything(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, reason = logic.on_cancel_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert logic.active_destination is None
+        assert logic.paused_destination is None
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert cancels and cancels[0].event == "goal_canceled"
+
+    def test_cancel_allowed_while_paused(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        _, reason = logic.on_cancel_request(2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+
+    def test_resume_requires_paused_state(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        _, reason = logic.on_resume_request(True, 1.0)
+        assert reason == GateReason.NOT_PAUSED
+
+
+class TestVoiceCancelConfirm:
+    """음성 취소는 잘못 알아들으면 안내가 끊기므로 되물어 확인한다."""
+
+    def test_confirm_request_does_not_cancel_yet(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, reason = logic.on_cancel_confirm_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.cancel_confirm_pending is True
+        assert logic.state == State.NAVIGATING
+        assert not any(isinstance(a, CancelNav) for a in actions)
+
+    def test_confirm_question_expects_a_reply(self):
+        """되묻기는 질문이다. expects_reply 로 표시해야 노드가"""
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_cancel_confirm_request(1.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].expects_reply is True
+
+    def test_plain_announcements_do_not_expect_a_reply(self):
+        """일반 안내 멘트("안내를 시작합니다")에 재청취가 걸리면, 말 끝날 때마다"""
+        logic = MissionLogic()
+        actions = start_navigation(logic)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says
+        assert all(s.expects_reply is False for s in says)
+
+    def test_affirmative_answer_cancels(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_cancel_confirm_request(1.0)
+        actions = logic.on_cancel_confirm_answer(True, 2.0)
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, CancelNav) for a in actions)
+
+    def test_negative_answer_keeps_navigating(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_cancel_confirm_request(1.0)
+        logic.on_cancel_confirm_answer(False, 2.0)
+        assert logic.state == State.NAVIGATING
+        assert logic.cancel_confirm_pending is False
+
+    def test_timeout_keeps_navigating(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_cancel_confirm_request(1.0)
+        logic.on_tick(1.0 + logic.confirm_timeout_sec + 0.1, NavStatus.RUNNING)
+        assert logic.cancel_confirm_pending is False
+        assert logic.state == State.NAVIGATING
+
+
+def make_home(**kw):
+    """복귀할 대기 위치. 지도상 좌표는 아직 [미정] 이라 시험에서만 정한다."""
+    defaults = dict(
+        id="standby",
+        name="대기 위치",
+        pose=Pose2D(x=-2.0, y=-1.0, yaw_deg=0.0, frame_id="map"),
+        calibrated=True,
+    )
+    defaults.update(kw)
+    return Destination(**defaults)
+
+
+def make_approach(**kw):
+    """접근 요청. goal 은 approach_geometry.approach_goal() 이 이미 계산한 값이다."""
+    defaults = dict(
+        goal=Pose2D(x=1.0, y=0.5, yaw_deg=30.0, frame_id="map"),
+        track_id=7,
+        approachable=True,
+    )
+    defaults.update(kw)
+    return ApproachRequest(**defaults)
+
+
+def start_approach(logic, t=0.0, request=None, nav_ready=True):
+    actions, reason = logic.on_approach_request(
+        request or make_approach(), BOUNDS, nav_ready, t
+    )
+    assert reason == GateReason.OK
+    assert logic.state == State.APPROACHING
+    return actions
+
+
+def arrive_and_ask(logic, t=5.0):
+    """접근 goal 도착 → 질문 → AWAITING_USER 까지 진행시킨다."""
+    actions = logic.on_tick(t, NavStatus.SUCCEEDED)
+    assert logic.state == State.AWAITING_USER
+    return actions
+
+
+class TestApproachGate:
+    """탐지 결과는 요청이지 goal 이 아니다. 승인은 Mission Manager 만 한다."""
+
+    def test_idle_request_passes(self):
+        assert (
+            check_approach_gate(
+                make_approach(), State.IDLE, None, BOUNDS, False, True, False
+            )
+            == GateReason.OK
+        )
+
+    def test_not_approachable_rejected(self):
+        r = check_approach_gate(
+            make_approach(approachable=False), State.IDLE, None, BOUNDS, False, True, False
+        )
+        assert r == GateReason.NOT_APPROACHABLE
+
+    def test_track_id_none_rejected(self):
+        r = check_approach_gate(
+            make_approach(track_id=0), State.IDLE, None, BOUNDS, False, True, False
+        )
+        assert r == GateReason.NO_TRACK_ID
+
+    def test_estop_rejected(self):
+        r = check_approach_gate(
+            make_approach(), State.IDLE, None, BOUNDS, True, True, False
+        )
+        assert r == GateReason.ESTOP_ACTIVE
+
+    def test_suppressed_track_rejected(self):
+        r = check_approach_gate(
+            make_approach(), State.IDLE, None, BOUNDS, False, True, True
+        )
+        assert r == GateReason.TRACK_SUPPRESSED
+
+    @pytest.mark.parametrize(
+        "state", [State.NAVIGATING, State.CONFIRMING, State.PAUSED, State.ARRIVED]
+    )
+    def test_busy_with_a_real_guidance_rejected(self, state):
+        r = check_approach_gate(make_approach(), state, None, BOUNDS, False, True, False)
+        assert r == GateReason.BUSY_NAVIGATING
+
+    @pytest.mark.parametrize(
+        "state", [State.AWAITING_USER, State.RETURNING]
+    )
+    def test_busy_approaching_rejected(self, state):
+        r = check_approach_gate(make_approach(), state, 7, BOUNDS, False, True, False)
+        assert r == GateReason.BUSY_APPROACHING
+
+    def test_other_track_while_approaching_rejected(self):
+        r = check_approach_gate(
+            make_approach(track_id=9), State.APPROACHING, 7, BOUNDS, False, True, False
+        )
+        assert r == GateReason.BUSY_APPROACHING
+
+    def test_same_track_while_approaching_allowed(self):
+        r = check_approach_gate(
+            make_approach(track_id=7), State.APPROACHING, 7, BOUNDS, False, True, False
+        )
+        assert r == GateReason.OK
+
+    def test_goal_none_rejected(self):
+        r = check_approach_gate(
+            make_approach(goal=None), State.IDLE, None, BOUNDS, False, True, False
+        )
+        assert r == GateReason.POSE_INVALID
+
+    def test_goal_out_of_map_rejected(self):
+        r = check_approach_gate(
+            make_approach(goal=Pose2D(100.0, 100.0, 0.0)),
+            State.IDLE, None, BOUNDS, False, True, False,
+        )
+        assert r == GateReason.POSE_INVALID
+
+    def test_goal_wrong_frame_rejected(self):
+        r = check_approach_gate(
+            make_approach(goal=Pose2D(1.0, 0.5, 0.0, frame_id="base_link")),
+            State.IDLE, None, BOUNDS, False, True, False,
+        )
+        assert r == GateReason.POSE_INVALID
+
+    def test_nav_not_ready_rejected(self):
+        r = check_approach_gate(
+            make_approach(), State.IDLE, None, BOUNDS, False, False, False
+        )
+        assert r == GateReason.NAV_NOT_READY
+
+
+class TestApproachTransitions:
+    def test_idle_to_approaching_sends_goal_with_speed_limit(self):
+        logic = MissionLogic()
+        actions = start_approach(logic)
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.pose == make_approach().goal
+        limits = [a for a in actions if isinstance(a, SetNavSpeedLimit)]
+        assert limits and limits[0].percent == PERSON_APPROACH_SPEED_PERCENT
+        assert logic.approach_track_id == 7
+
+    def test_rejected_request_changes_nothing(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_approach_request(
+            make_approach(approachable=False), BOUNDS, True, 0.0
+        )
+        assert reason == GateReason.NOT_APPROACHABLE
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_rejection_is_silent(self):
+        """거절을 말로 하지 않는다. 요청자는 사람이 아니라 노드이고, 다가가지도"""
+        logic = MissionLogic()
+        logic.on_estop(True, 0.0)
+        actions, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 1.0)
+        assert reason == GateReason.ESTOP_ACTIVE
+        assert actions == []
+
+    def test_arrival_asks_and_releases_speed_limit(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        actions = arrive_and_ask(logic, 5.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_QUESTION
+        assert says[0].expects_reply is True
+        assert says[0].priority == "response"
+        limits = [a for a in actions if isinstance(a, SetNavSpeedLimit)]
+        assert limits and limits[0].percent == 0.0
+
+    def test_yes_turns_handle_toward_person(self):
+        """수락하면 180도 돌아 핸들을 사람 쪽으로 낸다 (2026-08-24 범위 확장)."""
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(True, 6.0)
+        assert logic.state == State.TURNING
+        assert any(isinstance(a, Say) for a in actions)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_yes_suppresses_track_before_turn(self):
+        logic = MissionLogic()
+        start_approach(logic, request=make_approach(track_id=7))
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=7), BOUNDS, True, 9.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    def test_turn_done_goes_idle(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        actions = logic.on_tick(14.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_turn_failed_is_not_fatal(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(14.0, NavStatus.FAILED)
+        assert logic.state == State.IDLE
+
+    def test_turn_stuck_times_out(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        assert logic.on_tick(6.0 + APPROACH_TURN_TIMEOUT_SEC - 0.1,
+                             NavStatus.NONE) == []
+        assert logic.state == State.TURNING
+        logic.on_tick(6.0 + APPROACH_TURN_TIMEOUT_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_turn_disabled_keeps_old_behavior(self):
+        logic = MissionLogic(approach_turn_yaw_rad=0.0)
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(True, 6.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_estop_during_turn_cancels_spin(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        actions = logic.on_estop(True, 7.0)
+        assert any(isinstance(a, CancelNav) for a in actions)
+        assert logic.state != State.TURNING
+
+    def test_no_returns_to_standby(self):
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(False, 6.0)
+        assert logic.state == State.RETURNING
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.id == "standby"
+
+    def test_no_answer_stuck_fallback_returns(self):
+        """tts_done 이 영영 안 오면(TTS 사망) 안전망 30초로 탈출한다."""
+        logic = MissionLogic(
+            return_destination=make_home(), approach_response_timeout_sec=8.0
+        )
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        assert logic.on_tick(13.0, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        assert logic.on_tick(34.9, NavStatus.NONE) == []
+        actions = logic.on_tick(35.1, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_question_as_long_as_window_still_gets_full_8s(self):
+        """실기 재현: 질문 재생이 8.0초(응답 창과 같은 길이)여도 재생완료부터"""
+        logic = MissionLogic(
+            return_destination=make_home(), approach_response_timeout_sec=8.0
+        )
+        start_approach(logic)
+        arrive_and_ask(logic, 0.0)
+        logic.on_approach_question_spoken(8.2)
+        assert logic.on_tick(8.3, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        assert logic.on_tick(16.1, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        actions = logic.on_approach_answer(True, 16.15)
+        assert logic.state == State.TURNING
+        assert any(isinstance(a, Say) for a in actions)
+
+    def test_timeout_counts_from_playback_end(self):
+        """8초는 질문 재생이 끝난 시점부터다 (설계 6.2절). 재생이 언제 끝났는지는"""
+        logic = MissionLogic(
+            return_destination=make_home(), approach_response_timeout_sec=8.0
+        )
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_question_spoken(7.0)
+        assert logic.on_tick(14.9, NavStatus.NONE) == []
+        assert logic.state == State.AWAITING_USER
+        logic.on_tick(15.0, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+
+    def test_returning_completion_goes_idle(self):
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(False, 6.0)
+        logic.on_tick(20.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert logic.active_destination is None
+
+    @pytest.mark.parametrize("status", [NavStatus.FAILED, NavStatus.CANCELED])
+    def test_returning_finishes_even_if_it_fails(self, status):
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(False, 6.0)
+        logic.on_tick(20.0, status)
+        assert logic.state == State.IDLE
+
+    def test_default_does_not_drive_home_after_approach(self):
+        """기본값은 자동 홈 복귀가 꺼져 있다."""
+        logic = MissionLogic(return_destination=make_home())
+        assert logic.auto_return_home is False
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(False, 6.0)
+        assert not any(isinstance(a, Navigate) for a in actions)
+        assert logic.active_destination is None
+        assert logic.state == State.RETURNING
+        logic.on_tick(6.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_admin_return_home_works_even_when_auto_is_off(self):
+        """관리자가 부르는 복귀는 auto_return_home 과 무관하게 동작한다."""
+        logic = MissionLogic(return_destination=make_home())
+        accepted, reason, actions = logic.on_return_home_request(True, 0.0)
+        assert accepted is True
+        assert reason is GateReason.OK
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.id == "standby"
+
+    def test_returning_without_standby_pose_finishes(self):
+        """대기 위치는 아직 [미정] 이다. 좌표가 없으면 제자리에서 접근만 끝낸다."""
+        logic = MissionLogic(return_destination=None)
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        actions = logic.on_approach_answer(False, 6.0)
+        assert not any(isinstance(a, Navigate) for a in actions)
+        assert logic.state == State.RETURNING
+        logic.on_tick(6.5, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_approach_failure_returns_without_retry(self):
+        """접근 실패는 재시도하지 않는다. 사람은 3초 뒤 그 자리에 없다."""
+        logic = MissionLogic(return_destination=make_home(), nav_retry_limit=2)
+        start_approach(logic)
+        actions = logic.on_tick(5.0, NavStatus.FAILED)
+        assert logic.state == State.RETURNING
+        assert not any(
+            isinstance(a, Navigate) and a.destination.id.startswith("approach")
+            for a in actions
+        )
+
+    def test_approach_does_not_announce_distance(self):
+        """남은 거리 안내는 핸들을 잡은 사용자용이다. 아직 남이다."""
+        logic = MissionLogic()
+        start_approach(logic)
+        actions = logic.on_tick(1.0, NavStatus.RUNNING, distance_remaining=3.0)
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_answer_without_question_is_ignored(self):
+        logic = MissionLogic()
+        assert logic.on_approach_answer(True, 1.0) == []
+        assert logic.state == State.IDLE
+
+
+class TestApproachGoalUpdate:
+    """사람이 움직이면 새 goal 을 보낸다. 다만 자주 보내면 BT 가 처음부터 다시"""
+
+    def test_moved_far_enough_updates_goal(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        moved = make_approach(goal=Pose2D(x=1.8, y=0.5, yaw_deg=30.0))
+        actions, reason = logic.on_approach_request(moved, BOUNDS, True, 1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.APPROACHING
+        navigates = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigates) == 1
+        assert navigates[0].destination.pose.x == 1.8
+
+    def test_small_movement_does_not_resend(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        nudged = make_approach(goal=Pose2D(x=1.2, y=0.5, yaw_deg=30.0))
+        actions, reason = logic.on_approach_request(nudged, BOUNDS, True, 1.0)
+        assert reason == GateReason.OK
+        assert actions == []
+        assert logic.approach_goal_pose.x == 1.0
+
+
+class TestReapproachSuppression:
+    """RETURNING 완료 후 같은 track_id 는 60초간 재접근하지 않는다 (설계 4절)."""
+
+    def _return_once(self, logic, t=0.0):
+        start_approach(logic, t)
+        arrive_and_ask(logic, t + 5.0)
+        logic.on_approach_answer(False, t + 6.0)
+        logic.on_tick(t + 10.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+
+    def test_same_track_blocked_for_60s(self):
+        logic = MissionLogic(return_destination=make_home(), reapproach_suppress_sec=60.0)
+        self._return_once(logic)
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 69.9)
+        assert reason == GateReason.TRACK_SUPPRESSED
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 70.0)
+        assert reason == GateReason.OK
+
+    def test_other_track_is_free(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._return_once(logic)
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=8), BOUNDS, True, 11.0
+        )
+        assert reason == GateReason.OK
+
+    def test_accepted_person_is_also_suppressed(self):
+        """"네"라고 답한 사람에게 곧바로 다시 다가가면 안 된다. 인계는 다음"""
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        _, busy = logic.on_approach_request(make_approach(), BOUNDS, True, 7.0)
+        assert busy != GateReason.OK
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 9.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+
+class TestApproachCancel:
+    """이탈·포기 판정은 detector 가 하고 /vica/mission/cancel_approach 로 알린다."""
+
+    def test_cancel_while_approaching_returns(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        actions, reason = logic.on_approach_cancel_request(3.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, CancelNav) for a in actions)
+
+    def test_cancel_while_awaiting_user_returns(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        _, reason = logic.on_approach_cancel_request(6.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.RETURNING
+
+    def test_cancel_when_not_approaching_rejected(self):
+        logic = MissionLogic()
+        _, reason = logic.on_approach_cancel_request(1.0)
+        assert reason == GateReason.NOT_APPROACHING
+        assert logic.state == State.IDLE
+
+    def test_cancel_during_guidance_is_not_an_approach_cancel(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        _, reason = logic.on_approach_cancel_request(1.0)
+        assert reason == GateReason.NOT_APPROACHING
+        assert logic.state == State.NAVIGATING
+
+
+class TestApproachSafety:
+    """접근 중에도 E-stop 과 긴급어는 그대로 작동한다 (설계 7절)."""
+
+    @pytest.mark.parametrize(
+        "state_setup",
+        ["approaching", "awaiting_user", "returning"],
+    )
+    def test_estop_drops_the_approach(self, state_setup):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        if state_setup != "approaching":
+            arrive_and_ask(logic, 5.0)
+        if state_setup == "returning":
+            logic.on_approach_answer(False, 6.0)
+            assert logic.state == State.RETURNING
+
+        logic.on_estop(True, 7.0)
+        assert logic.state == State.ESTOPPED
+        assert logic.active_destination is None
+        assert logic.paused_destination is None
+        assert logic.approach_track_id is None
+
+    def test_estop_while_approaching_cancels_the_goal(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        actions = logic.on_estop(True, 3.0)
+        assert any(isinstance(a, CancelNav) for a in actions)
+        assert any(
+            isinstance(a, SetNavSpeedLimit) and a.percent == 0.0 for a in actions
+        )
+
+    def test_estop_release_returns_to_idle_without_resuming(self):
+        logic = MissionLogic(estop_release_grace_sec=2.0)
+        start_approach(logic)
+        logic.on_estop(True, 3.0)
+        logic.on_estop(False, 4.0)
+        logic.on_tick(6.0, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        assert logic.approach_track_id is None
+        assert logic.approach_goal_pose is None
+
+    def test_estopped_person_is_not_reapproached_at_once(self):
+        logic = MissionLogic(estop_release_grace_sec=2.0)
+        start_approach(logic)
+        logic.on_estop(True, 3.0)
+        logic.on_estop(False, 4.0)
+        logic.on_tick(6.0, NavStatus.NONE)
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 7.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    @pytest.mark.parametrize("kw", ["멈춰", "정지", "위험해"])
+    def test_hard_keyword_still_works_while_approaching(self, kw):
+        logic = MissionLogic()
+        start_approach(logic)
+        actions = logic.on_emergency(kw, 3.0)
+        assert logic.state == State.ESTOPPED
+        assert any(isinstance(a, CancelNav) for a in actions)
+
+    def test_hard_keyword_while_awaiting_user(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_emergency("안돼", 6.0)
+        assert logic.state == State.ESTOPPED
+
+    @pytest.mark.parametrize(
+        "state_setup", ["approaching", "awaiting_user", "returning"]
+    )
+    def test_destination_request_is_rejected_during_approach(self, state_setup):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        if state_setup != "approaching":
+            arrive_and_ask(logic, 5.0)
+        if state_setup == "returning":
+            logic.on_approach_answer(False, 6.0)
+        before = logic.state
+
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 7.0)
+        assert logic.state == before
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].priority == "response"
+
+    @pytest.mark.parametrize(
+        "command", ["on_cancel_request", "on_pause_request", "on_cancel_confirm_request"]
+    )
+    def test_guidance_commands_do_not_touch_the_approach(self, command):
+        logic = MissionLogic()
+        start_approach(logic)
+        _, reason = getattr(logic, command)(3.0)
+        assert reason == GateReason.NOT_NAVIGATING
+        assert logic.state == State.APPROACHING
+
+
+class TestStaleConfirmListens:
+    def test_stale_confirm_retry_prompt_expects_a_reply(self):
+        """"다시 말씀해 주세요"는 질문이다 — expects_reply 없이는 말해 놓고"""
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        assert logic.state == State.CONFIRMING
+        actions = logic.on_intent(
+            make_intent(matched_destination_id="다른_목적지"), make_dest(),
+            BOUNDS, True, 1.0)
+        assert not any(isinstance(a, Say) for a in actions)
+        assert logic.state == State.IDLE
+class TestApproachVoiceHooks:
+    """계획 문서(voice docs/approach-voice-flow.md)의 남은 두 조각."""
+
+    def _accept_with_turn(self, logic):
+        start_approach(logic)
+        arrive_and_ask(logic)
+        logic.on_approach_answer(True, 6.0)
+        assert logic.state == State.TURNING
+
+    def test_question_is_the_recorded_long_greeting(self):
+        assert MSG_APPROACH_QUESTION.startswith("안녕하세요? 저는 시각장애인")
+        assert MSG_APPROACH_QUESTION.endswith("안내를 받으시겠어요?")
+
+    def test_accept_speaks_turn_notice(self):
+        """수락 멘트 = 회전 예고 — 예고 없는 움직임 금지(2026-08-25 결정)."""
+        assert MSG_APPROACH_ACCEPTED == "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
+
+    def test_decline_speaks_farewell(self):
+        assert MSG_APPROACH_DECLINED == "알겠습니다. 이만 물러납니다."
+
+    def test_turn_success_onboards_without_done_ment(self):
+        """회전 완료 멘트는 9/1 감량 — 바로 뒤 온보딩 질문이 완료를 대신한다."""
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        actions = logic.on_tick(7.0, NavStatus.SUCCEEDED)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert says[-1].expects_reply is True
+        assert logic.state == State.IDLE
+
+    def test_turn_failure_skips_done_but_still_onboards(self):
+        """회전 실패에 '완료되었습니다'는 거짓말 — 생략. 다만 수락한 사람을"""
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        actions = logic.on_tick(7.0, NavStatus.FAILED)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert says[-1].expects_reply is True
+        assert logic.state == State.IDLE
+
+    @pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED,
+                                         NavStatus.CANCELED])
+    def test_turn_completion_speaks_handle_hint_before_onboarding(
+            self, status):
+        """설계 확정(2026-09-10): 회전이 끝나면(성공이든 실패든) 온보딩보다"""
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        actions = logic.on_tick(7.0, status)
+
+        hint_idx = next(i for i, a in enumerate(actions)
+                         if isinstance(a, Say) and a.text == MSG_HANDLE_HINT)
+        onboarding_idx = next(i for i, a in enumerate(actions)
+                               if isinstance(a, Say)
+                               and a.text == MSG_APPROACH_ONBOARDING)
+
+        assert hint_idx < onboarding_idx
+        assert actions[hint_idx].expects_reply is False
+        assert not any(isinstance(a, Haptic) for a in actions)
+
+    @pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED,
+                                         NavStatus.CANCELED])
+    def test_turn_completion_defers_haptic_until_hint_spoken(self, status):
+        """I-2 (2026-09-11): `Haptic` 을 그 자리에서 내면 1200ms 진동이"""
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        logic.on_tick(7.0, status)
+        spoken_actions = logic.on_handle_hint_spoken(7.1)
+        haptics = [a for a in spoken_actions if isinstance(a, Haptic)]
+        assert len(haptics) == 1
+        assert haptics[0].pattern == "long"
+
+    def test_handle_hint_spoken_without_pending_hint_is_noop(self):
+        """엉뚱한 시점(힌트를 낸 적 없음)에 신호가 와도 진동이 나가면 안"""
+        logic = MissionLogic()
+        assert logic.on_handle_hint_spoken(1.0) == []
+
+    def test_handle_hint_spoken_fires_haptic_only_once(self):
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        logic.on_tick(7.0, NavStatus.SUCCEEDED)
+        first = logic.on_handle_hint_spoken(7.1)
+        assert len(first) == 1
+        second = logic.on_handle_hint_spoken(7.2)
+        assert second == []
+
+    def test_decline_gives_no_handle_hint_or_haptic(self):
+        """거절("아니요")에는 손잡이 안내도 진동도 나가면 안 된다 — 아직"""
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic)
+        actions = logic.on_approach_answer(False, 6.0)
+        assert not any(isinstance(a, Haptic) for a in actions)
+        assert not any(isinstance(a, Say) and a.text == MSG_HANDLE_HINT
+                       for a in actions)
+
+    def test_haptic_pattern_is_long(self):
+        """짧은 진동은 지나치기 쉬워 "long" 을 쓴다(2026-09-10 사용자 결정)."""
+        assert HAPTIC_PATTERN_HANDLE_HINT == "long"
+
+    def test_handle_hint_message_matches_approved_text(self):
+        """사용자 승인 문구 글자 그대로(2026-09-10)."""
+        assert MSG_HANDLE_HINT == (
+            "손잡이는 지금 계신 쪽에 있습니다. 진동이 나는 곳을 잡아주세요."
+        )
+
+
+class TestEstopStateNarration:
+    """E-stop 안내 최종 규칙 (2026-08-31): 움직이는 중에 걸릴 때만 말한다."""
+
+    def test_estop_while_driving_announces(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_estop(True, 1.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
+
+    def test_estop_while_idle_is_silent(self):
+        logic = MissionLogic()
+        actions = logic.on_estop(True, 1.0)
+        assert [a for a in actions if isinstance(a, Say)] == []
+
+    def test_silent_estop_silent_release(self):
+        logic = MissionLogic(estop_release_grace_sec=0.0)
+        logic.on_estop(True, 1.0)
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(3.0, NavStatus.NONE)
+        assert [a for a in actions if isinstance(a, Say)] == []
+        assert logic.state == State.IDLE
+
+    def test_announced_estop_announces_release(self):
+        logic = MissionLogic(estop_release_grace_sec=0.0)
+        start_navigation(logic)
+        logic.on_estop(True, 1.0)
+        logic.on_estop(False, 2.0)
+        actions = logic.on_tick(3.0, NavStatus.NONE)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["비상멈춤이 해제되었습니다."]
+
+    def test_voice_emergency_while_idle_is_silent(self):
+        logic = MissionLogic()
+        actions = logic.on_emergency("멈춰", 1.0)
+        assert [a for a in actions if isinstance(a, Say)] == []
+
+    def test_voice_emergency_while_driving_announces(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions = logic.on_emergency("멈춰", 1.0)
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == ["안전을 위해 멈추겠습니다. 관리자를 호출했습니다."]
+
+
+class TestSpeechFlushOnCancel:
+    """취소·앱 선점은 하던 말부터 끊는다 (2026-09-01 큐 청소) — 상태는 즉시"""
+
+    def test_voice_cancel_flushes_first(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_cancel_request(1.0)
+        assert actions and isinstance(actions[0], StopSpeech)
+
+    def test_app_cancel_flushes_first(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_app_cancel(1.0)
+        assert actions and isinstance(actions[0], StopSpeech)
+
+    def test_app_preempt_flushes_first(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        actions, _ = logic.on_app_destination(
+            make_dest(id="restroom"), BOUNDS, True, 1.0)
+        assert actions and isinstance(actions[0], StopSpeech)
+        assert any(isinstance(a, Navigate) for a in actions)
+
+
+class TestWakeFoldsStaleQuestions:
+    """"비카야" = 새 대화 (2026-09-01) — 답-대기 상태를 조용히 접는다."""
+
+    def test_wake_folds_confirming_and_stray_affirm_is_dead(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        assert logic.on_wake(1.0) == []
+        assert logic.state == State.IDLE
+        assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 2.0) == []
+        assert logic.state == State.IDLE
+
+    def test_wake_folds_approach_question_and_stays_put(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        assert logic.on_wake(6.0) == []
+        assert logic.state == State.IDLE
+        assert logic.on_approach_answer(True, 7.0) == []
+
+
+class TestWakeConsumedGuardsWakeDoa:
+    """wake·wake_doa 는 같은 콜백 그룹이라 wake 가 먼저 상태를"""
+
+    def test_wake_doa_right_after_waiting_wake_does_not_open_seeking(self):
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        logic.on_wake(10.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 10.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_wake_doa_right_after_asking_next_wake_does_not_open_seeking(self):
+        logic = MissionLogic(arrival_dialog=True)
+        logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 0.0)
+        logic.on_tick(1.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.ASKING_NEXT
+        logic.on_wake(1.001)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 1.002)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_old_on_wake_behavior_is_unchanged(self):
+        """on_wake 자체(답-대기 상태를 IDLE 로 접기)는 그대로다 — 막히는 것은"""
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        assert logic.on_wake(1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_state_order_first_is_rejected_by_state_gate(self):
+        """wake_doa 가 먼저 오면(아직 옛 상태) 기존 state 관문이 거절한다 —"""
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        assert logic.on_wake_doa(90.0, True, 10.0) == []
+        assert logic.state == State.WAITING
+
+    def test_guard_expires_and_a_real_new_call_opens_seeking(self):
+        """2초가 지난 뒤는 진짜 새 호출이다 — 과도한 봉쇄가 아니다."""
+        logic = MissionLogic()
+        logic.state = State.WAITING
+        logic.on_wake(1.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(
+            90.0, True, 1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
+        assert logic.state == State.SEEKING
+        assert any(isinstance(a, SpinInPlace) for a in actions)
+
+
+class TestUserAttachedSuppressesWakeDoa:
+    """접근 회전이 끝나 사용자가 손잡이를 받아든 직후도 같은 사고 조건이다"""
+
+    def _accept_and_finish_turn(self, logic, t_answer=1.0, t_done=2.0,
+                                 nav_status=NavStatus.SUCCEEDED):
+        logic.on_approach_answer(True, t_answer)
+        assert logic.state == State.TURNING
+        logic.on_tick(t_done, nav_status)
+        assert logic.state == State.IDLE
+
+    def test_wake_doa_right_after_turn_done_is_rejected(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
+        actions = logic.on_wake_doa(180.0, True, 2.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_wake_doa_rejected_even_when_turn_failed(self):
+        """회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다."""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0,
+                                      nav_status=NavStatus.FAILED)
+        actions = logic.on_wake_doa(180.0, True, 2.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_wake_doa_opens_after_silent_suppress_window(self):
+        """아무도 말을 걸지 않은 채 60초가 다 지나면 다른 사람의 호출을"""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
+        actions = logic.on_wake_doa(
+            180.0, True, 2.0 + USER_ATTACHED_SUPPRESS_SEC + 0.01)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_wake_rewinds_the_suppress_window(self):
+        """붙어 있는 사용자가 만료 직전에 다시 말을 걸면 시계가 되감긴다 —"""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        self._accept_and_finish_turn(logic, t_answer=1.0, t_done=2.0)
+        original_expiry = logic._user_attached_until
+        assert original_expiry == pytest.approx(2.0 + USER_ATTACHED_SUPPRESS_SEC)
+        logic.on_wake(original_expiry - 1.0)
+        actions = logic.on_wake_doa(180.0, True, original_expiry + 1.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+    def test_decline_path_is_not_suppressed(self):
+        """거절 경로는 RETURNING 으로 빠지므로 억제를 걸지 않는다 — 찾기"""
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        logic.on_approach_answer(False, 1.0)
+        assert logic.state == State.RETURNING
+        logic.on_tick(1.1, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(180.0, True, 1.11)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_zero_yaw_shortcut_still_suppresses(self):
+        """회전량을 0으로 꺼도(예: 좁은 곳) 승낙한 사용자는 그 자리에 있다 —"""
+        logic = MissionLogic(return_destination=make_home(),
+                              approach_turn_yaw_rad=0.0)
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        logic.on_approach_answer(True, 1.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(180.0, True, 1.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+
+class TestReturnBrakeGuardsWakeDoa:
+    """on_return_brake 도 _wake_consumed_at 도장을 찍는다 — 복귀 중"""
+
+    def test_wake_doa_right_after_return_brake_does_not_open_seeking(self):
+        logic = MissionLogic()
+        logic.state = State.RETURNING
+        logic.on_return_brake(10.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 10.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+
+class TestReturnResumeAfterCallInterrupt:
+    """복귀 중 호출로 끊긴 뒤 무기한 정지하지 않고 결국 복귀를 재개한다"""
+
+    def test_silence_for_15s_gives_leaving_notice(self):
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        assert logic.state == State.IDLE
+        assert logic.on_tick(RETURN_RESUME_SEC - 0.1, NavStatus.NONE) == []
+        assert logic.state == State.IDLE
+        actions = logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        assert any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
+        )
+        assert logic.state == State.IDLE
+
+    def test_resume_after_notice_grace_elapses(self):
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        assert logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC - 0.1, NavStatus.NONE
+        ) == []
+        assert logic.state == State.IDLE
+        actions = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE
+        )
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+
+    def test_answer_within_grace_cancels_the_resume(self):
+        """예고 뒤 유예 안에 목적지를 말하면 복귀로 새지 않는다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        answer_t = RETURN_RESUME_SEC + 1.0
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, answer_t)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+        later = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC + 5.0, NavStatus.RUNNING
+        )
+        assert logic.state == State.NAVIGATING
+        assert not any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
+        )
+
+    def test_answer_within_15s_skips_notice_and_resume_entirely(self):
+        """15초 안에 목적지를 말하면 예고도 복귀도 없다."""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 5.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+        later = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC + 5.0, NavStatus.RUNNING
+        )
+        assert logic.state == State.NAVIGATING
+        assert not any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
+        )
+
+    def test_call_during_return_wait_is_rejected_and_ladder_still_resumes(self):
+        """2026-09-10 사용자 결정: 복귀 재개 사다리가 도는 동안은 회전 자체를"""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        assert logic._return_interrupted is True
+
+        actions = logic.on_wake_doa(90.0, True, 4.0)
+        assert actions == []
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        assert logic._return_resume_deadline == pytest.approx(RETURN_RESUME_SEC)
+
+        actions = logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        assert any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
+        )
+        actions = logic.on_tick(RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        assert logic._return_interrupted is False
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_frontal_call_during_return_wait_is_also_rejected(self):
+        """회전 거절을 넣기 전에는 on_wake_doa 의 무회전 분기(정면 ±10도,"""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+
+        actions = logic.on_wake_doa(3.0, True, 10.0)
+        assert actions == []
+        assert logic._seek_deadline is None
+        assert logic.state == State.IDLE
+
+        actions = logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        assert any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions
+        )
+        actions = logic.on_tick(RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+
+    def test_app_cancel_during_return_wait_clears_the_ladder(self):
+        """2026-09-10 사용자 결정: 관리자 취소가 IDLE 에서 GateReason.OK"""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        assert logic._return_interrupted is True
+
+        actions, reason = logic.on_app_cancel(5.0)
+        assert reason == GateReason.OK
+        assert logic._return_interrupted is False
+        assert logic._return_resume_deadline is None
+
+        later = logic.on_tick(
+            RETURN_RESUME_SEC + LEAVING_GRACE_SEC + 5.0, NavStatus.NONE
+        )
+        assert logic.state == State.IDLE
+        assert not any(
+            isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in later
+        )
+
+    def test_app_destination_during_return_wait_clears_the_ladder(self):
+        """on_app_destination 의 청산은 on_intent 와 같은 패턴"""
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+
+        actions, reason = logic.on_app_destination(make_dest(), BOUNDS, True, 5.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.NAVIGATING
+        assert logic._return_interrupted is False
+
+    def test_plain_idle_never_starts_the_timer(self):
+        """복귀 중이 아니었던 평범한 IDLE 에서는 이 사다리가 아예 안 걸린다."""
+        logic = MissionLogic(return_destination=make_home())
+        assert logic.state == State.IDLE
+        actions = logic.on_tick(1000.0, NavStatus.NONE)
+        assert actions == []
+        assert logic._return_interrupted is False
+        assert logic._return_resume_deadline is None
+        assert logic.state == State.IDLE
+
+
+class TestAwaitingUserWakeGuardsWakeDoa:
+    """사람 1.1 m 앞에서 질문 대기 중(AWAITING_USER)의 "비카야"도 on_wake 가"""
+
+    def test_wake_doa_right_after_awaiting_user_wake_does_not_open_seeking(self):
+        logic = MissionLogic()
+        logic.state = State.AWAITING_USER
+        logic.approach_track_id = 7
+        logic.on_wake(10.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_wake_doa(90.0, True, 10.001)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+
+
+class TestConfirmReproposalIsAnswer:
+    """확인 중 같은 목적지의 재제안(confirm=True)은 답이다 (2026-09-01) —"""
+
+    def test_same_dest_reproposal_starts_navigation(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        assert logic.state == State.CONFIRMING
+        actions = logic.on_intent(make_intent(need_confirm=True), make_dest(),
+                                  BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_different_dest_reproposal_switches_confirming(self):
+        logic = MissionLogic()
+        logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
+                        True, 0.0)
+        actions = logic.on_intent(
+            make_intent(need_confirm=True, matched_destination_id="restroom"),
+            make_dest(id="restroom"), BOUNDS, True, 3.0)
+        assert logic.state == State.CONFIRMING
+        assert logic.confirming_dest_id == "restroom"
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+
+class TestDoaToSpinYaw:
+    """마이크 각도(0~359°, 정면 0) -> SpinInPlace 회전량(rad, 양수=반시계)."""
+
+    def test_front_is_no_turn(self):
+        assert doa_to_spin_yaw(0.0, 1.0) == pytest.approx(0.0)
+
+    def test_ccw_mic_left_turns_left(self):
+        assert doa_to_spin_yaw(90.0, 1.0) == pytest.approx(math.pi / 2)
+
+    def test_cw_mic_left_turns_right(self):
+        """부호가 반대면 같은 각도가 반대쪽 회전이 된다."""
+        assert doa_to_spin_yaw(90.0, -1.0) == pytest.approx(-math.pi / 2)
+
+    def test_takes_the_short_way_round(self):
+        """270° 는 왼쪽으로 270° 가 아니라 오른쪽으로 90° 다."""
+        assert doa_to_spin_yaw(270.0, 1.0) == pytest.approx(-math.pi / 2)
+
+    def test_behind_is_half_turn(self):
+        """뒤(핸들 쪽)는 어느 방향으로 돌든 180° 다."""
+        assert abs(doa_to_spin_yaw(180.0, 1.0)) == pytest.approx(math.pi)
+
+    def test_just_left_of_front(self):
+        assert doa_to_spin_yaw(359.0, 1.0) == pytest.approx(math.radians(-1.0))
+
+
+class TestWrapToPi:
+    def test_leaves_small_angles_alone(self):
+        assert wrap_to_pi(1.0) == pytest.approx(1.0)
+
+    def test_wraps_over_half_turn(self):
+        assert wrap_to_pi(math.radians(270.0)) == pytest.approx(math.radians(-90.0))
+
+    def test_wraps_negative(self):
+        assert wrap_to_pi(math.radians(-270.0)) == pytest.approx(math.radians(90.0))
+
+
+class TestSeekEntry:
+    """"비카야" 방향으로 고개 돌리기 — 대기 중에만 연다."""
+
+    def test_wake_doa_turns_toward_the_sound(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(90.0, True, 1.0)
+        assert logic.state == State.SEEKING
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi / 2)
+
+    def test_no_new_ment(self):
+        """호출 응답 "네?"는 음성이 이미 했다. 미션은 말하지 않는다."""
+        logic = MissionLogic()
+        actions = logic.on_wake_doa(90.0, True, 1.0)
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_remembers_how_to_get_back(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(90.0, True, 1.0)
+        assert logic._seek_return_yaw == pytest.approx(-math.pi / 2)
+
+    def test_sound_from_the_front_does_not_spin(self):
+        """이미 그쪽을 보고 있다 — 돌지 않고 찾기만 한다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(3.0, True, 1.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic._seek_deadline == pytest.approx(1.0 + SEEK_LOOK_SEC)
+
+    def test_ignored_while_guiding(self):
+        """안내 중 "비카야"는 기존 사용자의 명령이다 — 고개를 돌리면 안 된다."""
+        logic = MissionLogic()
+        logic.state = State.NAVIGATING
+        assert logic.on_wake_doa(90.0, True, 1.0) == []
+        assert logic.state == State.NAVIGATING
+
+    def test_ignored_while_estopped(self):
+        logic = MissionLogic()
+        logic.estop_active = True
+        assert logic.on_wake_doa(90.0, True, 1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_ignored_when_nav_not_ready(self):
+        logic = MissionLogic()
+        assert logic.on_wake_doa(90.0, False, 1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_seeking_holds_a_live_goal(self):
+        """E-stop 이 회전을 취소할 수 있어야 한다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        actions = logic.on_estop(True, 2.0)
+        assert any(isinstance(a, CancelNav) for a in actions)
+
+    def test_destination_request_rejected_while_seeking(self):
+        """회전 중 목적지 요청을 받아 버리면 SpinInPlace 를 취소하지 않은 채"""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 2.0)
+        assert logic.state == State.SEEKING
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert len(says) == 1
+
+    def test_app_preempt_cancels_the_spin_while_seeking(self):
+        """음성 경로(위 시험)는 SEEKING 을 거부하는데, 앱 선점 경로"""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        assert logic.state == State.SEEKING
+        actions, reason = logic.on_app_destination(make_dest(), BOUNDS, True, 2.0)
+        assert reason == GateReason.OK
+        assert any(isinstance(a, CancelNav) for a in actions)
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic.state == State.NAVIGATING
+
+
+def seek_and_finish_turn(logic, doa=90.0, t0=1.0):
+    """호출 -> 회전 -> 회전 완료. 탐색 창이 열린 IDLE 을 만든다."""
+    logic.on_wake_doa(doa, True, t0)
+    logic.on_tick(t0 + 1.0, NavStatus.SUCCEEDED)
+    return logic
+
+
+class TestSeekLookWindow:
+    def test_turn_done_returns_to_idle_with_a_window(self):
+        """IDLE 로 내려오는 것이 요점이다 — 접근 관문은 IDLE 만 통과시킨다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline == pytest.approx(2.0 + SEEK_LOOK_SEC)
+
+    def test_person_found_cancels_the_way_back(self):
+        """사람에게 갔으면 되돌아가지 않는다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions, reason = logic.on_approach_request(
+            make_approach(), BOUNDS, True, 3.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.APPROACHING
+        later = logic.on_tick(30.0, NavStatus.RUNNING)
+        assert not any(isinstance(a, SpinInPlace) for a in later)
+
+    def test_nobody_found_turns_back_quietly(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        seek_and_finish_turn(logic, doa=90.0, t0=1.0)
+        actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(-math.pi / 2)
+        assert logic.state == State.SEEKING
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_back_home_ends_in_idle(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        logic.on_tick(20.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
+    def test_calling_again_accumulates_the_way_back(self):
+        """두 번 부르면 두 번 돈다 — 두 번째 SpinInPlace 발행 자체를 단언한다"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        seek_and_finish_turn(logic, doa=90.0, t0=1.0)
+        actions = logic.on_wake_doa(90.0, True, 3.0)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi / 2)
+        assert logic.state == State.SEEKING
+        assert logic._seek_return_yaw == pytest.approx(-math.pi)
+
+    def test_a_new_errand_wins(self):
+        """탐색 창 중에 할 일이 생기면 제자리 돌기를 시작하지 않는다."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 3.0)
+        assert logic.state == State.NAVIGATING
+        actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.RUNNING)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+
+    def test_new_errand_clears_the_seek_window(self):
+        """낡은 창이 안내 한 판을 살아남으면 안 된다 — test_a_new_errand_wins"""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        assert logic._seek_deadline is not None
+        logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 3.0)
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
+    def test_spin_that_never_started_escapes_by_clock(self):
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        logic.on_tick(1.0 + SEEK_TURN_TIMEOUT_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+
+    def test_failed_turn_still_looks(self):
+        """회전이 거부돼도 찾아는 본다 — 카메라가 이미 사람을 볼 수도 있다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        logic.on_tick(2.0, NavStatus.FAILED)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is not None
+
+    def test_small_accumulated_back_does_not_spin(self):
+        """설계 5요점: 복귀 회전도 10도 미만이면 생략한다 — 정면 근처 호출이"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(3.0, True, 1.0)
+        assert logic.state == State.IDLE
+        logic.on_wake_doa(3.0, True, 2.0)
+        assert logic.state == State.IDLE
+        assert abs(logic._seek_return_yaw) < SEEK_MIN_YAW_RAD
+        actions = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
+
+class TestNearCallApproach:
+    """부른 사람이 코앞(near_call_max_m 안)이면 접근 goal(1.1 m)이 이미 지나간"""
+
+    def test_near_person_skips_navigate_and_asks(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_QUESTION
+        assert says[0].expects_reply is True
+
+    def test_near_person_accept_turns_then_onboards(self):
+        """1.0~1.5 m: 걸어가지 않고 질문 -> 수락 시 180도 회전 -> 온보딩."""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        actions = logic.on_approach_answer(True, 4.0)
+        assert logic.state == State.TURNING
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        onboarding_actions = logic.on_tick(6.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        says = [a for a in onboarding_actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert not any(isinstance(a, Haptic) for a in onboarding_actions)
+        haptics = [a for a in logic.on_handle_hint_spoken(6.1) if isinstance(a, Haptic)]
+        assert len(haptics) == 1 and haptics[0].pattern == "long"
+
+    def test_very_near_person_accept_skips_spin(self):
+        """1.0 m 미만: 수락해도 회전 없이 바로 온보딩 (손잡이가 사람을 칠 위험,"""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=0.6, stable=True, approachable=False, now=3.0)
+        actions = logic.on_approach_answer(True, 4.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert not any(isinstance(a, Haptic) for a in actions)
+        haptics = [a for a in logic.on_handle_hint_spoken(4.1) if isinstance(a, Haptic)]
+        assert len(haptics) == 1 and haptics[0].pattern == "long"
+
+    def test_approachable_person_not_handled_here(self):
+        """approachable=true 는 기존 접근 요청 service 경로가 처리한다 —"""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=True, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_ignored_outside_seek_window(self):
+        """탐색 창 밖(그냥 IDLE)에서 같은 감지가 와도 아무 일도 없다."""
+        logic = MissionLogic()
+        assert logic.state == State.IDLE
+        assert logic._seek_deadline is None
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=1.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_ignored_while_still_seeking(self):
+        """회전이 아직 끝나지 않은 SEEKING 중에는 관여하지 않는다."""
+        logic = MissionLogic()
+        logic.on_wake_doa(90.0, True, 1.0)
+        assert logic.state == State.SEEKING
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=1.5)
+        assert actions == []
+        assert logic.state == State.SEEKING
+
+    def test_no_return_spin_once_conversation_starts(self):
+        """새 경로로 대화가 시작되면 복귀 회전이 발행되지 않는다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        seek_and_finish_turn(logic, doa=90.0, t0=1.0)
+        assert logic._seek_deadline is not None
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+        later = logic.on_tick(2.0 + SEEK_LOOK_SEC, NavStatus.NONE)
+        assert not any(isinstance(a, SpinInPlace) for a in later)
+
+    def test_nan_distance_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=float("nan"), stable=True, approachable=False,
+            now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_suppressed_track_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic._suppress_track(7, 2.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_too_far_for_near_call_ignored(self):
+        """near_call_max_m(1.5) 이상은 접근 goal 을 만들 수 있는 거리다 —"""
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.5, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_unstable_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=False, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_track_id_none_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=0, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_estop_ignored(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.estop_active = True
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        assert actions == []
+        assert logic.state == State.IDLE
+
+    def test_declined_suppresses_track(self):
+        logic = MissionLogic()
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        logic.on_approach_answer(False, 4.0)
+        logic.on_tick(4.5, NavStatus.NONE)
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=7), BOUNDS, True, 5.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    def test_no_answer_still_works(self):
+        """무응답 사다리는 기존 그대로 재사용된다."""
+        logic = MissionLogic(return_destination=make_home(),
+                             approach_response_timeout_sec=8.0)
+        seek_and_finish_turn(logic, t0=1.0)
+        logic.on_person_detection(
+            track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
+        actions = logic.on_tick(3.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+
+    def test_custom_thresholds(self):
+        logic = MissionLogic(near_call_max_m=2.0, near_call_no_spin_m=1.5)
+        seek_and_finish_turn(logic, t0=1.0)
+        actions = logic.on_person_detection(
+            track_id=7, distance_m=1.8, stable=True, approachable=False, now=3.0)
+        assert logic.state == State.AWAITING_USER
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_default_thresholds_match_module_constants(self):
+        logic = MissionLogic()
+        assert logic.near_call_max_m == NEAR_CALL_MAX_M
+        assert logic.near_call_no_spin_m == NEAR_CALL_NO_SPIN_M
+
+
+class TestHandleSideCall:
+    """핸들 쪽(로봇 뒤 180°±45°)에서 온 호출은 회전하지 않고 곧바로 접근"""
+
+    def test_call_near_180_skips_spin_and_asks_immediately(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(175.0, True, 1.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.AWAITING_USER
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_QUESTION
+        assert says[0].expects_reply is True
+
+    def test_boundary_just_inside_skips_spin(self):
+        """|yaw| = 136° (경계 135° 바로 안쪽) — 핸들 쪽으로 보고 돌지 않는다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(136.0, True, 1.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.AWAITING_USER
+
+    def test_boundary_just_outside_spins(self):
+        """|yaw| = 134° (경계 135° 바로 밖) — 평소처럼 그쪽으로 돈다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(134.0, True, 1.0)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert logic.state == State.SEEKING
+
+    def test_front_blind_spot_unaffected(self):
+        """정면 사각지대(10도 미만)는 기존 동작 그대로 — 탐색 창만 연다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        actions = logic.on_wake_doa(3.0, True, 1.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic._seek_deadline == pytest.approx(1.0 + SEEK_LOOK_SEC)
+
+    def test_no_track_id_recorded_for_handle_side_call(self):
+        """카메라 확인 없이 들어오므로 approach_track_id 가 없다(함정 1번)."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic.approach_track_id is None
+
+    def test_seek_window_state_cleared_on_entry(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
+    def test_accept_does_not_spin_and_goes_to_onboarding(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(True, 2.0)
+        assert not any(isinstance(a, SpinInPlace) for a in actions)
+        assert logic.state == State.IDLE
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[-1].text == MSG_APPROACH_ONBOARDING
+
+    def test_accept_speaks_handle_hint_and_vibrates_without_turning(self):
+        """회전이 없는 후면 호출도 손잡이 안내는 그대로 나간다(설계 확정,"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(True, 2.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert not any(isinstance(a, Haptic) for a in actions)
+        assert actions.index(says[0]) < actions.index(says[-1])
+        haptics = [a for a in logic.on_handle_hint_spoken(2.1) if isinstance(a, Haptic)]
+        assert len(haptics) == 1
+        assert haptics[0].pattern == "long"
+
+    def test_decline_does_not_crash_without_a_track(self):
+        """approach_track_id 가 None 인 채로 거절 -> 걸어간 적이 없으므로"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(False, 2.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+        assert logic._suppressed_tracks == {}
+
+    def test_decline_gives_no_handle_hint_or_haptic(self):
+        """M-3: 아직 안내를 수락하지 않은 사람에게 손잡이 안내·진동이 나가면"""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                              auto_return_home=True)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(False, 2.0)
+        assert not any(isinstance(a, Haptic) for a in actions)
+        assert not any(isinstance(a, Say) and a.text == MSG_HANDLE_HINT
+                       for a in actions)
+        assert logic.on_handle_hint_spoken(2.1) == []
+
+    def test_decline_ends_in_place_even_with_home_configured(self):
+        """실기 기본 설정(return_destination + auto_return_home=True)이어도"""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                              auto_return_home=True)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(False, 2.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_DECLINED
+
+    def test_no_answer_ends_in_place_even_with_home_configured(self):
+        """무응답도 거절과 같은 이유로 제자리에서 끝난다(Ruling 10, I-1)."""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                              auto_return_home=True,
+                              approach_response_timeout_sec=8.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_tick(1.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+
+    def test_existing_gates_still_block_handle_side_calls(self):
+        """E-stop 이 걸려 있으면 핸들 쪽 호출도 여전히 거절된다 — 관문 순서가"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.estop_active = True
+        assert logic.on_wake_doa(175.0, True, 1.0) == []
+        assert logic.state == State.IDLE
+
+    def test_default_threshold_matches_module_constant(self):
+        logic = MissionLogic()
+        assert logic.handle_side_min_yaw_rad == HANDLE_SIDE_MIN_YAW_RAD
+
+    def test_custom_threshold_is_configurable(self):
+        """실기에서 부채꼴 폭을 조정할 수 있어야 한다."""
+        logic = MissionLogic(wake_doa_sign=1.0,
+                             handle_side_min_yaw_rad=math.radians(150.0))
+        actions = logic.on_wake_doa(140.0, True, 1.0)
+        spins = [a for a in actions if isinstance(a, SpinInPlace)]
+        assert len(spins) == 1
+        assert logic.state == State.SEEKING
+
+
+class TestHandleSideCallWakeSiblingGuard:
+    """/vica/wake 와 /vica/wake_doa 는 같은 호출에서 수 ms 간격으로 오고 처리"""
+
+    def test_wake_right_after_handle_side_call_does_not_close_question(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic.state == State.AWAITING_USER
+        actions = logic.on_wake(1.001)
+        assert actions == []
+        assert logic.state == State.AWAITING_USER
+
+    def test_question_still_answerable_after_sibling_wake(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_wake(1.001)
+        actions = logic.on_approach_answer(True, 2.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert any(isinstance(a, Haptic) for a in logic.on_handle_hint_spoken(2.1))
+
+    def test_wake_more_than_guard_sec_later_still_closes_question(self):
+        """3초가 지난 뒤는 진짜 새 "비카야" 다 — 기존대로 옛 질문을 접는다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic.state == State.AWAITING_USER
+        logic.on_wake(1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
+        assert logic.state == State.IDLE
+
+    def test_wake_still_closes_normal_approach_question_without_stamp(self):
+        """정상 접근(track 있음)으로 들어간 AWAITING_USER 는 도장이 없으니"""
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        assert logic.state == State.AWAITING_USER
+        logic.on_wake(1.001)
+        assert logic.state == State.IDLE
+
+
+class TestOnboardingDestPrompt:
+    """온보딩("자, 이제 어디로 가고 싶으신가요?") 뒤 mission_logic 이 아무"""
+
+    def test_retry_after_empty_on_no_spin_onboarding(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_listen_state("empty:ghost", 20.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert len(says) == 1
+        assert says[0].text == MSG_DEST_RETRY
+        assert says[0].expects_reply is True
+
+    def test_retry_after_empty_on_turn_succeeded_onboarding(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic)
+        logic.on_approach_answer(True, 6.0)
+        assert logic.state == State.TURNING
+        logic.on_tick(7.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        actions = logic.on_listen_state("empty:short-reject", 8.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_DEST_RETRY
+
+    def test_retry_after_empty_on_turn_failed_onboarding(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(7.0, NavStatus.FAILED)
+        assert logic.state == State.IDLE
+        actions = logic.on_listen_state("empty:ghost", 8.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_DEST_RETRY
+
+    def test_second_empty_leads_to_leaving_then_home(self):
+        """dest_retry_return_sec 를 주면 되묻기 뒤 빈손에서 그만큼 더 기다렸다"""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                             dest_retry_return_sec=15.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)
+        logic.on_listen_state("empty:ghost", 25.0)
+        assert logic._dest_prompt_stage == "leaving"
+
+        before = logic.on_tick(25.0 + 15.0 - 0.1, NavStatus.NONE)
+        assert before == []
+
+        actions = logic.on_tick(25.0 + 15.0, NavStatus.NONE)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_LEAVING_NOTICE
+        assert logic._dest_prompt_stage == "notice"
+
+        actions = logic.on_tick(25.0 + 15.0 + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._dest_prompt_stage is None
+
+    def test_no_home_gives_notice_without_navigate(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)
+        logic.on_listen_state("empty:ghost", 25.0)
+        logic.on_tick(25.0 + DEST_RETRY_RETURN_SEC, NavStatus.NONE)
+        actions = logic.on_tick(
+            25.0 + DEST_RETRY_RETURN_SEC + LEAVING_GRACE_SEC, NavStatus.NONE
+        )
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    def test_default_retry_return_is_immediate_notice(self):
+        """사용자 결정(2026-09-11 실기): 15초 → 되묻기 → 15초 → 예고 → 3초."""
+        assert DEST_RETRY_RETURN_SEC == 0.0
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home())
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)
+        logic.on_listen_state("empty:ghost", 25.0)
+        actions = logic.on_tick(25.0, NavStatus.NONE)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_LEAVING_NOTICE
+        actions = logic.on_tick(25.0 + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_fallback_fires_only_after_deadline(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        just_before = logic.on_tick(
+            2.0 + DEST_PROMPT_FALLBACK_SEC - 0.1, NavStatus.NONE
+        )
+        assert just_before == []
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC, NavStatus.NONE)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_DEST_RETRY
+
+    def test_speech_holds_the_clock_but_open_does_not(self):
+        """음성이 '창 열림(open)'을 알려도 시계는 흐른다 — 질문 뒤 창은 30초라"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_dest_prompt_spoken(20.0)
+        logic.on_listen_state("open", 20.2)
+        assert logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC - 0.1, NavStatus.NONE) == []
+        actions = logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC, NavStatus.NONE)
+        assert any(isinstance(a, Say) and a.text == MSG_DEST_RETRY for a in actions)
+
+        logic2 = MissionLogic(wake_doa_sign=1.0)
+        logic2.on_wake_doa(175.0, True, 1.0)
+        logic2.on_approach_answer(True, 2.0)
+        logic2.on_dest_prompt_spoken(20.0)
+        logic2.on_listen_state("open", 20.2)
+        logic2.on_listen_state("speech", 30.0)
+        actions = logic2.on_tick(20.0 + DEST_ANSWER_WAIT_SEC + 2.0, NavStatus.NONE)
+        assert actions == []
+        assert logic2._dest_prompt_stage == "asked"
+
+    def test_answer_wait_starts_when_prompt_tts_ends(self):
+        """온보딩·되묻기 재생이 끝났다고 노드가 알려주면(on_dest_prompt_spoken)"""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home())
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_dest_prompt_spoken(20.0)
+        assert logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC - 0.1, NavStatus.NONE) == []
+        actions = logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC, NavStatus.NONE)
+        assert any(isinstance(a, Say) and a.text == MSG_DEST_RETRY for a in actions)
+        assert logic._dest_prompt_stage == "retried"
+
+        logic.on_dest_prompt_spoken(38.0)
+        assert logic.on_tick(38.0 + DEST_ANSWER_WAIT_SEC - 0.1, NavStatus.NONE) == []
+        t_notice = 38.0 + DEST_ANSWER_WAIT_SEC
+        actions = logic.on_tick(t_notice, NavStatus.NONE)
+        actions += logic.on_tick(t_notice + 0.1, NavStatus.NONE)
+        assert any(isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions)
+        actions = logic.on_tick(t_notice + 0.1 + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_prompt_spoken_without_ladder_is_noop(self):
+        logic = MissionLogic()
+        assert logic.on_dest_prompt_spoken(1.0) == []
+        assert logic._dest_prompt_deadline is None
+
+    def test_intent_arrival_clears_the_ladder(self):
+        """LLM-unknown 도 포함한다 — 음성 노드가 스스로 되묻고 재청취를"""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_intent(make_intent(intent="unknown"), None, BOUNDS, True, 3.0)
+        assert logic._dest_prompt_stage is None
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 5.0, NavStatus.NONE)
+        assert actions == []
+
+    def test_wake_clears_the_ladder(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_wake(3.0 + WAKE_CONSUMED_GUARD_SEC + 0.1)
+        assert logic._dest_prompt_stage is None
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 5.0, NavStatus.NONE)
+        assert actions == []
+
+    def test_empty_without_ladder_is_noop(self):
+        logic = MissionLogic()
+        assert logic.on_listen_state("empty", 1.0) == []
+
+    def test_empty_in_leaving_stage_does_not_advance(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)
+        logic.on_listen_state("empty:ghost", 25.0)
+        assert logic._dest_prompt_stage == "leaving"
+        actions = logic.on_listen_state("empty:ghost", 26.0)
+        assert actions == []
+        assert logic._dest_prompt_stage == "leaving"
+
+    def test_retry_said_exactly_once_across_three_empties(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        all_actions = []
+        all_actions += logic.on_listen_state("empty:ghost", 20.0)
+        all_actions += logic.on_listen_state("empty:ghost", 25.0)
+        all_actions += logic.on_listen_state("empty:ghost", 26.0)
+        retries = [
+            a for a in all_actions if isinstance(a, Say) and a.text == MSG_DEST_RETRY
+        ]
+        assert len(retries) == 1
+
+    def test_estop_holds_the_ladder_and_release_clears_it(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_estop(True, 3.0)
+        assert logic.state == State.ESTOPPED
+
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 100.0, NavStatus.NONE)
+        assert actions == []
+        assert logic._dest_prompt_stage == "asked"
+
+        logic.on_estop(False, 3.1)
+        actions = logic.on_tick(
+            3.1 + logic.estop_release_grace_sec + 0.01, NavStatus.NONE
+        )
+        assert logic.state == State.IDLE
+        assert logic._dest_prompt_stage is None
