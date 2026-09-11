@@ -2354,17 +2354,41 @@ class TestHandleSideCall:
         assert actions.index(says[0]) < actions.index(says[-1])
 
     def test_decline_does_not_crash_without_a_track(self):
-        """approach_track_id 가 None 인 채로 거절 -> 복귀 사다리를 타야 한다
-        (함정 1번). 걸어간 적이 없으므로 홈이 지정돼 있지 않으면 제자리에서
-        끝난다 — 기존 근접 호출 거절과 같은 처리다."""
+        """approach_track_id 가 None 인 채로 거절 -> 걸어간 적이 없으므로
+        제자리에서 끝난다(Ruling 10, I-1) — RETURNING 을 거치지 않고 곧장
+        IDLE 이다. 사람이 손잡이 자리(로봇 뒤)에 서 있어, RETURNING 이었다면
+        출발 회전이 손잡이로 그 사람을 훑는다."""
         logic = MissionLogic(wake_doa_sign=1.0)
         logic.on_wake_doa(175.0, True, 1.0)
         actions = logic.on_approach_answer(False, 2.0)
-        assert logic.state == State.RETURNING
-        assert not any(isinstance(a, Navigate) for a in actions)
-        logic.on_tick(2.5, NavStatus.NONE)
         assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
         assert logic._suppressed_tracks == {}
+
+    def test_decline_ends_in_place_even_with_home_configured(self):
+        """실기 기본 설정(return_destination + auto_return_home=True)이어도
+        핸들 쪽 호출의 거절은 출발하지 않는다 — 물러날 곳이 없다, 사람이 그
+        자리에 서 있다(Ruling 10, I-1 안전)."""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                              auto_return_home=True)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(False, 2.0)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_DECLINED
+
+    def test_no_answer_ends_in_place_even_with_home_configured(self):
+        """무응답도 거절과 같은 이유로 제자리에서 끝난다(Ruling 10, I-1)."""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                              auto_return_home=True,
+                              approach_response_timeout_sec=8.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_tick(1.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        assert not any(isinstance(a, Navigate) for a in actions)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
 
     def test_existing_gates_still_block_handle_side_calls(self):
         """E-stop 이 걸려 있으면 핸들 쪽 호출도 여전히 거절된다 — 관문 순서가
