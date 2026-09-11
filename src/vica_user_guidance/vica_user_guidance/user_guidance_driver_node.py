@@ -126,9 +126,10 @@ class UserGuidanceDriverNode(Node):
         self.create_subscription(TurnGuide, "/vica/turn_guide", self.cb_turn, 10)
         self.create_subscription(Bool, "/estop_state", self.cb_estop, 10)
         self.create_subscription(String, "/vica_goal_event", self.cb_goal, 10)
-        # 햅틱 수동 명령 (2026-09-04). 주행 중에는 이 노드가 포트를 잡고 있어
-        # bench_test.py 가 못 붙는다 — 그래서 여기를 거친다. **수동 전용**이며
-        # 이 노드는 스스로 보내지 않는다. 자동 트리거(ESTOP·ARRIVED)는 별도
+        # 햅틱 명령 (2026-09-04). 주행 중에는 이 노드가 포트를 잡고 있어
+        # bench_test.py 가 못 붙는다 — 그래서 여기를 거친다. 이 노드 자체는
+        # 스스로 보내지 않는다 — 미션 매니저가 손잡이 안내 시점에 자동
+        # 발행한다(2026-09-10). ESTOP·ARRIVED 진입 시 자동 트리거는 별도
         # 결정 사항이다.
         self.create_subscription(
             String, "/vica/haptic_request", self.cb_haptic_request, 10

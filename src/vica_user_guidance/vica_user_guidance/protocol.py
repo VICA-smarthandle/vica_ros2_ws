@@ -83,13 +83,19 @@ FIRMWARE_TOUCH_HOLD_MS: int = 200    # 시간 브리지. LOW 본 뒤 이만큼�
 # 상태코드(0~7)와 겹치지 않는 별도 바이트다. applyState()를 거치지 않으므로
 # LED·서보는 그대로이고 D10 의 진동모터만 패턴대로 떨린다.
 #
-# **수동 전용이다.** 드라이버 노드는 이 바이트를 보내지 않는다(SENDABLE_STATE_CODES
-# 에 없다). bench_test.py --haptic 으로만 쏜다. ESTOP·ARRIVED 진입 시 자동으로
-# 울리는 것(7/28 계획서 6.2절)은 별도 결정 사항이며 아직 넣지 않았다.
+# 드라이버 노드(user_guidance_driver_node) 자체는 이 바이트를 스스로 보내지
+# 않는다(SENDABLE_STATE_CODES 에 없다) — 다만 미션 매니저가 손잡이 안내
+# 시점에 /vica/haptic_request 로 자동 발행한다(2026-09-10). bench_test.py
+# --haptic 은 여전히 수동으로 쏠 수 있는 경로다. ESTOP·ARRIVED 진입 시
+# 자동으로 울리는 것(7/28 계획서 6.2절)은 별도 결정 사항이며 아직 넣지 않았다.
 #
 # 패턴은 계획서 6.2절 그대로다. 사용자 요구: "비상제동 = 긴 진동 / 도착 = 짧은 3회".
 HAPTIC_CMD_SHORT: int = 0x10     # 300ms on / 150ms off x 3회 (도착 패턴)
-HAPTIC_CMD_LONG: int = 0x11      # 1200ms on x 1회 (비상 패턴)
+# 1200ms on x 1회 — 손잡이 안내(2026-09-10)가 이 "비상" 패턴을 그대로
+# 재사용하기로 한 것은 사용자 결정이다(같은 결정). 나중에 진짜 비상 진동을
+# 붙이면 두 쓰임이 같은 패턴을 공유해 구분이 안 되는 문제가 생길 수 있다 —
+# 그때 패턴을 나누는 것을 고려한다.
+HAPTIC_CMD_LONG: int = 0x11
 FIRMWARE_HAPTIC_SHORT_ON_MS: int = 300   # 2026-09-04 150->300. 회전 올라올 시간
 FIRMWARE_HAPTIC_SHORT_OFF_MS: int = 150
 FIRMWARE_HAPTIC_SHORT_COUNT: int = 3

@@ -50,11 +50,17 @@ from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
 from .mission_logic import (
+    HANDLE_SIDE_MIN_YAW_RAD,
+    Haptic,
+    MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_QUESTION,
+    MSG_DEST_RETRY,
+    MSG_HANDLE_HINT,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
     RETURN_RESUME_SEC,
+    DEST_RETRY_RETURN_SEC,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -132,11 +138,22 @@ class MissionManagerNode(Node):
         # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
         # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
         self.declare_parameter("near_call_no_spin_m", NEAR_CALL_NO_SPIN_M)
+        # 핸들 쪽(로봇 뒤) 호출 사각지대(도) — 위 정면 사각지대(SEEK_MIN_YAW_RAD,
+        # 10°)의 거울쌍이다. 회전량이 이보다 크면(부채꼴 180°±45°) 소리가
+        # 핸들 옆에서 왔다는 뜻이라 카메라 확인 없이 곧바로 접근 질문을 낸다
+        # (mission_logic.HANDLE_SIDE_MIN_YAW_RAD 주석, 2026-09-10 사용자 결정).
+        self.declare_parameter(
+            "handle_side_min_yaw_deg", math.degrees(HANDLE_SIDE_MIN_YAW_RAD))
         # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기 예고를
         # 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC 뒤 복귀를 재개한다
         # (2026-09-10 사용자 승인 흐름). 기준은 브레이크가 걸린 시각 —
         # 청취 창(음성 쪽) 길이와는 무관하다.
         self.declare_parameter("return_resume_sec", RETURN_RESUME_SEC)
+        # 온보딩("이제 어디로 가고 싶으신가요?") 뒤 STT 가 빈손으로 닫히면
+        # 한 번 되묻고, 그래도 빈손이면 이만큼 더 기다렸다 떠남을 예고한다
+        # (실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 — 근거는
+        # mission_logic.DEST_RETRY_RETURN_SEC 주석.
+        self.declare_parameter("dest_retry_return_sec", DEST_RETRY_RETURN_SEC)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -231,6 +248,10 @@ class MissionManagerNode(Node):
             near_call_no_spin_m=float(
                 self.get_parameter("near_call_no_spin_m").value),
             return_resume_sec=float(self.get_parameter("return_resume_sec").value),
+            handle_side_min_yaw_rad=math.radians(
+                float(self.get_parameter("handle_side_min_yaw_deg").value)),
+            dest_retry_return_sec=float(
+                self.get_parameter("dest_retry_return_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -352,10 +373,13 @@ class MissionManagerNode(Node):
             callback_group=self._main_group,
         )
         # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
-        # on_listen_state 주석, 2026-08-30).
+        # on_listen_state 주석, 2026-08-30). 빈손(empty:*)은 온보딩 되묻기
+        # 사다리도 전진시키므로(2026-09-11) 반환값을 버리지 않고 실행한다.
         self.create_subscription(
             String, "/vica/listen_state",
-            lambda msg: self.logic.on_listen_state(msg.data, self._now()), 10,
+            lambda msg: self._run_actions(
+                self.logic.on_listen_state(msg.data, self._now())),
+            10,
             callback_group=self._main_group,
         )
 
@@ -367,6 +391,10 @@ class MissionManagerNode(Node):
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
         self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
+        # 손잡이 진동 요청 (2026-09-10). 진동 모터는 아직 미장착이라 지금은
+        # 받는 쪽이 없지만, 장착되면 그대로 동작하도록 미리 배선해 둔다 —
+        # user_guidance_driver_node 가 /vica/haptic_request 를 구독한다.
+        self.pub_haptic = self.create_publisher(String, "/vica/haptic_request", 10)
         self.pub_state = self.create_publisher(RobotState, "/vica/robot_state", 10)
         self.pub_goal_event = self.create_publisher(String, "/vica_goal_event", 10)
         self.pub_speed_limit = self.create_publisher(
@@ -561,6 +589,14 @@ class MissionManagerNode(Node):
         """
         if MSG_APPROACH_QUESTION in msg.data:
             self.logic.on_approach_question_spoken(self._now())
+        # 손잡이 힌트 재생이 끝난 시점에만 진동을 낸다(I-2) — 힌트와 같은
+        # 순간에 내면 1200ms 진동이 TTS 큐에서 밀린 멘트보다 먼저 끝난다.
+        if MSG_HANDLE_HINT in msg.data:
+            self._run_actions(self.logic.on_handle_hint_spoken(self._now()))
+        # 온보딩·되묻기 재생이 끝난 시점부터 답 대기 15초를 센다(2026-09-11).
+        # 로직이 사다리 중이 아니면 무시하므로 이중 방어다.
+        if MSG_APPROACH_ONBOARDING in msg.data or MSG_DEST_RETRY in msg.data:
+            self._run_actions(self.logic.on_dest_prompt_spoken(self._now()))
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
         self.logic.on_arrival_question_spoken(self._now())
@@ -638,12 +674,17 @@ class MissionManagerNode(Node):
         "안 돌았다"의 원인(부호 오류·관문 거절·사각지대)을 가릴 유일한
         단서이며, 실기 검증만 남은 브랜치에서는 이 로그가 전제다.
 
-        판정 분기는 on_wake_doa 안의 실제 관문 순서(state/estop/nav_ready →
-        복귀 대기 중 → wake 소비 직후 → 접근 온보딩 직후 → 10도 미만)를
-        그대로 따른다 — 순서가 어긋나면 시각 관문이 거절했는데도 "10도
-        미만" 으로 잘못 찍힌다. return_interrupted/wake_guard_active/
+        판정 분기는 결과(actions·state 전이)를 먼저 보고, 못 맞히면 그제서야
+        on_wake_doa 의 관문을 순서대로 되짚는다: 회전 시작(SpinInPlace 발행)
+        → 핸들 쪽(180도 근방, 회전 없이 AWAITING_USER 로 전이) → state/estop/
+        nav_ready → 복귀 대기 중 → wake 소비 직후 → 접근 온보딩 직후 →
+        생략(10도 미만, 마지막 else). return_interrupted/wake_guard_active/
         user_attached_guard_active 는 on_wake_doa 가 쓰는 것과 같은
         속성·메서드라 로그와 실제 판정이 갈라질 일이 없다.
+
+        핸들 쪽(180°±45°, HANDLE_SIDE_MIN_YAW_RAD) 판정은 회전 없이 상태가
+        곧장 AWAITING_USER 로 바뀌는 것으로 알아본다 — SpinInPlace 가 없다는
+        점은 정면 사각지대("생략, 10도 미만")와 같지만 상태 전이가 다르다.
         """
         now = self._now()
         before = self.logic.state
@@ -658,6 +699,8 @@ class MissionManagerNode(Node):
         yaw_rad = doa_to_spin_yaw(float(msg.data), self.logic.wake_doa_sign)
         if any(isinstance(a, SpinInPlace) for a in actions):
             verdict = "회전 시작"
+        elif before == State.IDLE and self.logic.state == State.AWAITING_USER:
+            verdict = "핸들 쪽 — 회전 없이 곧바로 질문"
         elif before != State.IDLE:
             verdict = f"거절(대기 중 아님, state={before.value})"
         elif self.logic.estop_active:
@@ -1279,6 +1322,11 @@ class MissionManagerNode(Node):
                 self._start_spin(action)
             elif isinstance(action, SetNavSpeedLimit):
                 self._publish_nav_speed_limit(action.percent)
+            elif isinstance(action, Haptic):
+                out = String()
+                out.data = action.pattern
+                self.pub_haptic.publish(out)
+                self.get_logger().info(f"진동 요청: {action.pattern}")
 
     def _publish_nav_speed_limit(self, percent: float) -> None:
         msg = SpeedLimit()

@@ -108,7 +108,7 @@ def generate_launch_description() -> LaunchDescription:
             # 1.0 s)과 detection_gate 의 stable 1.0 s + still window 3.0 s 를
             # 더한 바닥값이 4.2~4.5 s 라 여유가 1.5 s 뿐이었다 — 8.0 으로 올린다
             # (2026-09-10 재검토. 근거는 mission_logic.SEEK_LOOK_SEC 주석).
-            DeclareLaunchArgument("seek_look_sec", default_value="8.0"),
+            DeclareLaunchArgument("seek_look_sec", default_value="6.0"),
             # 근접 호출(2026-09-10 확장). 부른 사람이 이보다 가까우면 접근 goal
             # (1.1 m)이 이미 지나간 자리라 걸어가지 않고 그 자리에서 바로
             # 질문한다. vica_perception detection_gate 의 min_distance_m 과 값은
@@ -118,11 +118,23 @@ def generate_launch_description() -> LaunchDescription:
             # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
             # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
             DeclareLaunchArgument("near_call_no_spin_m", default_value="1.0"),
+            # 핸들 쪽(로봇 뒤) 호출 사각지대(도) — 정면 사각지대(10°)의
+            # 거울쌍이다. 회전량이 이보다 크면(부채꼴 180°±45°) 소리가 핸들
+            # 옆에서 왔다는 뜻이라 카메라 확인 없이 곧바로 접근 질문을 낸다
+            # (mission_logic.HANDLE_SIDE_MIN_YAW_RAD 주석, 2026-09-10 사용자
+            # 결정). 실기에서 뒤쪽 호출의 DOA 가 163°~185° 안에 들어와 ±45°는
+            # 넉넉한 여유다 — 실기에서 폭을 조정한다.
+            DeclareLaunchArgument("handle_side_min_yaw_deg", default_value="135.0"),
             # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기
             # 예고를 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC(3초)
             # 뒤 복귀를 재개한다(2026-09-10 사용자 승인 흐름). 기준은
             # 브레이크가 걸린 시각 — 청취 창(음성 쪽) 길이와는 무관하다.
             DeclareLaunchArgument("return_resume_sec", default_value="15.0"),
+            # 온보딩("이제 어디로 가고 싶으신가요?") 뒤 STT 가 빈손으로
+            # 닫히면 한 번 되묻고, 그래도 빈손이면 이만큼 더 기다렸다 떠남을
+            # 예고한다(실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 —
+            # 근거는 mission_logic.DEST_RETRY_RETURN_SEC 주석.
+            DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -174,8 +186,16 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("near_call_no_spin_m"),
                             value_type=float,
                         ),
+                        "handle_side_min_yaw_deg": ParameterValue(
+                            LaunchConfiguration("handle_side_min_yaw_deg"),
+                            value_type=float,
+                        ),
                         "return_resume_sec": ParameterValue(
                             LaunchConfiguration("return_resume_sec"),
+                            value_type=float,
+                        ),
+                        "dest_retry_return_sec": ParameterValue(
+                            LaunchConfiguration("dest_retry_return_sec"),
                             value_type=float,
                         ),
                     }
