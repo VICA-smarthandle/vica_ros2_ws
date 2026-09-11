@@ -53,6 +53,7 @@ from .mission_logic import (
     HANDLE_SIDE_MIN_YAW_RAD,
     Haptic,
     MSG_APPROACH_QUESTION,
+    MSG_HANDLE_HINT,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
@@ -575,6 +576,10 @@ class MissionManagerNode(Node):
         """
         if MSG_APPROACH_QUESTION in msg.data:
             self.logic.on_approach_question_spoken(self._now())
+        # 손잡이 힌트 재생이 끝난 시점에만 진동을 낸다(I-2) — 힌트와 같은
+        # 순간에 내면 1200ms 진동이 TTS 큐에서 밀린 멘트보다 먼저 끝난다.
+        if MSG_HANDLE_HINT in msg.data:
+            self._run_actions(self.logic.on_handle_hint_spoken(self._now()))
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
         self.logic.on_arrival_question_spoken(self._now())

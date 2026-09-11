@@ -950,6 +950,12 @@ class MissionLogic:
         # 사람을 훑는다. _near_call_no_spin(회전 생략 여부)과는 뜻이 달라
         # 겹쳐 쓰지 않는다.
         self._never_approached: bool = False
+        # 손잡이 힌트(MSG_HANDLE_HINT) 재생이 끝나면 진동을 내야 하는가(I-2,
+        # 2026-09-11). `Haptic` 을 힌트와 같은 순간에 내면 1200ms 진동이 TTS
+        # 큐에서 밀린 멘트보다 먼저 끝나 "진동이 나는 곳"이 거짓말이 된다 —
+        # on_approach_question_spoken 과 같은 방식으로, 노드가 재생 완료를
+        # 알려줄 때(on_handle_hint_spoken)까지 여기 담아 둔다.
+        self._pending_handle_hint: bool = False
         # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
         self._estop_announced = False
 
@@ -1407,6 +1413,24 @@ class MissionLogic:
         self._response_deadline = now + self.approach_response_timeout_sec
         return []
 
+    def on_handle_hint_spoken(self, now: float) -> list:
+        """손잡이 위치 안내(MSG_HANDLE_HINT) 재생이 끝났다 — 이 순간 진동을
+        낸다(I-2, 2026-09-11).
+
+        `Haptic` 을 힌트와 같은 순간에 내면 HAPTIC_CMD_LONG 1200ms 가 TTS
+        큐에서 밀린 문구보다 먼저 끝나 "진동이 나는 곳을 잡아주세요"가
+        재생될 즈음엔 이미 멎어 있다. on_approach_question_spoken 과 같은
+        방식으로, 재생 시간은 TTS 만 알 수 있어 노드가 문구 대조로 이
+        시점을 알려준다 — 상태기계는 여기서도 ROS 를 모른다.
+
+        `_pending_handle_hint` 가 없으면(힌트를 낸 적이 없거나 이미
+        소비했으면) 아무 일도 하지 않는다 — 이중 발사 방지.
+        """
+        if not self._pending_handle_hint:
+            return []
+        self._pending_handle_hint = False
+        return [Haptic(HAPTIC_PATTERN_HANDLE_HINT)]
+
     def _enter_awaiting_user(self, now: float) -> list:
         """질문을 던지고 AWAITING_USER 로 들어간다.
 
@@ -1503,11 +1527,13 @@ class MissionLogic:
                 # 회전을 껐어도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # State.TURNING 을 거치는 길과 같은 억제를 건다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
-                # 손잡이 위치 안내 + 진동 (2026-09-10 사용자 결정): 회전이
-                # 없어도 사용자는 손잡이가 어디인지 모른다 — 온보딩보다 먼저.
+                # 손잡이 위치 안내 (2026-09-10 사용자 결정): 회전이 없어도
+                # 사용자는 손잡이가 어디인지 모른다 — 온보딩보다 먼저. 진동은
+                # 여기서 내지 않는다 — 힌트 재생이 끝난 시점에 노드가
+                # on_handle_hint_spoken 을 불러야 낸다(I-2).
+                self._pending_handle_hint = True
                 return [
                     Say(MSG_HANDLE_HINT, priority="response"),
-                    Haptic(HAPTIC_PATTERN_HANDLE_HINT),
                     Say(MSG_APPROACH_ONBOARDING, priority="response",
                         expects_reply=True),
                 ]
@@ -2142,10 +2168,12 @@ class MissionLogic:
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 온보딩 질문이
                 # 완료를 대신한다.
-                # 손잡이 위치 안내 + 진동 (2026-09-10 사용자 결정): 온보딩
-                # 앞에서 손잡이가 어디인지 말하고 같은 순간 진동을 울린다.
+                # 손잡이 위치 안내 (2026-09-10 사용자 결정): 온보딩 앞에서
+                # 손잡이가 어디인지 말한다. 진동은 여기서 내지 않는다 —
+                # 힌트 재생이 끝난 시점에 노드가 on_handle_hint_spoken 을
+                # 불러야 낸다(I-2).
+                self._pending_handle_hint = True
                 actions.append(Say(MSG_HANDLE_HINT, priority="response"))
-                actions.append(Haptic(HAPTIC_PATTERN_HANDLE_HINT))
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
@@ -2156,10 +2184,11 @@ class MissionLogic:
                 # 회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # 위와 같은 억제를 건다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
-                # 회전이 실패해도 손잡이 안내·진동은 그대로 나간다 — 사용자는
-                # 이미 승낙하고 서 있다(2026-09-10 사용자 결정).
+                # 회전이 실패해도 손잡이 안내는 그대로 나간다 — 사용자는 이미
+                # 승낙하고 서 있다(2026-09-10 사용자 결정). 진동은 위와 같은
+                # 이유로 여기서 내지 않는다(I-2).
+                self._pending_handle_hint = True
                 actions.append(Say(MSG_HANDLE_HINT, priority="response"))
-                actions.append(Haptic(HAPTIC_PATTERN_HANDLE_HINT))
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif (self._turn_deadline is not None

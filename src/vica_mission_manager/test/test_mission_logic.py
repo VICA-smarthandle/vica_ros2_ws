@@ -1319,27 +1319,57 @@ class TestApproachVoiceHooks:
 
     @pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED,
                                          NavStatus.CANCELED])
-    def test_turn_completion_speaks_handle_hint_and_vibrates_before_onboarding(
+    def test_turn_completion_speaks_handle_hint_before_onboarding(
             self, status):
         """설계 확정(2026-09-10): 회전이 끝나면(성공이든 실패든) 온보딩보다
-        먼저 손잡이 위치를 말하고 같은 순간 진동("long")을 울린다 — 회전
-        실패라도 사용자는 이미 승낙하고 서 있으므로 안내가 필요하다."""
+        먼저 손잡이 위치를 말한다 — 회전 실패라도 사용자는 이미 승낙하고
+        서 있으므로 안내가 필요하다. 진동은 이 시점에 아직 안 나간다(I-2,
+        2026-09-11) — test_turn_completion_defers_haptic_until_hint_spoken
+        참고."""
         logic = MissionLogic()
         self._accept_with_turn(logic)
         actions = logic.on_tick(7.0, status)
 
         hint_idx = next(i for i, a in enumerate(actions)
                          if isinstance(a, Say) and a.text == MSG_HANDLE_HINT)
-        haptic_idx = next(i for i, a in enumerate(actions)
-                           if isinstance(a, Haptic))
         onboarding_idx = next(i for i, a in enumerate(actions)
                                if isinstance(a, Say)
                                and a.text == MSG_APPROACH_ONBOARDING)
 
         assert hint_idx < onboarding_idx
-        assert haptic_idx < onboarding_idx
         assert actions[hint_idx].expects_reply is False
-        assert actions[haptic_idx].pattern == "long"
+        assert not any(isinstance(a, Haptic) for a in actions)
+
+    @pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED,
+                                         NavStatus.CANCELED])
+    def test_turn_completion_defers_haptic_until_hint_spoken(self, status):
+        """I-2 (2026-09-11): `Haptic` 을 그 자리에서 내면 1200ms 진동이
+        TTS 큐에서 밀린 멘트보다 먼저 끝나 "진동이 나는 곳"이 거짓말이
+        된다. 힌트(MSG_HANDLE_HINT) 재생이 실제로 끝난 시점
+        (on_handle_hint_spoken)에만 진동을 낸다 — on_approach_question_spoken
+        과 같은 방식."""
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        logic.on_tick(7.0, status)
+        spoken_actions = logic.on_handle_hint_spoken(7.1)
+        haptics = [a for a in spoken_actions if isinstance(a, Haptic)]
+        assert len(haptics) == 1
+        assert haptics[0].pattern == "long"
+
+    def test_handle_hint_spoken_without_pending_hint_is_noop(self):
+        """엉뚱한 시점(힌트를 낸 적 없음)에 신호가 와도 진동이 나가면 안
+        된다 — 이중 발사 방지."""
+        logic = MissionLogic()
+        assert logic.on_handle_hint_spoken(1.0) == []
+
+    def test_handle_hint_spoken_fires_haptic_only_once(self):
+        logic = MissionLogic()
+        self._accept_with_turn(logic)
+        logic.on_tick(7.0, NavStatus.SUCCEEDED)
+        first = logic.on_handle_hint_spoken(7.1)
+        assert len(first) == 1
+        second = logic.on_handle_hint_spoken(7.2)
+        assert second == []
 
     def test_decline_gives_no_handle_hint_or_haptic(self):
         """거절("아니요")에는 손잡이 안내도 진동도 나가면 안 된다 — 아직
@@ -2128,13 +2158,16 @@ class TestNearCallApproach:
         says = [a for a in onboarding_actions if isinstance(a, Say)]
         # 손잡이 안내(2026-09-10)가 온보딩보다 먼저 나간다.
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert any(isinstance(a, Haptic) and a.pattern == "long"
-                   for a in onboarding_actions)
+        # 진동은 힌트 재생이 끝난 뒤에만 나간다(I-2, 2026-09-11).
+        assert not any(isinstance(a, Haptic) for a in onboarding_actions)
+        haptics = [a for a in logic.on_handle_hint_spoken(6.1) if isinstance(a, Haptic)]
+        assert len(haptics) == 1 and haptics[0].pattern == "long"
 
     def test_very_near_person_accept_skips_spin(self):
         """1.0 m 미만: 수락해도 회전 없이 바로 온보딩 (손잡이가 사람을 칠 위험,
-        2026-09-10 사용자 결정). 회전이 없어도 손잡이 안내·진동은 그대로
-        나간다 — 회전 여부와 무관하다(설계 확정)."""
+        2026-09-10 사용자 결정). 회전이 없어도 손잡이 안내는 그대로 나간다
+        — 회전 여부와 무관하다(설계 확정). 진동은 힌트 재생이 끝난 뒤에만
+        나간다(I-2, 2026-09-11)."""
         logic = MissionLogic()
         seek_and_finish_turn(logic, t0=1.0)
         logic.on_person_detection(
@@ -2144,8 +2177,9 @@ class TestNearCallApproach:
         assert not any(isinstance(a, SpinInPlace) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert any(isinstance(a, Haptic) and a.pattern == "long"
-                   for a in actions)
+        assert not any(isinstance(a, Haptic) for a in actions)
+        haptics = [a for a in logic.on_handle_hint_spoken(4.1) if isinstance(a, Haptic)]
+        assert len(haptics) == 1 and haptics[0].pattern == "long"
 
     def test_approachable_person_not_handled_here(self):
         """approachable=true 는 기존 접근 요청 service 경로가 처리한다 —
@@ -2340,18 +2374,20 @@ class TestHandleSideCall:
         assert says and says[-1].text == MSG_APPROACH_ONBOARDING
 
     def test_accept_speaks_handle_hint_and_vibrates_without_turning(self):
-        """회전이 없는 후면 호출도 손잡이 안내·진동은 그대로 나간다(설계
-        확정, 2026-09-10) — 회전 안 한 사용자도 손잡이가 어디인지는 모른다."""
+        """회전이 없는 후면 호출도 손잡이 안내는 그대로 나간다(설계 확정,
+        2026-09-10) — 회전 안 한 사용자도 손잡이가 어디인지는 모른다. 진동은
+        힌트 재생이 끝난 뒤에만 나간다(I-2, 2026-09-11)."""
         logic = MissionLogic(wake_doa_sign=1.0)
         logic.on_wake_doa(175.0, True, 1.0)
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        haptics = [a for a in actions if isinstance(a, Haptic)]
-        assert len(haptics) == 1
-        assert haptics[0].pattern == "long"
+        assert not any(isinstance(a, Haptic) for a in actions)
         # 손잡이 안내가 온보딩보다 먼저다.
         assert actions.index(says[0]) < actions.index(says[-1])
+        haptics = [a for a in logic.on_handle_hint_spoken(2.1) if isinstance(a, Haptic)]
+        assert len(haptics) == 1
+        assert haptics[0].pattern == "long"
 
     def test_decline_does_not_crash_without_a_track(self):
         """approach_track_id 가 None 인 채로 거절 -> 걸어간 적이 없으므로
@@ -2364,6 +2400,20 @@ class TestHandleSideCall:
         assert logic.state == State.IDLE
         assert not any(isinstance(a, Navigate) for a in actions)
         assert logic._suppressed_tracks == {}
+
+    def test_decline_gives_no_handle_hint_or_haptic(self):
+        """M-3: 아직 안내를 수락하지 않은 사람에게 손잡이 안내·진동이 나가면
+        안 된다 — 정상 접근의 같은 이름 시험(TestApproachVoiceHooks)과
+        짝이다. 거절 뒤 힌트가 나온 적이 없으니 on_handle_hint_spoken 도
+        진동을 내면 안 된다."""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                              auto_return_home=True)
+        logic.on_wake_doa(175.0, True, 1.0)
+        actions = logic.on_approach_answer(False, 2.0)
+        assert not any(isinstance(a, Haptic) for a in actions)
+        assert not any(isinstance(a, Say) and a.text == MSG_HANDLE_HINT
+                       for a in actions)
+        assert logic.on_handle_hint_spoken(2.1) == []
 
     def test_decline_ends_in_place_even_with_home_configured(self):
         """실기 기본 설정(return_destination + auto_return_home=True)이어도
@@ -2435,7 +2485,7 @@ class TestHandleSideCallWakeSiblingGuard:
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert any(isinstance(a, Haptic) for a in actions)
+        assert any(isinstance(a, Haptic) for a in logic.on_handle_hint_spoken(2.1))
 
     def test_wake_more_than_guard_sec_later_still_closes_question(self):
         """3초가 지난 뒤는 진짜 새 "비카야" 다 — 기존대로 옛 질문을 접는다."""
