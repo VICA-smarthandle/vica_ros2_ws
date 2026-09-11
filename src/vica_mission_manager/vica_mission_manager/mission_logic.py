@@ -1638,6 +1638,14 @@ class MissionLogic:
             self._wake_consumed_at = now
             return []
         if self.state == State.AWAITING_USER:
+            if self.wake_guard_active(now):
+                # 이 질문을 연 것 자체가 wake_doa 였을 수 있다(핸들 쪽 호출,
+                # 회전 없이 곧장 질문). /vica/wake 와 /vica/wake_doa 는 같은
+                # 호출에서 수 ms 간격으로 오고 처리 순서가 보장되지 않는다
+                # (2026-09-11 실기 재현) — 도장이 방금(3초 이내) 찍혀 있으면
+                # 이 wake 는 그 형제 신호이지 새 "비카야"가 아니다. 접지
+                # 않고 질문을 그대로 둔다.
+                return []
             # 같은 사람을 곧장 다시 쫓지 않게 억제하고 제자리에 선다 —
             # 부른 사람과의 새 대화가 이어진다 (복귀 주행은 하지 않는다).
             self._suppress_track(self.approach_track_id, now)
@@ -1737,6 +1745,10 @@ class MissionLogic:
             self.approach_track_id = None
             self.active_destination = None
             self._near_call_no_spin = True
+            # 이 호출의 형제 신호인 /vica/wake 가 수 ms 뒤 따라올 수 있다
+            # (2026-09-11 실기 재현) — 도장을 찍어 on_wake 의 AWAITING_USER
+            # 분기가 방금 연 이 질문을 "옛 대화"로 오인해 접지 않게 한다.
+            self._wake_consumed_at = now
             return self._enter_awaiting_user(now)
         self.state = State.SEEKING
         self._seek_return_yaw = back

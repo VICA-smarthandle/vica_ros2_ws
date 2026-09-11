@@ -2387,3 +2387,46 @@ class TestHandleSideCall:
         spins = [a for a in actions if isinstance(a, SpinInPlace)]
         assert len(spins) == 1
         assert logic.state == State.SEEKING
+
+
+class TestHandleSideCallWakeSiblingGuard:
+    """/vica/wake 와 /vica/wake_doa 는 같은 호출에서 수 ms 간격으로 오고 처리
+    순서가 보장되지 않는다(2026-09-11 실기 재현, I-4). wake_doa 가 먼저
+    처리돼 핸들 쪽 질문을 연 경우, 형제 신호인 wake 가 뒤따라 그 질문을
+    접으면 안 된다 — TestWakeConsumedGuardsWakeDoa 의 거울상이다."""
+
+    def test_wake_right_after_handle_side_call_does_not_close_question(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic.state == State.AWAITING_USER
+        # 같은 호출의 wake 가 수 ms 뒤 도착했다고 가정한다.
+        actions = logic.on_wake(1.001)
+        assert actions == []
+        assert logic.state == State.AWAITING_USER
+
+    def test_question_still_answerable_after_sibling_wake(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_wake(1.001)
+        actions = logic.on_approach_answer(True, 2.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert any(isinstance(a, Haptic) for a in actions)
+
+    def test_wake_more_than_guard_sec_later_still_closes_question(self):
+        """3초가 지난 뒤는 진짜 새 "비카야" 다 — 기존대로 옛 질문을 접는다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        assert logic.state == State.AWAITING_USER
+        logic.on_wake(1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
+        assert logic.state == State.IDLE
+
+    def test_wake_still_closes_normal_approach_question_without_stamp(self):
+        """정상 접근(track 있음)으로 들어간 AWAITING_USER 는 도장이 없으니
+        기존대로 접힌다 — 이 가드가 다른 진입 경로까지 넓어지면 안 된다."""
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic, t=1.0)
+        assert logic.state == State.AWAITING_USER
+        logic.on_wake(1.001)
+        assert logic.state == State.IDLE
