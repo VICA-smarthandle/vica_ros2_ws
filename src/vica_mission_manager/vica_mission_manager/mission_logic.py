@@ -973,6 +973,14 @@ class MissionLogic:
         # AWAITING_USER 로 새로 들어올 때마다(정상 접근·근접 호출 두 진입점
         # 모두) 다시 명시적으로 정해지므로 묵은 값이 남을 자리가 없다.
         self._near_call_no_spin: bool = False
+        # 이 AWAITING_USER 에 "걸어서 다가간 적이 없는가"(Ruling 10, I-1).
+        # 핸들 쪽 호출(on_wake_doa)만 세운다 — 정상 접근·근접 호출은 걸어서건
+        # 코앞이건 실제로 그 사람 쪽으로 움직였으므로 물러날 여지가 있다.
+        # 핸들 쪽은 사람이 이미 손잡이 자리(로봇 뒤)에 서 있어 물러날 곳이
+        # 없다: 거절·무응답에 복귀 주행을 걸면 출발 회전이 손잡이로 그
+        # 사람을 훑는다. _near_call_no_spin(회전 생략 여부)과는 뜻이 달라
+        # 겹쳐 쓰지 않는다.
+        self._never_approached: bool = False
         # 손잡이 힌트(MSG_HANDLE_HINT) 재생이 끝나면 진동을 내야 하는가(I-2,
         # 2026-09-11). `Haptic` 을 힌트와 같은 순간에 내면 1200ms 진동이 TTS
         # 큐에서 밀린 멘트보다 먼저 끝나 "진동이 나는 곳"이 거짓말이 된다 —
@@ -1580,7 +1588,14 @@ class MissionLogic:
             ]
 
         actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
-        actions.extend(self._enter_returning(now))
+        if self._never_approached:
+            # 걸어간 적이 없다(핸들 쪽 호출) — 물러날 곳이 없다. 사람이 이미
+            # 손잡이 자리(로봇 뒤)에 서 있어, 복귀 주행을 걸면 출발 회전이
+            # 손잡이로 그 사람을 훑는다(Ruling 10, I-1). 홈 미지정일 때의
+            # 기존 동작과 같은 모양으로 제자리에서 끝낸다.
+            self._to_idle()
+        else:
+            actions.extend(self._enter_returning(now))
         return actions
 
     # -- 도착 후 대화 (arrival-dialog-flow) ------------------------------------
@@ -1826,6 +1841,9 @@ class MissionLogic:
             self.approach_track_id = None
             self.active_destination = None
             self._near_call_no_spin = True
+            # 걸어서건 코앞이건 이 사람 쪽으로 움직인 적이 없다 — 거절·
+            # 무응답이 복귀 주행으로 새면 안 된다(Ruling 10, I-1).
+            self._never_approached = True
             # 이 호출의 형제 신호인 /vica/wake 가 수 ms 뒤 따라올 수 있다
             # (2026-09-11 실기 재현) — 도장을 찍어 on_wake 의 AWAITING_USER
             # 분기가 방금 연 이 질문을 "옛 대화"로 오인해 접지 않게 한다.
@@ -2306,7 +2324,12 @@ class MissionLogic:
                 # 오탐이라 답할 이유가 없었을 수도, 답할 수 없는 상황일 수도 있다.
                 # 어느 쪽이든 계속 서서 기다리면 사람 앞을 막는 셈이 된다.
                 actions.append(Say(MSG_APPROACH_NO_ANSWER, priority="response"))
-                actions.extend(self._enter_returning(now))
+                if self._never_approached:
+                    # 거절과 같은 이유(Ruling 10, I-1) — 걸어간 적이 없어
+                    # 물러날 곳이 없다.
+                    self._to_idle()
+                else:
+                    actions.extend(self._enter_returning(now))
 
         elif self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             # 무응답 사다리 (arrival-dialog 3절). 떠나기 예고 후면 유예를 세고,
@@ -2634,3 +2657,4 @@ class MissionLogic:
         # 명시적으로 정하므로, 여기서 지우지 않아도 안전과는 무관하다 —
         # 다만 묵은 값을 들고 있을 이유도 없어 다른 접근 상태값들과 함께 비운다.
         self._near_call_no_spin = False
+        self._never_approached = False
