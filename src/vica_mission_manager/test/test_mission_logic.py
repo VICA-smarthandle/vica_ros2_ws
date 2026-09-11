@@ -45,6 +45,9 @@ from vica_mission_manager.mission_logic import (
     LEAVING_GRACE_SEC,
     MSG_LEAVING_NOTICE,
     RETURN_RESUME_SEC,
+    MSG_DEST_RETRY,
+    DEST_PROMPT_FALLBACK_SEC,
+    DEST_RETRY_RETURN_SEC,
     doa_to_spin_yaw,
     wrap_to_pi,
 )
@@ -2505,3 +2508,182 @@ class TestHandleSideCallWakeSiblingGuard:
         assert logic.state == State.AWAITING_USER
         logic.on_wake(1.001)
         assert logic.state == State.IDLE
+
+
+class TestOnboardingDestPrompt:
+    """온보딩("자, 이제 어디로 가고 싶으신가요?") 뒤 mission_logic 이 아무
+    시계도 걸지 않던 결함(실기 2026-09-11)의 시험. STT 가 빈손(empty:*)으로
+    닫히면 도착 후 대화의 무응답 사다리(MSG_ARRIVAL_RETRY/_arrival_retried)를
+    본떠 한 번 되묻고, 그래도 빈손이면 떠남을 예고한 뒤 홈으로 돌아간다."""
+
+    # -- ① 회전 생략 자리(핸들 쪽 호출) -------------------------------------
+
+    def test_retry_after_empty_on_no_spin_onboarding(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        assert logic.state == State.IDLE
+        actions = logic.on_listen_state("empty:ghost", 20.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert len(says) == 1
+        assert says[0].text == MSG_DEST_RETRY
+        assert says[0].expects_reply is True
+
+    # -- ② 회전 성공/실패 자리(정상 접근) ------------------------------------
+
+    def test_retry_after_empty_on_turn_succeeded_onboarding(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic)
+        logic.on_approach_answer(True, 6.0)
+        assert logic.state == State.TURNING
+        logic.on_tick(7.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        actions = logic.on_listen_state("empty:short-reject", 8.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_DEST_RETRY
+
+    def test_retry_after_empty_on_turn_failed_onboarding(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        arrive_and_ask(logic)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(7.0, NavStatus.FAILED)
+        assert logic.state == State.IDLE
+        actions = logic.on_listen_state("empty:ghost", 8.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_DEST_RETRY
+
+    # -- ③ 두 번째 빈손 → 떠남 예고 → 홈 복귀 --------------------------------
+
+    def test_second_empty_leads_to_leaving_then_home(self):
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home())
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)   # 1차 되묻기
+        logic.on_listen_state("empty:ghost", 25.0)   # 2차 빈손 -> leaving
+        assert logic._dest_prompt_stage == "leaving"
+
+        before = logic.on_tick(25.0 + DEST_RETRY_RETURN_SEC - 0.1, NavStatus.NONE)
+        assert before == []
+
+        actions = logic.on_tick(25.0 + DEST_RETRY_RETURN_SEC, NavStatus.NONE)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_LEAVING_NOTICE
+        assert logic._dest_prompt_stage == "notice"
+
+        actions = logic.on_tick(
+            25.0 + DEST_RETRY_RETURN_SEC + LEAVING_GRACE_SEC, NavStatus.NONE
+        )
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._dest_prompt_stage is None
+
+    def test_no_home_gives_notice_without_navigate(self):
+        logic = MissionLogic(wake_doa_sign=1.0)   # 홈 미지정
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)
+        logic.on_listen_state("empty:ghost", 25.0)
+        logic.on_tick(25.0 + DEST_RETRY_RETURN_SEC, NavStatus.NONE)   # 예고
+        actions = logic.on_tick(
+            25.0 + DEST_RETRY_RETURN_SEC + LEAVING_GRACE_SEC, NavStatus.NONE
+        )
+        assert not any(isinstance(a, Navigate) for a in actions)
+
+    # -- ④ 폴백(신호 유실 대비) ----------------------------------------------
+
+    def test_fallback_fires_only_after_deadline(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        just_before = logic.on_tick(
+            2.0 + DEST_PROMPT_FALLBACK_SEC - 0.1, NavStatus.NONE
+        )
+        assert just_before == []
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC, NavStatus.NONE)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_DEST_RETRY
+
+    def test_ear_busy_holds_the_fallback(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("open", 2.0 + DEST_PROMPT_FALLBACK_SEC - 0.1)
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 5.0, NavStatus.NONE)
+        assert actions == []
+        assert logic._dest_prompt_stage == "asked"
+
+    # -- ⑤ 대화가 다른 경로로 넘어가면 사다리는 죽는다 -----------------------
+
+    def test_intent_arrival_clears_the_ladder(self):
+        """LLM-unknown 도 포함한다 — 음성 노드가 스스로 되묻고 재청취를
+        여니 미션까지 겹쳐 되물으면 안 된다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_intent(make_intent(intent="unknown"), None, BOUNDS, True, 3.0)
+        assert logic._dest_prompt_stage is None
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 5.0, NavStatus.NONE)
+        assert actions == []
+
+    def test_wake_clears_the_ladder(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_wake(3.0 + WAKE_CONSUMED_GUARD_SEC + 0.1)
+        assert logic._dest_prompt_stage is None
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 5.0, NavStatus.NONE)
+        assert actions == []
+
+    # -- ⑥ 사다리가 없거나 이미 지난 단이면 전진하지 않는다 -------------------
+
+    def test_empty_without_ladder_is_noop(self):
+        logic = MissionLogic()
+        assert logic.on_listen_state("empty", 1.0) == []
+
+    def test_empty_in_leaving_stage_does_not_advance(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)
+        logic.on_listen_state("empty:ghost", 25.0)
+        assert logic._dest_prompt_stage == "leaving"
+        actions = logic.on_listen_state("empty:ghost", 26.0)
+        assert actions == []
+        assert logic._dest_prompt_stage == "leaving"
+
+    # -- ⑦ 되묻기는 정확히 한 번 ----------------------------------------------
+
+    def test_retry_said_exactly_once_across_three_empties(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        all_actions = []
+        all_actions += logic.on_listen_state("empty:ghost", 20.0)
+        all_actions += logic.on_listen_state("empty:ghost", 25.0)
+        all_actions += logic.on_listen_state("empty:ghost", 26.0)
+        retries = [
+            a for a in all_actions if isinstance(a, Say) and a.text == MSG_DEST_RETRY
+        ]
+        assert len(retries) == 1
+
+    # -- ⑧ E-stop 중엔 멈추고, 해제 뒤 _to_idle 이 지운다 --------------------
+
+    def test_estop_holds_the_ladder_and_release_clears_it(self):
+        logic = MissionLogic(wake_doa_sign=1.0)
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_estop(True, 3.0)
+        assert logic.state == State.ESTOPPED
+
+        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 100.0, NavStatus.NONE)
+        assert actions == []
+        assert logic._dest_prompt_stage == "asked"
+
+        logic.on_estop(False, 3.1)
+        actions = logic.on_tick(
+            3.1 + logic.estop_release_grace_sec + 0.01, NavStatus.NONE
+        )
+        assert logic.state == State.IDLE
+        assert logic._dest_prompt_stage is None

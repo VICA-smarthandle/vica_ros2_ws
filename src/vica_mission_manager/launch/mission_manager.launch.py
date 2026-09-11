@@ -130,6 +130,11 @@ def generate_launch_description() -> LaunchDescription:
             # 뒤 복귀를 재개한다(2026-09-10 사용자 승인 흐름). 기준은
             # 브레이크가 걸린 시각 — 청취 창(음성 쪽) 길이와는 무관하다.
             DeclareLaunchArgument("return_resume_sec", default_value="15.0"),
+            # 온보딩("이제 어디로 가고 싶으신가요?") 뒤 STT 가 빈손으로
+            # 닫히면 한 번 되묻고, 그래도 빈손이면 이만큼 더 기다렸다 떠남을
+            # 예고한다(실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 —
+            # 근거는 mission_logic.DEST_RETRY_RETURN_SEC 주석.
+            DeclareLaunchArgument("dest_retry_return_sec", default_value="15.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -187,6 +192,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "return_resume_sec": ParameterValue(
                             LaunchConfiguration("return_resume_sec"),
+                            value_type=float,
+                        ),
+                        "dest_retry_return_sec": ParameterValue(
+                            LaunchConfiguration("dest_retry_return_sec"),
                             value_type=float,
                         ),
                     }

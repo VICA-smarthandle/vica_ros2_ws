@@ -58,6 +58,7 @@ from .mission_logic import (
     NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
     RETURN_RESUME_SEC,
+    DEST_RETRY_RETURN_SEC,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -146,6 +147,11 @@ class MissionManagerNode(Node):
         # (2026-09-10 사용자 승인 흐름). 기준은 브레이크가 걸린 시각 —
         # 청취 창(음성 쪽) 길이와는 무관하다.
         self.declare_parameter("return_resume_sec", RETURN_RESUME_SEC)
+        # 온보딩("이제 어디로 가고 싶으신가요?") 뒤 STT 가 빈손으로 닫히면
+        # 한 번 되묻고, 그래도 빈손이면 이만큼 더 기다렸다 떠남을 예고한다
+        # (실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 — 근거는
+        # mission_logic.DEST_RETRY_RETURN_SEC 주석.
+        self.declare_parameter("dest_retry_return_sec", DEST_RETRY_RETURN_SEC)
         # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 60 % = 0.3 m/s.
         # 등록 목적지 주행과 달리 감속 사다리를 쓰지 않고 처음부터 끝까지 이 값이다.
         # 2026-09-09 실측: 7.77 m 접근에 19.6 초로, 이 값이 그 시간의 주범이다
@@ -242,6 +248,8 @@ class MissionManagerNode(Node):
             return_resume_sec=float(self.get_parameter("return_resume_sec").value),
             handle_side_min_yaw_rad=math.radians(
                 float(self.get_parameter("handle_side_min_yaw_deg").value)),
+            dest_retry_return_sec=float(
+                self.get_parameter("dest_retry_return_sec").value),
             estop_release_grace_sec=float(self.get_parameter("estop_release_grace_sec").value),
             approach_stages=approach_stages,
             nav_retry_limit=retry_limit,
@@ -363,10 +371,13 @@ class MissionManagerNode(Node):
             callback_group=self._main_group,
         )
         # 청취 상태 — 무응답 시계를 귀가 바쁜 동안 멈춘다 (mission_logic
-        # on_listen_state 주석, 2026-08-30).
+        # on_listen_state 주석, 2026-08-30). 빈손(empty:*)은 온보딩 되묻기
+        # 사다리도 전진시키므로(2026-09-11) 반환값을 버리지 않고 실행한다.
         self.create_subscription(
             String, "/vica/listen_state",
-            lambda msg: self.logic.on_listen_state(msg.data, self._now()), 10,
+            lambda msg: self._run_actions(
+                self.logic.on_listen_state(msg.data, self._now())),
+            10,
             callback_group=self._main_group,
         )
 
