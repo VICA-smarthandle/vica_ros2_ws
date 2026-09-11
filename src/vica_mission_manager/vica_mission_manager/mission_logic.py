@@ -245,7 +245,9 @@ class Haptic:
     pattern: str
 
 
-Action = Union[Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic]
+Action = Union[
+    Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic, SpinInPlace, StopSpeech
+]
 
 
 # ---- 멘트 (v1 임시 카피 — 시각장애인 관점 감수는 미결 사항 #4) ----------------
