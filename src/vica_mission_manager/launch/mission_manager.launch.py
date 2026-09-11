@@ -108,7 +108,7 @@ def generate_launch_description() -> LaunchDescription:
             # 1.0 s)과 detection_gate 의 stable 1.0 s + still window 3.0 s 를
             # 더한 바닥값이 4.2~4.5 s 라 여유가 1.5 s 뿐이었다 — 8.0 으로 올린다
             # (2026-09-10 재검토. 근거는 mission_logic.SEEK_LOOK_SEC 주석).
-            DeclareLaunchArgument("seek_look_sec", default_value="8.0"),
+            DeclareLaunchArgument("seek_look_sec", default_value="6.0"),
             # 근접 호출(2026-09-10 확장). 부른 사람이 이보다 가까우면 접근 goal
             # (1.1 m)이 이미 지나간 자리라 걸어가지 않고 그 자리에서 바로
             # 질문한다. vica_perception detection_gate 의 min_distance_m 과 값은
