@@ -1,0 +1,14 @@
+string map_id
+
+string zones_json
+
+bool apply_now
+---
+bool accepted
+
+string reason
+string message
+
+int32 zone_count
+
+bool applied

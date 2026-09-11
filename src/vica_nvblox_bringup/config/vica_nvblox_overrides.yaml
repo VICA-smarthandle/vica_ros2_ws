@@ -1,0 +1,23 @@
+/**:
+  ros__parameters:
+    mapping_type: human_with_static_tsdf
+    use_segmentation: true
+    multi_mapper.remove_small_connected_components: false
+    decay_tsdf_rate_hz: 2.5
+    decay_dynamic_occupancy_rate_hz: 5.0
+    static_mapper:
+      esdf_slice_min_height: 0.05
+      esdf_slice_max_height: 0.9
+      esdf_slice_height: 0.10
+      tsdf_decay_factor: 0.95
+      tsdf_set_free_distance_on_decayed: true
+      tsdf_decayed_free_distance_vox: 4.0
+      exclude_last_view_from_decay: false
+    dynamic_mapper:
+      esdf_slice_min_height: 0.05
+      esdf_slice_max_height: 0.9
+      esdf_slice_height: 0.10
+      occupied_region_decay_probability: 0.30
+      free_region_decay_probability: 0.60
+      exclude_last_view_from_decay: false
+      occupancy_decay_to_free: true

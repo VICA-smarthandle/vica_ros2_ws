@@ -1,0 +1,91 @@
+robot_health_monitor_node:
+  ros__parameters:
+    diagnostics_topic: /diagnostics_agg
+
+    publish_period_sec: 1.0
+
+    reminder_interval_sec: 300.0
+
+    latched_reminder_interval_sec: 10.0
+
+    clear_confirm_ticks: 2
+
+    nav2_state_poll_period_sec: 2.0
+    nav2_lifecycle_node: /bt_navigator
+
+    nav2_call_timeout_sec: 5.0
+
+    emergency_stop_timeout_sec: 0.5
+    safety_state_timeout_sec: 1.0
+    tf_timeout_sec: 3.0
+    robot_state_timeout_sec: 3.0
+
+    diagnostics_timeout_sec: 5.0
+
+    map_frame: map
+    base_frame: base_footprint
+
+    component_names:
+      - motor
+      - safety
+      - localization
+      - navigation
+      - lidar
+      - perception
+      - guidance
+      - voice
+      - app
+
+    motor:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 15.0
+
+    safety:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 15.0
+
+    localization:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 30.0
+
+    navigation:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 45.0
+
+    lidar:
+      required: true
+      observable: true
+      severity: 3
+      grace_sec: 20.0
+
+    perception:
+      required: false
+      observable: true
+      severity: 2
+      grace_sec: 45.0
+
+    guidance:
+      required: false
+      observable: false
+      severity: 3
+      grace_sec: 20.0
+
+    voice:
+      required: false
+      observable: false
+      severity: 2
+      grace_sec: 60.0
+
+    app:
+      required: false
+      observable: false
+      severity: 1
+      grace_sec: 30.0

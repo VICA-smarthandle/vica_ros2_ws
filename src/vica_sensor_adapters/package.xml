@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_sensor_adapters</name>
+  <version>0.0.0</version>
+  <description>
+    센서 원본을 VICA 표준 프레임·규격으로 바꿔 주는 어댑터 모음이다.
+    imu_base_link_adapter 는 D455 IMU 를 base_link 기준으로 다시 내면서 기동 직후
+    정지 구간에서 추정한 자이로 편향을 뺀다. vslam_covariance_adapter 는 VSLAM
+    오도메트리의 공분산을 EKF 가 쓸 수 있는 값으로 채운다.
+  </description>
+  <maintainer email="rlaalstj2954@gmail.com">ji_w</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
