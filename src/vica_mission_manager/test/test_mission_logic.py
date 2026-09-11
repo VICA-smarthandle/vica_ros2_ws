@@ -47,6 +47,7 @@ from vica_mission_manager.mission_logic import (
     RETURN_RESUME_SEC,
     MSG_DEST_RETRY,
     DEST_PROMPT_FALLBACK_SEC,
+    DEST_ANSWER_WAIT_SEC,
     DEST_RETRY_RETURN_SEC,
     doa_to_spin_yaw,
     wrap_to_pi,
@@ -2556,24 +2557,25 @@ class TestOnboardingDestPrompt:
     # -- ③ 두 번째 빈손 → 떠남 예고 → 홈 복귀 --------------------------------
 
     def test_second_empty_leads_to_leaving_then_home(self):
-        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home())
+        """dest_retry_return_sec 를 주면 되묻기 뒤 빈손에서 그만큼 더 기다렸다
+        예고한다(launch 로 조정 가능한 여유)."""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home(),
+                             dest_retry_return_sec=15.0)
         logic.on_wake_doa(175.0, True, 1.0)
         logic.on_approach_answer(True, 2.0)
         logic.on_listen_state("empty:ghost", 20.0)   # 1차 되묻기
         logic.on_listen_state("empty:ghost", 25.0)   # 2차 빈손 -> leaving
         assert logic._dest_prompt_stage == "leaving"
 
-        before = logic.on_tick(25.0 + DEST_RETRY_RETURN_SEC - 0.1, NavStatus.NONE)
+        before = logic.on_tick(25.0 + 15.0 - 0.1, NavStatus.NONE)
         assert before == []
 
-        actions = logic.on_tick(25.0 + DEST_RETRY_RETURN_SEC, NavStatus.NONE)
+        actions = logic.on_tick(25.0 + 15.0, NavStatus.NONE)
         says = [a for a in actions if isinstance(a, Say)]
         assert says and says[0].text == MSG_LEAVING_NOTICE
         assert logic._dest_prompt_stage == "notice"
 
-        actions = logic.on_tick(
-            25.0 + DEST_RETRY_RETURN_SEC + LEAVING_GRACE_SEC, NavStatus.NONE
-        )
+        actions = logic.on_tick(25.0 + 15.0 + LEAVING_GRACE_SEC, NavStatus.NONE)
         assert logic.state == State.RETURNING
         assert any(isinstance(a, Navigate) for a in actions)
         assert logic._dest_prompt_stage is None
@@ -2590,6 +2592,21 @@ class TestOnboardingDestPrompt:
         )
         assert not any(isinstance(a, Navigate) for a in actions)
 
+    def test_default_retry_return_is_immediate_notice(self):
+        """사용자 결정(2026-09-11 실기): 15초 → 되묻기 → 15초 → 예고 → 3초.
+        되묻기 뒤 빈손에서 따로 더 기다리지 않는다(기본값 0초)."""
+        assert DEST_RETRY_RETURN_SEC == 0.0
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home())
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)
+        logic.on_listen_state("empty:ghost", 20.0)   # 1차 되묻기
+        logic.on_listen_state("empty:ghost", 25.0)   # 2차 빈손 -> leaving
+        actions = logic.on_tick(25.0, NavStatus.NONE)   # 바로 다음 tick 에 예고
+        says = [a for a in actions if isinstance(a, Say)]
+        assert says and says[0].text == MSG_LEAVING_NOTICE
+        actions = logic.on_tick(25.0 + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert any(isinstance(a, Navigate) for a in actions)
+
     # -- ④ 폴백(신호 유실 대비) ----------------------------------------------
 
     def test_fallback_fires_only_after_deadline(self):
@@ -2604,14 +2621,58 @@ class TestOnboardingDestPrompt:
         says = [a for a in actions if isinstance(a, Say)]
         assert says and says[0].text == MSG_DEST_RETRY
 
-    def test_ear_busy_holds_the_fallback(self):
+    def test_speech_holds_the_clock_but_open_does_not(self):
+        """음성이 '창 열림(open)'을 알려도 시계는 흐른다 — 질문 뒤 창은 30초라
+        열림을 잡으면 15초 시계가 무의미해진다(실기 2026-09-11). 사용자가
+        말을 시작한 신호(speech)만 시계를 잡는다."""
         logic = MissionLogic(wake_doa_sign=1.0)
         logic.on_wake_doa(175.0, True, 1.0)
         logic.on_approach_answer(True, 2.0)
-        logic.on_listen_state("open", 2.0 + DEST_PROMPT_FALLBACK_SEC - 0.1)
-        actions = logic.on_tick(2.0 + DEST_PROMPT_FALLBACK_SEC + 5.0, NavStatus.NONE)
+        logic.on_dest_prompt_spoken(20.0)
+        logic.on_listen_state("open", 20.2)
+        assert logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC - 0.1, NavStatus.NONE) == []
+        actions = logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC, NavStatus.NONE)
+        assert any(isinstance(a, Say) and a.text == MSG_DEST_RETRY for a in actions)
+
+        logic2 = MissionLogic(wake_doa_sign=1.0)
+        logic2.on_wake_doa(175.0, True, 1.0)
+        logic2.on_approach_answer(True, 2.0)
+        logic2.on_dest_prompt_spoken(20.0)
+        logic2.on_listen_state("open", 20.2)
+        logic2.on_listen_state("speech", 30.0)
+        actions = logic2.on_tick(20.0 + DEST_ANSWER_WAIT_SEC + 2.0, NavStatus.NONE)
         assert actions == []
-        assert logic._dest_prompt_stage == "asked"
+        assert logic2._dest_prompt_stage == "asked"
+
+    # -- ④-1 시계는 멘트 재생이 끝난 시점부터 ---------------------------------
+
+    def test_answer_wait_starts_when_prompt_tts_ends(self):
+        """온보딩·되묻기 재생이 끝났다고 노드가 알려주면(on_dest_prompt_spoken)
+        그 시점 + DEST_ANSWER_WAIT_SEC 에 전진한다 — 폴백 40초를 기다리지
+        않는다(실기 2026-09-11: 사다리 한 판이 80초 넘게 걸렸다)."""
+        logic = MissionLogic(wake_doa_sign=1.0, return_destination=make_home())
+        logic.on_wake_doa(175.0, True, 1.0)
+        logic.on_approach_answer(True, 2.0)          # 온보딩 Say, 폴백 42.0
+        logic.on_dest_prompt_spoken(20.0)            # 온보딩 재생 끝
+        assert logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC - 0.1, NavStatus.NONE) == []
+        actions = logic.on_tick(20.0 + DEST_ANSWER_WAIT_SEC, NavStatus.NONE)
+        assert any(isinstance(a, Say) and a.text == MSG_DEST_RETRY for a in actions)
+        assert logic._dest_prompt_stage == "retried"
+
+        logic.on_dest_prompt_spoken(38.0)            # 되묻기 재생 끝
+        assert logic.on_tick(38.0 + DEST_ANSWER_WAIT_SEC - 0.1, NavStatus.NONE) == []
+        t_notice = 38.0 + DEST_ANSWER_WAIT_SEC
+        actions = logic.on_tick(t_notice, NavStatus.NONE)          # leaving(0초)
+        actions += logic.on_tick(t_notice + 0.1, NavStatus.NONE)   # 예고
+        assert any(isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions)
+        actions = logic.on_tick(t_notice + 0.1 + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+        assert any(isinstance(a, Navigate) for a in actions)
+
+    def test_prompt_spoken_without_ladder_is_noop(self):
+        logic = MissionLogic()
+        assert logic.on_dest_prompt_spoken(1.0) == []
+        assert logic._dest_prompt_deadline is None
 
     # -- ⑤ 대화가 다른 경로로 넘어가면 사다리는 죽는다 -----------------------
 

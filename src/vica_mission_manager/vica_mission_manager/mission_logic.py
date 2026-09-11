@@ -377,14 +377,21 @@ MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말
 # 경우(재청취를 음성 노드가 스스로 여는 "안내와 관련된 요청이 아니에요")는
 # 범위 밖이다 — on_intent 가 그 도착만으로 이 사다리를 청산한다.
 MSG_DEST_RETRY = "잘 듣지 못했습니다. 어디로 가고 싶으신가요?"
-# 음성의 빈손 신호가 유실됐을 때의 보험. 힌트+온보딩 TTS 재생(≈14초) + 청취
-# 창 15초 + STT 여유를 덮어야 하므로 이만큼 크다 — 정상 경로는 그 신호가
-# 먼저 와 이 시계보다 훨씬 먼저 사다리를 전진시킨다.
+# 답을 기다리는 시간 — 온보딩·되묻기 **재생이 끝난 시점**(노드가 tts_done 으로
+# 알려주는 on_dest_prompt_spoken)부터 센다. 음성의 질문 뒤 청취 창은 30초
+# (확인 질문용)라 그 창의 빈손 신호를 기다리면 한 단이 30초가 되고, 사다리
+# 한 판이 80초를 넘겼다(2026-09-11 실기). 접근 질문의 8초처럼 미션이 직접
+# 잰다. 사용자가 말을 시작하면(listen_state "speech") 시계를 잡는다 —
+# 창이 열렸다는 신호("open")만으로는 잡지 않는다.
+DEST_ANSWER_WAIT_SEC = 15.0
+# tts_done 이 끝내 안 왔을 때의 보험. 힌트+온보딩 재생(≈14초) + 답 대기를
+# 덮어야 하므로 이만큼 크다 — 정상 경로는 on_dest_prompt_spoken 이 먼저 와
+# 이 시계를 DEST_ANSWER_WAIT_SEC 로 갈아 끼운다.
 DEST_PROMPT_FALLBACK_SEC = 40.0
-# 되묻기도 빈손이면 이만큼 더 기다렸다 떠남을 예고한다. RETURN_RESUME_SEC
-# (위 "도착 후 대화" 절)과 값·뜻이 같다 — 사용자가 아직 붙어 있을 수 있어
-# 예고 없이 곧장 출발하지 않는다.
-DEST_RETRY_RETURN_SEC = 15.0
+# 되묻기 뒤 빈손에서 예고까지 더 기다리는 시간. 사용자 결정(2026-09-11 실기):
+# "15초 → 되묻기 → 15초 → 예고 → 3초" — 이미 두 번 기다렸으므로 곧장
+# 예고한다(0). launch `dest_retry_return_sec` 로 늘릴 수 있다.
+DEST_RETRY_RETURN_SEC = 0.0
 
 # 손잡이 위치 안내 (사용자 승인 문구, 2026-09-10 사용자 결정). 회전 여부와
 # 무관하게 수락 직후·온보딩 직전에 항상 나간다 — 회전해서 손잡이를 내준
@@ -1006,6 +1013,10 @@ class MissionLogic:
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
         self._ear_grace_until: Optional[float] = None
+        # 사용자가 실제로 말을 시작했는가("speech") — 창이 열렸을 뿐("open")
+        # 인 상태와 구분한다. 온보딩 되묻기 사다리의 시계는 이것만 본다.
+        self._ear_speaking = False
+        self._ear_speech_since: Optional[float] = None
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -1620,11 +1631,19 @@ class MissionLogic:
             if not self._ear_busy:
                 self._ear_busy_since = now
             self._ear_busy = True
+            if state == "speech":
+                if not self._ear_speaking:
+                    self._ear_speech_since = now
+                self._ear_speaking = True
+            else:
+                self._ear_speaking = False
         elif state == "closed":
             self._ear_busy = False
+            self._ear_speaking = False
             self._ear_grace_until = now + EAR_GRACE_SEC
         else:   # "empty" 또는 "empty:이유"
             self._ear_busy = False
+            self._ear_speaking = False
             self._ear_grace_until = None
         # 온보딩 뒤 빈손 되묻기 사다리(2026-09-11): 빈손이 실제로 도착하면
         # 폴백 시계(DEST_PROMPT_FALLBACK_SEC)까지 기다리지 않고 곧장
@@ -1635,6 +1654,33 @@ class MissionLogic:
             "asked", "retried",
         ):
             return self._advance_dest_prompt(now)
+        return []
+
+    def _dest_prompt_holds(self, now: float) -> bool:
+        """온보딩 되묻기 사다리의 시계를 잡아둘 이유가 있는가.
+
+        _ear_holds 와 달리 "창이 열려 있다(open)"는 잡지 않는다 — 질문 뒤
+        청취 창은 30초라 열림을 잡으면 DEST_ANSWER_WAIT_SEC 가 무의미해진다.
+        사용자가 말을 시작한 신호(speech)와, 말이 STT 를 지나 LLM 으로 가는
+        유예(closed 뒤 EAR_GRACE_SEC)만 잡는다. 상한(EAR_HOLD_MAX_SEC)은
+        닫힘 신호 유실 대비다.
+        """
+        if (self._ear_speaking and self._ear_speech_since is not None
+                and now - self._ear_speech_since <= EAR_HOLD_MAX_SEC):
+            return True
+        return (self._ear_grace_until is not None
+                and now < self._ear_grace_until)
+
+    def on_dest_prompt_spoken(self, now: float) -> list:
+        """온보딩(MSG_APPROACH_ONBOARDING)·되묻기(MSG_DEST_RETRY) 재생이
+        끝났다 — 답 대기 시계(DEST_ANSWER_WAIT_SEC)는 여기서부터 센다.
+        on_approach_question_spoken 과 같은 방식이다: 재생에 몇 초가 걸리는지는
+        TTS 만 알아 노드가 tts_done 문구 대조로 알려준다. 안 오면
+        _arm_dest_prompt·_advance_dest_prompt 가 걸어 둔 폴백(DEST_PROMPT_
+        FALLBACK_SEC)이 탈출을 맡는다.
+        """
+        if self._dest_prompt_stage in ("asked", "retried"):
+            self._dest_prompt_deadline = now + DEST_ANSWER_WAIT_SEC
         return []
 
     def _ear_holds(self, now: float) -> bool:
@@ -1955,9 +2001,10 @@ class MissionLogic:
         켠다 — 회전 생략·회전 성공·회전 실패, 온보딩이 나가는 세 자리 모두
         여기를 부른다.
 
-        deadline 은 음성의 빈손 신호(on_listen_state 의 empty:*)가 유실됐을
-        때의 보험(DEST_PROMPT_FALLBACK_SEC) 이다 — 정상 경로는 그 신호가
-        먼저 와 on_listen_state 가 더 일찍 전진시킨다.
+        deadline 은 우선 보험(DEST_PROMPT_FALLBACK_SEC)으로 건다 — 정상 경로는
+        온보딩 재생이 끝날 때 노드가 on_dest_prompt_spoken 을 불러
+        DEST_ANSWER_WAIT_SEC 짜리 진짜 시계로 갈아 끼우고, 그 전에 음성의
+        빈손 신호(on_listen_state 의 empty:*)가 오면 그것이 더 일찍 전진시킨다.
 
         끊긴 옛 복귀 사다리(_return_interrupted)를 함께 잊는다 — 사람 접근은
         그 사다리가 도는 중에도 카메라로 열릴 수 있어(2026-09-10 설계), 새
@@ -2263,13 +2310,13 @@ class MissionLogic:
             # 온보딩 뒤 빈손 되묻기 사다리 (2026-09-11). 위 두 블록 중 하나가
             # 이번 tick 에 state 를 이미 바꿨을 수 있으므로(SEEKING 진입,
             # _go_home 의 RETURNING 전이) state 를 다시 본다 — 같은 이유로
-            # 위 두 사다리도 서로 state 를 재확인한다. 빈손 신호를 실제로
-            # 받는 동안(_ear_holds)은 폴백 시계가 앞서 끝나도 기다린다 —
-            # 도착 후 대화의 무응답 사다리와 같은 규칙이다.
+            # 위 두 사다리도 서로 state 를 재확인한다. 사용자가 말하는 동안
+            # (_dest_prompt_holds: speech·LLM 유예)은 시계가 끝나도 기다린다.
+            # 창이 열렸다는 것(open)만으로는 기다리지 않는다 — 그 창은 30초다.
             if (self.state == State.IDLE and self._dest_prompt_stage is not None
                     and self._dest_prompt_deadline is not None
                     and now >= self._dest_prompt_deadline
-                    and not self._ear_holds(now)):
+                    and not self._dest_prompt_holds(now)):
                 actions.extend(self._advance_dest_prompt(now))
 
         elif self.state == State.TURNING:

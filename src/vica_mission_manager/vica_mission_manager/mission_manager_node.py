@@ -52,7 +52,9 @@ from .home_storage import HomeStorage, build_home
 from .mission_logic import (
     HANDLE_SIDE_MIN_YAW_RAD,
     Haptic,
+    MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_QUESTION,
+    MSG_DEST_RETRY,
     MSG_HANDLE_HINT,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
@@ -591,6 +593,10 @@ class MissionManagerNode(Node):
         # 순간에 내면 1200ms 진동이 TTS 큐에서 밀린 멘트보다 먼저 끝난다.
         if MSG_HANDLE_HINT in msg.data:
             self._run_actions(self.logic.on_handle_hint_spoken(self._now()))
+        # 온보딩·되묻기 재생이 끝난 시점부터 답 대기 15초를 센다(2026-09-11).
+        # 로직이 사다리 중이 아니면 무시하므로 이중 방어다.
+        if MSG_APPROACH_ONBOARDING in msg.data or MSG_DEST_RETRY in msg.data:
+            self._run_actions(self.logic.on_dest_prompt_spoken(self._now()))
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
         self.logic.on_arrival_question_spoken(self._now())

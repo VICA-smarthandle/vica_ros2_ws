@@ -134,7 +134,7 @@ def generate_launch_description() -> LaunchDescription:
             # 닫히면 한 번 되묻고, 그래도 빈손이면 이만큼 더 기다렸다 떠남을
             # 예고한다(실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 —
             # 근거는 mission_logic.DEST_RETRY_RETURN_SEC 주석.
-            DeclareLaunchArgument("dest_retry_return_sec", default_value="15.0"),
+            DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
