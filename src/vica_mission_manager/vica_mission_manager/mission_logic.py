@@ -361,7 +361,7 @@ MSG_APPROACH_QUESTION = (
 MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
 MSG_APPROACH_ONBOARDING = (
-    "안녕하세요? 반갑습니다! 저에게 말을 거실 때는 '비카야'라고 불러주세요. "
+    "저에게 말을 거실 때는 '비카야'라고 불러주세요. "
     "자, 이제 어디로 가고 싶으신가요?"
 )
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
