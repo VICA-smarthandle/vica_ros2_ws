@@ -148,6 +148,100 @@ bool arriveTailPending = false;
 #define US_FRAME_H1   0xAA
 #define US_FRAME_H2   0x55
 
+// ── 터치센서 (D11, 2026-09-05 인수인계 문서 기준) ──────────────────────
+// **idle HIGH / 터치 LOW** 인 active-low 타입이다. 2026-09-04 에 "잡으면 HIGH"
+// 로 잘못 알고 짰던 것을 문서 실측(idle=HIGH, touch=LOW, idle noise 0/994)
+// 으로 바로잡았다.
+//
+// INPUT_PULLUP 을 쓴다 — OUT 선이 빠지면 핀이 HIGH 로 뜨므로 **단선 = 놓음**이
+// 되어 07-30 결정의 NC fail-safe 가 그대로 성립한다. 풀업 없이 INPUT 이면
+// 단선 시 값이 떠서 '잡음'으로 오판할 수 있다.
+//
+// 상향 프레임 5B: AA 56 seq flags xor (xor 는 seq^flags).
+// 초음파 프레임(AA 55)에 얹지 않고 헤더를 가른 이유는 두 가지다.
+//   * 주기가 다르다. 초음파 4.8Hz 는 측정 시간이 정하는 물리 한계인데, 손 놓음
+//     판정 유예는 0.5초라 그사이 샘플이 2~3개뿐이다.
+//   * 8B 를 9B 로 늘리면 헤더가 같아, 옛 젯슨 파서가 체크섬 실패와 재동기를
+//     반복하며 **초음파까지 함께** 조용히 멈춘다.
+//
+// [판정은 여기서 하지 않는다] 3초 진입도 0.5초 놓침도 mission_manager 몫이다.
+// 이 펌웨어는 "그 순간 잡고 있나"만 20Hz 로 보낸다.
+//
+// [시간 브리지] 이 센서는 **터치 중에 출력이 LOW/HIGH 로 빠르게 튄다.** 반면
+// idle 은 994회 측정에서 흔들림 0 이었다(인수인계 문서 §2). 그래서 디바운스도
+// 적분 필터도 실패했다 — 튀는 신호를 세면 여러 번 발동하거나 아예 무반응이 된다.
+// 신호를 세지 않고 **마지막으로 LOW 를 본 시각** 하나만 기억한다.
+//     touched = (now - lastLowMs < TOUCH_HOLD_MS)
+// 평소엔 LOW 가 절대 안 나오므로 LOW 가 한 번이라도 보이면 진짜 터치고, 터치 중
+// HIGH 가 끼어들어도 200ms 안에 다음 LOW 가 오면 끊기지 않는다. 채터링을
+// 필터링하는 게 아니라 무시하는 구조다. 이것도 판정이 아니라 신호 정리다 —
+// 사람 손의 3초·0.5초와는 자릿수가 다르다.
+#define TOUCH_PIN        11
+#define TOUCH_FRAME_H1   0xAA
+#define TOUCH_FRAME_H2   0x56
+#define TOUCH_FLAG_ON    0x01
+#define TOUCH_PERIOD_MS  50    // 20Hz. 판정 유예 0.5초에 10프레임
+#define TOUCH_HOLD_MS    200   // LOW 본 뒤 '잡음' 유지. 터치 중 끊기면 올린다
+
+uint8_t       touchSeq     = 0;
+unsigned long touchLastLow = 0;      // 마지막으로 LOW(터치)를 본 시각
+bool          touchSeenLow = false;  // 부팅 후 LOW 를 한 번이라도 봤나
+unsigned long touchSentAt  = 0;
+
+// ── 진동모터 (D10, 2026-09-04) ─────────────────────────────────────────
+// MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). 나노 GPIO 로 모터를
+// 직접 구동하지 않는다 — 전류 초과. 플라이백 다이오드가 드라이버 쪽에 있다.
+//
+// **수동 명령 전용이다.** 젯슨이 0x10/0x11 을 보내면 그 패턴대로 한 번 떨린다.
+// 상태코드(0~7)와 겹치지 않는 별도 바이트라 applyState() 를 거치지 않는다 —
+// LED·서보는 그대로다. 드라이버 노드는 이 바이트를 안 보내며 bench_test.py
+// --haptic 으로만 쏜다. ESTOP·ARRIVED 진입 시 자동으로 울리는 것(계획서 6.2절)은
+// 별도 결정 사항이라 아직 넣지 않았다. 넣게 되면 applyState() 의 해당 case 에서
+// hapticStart() 를 부르면 된다.
+//
+// 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
+// 멈춘다.
+#define HAPTIC_PIN            10
+#define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
+#define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (비상 패턴)
+#define HAPTIC_SHORT_ON_MS    300   // 2026-09-04 150->300. 모터가 회전 올라올 시간(50~100ms)을 준다
+#define HAPTIC_SHORT_OFF_MS   150
+#define HAPTIC_SHORT_COUNT    3
+#define HAPTIC_LONG_ON_MS     1200  // 2026-09-04 800->1200. 사용자 "더 강하게"
+
+uint8_t       hapticLeft  = 0;      // 남은 ON 횟수
+bool          hapticOn    = false;  // 지금 HIGH 인가
+unsigned long hapticAt    = 0;      // 마지막 전환 시각
+unsigned int  hapticOnMs  = 0;
+unsigned int  hapticOffMs = 0;
+
+void hapticStart(uint8_t count, unsigned int onMs, unsigned int offMs) {
+  // 진행 중이면 새 명령이 덮어쓴다. 겹쳐 쌓지 않는다 — 누적하면 사용자가
+  // 몇 번 떨렸는지로 상황을 못 읽는다.
+  hapticLeft  = count;
+  hapticOnMs  = onMs;
+  hapticOffMs = offMs;
+  hapticOn    = true;
+  hapticAt    = millis();
+  digitalWrite(HAPTIC_PIN, HIGH);
+  hapticLeft--;
+}
+
+void hapticTask(unsigned long now) {
+  if (hapticOn) {
+    if (now - hapticAt >= hapticOnMs) {
+      digitalWrite(HAPTIC_PIN, LOW);
+      hapticOn = false;
+      hapticAt = now;
+    }
+  } else if (hapticLeft > 0 && now - hapticAt >= hapticOffMs) {
+    digitalWrite(HAPTIC_PIN, HIGH);
+    hapticOn = true;
+    hapticAt = now;
+    hapticLeft--;
+  }
+}
+
 const uint8_t US_ADDR7[US_N] = { 0x68, 0x74 };
 
 enum UsPhase { US_TRIG, US_WAIT, US_READ };
@@ -219,6 +313,32 @@ void usSendFrame() {
   f[6] = usDist[1] >> 8;
   f[7] = f[2] ^ f[3] ^ f[4] ^ f[5] ^ f[6];
   Serial.write(f, 8);
+}
+
+// 터치 원시값을 읽어 시간 브리지만 통과시킨다. 판정은 하지 않는다.
+void touchPoll() {
+  unsigned long now = millis();
+
+  if (digitalRead(TOUCH_PIN) == LOW) {   // active-low: LOW = 잡음
+    touchLastLow = now;
+    touchSeenLow = true;
+  }
+  // 부팅 직후 touchLastLow 가 0 이면 now-0 < HOLD 가 잠깐 참이 되어 "잡음"으로
+  // 시작한다. LOW 를 한 번이라도 본 뒤에만 브리지를 적용한다.
+  bool touched = touchSeenLow && (now - touchLastLow < TOUCH_HOLD_MS);
+
+  // 주기 송신. 상태가 안 바뀌어도 계속 보낸다 — 젯슨이 "언제까지 살아 있었나"로
+  // 상향 신선도를 판정하기 때문이다. 조용하면 끊긴 것과 구분이 안 된다.
+  if (now - touchSentAt < TOUCH_PERIOD_MS) return;
+  touchSentAt = now;
+
+  uint8_t f[5];
+  f[0] = TOUCH_FRAME_H1;
+  f[1] = TOUCH_FRAME_H2;
+  f[2] = touchSeq++;
+  f[3] = touched ? TOUCH_FLAG_ON : 0x00;
+  f[4] = f[2] ^ f[3];
+  Serial.write(f, 5);
 }
 
 // 트리거 실패도 WAIT 를 그대로 거친다 — 센서가 빠져 있어도 주기가 흔들리지
@@ -391,6 +511,15 @@ void setup() {
 
   lastRxMillis = millis();
 
+  // 터치센서. active-low 라 풀업을 켠다 — OUT 선이 빠지면 HIGH 로 떠서
+  // '놓음'으로 읽힌다(단선 = 놓음, fail-safe).
+  pinMode(TOUCH_PIN, INPUT_PULLUP);
+  touchSentAt = millis();
+
+  // 진동모터. 부팅 직후 게이트가 떠서 모터가 헛돌지 않게 먼저 LOW 로 잡는다.
+  pinMode(HAPTIC_PIN, OUTPUT);
+  digitalWrite(HAPTIC_PIN, LOW);
+
   // ── 초음파 I2C ──
   // 케이블이 길어 데이터시트 상한(100kHz)의 절반으로 시작한다(§4.2-4).
   // setWireTimeout: SDA 락업 시 25ms 후 자동 복구 — 없으면 loop() 전체가 멎어
@@ -415,13 +544,19 @@ void loop() {
   // ── 시리얼 수신 (1바이트 상태 코드) ────
   if (Serial.available()) {
     int b = Serial.read();
-    if (b >= STATE_MIN && b <= STATE_MAX) {
+    if (b == HAPTIC_CMD_SHORT) {
+      // 햅틱 명령은 워치독을 건드리지 않는다. 링크 생존 판정은 상태코드에만
+      // 묶여 있어야 "젯슨이 살아서 상태를 보내고 있다"는 뜻이 유지된다.
+      hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
+    } else if (b == HAPTIC_CMD_LONG) {
+      hapticStart(1, HAPTIC_LONG_ON_MS, 0);
+    } else if (b >= STATE_MIN && b <= STATE_MAX) {
       lastRxMillis    = now;
       watchdogTripped = false;
       everConnected   = true;   // 최초 1회만 의미 있음
       applyState((uint8_t)b);
     }
-    // 범위 밖 값은 버린다. 잘못된 명령으로 오작동하지 않게 하는 안전장치.
+    // 그 밖의 값은 버린다. 잘못된 명령으로 오작동하지 않게 하는 안전장치.
   }
 
   // ── 워치독: 수신 중 단절만 감지 ────────
@@ -436,6 +571,14 @@ void loop() {
   // ── 초음파 순차 측정 (논블로킹) ─────────
   // 링크 상태와 무관하게 돈다. 젯슨이 조용해도 측정·송신은 계속한다.
   usTask(now);
+
+  // ── 터치센서 (논블로킹) ────────────────
+  // 초음파와 같은 이유로 링크 상태와 무관하게 돈다. 젯슨은 이 프레임이
+  // 끊기는 것으로 상향 두절을 판정하므로, 조용해지면 안 된다.
+  touchPoll();
+
+  // ── 진동 패턴 (논블로킹) ────────────────
+  hapticTask(now);
 
   // ── 서보 슬로우 이동 ───────────────────
   // 한 번에 돌리지 않고 14ms마다 1도씩. 사용자 손목에 충격을 주지 않는다.

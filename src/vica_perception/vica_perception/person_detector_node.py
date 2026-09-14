@@ -38,7 +38,14 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from vica_interfaces.msg import PersonDetection, RobotState
 from vica_interfaces.srv import RequestApproach
 from vica_perception.approach_request_policy import ApproachRequestThrottle
-from vica_perception.detection_gate import DetectionGate, DetectionSample, Point2D
+from vica_perception.detection_gate import (
+    DEFAULT_MAX_DISTANCE_M,
+    DEFAULT_MIN_DISTANCE_M,
+    DetectionGate,
+    DetectionSample,
+    GateThresholds,
+    Point2D,
+)
 from vica_perception.inference_gate import (
     DEFAULT_STATE_TIMEOUT_S,
     InferenceGate,
@@ -65,13 +72,27 @@ class PersonDetectorNode(Node):
         # 주행 중 추론 차단. 끄면 종전대로 항상 추론한다(inference_gate 참고).
         self.declare_parameter("gate_while_moving", True)
         self.declare_parameter("robot_state_timeout_s", DEFAULT_STATE_TIMEOUT_S)
+        # 접근 대상으로 인정할 거리 범위. 기본값은 detection_gate 의 상수 그대로다
+        # (1.5 ~ 4.0 m). 값을 바꾸려면 그 파일의 근거 주석을 먼저 읽을 것 —
+        # 하한은 접근 goal(1.1 m)이 이미 지나간 자리인지, 상한은 도착까지 걸리는
+        # 시간이 근거다. 잘못된 범위(하한 >= 상한)는 GateThresholds 가 기동 때
+        # 예외로 막는다.
+        self.declare_parameter("approach_min_distance_m", DEFAULT_MIN_DISTANCE_M)
+        self.declare_parameter("approach_max_distance_m", DEFAULT_MAX_DISTANCE_M)
 
         self._model = model
         self._conf = float(self.get_parameter("conf_threshold").value)
         self._period_s = 1.0 / float(self.get_parameter("publish_rate_hz").value)
         self._target_frame = str(self.get_parameter("target_frame").value)
 
-        self._gate = DetectionGate()
+        self._approach_min_m = float(
+            self.get_parameter("approach_min_distance_m").value)
+        self._approach_max_m = float(
+            self.get_parameter("approach_max_distance_m").value)
+        self._gate = DetectionGate(GateThresholds(
+            min_distance_m=self._approach_min_m,
+            max_distance_m=self._approach_max_m,
+        ))
         self._infer_gate = InferenceGate(
             state_timeout_s=float(
                 self.get_parameter("robot_state_timeout_s").value),
@@ -112,9 +133,10 @@ class PersonDetectorNode(Node):
                                  self._on_robot_state, 10)
         self.get_logger().info(
             "person_detector_node 시작 (conf %.2f, %.1f Hz, frame %s, "
-            "주행 중 추론 %s)"
+            "주행 중 추론 %s, 접근 거리 %.1f~%.1f m)"
             % (self._conf, 1.0 / self._period_s, self._target_frame,
-               "차단" if self._infer_gate.enabled else "허용"))
+               "차단" if self._infer_gate.enabled else "허용",
+               self._approach_min_m, self._approach_max_m))
 
     # ── 입력 보관 ──────────────────────────────────────────────────────────
     def _on_depth(self, msg: Image) -> None:

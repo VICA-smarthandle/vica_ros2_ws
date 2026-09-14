@@ -62,6 +62,45 @@ US_DIST_MAX_MM: int = 3000   # 유효 실거리 상한
 US_CLEAR_MM: int = 3001      # 범위 내 에코 없음 — max_range 로 발행해 부채꼴을 지운다
 FIRMWARE_US_CYCLE_MS: int = 210  # GAP 5 + WAIT 100, 2채널. 프레임 약 4.8Hz
 
+# ── 상향 터치 프레임 (아두이노 → 젯슨, 2026-09-04 신설 · 09-05 재도입) ───
+# 정본은 펌웨어 touchPoll()이다. 5바이트: AA 56 seq flags xor (xor 는 seq^flags).
+#
+# 센서(D11)는 **idle HIGH / 터치 LOW** 인 active-low 타입이다(2026-09-05 인수인계
+# 문서 실측). 펌웨어가 극성과 '터치 중 튐'을 정리해 flags.bit0 = 1 이면 잡음이다.
+# 젯슨은 그 비트만 믿는다.
+#
+# [왜 초음파 프레임에 얹지 않았나] 둘은 주기가 다르다. 초음파 4.8Hz 는 측정
+# 시간이 정하는 물리 한계인데, 손 놓음 판정 유예는 0.5초라 그사이 샘플이 2~3개
+# 뿐이다. [왜 헤더를 갈랐나] 8바이트를 9바이트로 늘리면 헤더가 같아, 옛 파서가
+# 체크섬 실패 -> 1바이트 밀기를 반복하며 **초음파까지 함께** 멈춘다.
+TOUCH_FRAME_HEADER: bytes = b"\xaa\x56"
+TOUCH_FRAME_LEN: int = 5
+TOUCH_FLAG_CONTACT: int = 0x01   # bit0 = 잡고 있음. bit1~7 예약(0)
+FIRMWARE_TOUCH_PERIOD_MS: int = 50   # 20Hz. 판정 유예 0.5초에 10프레임
+FIRMWARE_TOUCH_HOLD_MS: int = 200    # 시간 브리지. LOW 본 뒤 이만큼은 '잡음'
+
+# ── 하향 햅틱 명령 (젯슨 → 아두이노, 2026-09-04 신설) ──────────────────
+# 상태코드(0~7)와 겹치지 않는 별도 바이트다. applyState()를 거치지 않으므로
+# LED·서보는 그대로이고 D10 의 진동모터만 패턴대로 떨린다.
+#
+# 드라이버 노드(user_guidance_driver_node) 자체는 이 바이트를 스스로 보내지
+# 않는다(SENDABLE_STATE_CODES 에 없다) — 다만 미션 매니저가 손잡이 안내
+# 시점에 /vica/haptic_request 로 자동 발행한다(2026-09-10). bench_test.py
+# --haptic 은 여전히 수동으로 쏠 수 있는 경로다. ESTOP·ARRIVED 진입 시
+# 자동으로 울리는 것(7/28 계획서 6.2절)은 별도 결정 사항이며 아직 넣지 않았다.
+#
+# 패턴은 계획서 6.2절 그대로다. 사용자 요구: "비상제동 = 긴 진동 / 도착 = 짧은 3회".
+HAPTIC_CMD_SHORT: int = 0x10     # 300ms on / 150ms off x 3회 (도착 패턴)
+# 1200ms on x 1회 — 손잡이 안내(2026-09-10)가 이 "비상" 패턴을 그대로
+# 재사용하기로 한 것은 사용자 결정이다(같은 결정). 나중에 진짜 비상 진동을
+# 붙이면 두 쓰임이 같은 패턴을 공유해 구분이 안 되는 문제가 생길 수 있다 —
+# 그때 패턴을 나누는 것을 고려한다.
+HAPTIC_CMD_LONG: int = 0x11
+FIRMWARE_HAPTIC_SHORT_ON_MS: int = 300   # 2026-09-04 150->300. 회전 올라올 시간
+FIRMWARE_HAPTIC_SHORT_OFF_MS: int = 150
+FIRMWARE_HAPTIC_SHORT_COUNT: int = 3
+FIRMWARE_HAPTIC_LONG_ON_MS: int = 1200   # 2026-09-04 800->1200
+
 
 def firmware_arrival_duration_sec() -> float:
     """도착 애니메이션이 스스로 복귀할 때까지의 실제 재생 시간(초).

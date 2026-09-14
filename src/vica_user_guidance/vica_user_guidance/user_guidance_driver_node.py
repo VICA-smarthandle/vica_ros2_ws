@@ -14,8 +14,10 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from vica_interfaces.msg import SmartHandleState, TurnGuide
 
@@ -26,8 +28,10 @@ from .guidance_priority import (
     parse_goal_event,
     resolve_state_code,
 )
+from .range_tf_gate import RangeTfGate
 from .serial_link import SerialLink
-from .timebase import sec_to_ns
+from .timebase import is_fresh_ns, sec_to_ns
+from .touch_frame import TouchFrameAccumulator, resolve_contact
 from .ultrasonic_frame import FrameAccumulator
 
 
@@ -58,6 +62,11 @@ class UserGuidanceDriverNode(Node):
         # 열 수 없다.
         self.declare_parameter("ultrasonic_enabled", True)
         self.declare_parameter("ultrasonic_rate_hz", 20.0)  # 프레임 4.8Hz 의 4배
+        # 상향 읽기 주기. 초음파·터치가 이 한 루프를 공유한다(스트림이 하나다).
+        self.declare_parameter("uplink_rate_hz", 20.0)
+        self.declare_parameter("touch_enabled", True)
+        self.declare_parameter("touch_stale_sec", 0.5)
+        self.declare_parameter("touch_publish_min_interval_sec", 0.1)
         self.declare_parameter(
             "ultrasonic_topics", ["/ultrasonic/front_left", "/ultrasonic/front_right"]
         )
@@ -72,6 +81,13 @@ class UserGuidanceDriverNode(Node):
         # costmap 이 낡은 값을 새것으로 착각한다.
         self.declare_parameter("ultrasonic_measurement_delay_ms", [210, 105])
         self.declare_parameter("ultrasonic_stale_warn_sec", 2.0)
+        # TF 가 없는 동안에는 Range 를 보내지 않는다(range_tf_gate 참고).
+        # 2026-09-07: TF 34 초 공백에서 Nav2 RangeSensorLayer 가 미포착 예외로
+        # controller_server 를 죽였다. 문제가 생기면 이 값을 false 로 되돌린다.
+        self.declare_parameter("ultrasonic_tf_gate", True)
+        # local_costmap 의 global_frame 과 같아야 한다. 그 층이 조회하는 변환을
+        # 우리가 미리 대신 확인하는 것이므로, 다른 프레임을 보면 의미가 없다.
+        self.declare_parameter("ultrasonic_tf_target_frame", "odom")
 
         self.cue_timeout_ns = sec_to_ns(
             float(self.get_parameter("cue_timeout_sec").value)
@@ -110,6 +126,14 @@ class UserGuidanceDriverNode(Node):
         self.create_subscription(TurnGuide, "/vica/turn_guide", self.cb_turn, 10)
         self.create_subscription(Bool, "/estop_state", self.cb_estop, 10)
         self.create_subscription(String, "/vica_goal_event", self.cb_goal, 10)
+        # 햅틱 명령 (2026-09-04). 주행 중에는 이 노드가 포트를 잡고 있어
+        # bench_test.py 가 못 붙는다 — 그래서 여기를 거친다. 이 노드 자체는
+        # 스스로 보내지 않는다 — 미션 매니저가 손잡이 안내 시점에 자동
+        # 발행한다(2026-09-10). ESTOP·ARRIVED 진입 시 자동 트리거는 별도
+        # 결정 사항이다.
+        self.create_subscription(
+            String, "/vica/haptic_request", self.cb_haptic_request, 10
+        )
 
         self.pub_state = self.create_publisher(
             SmartHandleState, "/vica/smart_handle_state", 10
@@ -126,9 +150,36 @@ class UserGuidanceDriverNode(Node):
             clock=self.steady_clock,
         )
 
+        # ── 터치 상태는 enable 여부와 무관하게 **먼저** 초기화한다 ──────────
+        # 2026-09-04 사고: touch_enabled=false 면 _setup_touch() 를 건너뛰는데
+        # diag_loop 가 그 안에서만 만들어지던 touch_contact 를 읽어 첫 진단 tick 에
+        # 노드가 죽었다(AttributeError) → 펌웨어 워치독 → 빨간불. 진단이 읽는
+        # 필드는 어떤 설정에서도 존재해야 한다.
+        self.touch_enabled = bool(self.get_parameter("touch_enabled").value)
+        self.touch_contact = False
+        self.touch_last_frame_ns = None
+        self.touch_stale_ns = sec_to_ns(
+            float(self.get_parameter("touch_stale_sec").value)
+        )
+        self.touch_pub_min_ns = sec_to_ns(
+            float(self.get_parameter("touch_publish_min_interval_sec").value)
+        )
+        self._touch_pub_last_ns = None
+
+        # 상향 시리얼은 한 스트림이다. 초음파와 터치가 각자 read 하면 서로 바이트를
+        # 뺏어 양쪽 다 프레임이 깨진다. 읽기는 uplink_loop 한 곳에서만 하고, 읽은
+        # 바이트를 두 누적기에 먹인다.
         self.us_enabled = bool(self.get_parameter("ultrasonic_enabled").value)
         if self.us_enabled:
             self._setup_ultrasonic()
+        if self.touch_enabled:
+            self._setup_touch()
+        if self.us_enabled or self.touch_enabled:
+            self.create_timer(
+                1.0 / float(self.get_parameter("uplink_rate_hz").value),
+                self.uplink_loop,
+                clock=self.steady_clock,
+            )
 
         self.get_logger().info(
             "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event"
@@ -249,8 +300,15 @@ class UserGuidanceDriverNode(Node):
 
         connected = self.link.connected
         msg.connected = connected
-        msg.user_contact = False    # 터치센서 미장착 확정
-        # 상향 통신이 없어 실제 관측이 아니다. connected와 같은 값이며 [미검증]이다.
+
+        # 터치는 상향이 살아 있을 때만 사실이다. stale 인데 마지막 값을 그대로 내면
+        # 죽은 센서가 "잡고 있다"고 말하게 된다 — 모드가 그 값으로 갈리므로
+        # 반드시 false 로 떨어뜨린다. 두 필드 모두 __init__ 에서 무조건 초기화된
+        # 값을 읽으므로 touch_enabled 가 어느 쪽이든 여기서 죽지 않는다.
+        msg.uplink_fresh = self._uplink_fresh(self.now_ns())
+        msg.user_contact = resolve_contact(self.touch_contact, msg.uplink_fresh)
+
+        # 서보·LED 는 상향으로 관측하지 않는다. connected와 같은 값이며 [미검증]이다.
         msg.servo_ok = connected
         msg.left_led_ok = connected
         msg.right_led_ok = connected
@@ -260,6 +318,36 @@ class UserGuidanceDriverNode(Node):
         msg.last_state_code = self.link.last_state_code
         msg.write_error_count = self.link.write_error_count
         self.pub_state.publish(msg)
+
+    # ── 햅틱 ───────────────────────────────────────────
+
+    HAPTIC_PATTERNS = {
+        "short": protocol.HAPTIC_CMD_SHORT,
+        "long": protocol.HAPTIC_CMD_LONG,
+    }
+
+    def cb_haptic_request(self, msg: String) -> None:
+        """진동모터 수동 명령. 패턴 이름 하나를 받아 바이트 하나를 흘려보낸다.
+
+        10 Hz 상태코드 사이에 끼워 넣는 것이라 LED·서보에는 영향이 없다 — 펌웨어가
+        이 바이트를 applyState() 로 보내지 않는다. send() 가 아니라 send_raw() 를
+        쓰는 이유는 last_state_code 를 더럽히지 않기 위해서다.
+        """
+        name = msg.data.strip().lower()
+        code = self.HAPTIC_PATTERNS.get(name)
+        if code is None:
+            self.get_logger().warn(
+                f"[HAPTIC] 모르는 패턴 '{msg.data}' — "
+                f"{sorted(self.HAPTIC_PATTERNS)} 중 하나여야 합니다. 무시합니다."
+            )
+            return
+        ok = self.link.send_raw(code, self.now_ns())
+        if ok:
+            self.get_logger().info(f"[HAPTIC] {name} (0x{code:02X}) 전송")
+        else:
+            self.get_logger().warn(
+                f"[HAPTIC] {name} 전송 실패 — 포트 상태 fault={self.link.fault_code}"
+            )
 
     # ── 초음파 ─────────────────────────────────────────
 
@@ -295,27 +383,117 @@ class UserGuidanceDriverNode(Node):
         self.us_last_frame_ns = None
         self.us_stale_warned = False
 
-        self.create_timer(
-            1.0 / float(self.get_parameter("ultrasonic_rate_hz").value),
-            self.ultrasonic_loop,
-            clock=self.steady_clock,
+        # TF 게이트. 조회는 여기서 tf2 로 하고, 판정은 range_tf_gate 가 한다.
+        self.us_tf_gate_enabled = bool(
+            self.get_parameter("ultrasonic_tf_gate").value
         )
-        self.get_logger().info(f"Ultrasonic Range publishing: {topics}")
+        self.us_tf_target = str(
+            self.get_parameter("ultrasonic_tf_target_frame").value
+        )
+        self.us_gate = RangeTfGate(channels=protocol.US_CHANNELS)
+        if self.us_tf_gate_enabled:
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
 
-    def ultrasonic_loop(self) -> None:
-        """상향 프레임을 읽어 채널별 Range 로 발행한다.
+        self.get_logger().info(
+            f"Ultrasonic Range publishing: {topics} "
+            f"(TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
+            f", 기준 프레임 {self.us_tf_target})"
+        )
 
-        발행은 프레임 수신에만 의존한다 — 프레임이 끊기면 저절로 발행이 멎고,
-        costmap 은 stale 판정으로 스스로 값을 만료시킨다. 마지막 값 재발행이나
+    # ── 터치 ───────────────────────────────────────────
+
+    def _setup_touch(self) -> None:
+        self.touch_acc = TouchFrameAccumulator()
+        self.get_logger().info(
+            "Touch sensor uplink enabled (D11, active-low, firmware 200ms bridge)"
+        )
+
+    def _uplink_fresh(self, now_ns: int) -> bool:
+        """상향 터치 프레임이 최근에 왔는가.
+
+        초음파의 stale 시한(2.0초)과 따로 둔다. 터치는 20Hz 라 훨씬 짧아도 되고,
+        길게 잡으면 죽은 센서를 오래 살아 있다고 말하게 된다.
+        touch_enabled=false 면 프레임을 안 읽으므로 항상 False 다.
+        """
+        if not self.touch_enabled:
+            return False
+        return is_fresh_ns(self.touch_last_frame_ns, now_ns, self.touch_stale_ns)
+
+    # ── 상향 공통 ──────────────────────────────────────
+
+    def uplink_loop(self) -> None:
+        """상향 시리얼을 한 번 읽어 초음파·터치 누적기에 함께 먹인다.
+
+        [중요] 읽기는 여기 한 곳뿐이다. 두 곳에서 read 하면 한쪽이 상대의 바이트를
+        가져가 양쪽 프레임이 모두 깨진다. 두 누적기는 각자 자기 헤더만 찾고 나머지
+        바이트는 1개씩 버리므로, 같은 스트림을 두 번 훑어도 서로를 삼키지 않는다.
+
+        초음파 발행은 프레임 수신에만 의존한다 — 프레임이 끊기면 저절로 발행이
+        멎고, costmap 은 stale 판정으로 스스로 값을 만료시킨다. 마지막 값 재발행이나
         range=0 발행은 하지 않는다(인수인계 문서 §4.1 채택 항목).
         """
         now = self.now_ns()
         data = self.link.read_available(now)
-        for frame in self.us_acc.feed(data):
-            self.us_last_frame_ns = now
-            self.us_stale_warned = False
-            self._publish_ranges(frame)
-        self._warn_if_ultrasonic_stale(now)
+
+        if self.us_enabled:
+            for frame in self.us_acc.feed(data):
+                self.us_last_frame_ns = now
+                self.us_stale_warned = False
+                self._publish_ranges(frame)
+            self._warn_if_ultrasonic_stale(now)
+
+        if self.touch_enabled:
+            for frame in self.touch_acc.feed(data):
+                self.touch_last_frame_ns = now
+                if frame.touched != self.touch_contact:
+                    self.touch_contact = frame.touched
+                    # 주기 발행(2Hz)만으로는 0.5초 판정에 샘플이 1개뿐이다. 바뀐
+                    # 순간 한 번 더 내되, 손을 빠르게 두드려도 system_monitor 의
+                    # handle_state 프로브 상한(4Hz)을 넘기지 않게 최소 간격을 둔다.
+                    if not is_fresh_ns(
+                        self._touch_pub_last_ns, now, self.touch_pub_min_ns
+                    ):
+                        self._touch_pub_last_ns = now
+                        self.diag_loop()
+
+    def _range_tf_ok(self, ch: int, stamp) -> bool:
+        """이 stamp 로 `odom -> usonic_*` 를 조회할 수 있는가.
+
+        Nav2 의 RangeSensorLayer 가 곧 할 조회를 우리가 먼저 해 보는 것이다.
+        여기서 안 되면 그쪽에서도 안 되고, 그쪽은 실패를 예외로 던진 뒤 아무도
+        잡지 않아 프로세스가 죽는다(2026-09-07).
+        """
+        if not self.us_tf_gate_enabled:
+            return True
+        try:
+            return bool(
+                self.tf_buffer.can_transform(
+                    self.us_tf_target,
+                    self.us_frame_ids[ch],
+                    Time.from_msg(stamp),
+                )
+            )
+        except TransformException:
+            # 프레임 이름이 아직 그래프에 없는 경우 등. 못 하는 것은 확실하다.
+            return False
+
+    def _log_range_gate(self, ch: int) -> None:
+        """게이트 상태가 바뀐 순간에만 1회 남긴다(10 Hz 로그 폭주 방지)."""
+        changed = self.us_gate.take_transition(ch)
+        if changed is None:
+            return
+        frame_id = self.us_frame_ids[ch]
+        if changed:
+            self.get_logger().info(
+                f"[초음파] {frame_id} TF 복귀 — Range 발행 재개 "
+                f"(보류한 프레임 {self.us_gate.blocked_count(ch)}개)"
+            )
+        else:
+            self.get_logger().warn(
+                f"[초음파] {frame_id} TF 없음 — Range 발행 보류 "
+                "(odom 끊김 동안 Nav2 컨트롤러를 지킨다)"
+            )
 
     def _publish_ranges(self, frame) -> None:
         stamp_base = self.get_clock().now()
@@ -324,10 +502,16 @@ class UserGuidanceDriverNode(Node):
                 # 채널 무효(3회 연속 실패) — 그 채널만 건너뛴다. 한 센서 고장이
                 # 다른 채널을 죽이지 않는다.
                 continue
-            msg = Range()
-            msg.header.stamp = (
+            stamp = (
                 stamp_base - Duration(nanoseconds=self.us_delay_ns[ch])
             ).to_msg()
+            # TF 가 없으면 보내지 않는다. 보내는 순간 Nav2 쪽에서 예외가 난다.
+            allowed = self.us_gate.allow(ch, self._range_tf_ok(ch, stamp))
+            self._log_range_gate(ch)
+            if not allowed:
+                continue
+            msg = Range()
+            msg.header.stamp = stamp
             msg.header.frame_id = self.us_frame_ids[ch]
             msg.radiation_type = Range.ULTRASOUND
             msg.field_of_view = self.us_fov

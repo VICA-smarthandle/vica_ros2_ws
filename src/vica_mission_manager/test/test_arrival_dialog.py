@@ -265,6 +265,17 @@ class TestArrivalNavigateConfirm:
         logic.exit_arrival_dialog()                          # 아무 일 없음
         assert logic.state == State.IDLE
 
+    def test_exit_during_open_seek_window_clears_it(self):
+        """exit_arrival_dialog 는 IDLE 로 가는 길 중 _to_idle() 을 안 거치는
+        유일한 곳이라 탐색 창이 안 비워진다 — 남으면 안내 한 판이 끝난 뒤 낡은
+        복귀각으로 갑자기 돈다."""
+        logic = arrive("restroom")
+        logic._seek_deadline = 999.0
+        logic._seek_return_yaw = 1.23
+        logic.exit_arrival_dialog()
+        assert logic._seek_deadline is None
+        assert logic._seek_return_yaw is None
+
 
 class TestEarHold:
     """무응답 시계는 귀가 바쁜 동안 멈춘다 (2026-08-30 실기 — 답이 STT·LLM

@@ -234,3 +234,44 @@ def test_serial_port_is_not_an_enumeration_dependent_path():
     ]
     assert not configured.startswith("/dev/ttyUSB")
     assert not configured.startswith("/dev/ttyACM")
+
+
+def test_driver_haptic_request_is_manual_only():
+    """/vica/haptic_request 를 구독해 send_raw 로만 보낸다. 스스로 발행하지 않는다.
+
+    자동 트리거(ESTOP·ARRIVED 진입 시 진동)는 별도 결정 사항이다. 이 시험은
+    '노드가 햅틱을 제 판단으로 쏘는 경로가 없다'를 고정한다 — 그 경로가 생기면
+    사용자 요구("내가 신호 줄 때만 울린다")가 깨진다.
+    """
+    text = read(NODE_DIR / "user_guidance_driver_node.py")
+    assert 'create_subscription(\n            String, "/vica/haptic_request"' in text
+    assert 'create_publisher(String, "/vica/haptic_request"' not in text
+    # 햅틱 바이트는 send() 가 아니라 send_raw() 로만 나간다 — last_state_code 보호
+    assert "self.link.send_raw(code" in text
+    # strip_comments_and_docstrings 는 토큰 사이에 공백을 넣어 되붙이므로
+    # "send_raw(" 가 아니라 토큰 "send_raw" 를 센다.
+    code = strip_comments_and_docstrings(text)
+    assert code.count("send_raw") == 1, (
+        "send_raw 호출이 한 곳(cb_haptic_request)이 아니다 — 자동 트리거 의심"
+    )
+
+
+def test_touch_state_is_initialised_before_any_enable_branch():
+    """diag_loop 가 읽는 터치 필드는 touch_enabled 값과 무관하게 __init__ 에서 먼저 만든다.
+
+    2026-09-04 사고: touch_enabled=false 면 _setup_touch() 를 건너뛰는데 diag_loop 가
+    그 안에서만 만들어지던 touch_contact 를 읽어 첫 진단 tick 에 노드가 죽었다
+    (AttributeError) → 펌웨어 워치독 1.5초 → 빨간불. 진단이 읽는 필드는 어떤 설정에서도
+    존재해야 한다. 이 시험은 그 초기화가 enable 분기보다 **앞에** 있음을 고정한다.
+    """
+    text = read(NODE_DIR / "user_guidance_driver_node.py")
+    init_contact = text.index("self.touch_contact = False")
+    init_last = text.index("self.touch_last_frame_ns = None")
+    enable_branch = text.index("if self.touch_enabled:\n            self._setup_touch()")
+    assert init_contact < enable_branch, "touch_contact 초기화가 enable 분기 뒤에 있다"
+    assert init_last < enable_branch, "touch_last_frame_ns 초기화가 enable 분기 뒤에 있다"
+    # diag_loop 는 이 둘만 읽는다 — _setup_touch 안에서 새 필드를 만들어 diag_loop 가
+    # 읽게 하면 같은 사고가 재발한다.
+    setup_body = text.split("def _setup_touch(self)")[1].split("def ")[0]
+    assert "self.touch_contact" not in setup_body
+    assert "self.touch_last_frame_ns" not in setup_body

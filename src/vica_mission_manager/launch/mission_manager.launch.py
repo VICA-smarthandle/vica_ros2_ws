@@ -44,6 +44,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map_yaml", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
+            # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 100 % = 0.5 m/s.
+            # 등록 목적지와 달리 감속 사다리 없이 처음부터 끝까지 이 값이다.
+            # 2026-09-09 실기: 60 % 일 때 접근 19.6 초 -> 100 % 에서 7.9 초.
+            DeclareLaunchArgument(
+                "person_approach_speed_percent", default_value="100.0"),
             # 접근 감속 단계. 두 배열은 순번끼리 짝이며 개수가 같아야 한다.
             # 잔여거리가 1.0 m 이하면 80 %, 0.5 m 이하면 60 %로 최대속도 상한을
             # 내린다. 한 번 내려간 제한은 그 Goal 동안 풀리지 않는다.
@@ -88,6 +93,48 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
             DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
+            # 접근(거절·무응답) 뒤 홈 복귀. 2026-09-04 사용자 결정으로 기본 켬 —
+            # 촬영에서 "물러납니다" 하고 제자리에 서 있는 것이 어색했다.
+            # 끄려면 auto_return_home:=false. 켜면 사람이 부르지 않아도 로봇이
+            # 홈까지 달리므로, 통행이 잦은 곳에서는 끄는 편이 안전하다.
+            DeclareLaunchArgument("auto_return_home", default_value="true"),
+            # 마이크 각도 증가 방향(+1 반시계 / -1 시계, 호출 접근 설계 §5).
+            # 실측값 +1.0 확정(2026-09-10, 컨트롤러가 사용자와 2회 걷기 측정) —
+            # 로봇을 마주 보고 사용자 기준 오른쪽으로 이동 -> 마이크 각도 0°에서
+            # 119°로 증가 -> 반시계 증가 -> Nav2 규약과 같은 부호. 틀리면
+            # 로봇이 호출 방향의 정반대로 돈다.
+            DeclareLaunchArgument("wake_doa_sign", default_value="1.0"),
+            # 고개를 돌린 뒤 사람을 찾는 시간(초). 회전 완료 갱신(1 Hz, 최대
+            # 1.0 s)과 detection_gate 의 stable 1.0 s + still window 3.0 s 를
+            # 더한 바닥값이 4.2~4.5 s 라 여유가 1.5 s 뿐이었다 — 8.0 으로 올린다
+            # (2026-09-10 재검토. 근거는 mission_logic.SEEK_LOOK_SEC 주석).
+            DeclareLaunchArgument("seek_look_sec", default_value="6.0"),
+            # 근접 호출(2026-09-10 확장). 부른 사람이 이보다 가까우면 접근 goal
+            # (1.1 m)이 이미 지나간 자리라 걸어가지 않고 그 자리에서 바로
+            # 질문한다. vica_perception detection_gate 의 min_distance_m 과 값은
+            # 같지만(1.5) 별개 파라미터다 — Mission 은 그 감지기 상수를 모른다.
+            DeclareLaunchArgument("near_call_max_m", default_value="1.5"),
+            # 이보다 가까우면 수락해도 회전하지 않는다 — 손잡이가 뒤로 길게 나와
+            # 있어 이 거리의 180도 회전은 손잡이가 사람을 칠 수 있다
+            # (mission_logic.NEAR_CALL_NO_SPIN_M 주석, 2026-09-10 사용자 결정).
+            DeclareLaunchArgument("near_call_no_spin_m", default_value="1.0"),
+            # 핸들 쪽(로봇 뒤) 호출 사각지대(도) — 정면 사각지대(10°)의
+            # 거울쌍이다. 회전량이 이보다 크면(부채꼴 180°±45°) 소리가 핸들
+            # 옆에서 왔다는 뜻이라 카메라 확인 없이 곧바로 접근 질문을 낸다
+            # (mission_logic.HANDLE_SIDE_MIN_YAW_RAD 주석, 2026-09-10 사용자
+            # 결정). 실기에서 뒤쪽 호출의 DOA 가 163°~185° 안에 들어와 ±45°는
+            # 넉넉한 여유다 — 실기에서 폭을 조정한다.
+            DeclareLaunchArgument("handle_side_min_yaw_deg", default_value="135.0"),
+            # 홈 복귀 중 호출로 브레이크가 걸린 뒤 이만큼 침묵하면 떠나기
+            # 예고를 내고(MSG_LEAVING_NOTICE 재사용) LEAVING_GRACE_SEC(3초)
+            # 뒤 복귀를 재개한다(2026-09-10 사용자 승인 흐름). 기준은
+            # 브레이크가 걸린 시각 — 청취 창(음성 쪽) 길이와는 무관하다.
+            DeclareLaunchArgument("return_resume_sec", default_value="15.0"),
+            # 온보딩("이제 어디로 가고 싶으신가요?") 뒤 STT 가 빈손으로
+            # 닫히면 한 번 되묻고, 그래도 빈손이면 이만큼 더 기다렸다 떠남을
+            # 예고한다(실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 —
+            # 근거는 mission_logic.DEST_RETRY_RETURN_SEC 주석.
+            DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -103,6 +150,10 @@ def generate_launch_description() -> LaunchDescription:
                         "estop_release_grace_sec": LaunchConfiguration(
                             "estop_release_grace_sec"
                         ),
+                        "person_approach_speed_percent": ParameterValue(
+                            LaunchConfiguration("person_approach_speed_percent"),
+                            value_type=float,
+                        ),
                         # 노드는 double 배열로 선언한다. launch 인자는 문자열이라
                         # value_type 을 지정해야 "[1.5, 1.0, 0.5]" 가 배열로 해석된다.
                         "approach_slowdown_distances_m": ParameterValue(
@@ -115,6 +166,38 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),
+                        "auto_return_home": ParameterValue(
+                            LaunchConfiguration("auto_return_home"),
+                            value_type=bool,
+                        ),
+                        "wake_doa_sign": ParameterValue(
+                            LaunchConfiguration("wake_doa_sign"),
+                            value_type=float,
+                        ),
+                        "seek_look_sec": ParameterValue(
+                            LaunchConfiguration("seek_look_sec"),
+                            value_type=float,
+                        ),
+                        "near_call_max_m": ParameterValue(
+                            LaunchConfiguration("near_call_max_m"),
+                            value_type=float,
+                        ),
+                        "near_call_no_spin_m": ParameterValue(
+                            LaunchConfiguration("near_call_no_spin_m"),
+                            value_type=float,
+                        ),
+                        "handle_side_min_yaw_deg": ParameterValue(
+                            LaunchConfiguration("handle_side_min_yaw_deg"),
+                            value_type=float,
+                        ),
+                        "return_resume_sec": ParameterValue(
+                            LaunchConfiguration("return_resume_sec"),
+                            value_type=float,
+                        ),
+                        "dest_retry_return_sec": ParameterValue(
+                            LaunchConfiguration("dest_retry_return_sec"),
+                            value_type=float,
+                        ),
                     }
                 ],
             ),

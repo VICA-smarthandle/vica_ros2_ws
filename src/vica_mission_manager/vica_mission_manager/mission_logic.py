@@ -46,6 +46,9 @@ class State(str, Enum):
     # 정지 거리 1.1 m 가 이 회전의 반경 기준으로 설계돼 있다(설계 6.3절).
     TURNING = "turning"
     RETURNING = "returning"
+    # "비카야"를 듣고 그 방향으로 고개를 돌리는 중(또는 못 찾고 되돌아 도는
+    # 중). 안내 받는 사용자가 아직 없는 구간이다 (호출 접근 설계 §4).
+    SEEKING = "seeking"
     # ---- 목적지 도착 후 대화 (2026-08-30, arrival-dialog-flow) ------------------
     #
     # 도착하면 유형별로 묻고(ASKING_NEXT), 대기를 고르면 시간을 묻고
@@ -214,6 +217,13 @@ class SpinInPlace:
     """
 
     yaw_rad: float
+    # 이 회전이 무엇인지. 로그에만 쓴다.
+    #
+    # 지금 제자리 회전은 세 종류다(수락 뒤 핸들 내주기·호출 방향 보기·못 찾아
+    # 원위치). 셋이 같은 문구로 찍히면 실기에서 "왜 돌았는지"를 사후에 가릴 수
+    # 없다 — 특히 호출 회전과 그 8초 뒤의 원위치 회전은 밖에서 보면 "부르지도
+    # 않았는데 또 돌았다"로 보인다 (2026-09-10 실기 관찰).
+    reason: str = "회전"
 
 
 @dataclass(frozen=True)
@@ -223,7 +233,21 @@ class SetNavSpeedLimit:
     percent: float
 
 
-Action = Union[Say, Navigate, CancelNav, SetNavSpeedLimit]
+@dataclass(frozen=True)
+class Haptic:
+    """손잡이 진동 요청. 노드가 패턴 이름을 그대로 /vica/haptic_request 에
+    발행한다 — 이 모듈은 그 토픽도, 값을 해석하는 펌웨어도 모른다.
+
+    쓸 수 있는 패턴은 드라이버가 아는 두 개뿐이다("short"/"long", 2026-09-10
+    사용자 결정 — HAPTIC_PATTERN_HANDLE_HINT 참고).
+    """
+
+    pattern: str
+
+
+Action = Union[
+    Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic, SpinInPlace, StopSpeech
+]
 
 
 # ---- 멘트 (v1 임시 카피 — 시각장애인 관점 감수는 미결 사항 #4) ----------------
@@ -307,6 +331,13 @@ MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아�
 
 WAIT_MINUTES_CAP = 30
 LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유예
+# 홈 복귀 재개 (2026-09-10 사용자 결정). 복귀 중 호출("비카야")로 브레이크가
+# 걸리면(on_return_brake) 그 순간부터 이 시간만큼 침묵하면 떠나기 예고를
+# 낸다(멘트는 MSG_LEAVING_NOTICE 재사용) — 청취 창(음성 쪽, 약 8초)의 길이는
+# 이 모듈이 모른다. 기준은 항상 "호출이 브레이크를 건 시각" 또는(회전이
+# 끼어들었으면) "그 회전을 마치고 IDLE 로 돌아온 시각" 이며, 절대 두 구간을
+# 이어 붙여 세지 않는다.
+RETURN_RESUME_SEC = 15.0
 # 귀 홀드 (2026-08-30): 무응답 시계는 귀가 바쁜 동안 멈춘다 — 답이 STT·LLM
 # 을 통과하는 동안 8초가 먼저 울려 떠나던 결함. closed(전사 성공) 후 LLM
 # 처리 유예, open 이 닫힘 신호를 잃어도 상한 뒤엔 떠난다(무한 대기 방지).
@@ -341,6 +372,42 @@ MSG_APPROACH_ONBOARDING = (
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
 MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
 
+# ---- 온보딩 뒤 빈손 되묻기 사다리 (실기 2026-09-11, 사용자 결정) --------------
+# 온보딩(MSG_APPROACH_ONBOARDING) 뒤 mission_logic 이 걸던 시계가 아예
+# 없었다 — 음성이 15초 창을 열었는데 STT 가 너무 짧거나 조용해 기각하면
+# (/vica/listen_state 가 "empty:ghost"/"empty:short-reject" 등만 내고) 로봇도
+# 사용자도 조용히 서 있기만 했다. 도착 후 대화의 무응답 사다리
+# (MSG_ARRIVAL_RETRY/_arrival_retried, 위 3절)를 그대로 본떠, 한 번 되묻고
+# 그래도 빈손이면 떠남을 예고한 뒤 홈으로 돌아간다. LLM 이 못 알아들은
+# 경우(재청취를 음성 노드가 스스로 여는 "안내와 관련된 요청이 아니에요")는
+# 범위 밖이다 — on_intent 가 그 도착만으로 이 사다리를 청산한다.
+MSG_DEST_RETRY = "잘 듣지 못했습니다. 어디로 가고 싶으신가요?"
+# 답을 기다리는 시간 — 온보딩·되묻기 **재생이 끝난 시점**(노드가 tts_done 으로
+# 알려주는 on_dest_prompt_spoken)부터 센다. 음성의 질문 뒤 청취 창은 30초
+# (확인 질문용)라 그 창의 빈손 신호를 기다리면 한 단이 30초가 되고, 사다리
+# 한 판이 80초를 넘겼다(2026-09-11 실기). 접근 질문의 8초처럼 미션이 직접
+# 잰다. 사용자가 말을 시작하면(listen_state "speech") 시계를 잡는다 —
+# 창이 열렸다는 신호("open")만으로는 잡지 않는다.
+DEST_ANSWER_WAIT_SEC = 15.0
+# tts_done 이 끝내 안 왔을 때의 보험. 힌트+온보딩 재생(≈14초) + 답 대기를
+# 덮어야 하므로 이만큼 크다 — 정상 경로는 on_dest_prompt_spoken 이 먼저 와
+# 이 시계를 DEST_ANSWER_WAIT_SEC 로 갈아 끼운다.
+DEST_PROMPT_FALLBACK_SEC = 40.0
+# 되묻기 뒤 빈손에서 예고까지 더 기다리는 시간. 사용자 결정(2026-09-11 실기):
+# "15초 → 되묻기 → 15초 → 예고 → 3초" — 이미 두 번 기다렸으므로 곧장
+# 예고한다(0). launch `dest_retry_return_sec` 로 늘릴 수 있다.
+DEST_RETRY_RETURN_SEC = 0.0
+
+# 손잡이 위치 안내 (사용자 승인 문구, 2026-09-10 사용자 결정). 회전 여부와
+# 무관하게 수락 직후·온보딩 직전에 항상 나간다 — 회전해서 손잡이를 내준
+# 경우도 시각장애인은 그 사실을 알 방법이 없다. 같은 순간 HAPTIC_PATTERN_
+# HANDLE_HINT 진동이 울려야 "진동이 나는 곳"이 거짓말이 되지 않는다.
+MSG_HANDLE_HINT = "손잡이는 지금 계신 쪽에 있습니다. 진동이 나는 곳을 잡아주세요."
+# 진동 드라이버가 아는 패턴은 "short"/"long" 둘뿐이다
+# (user_guidance_driver_node.HAPTIC_PATTERNS). 손잡이를 찾는 신호라 짧은
+# 진동은 지나치기 쉬워 "long" 을 쓴다.
+HAPTIC_PATTERN_HANDLE_HINT = "long"
+
 # 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
 # 각 지점은 목적지 하나당 한 번만 안내한다.
@@ -364,18 +431,136 @@ APPROACH_QUESTION_STUCK_SEC = 30.0
 # 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
 # 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
 APPROACH_TURN_TIMEOUT_SEC = 15.0
+# 호출 접근(설계 2026-09-10). "비카야"를 듣고 그쪽으로 고개를 돌린 뒤,
+# 카메라가 사람을 찾을 때까지 기다리는 시간.
+#
+# 8.0 인 이유(2026-09-10 재검토 — 처음 잡은 6.0 은 여유가 1.5 s 뿐이었다):
+# 바닥값은 stable 1.0 s + still window 3.0 s(detection_gate, 5 Hz) 만이 아니다.
+#   - /vica/robot_state 는 1 Hz 발행이라 회전 종료(is_moving=false) 갱신이
+#     최대 1.0 s 늦는다 — 그동안 YOLO 는 여전히 꺼져 있다(SEEKING 진입·이탈
+#     즉시 발행으로 이 지연은 회수했지만, 값 자체는 그 지연 없이도 여유가
+#     있도록 넉넉히 잡는다).
+#   - 회전 중 추론이 끊겨 있었으므로 stable 3.0 s 는 창이 열린 뒤 새로
+#     쌓인다.
+# 바닥값 ≈ 1.0 + 0.2 + 3.0 ≈ 4.2~4.5 s. 젯슨 CPU 경합으로 프레임 간격이
+# detection_gap 0.6 s 를 한 번만 넘겨도 연속이 깨져 처음부터 다시 세므로,
+# 처음엔 8.0 으로 여유를 뒀다.
+# 6.0 으로 내린 이유(2026-09-11 실기, 사용자 결정): 회전이 끝나고 사람이
+# 확인되기까지 실측 1.5~4.0 s(11회, 최대 4.0). 8 초는 사람이 없을 때(오탐·
+# 미검출)만 체감되는 시간이라 짧을수록 좋고, 그동안 "비카야"가 쌓인다.
+# 6.0 은 실측 최댓값에 2 초 여유 — 프레임 간격 리셋 한 번을 견딘다.
+# launch `seek_look_sec` 로 조정한다.
+SEEK_LOOK_SEC = 6.0
+# 이 값과 RETURN_RESUME_SEC(복귀 재개 사다리) 은 서로 대소를 지킬 필요가
+# 없다 — on_wake_doa 가 _return_interrupted 동안 호출 자체를 거절해
+# (2026-09-10 사용자 결정) 탐색 창이 그 사다리와 아예 같은 IDLE 위에 놓이지
+# 않기 때문이다. 이 값을 올려도 사다리와의 우연한 여유(예전엔 8.0 < 15.0
+# 에만 기대고 있었다)를 다시 계산할 필요가 없다.
+# 회전이 시작조차 안 됐을 때(노드 결함 등) 상태에서 빠져나오는 시계.
+# 접근 수락 회전과 같은 값을 쓴다 — 같은 Spin 액션이다.
+SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC
+# 이보다 작은 회전은 하지 않는다. DOA 퍼짐이 ±4~16° 라 10° 미만은 잡음이고,
+# 0 에 가까운 spin 은 behavior server 가 거부하거나 즉시 끝나 무의미하다.
+SEEK_MIN_YAW_RAD = math.radians(10.0)
+# 위 SEEK_MIN_YAW_RAD(정면 사각지대)의 거울쌍 — 핸들 쪽(로봇 뒤) 사각지대다.
+# 이보다 큰 회전량(180°에 가까움)이면 소리가 핸들 부채꼴에서 왔다는 뜻이고,
+# 그 자체가 "이미 핸들 옆에 서 있다"는 증거라 카메라 확인 없이 곧바로 접근
+# 질문을 낸다 — 돌면 오히려 핸들을 사람에게서 빼앗는다(2026-09-10 사용자
+# 결정). 부채꼴 180°±45°, 즉 135°가 경계다.
+#
+# 폭의 근거(2026-09-10 실기): 뒤에서 부른 호출의 DOA 가 163°·181°·185°·
+# 160°·172° 로 전부 180±20° 안에 들어왔다. ±45° 면 넉넉한 여유다.
+HANDLE_SIDE_MIN_YAW_RAD = math.radians(135.0)
+# 같은 호출의 /vica/wake 와 /vica/wake_doa 는 몇 ms 간격으로 온다(2026-09-10
+# 실기 재현). 콜백이 같은 MutuallyExclusive 그룹이라 wake 가 먼저 상태를
+# IDLE 로 내린 뒤에야 wake_doa 가 처리될 수 있는데, 그때 IDLE 만 보고 통과
+# 시키면 "옛 대화를 접었을 뿐"인 wake 를 새 호출로 오인해 SEEKING 이 열린다
+# — 사람이 핸들을 잡고 로봇 뒤에 서 있을 때 "비카야"로 최대 180도 제자리
+# 회전이 터지는 사고.
+#
+# 이 가드가 실제로 재는 것은 두 토픽의 **수신 시각 차**가 아니라 **콜백이
+# 실행된 시각 차**다 — 둘 사이에 긴 콜백이 하나라도 끼면 그만큼 간격이
+# 벌어진다. 같은 MutuallyExclusive 그룹에서 알려진 최악값이
+# mission_manager_node._nav_lock_timeout_sec(2.0초, cancelTask 응답을
+# 기다리는 상한)이다 — 젯슨 CPU 경합에서 이 콜백이 wake 와 wake_doa 사이에
+# 끼어 꽉 채워 걸리면 옛 2.0초 가드와 정확히 같아져, 사람이 핸들을 잡은 채
+# 최대 180도 제자리 회전이 도는 사고가 되살아난다.
+# 3.0초는 그 최악값보다 크게 잡아 여유를 둔 값이다. 같은 호출의 두 토픽
+# 간격을 넉넉히 덮으면서 진짜 새 호출(수 초 뒤)까지 막기에는 여전히 짧다.
+WAKE_CONSUMED_GUARD_SEC = 3.0
 # 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
 # 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
 REAPPROACH_SUPPRESS_SEC = 60.0
-# 사람에게 다가가는 구간의 최대속도 상한. 주행 상한 0.5 m/s 의 60 % = 0.3 m/s 다.
-# 마지막 1.1 m 는 collision_monitor 의 PolygonSlow 가 0.12 m/s 로 한 번 더
-# 줄인다(설계 6.4절).
+# 접근 회전이 끝나 사용자가 손잡이를 받아든 뒤 이만큼은 wake_doa 를 거절한다
+# (2026-09-10 사용자 결정). 이 전이는 wake 가 아니라 회전 완료가 일으킨
+# 것이라 WAKE_CONSUMED_GUARD_SEC 도장(_wake_consumed_at)이 안 찍힌다 —
+# 재청취 창이 만료된 뒤 "비카야, 화장실"처럼 부르면 DOA≈180(핸들 쪽)이
+# 그대로 SEEKING 을 열어, 손잡이를 잡고 로봇 옆에 선 사용자 앞에서 같은
+# 사고가 재현된다.
+#
+# 60초인 이유는 둘이다. 하나, 같은 뜻(방금 상대한 사람을 다시 사고 대상으로
+# 만들지 않는다)의 REAPPROACH_SUPPRESS_SEC 이 이미 60초라 — 임시방편에
+# 숫자를 하나 더 만들지 않고 맞춘다. 둘, 이 규칙 전체가 터치센서가 붙기
+# 전까지의 임시방편이라 — 정식 판정(터치)이 들어올 때 시나리오를 다시
+# 정리하기로 했고, 그 전에 이 숫자만 정교하게 다듬는 것은 값어치가 없다.
+#
+# on_wake 는 이 억제가 이미 살아 있을 때만 now + USER_ATTACHED_SUPPRESS_SEC
+# 로 되감는다(on_wake 참고) — 사용자가 그 사이 다시 말을 걸면 대화가 이어지는
+# 한 계속 막힌다.
+#
+# [수정됨, 2026-09-11] 온보딩 질문("어디로 가고 싶으신가요?") 뒤에 걸리는
+# 시계는 이제 아래 "온보딩 뒤 빈손 되묻기 사다리"(_dest_prompt_stage /
+# _dest_prompt_deadline, _arm_dest_prompt 가 세 온보딩 자리 전부에서 건다)다
+# — 한때 여기 적혀 있던 "시간 제한이 아예 없다"는 더는 사실이 아니다.
+# 그래도 사용자가 **아무 말 없이 60초를 넘긴 뒤** "비카야"라고 부르면(즉
+# 되묻기 사다리도 이미 만료돼 청산된 뒤) 이 억제는 풀려 있어 회전이 그대로
+# 열린다 — 되감기는 그 사이 사용자가 말을 걸었을 때만 돕는다는 뜻은
+# 그대로다.
+#
+# [임시방편] 이 판정의 참뜻은 "사용자가 지금 손잡이를 잡고 있는가"이고,
+# 정답은 터치센서(SmartHandleState.user_contact)다. 그 센서는 지금 하드웨어
+# 결함으로 꺼져 있고(handle-touch-sensor-resume 메모리), 고장이 위험한
+# 쪽으로 난다 — 신호가 안 오면 규약상 항상 false, 즉 "아무도 안 잡았다"로
+# 읽힌다. 그래서 지금은 시간(+되감기)으로 어림한다. 터치센서가 살아나도 이
+# 상수는 지워지는 게 아니라 **덧대는** 조건이 된다 — 시간이 지나도 센서가
+# 여전히 접촉을 본다면 억제를 풀면 안 된다.
+USER_ATTACHED_SUPPRESS_SEC = 60.0
+# 근접 호출(2026-09-10 확장). 탐색 창(IDLE + _seek_deadline) 중 detection_gate 가
+# 거리 하나만으로 TOO_NEAR 거절한 결과(stable=true·approachable=false·
+# distance_m)가 person_detection 원본 토픽으로 들어오면, Mission 이 그 값을 직접
+# 보고 판단한다 — 접근 goal(1.1 m)이 이미 지나간 자리인 사람에게 걸어가는 대신
+# 그 자리에서 바로 질문한다. 부른 사람이 코앞에 있는데 8초 동안 쳐다보기만 하다
+# 말없이 돌아가는 동작(2026-09-10 실기 관찰)을 없앤다.
+#
+# vica_perception.detection_gate.DEFAULT_MIN_DISTANCE_M 과 값은 같지만(1.5) 별개
+# 상수다 — Mission 은 그 감지기 상수를 알 수 없다(패키지 경계, vica_perception 은
+# 이 저장소에서도 건드리지 않는다). 두 값이 우연히 같을 뿐 하나가 다른 하나를
+# 참조하지 않는다 — detection_gate 쪽을 조정해도 이 값은 저절로 안 따라간다.
+NEAR_CALL_MAX_M = 1.5
+# 이보다 가까우면 수락해도 회전하지 않는다(2026-09-10 사용자 결정, 안전).
+# 손잡이가 뒤로 길게 나와 있어 제자리 회전의 실제 스윕이 차체보다 크다 — 이
+# 거리에서 180도를 돌면 손잡이가 사람을 칠 수 있다. Nav2 의 Spin 은 회전 중
+# costmap 충돌을 스스로 검사하지만, 코앞 사람은 costmap 에 잘 안 잡힌다는 실측
+# 기록이 있어(잔상 15.8초, close-person-leaks-into-static) 그 검사에 기댈 수
+# 없다. 이 거리면 사용자가 로봇에 손이 닿으므로 더듬어 손잡이를 찾을 수 있고,
+# 나중에 햅틱이 붙으면 그 단계가 쉬워진다.
+NEAR_CALL_NO_SPIN_M = 1.0
+# 사람에게 다가가는 구간의 최대속도 상한. 주행 상한 0.5 m/s 의 100 % = 0.5 m/s 다.
+# 마지막 1.1 m 는 collision_monitor 의 PolygonSlow 가 0.2 m/s 로 한 번 더
+# 줄인다(설계 6.4절) — 그 구간은 이 값과 무관하다.
+#
+# [60 -> 100, 2026-09-09 실기] 60 % 일 때 7.77 m 접근에 19.6 초가 걸렸다. 속도가
+# 깎이는 곳을 전 구간에서 확인하니 요청·승인·실제 바퀴가 0.300/0.300/0.40 으로
+# 일치했다 — 어디서 막힌 것이 아니라 처음부터 이 값만큼만 허락된 것이었다.
+# 100 % 로 풀고 다시 재니 승인(6.39 m)부터 도착까지 **7.9 초**로, 접근 거리를
+# 4 m 에서 8 m 로 늘렸는데도 종전보다 빨라졌다. 사용자가 그 자리에 서서 다가오는
+# 속도를 직접 확인하고 판정했다.
 #
 # [이름 주의] 이 파일에서 "접근"은 두 가지를 뜻한다. approach_speed.py 의
 # ApproachSpeedLadder 와 MissionLogic.approach_speed_limit_percent 는 **등록
 # 목적지에 가까워질 때의 감속**이고, 여기 PERSON_* 은 **사람에게 다가가는 구간의
 # 고정 상한**이다. 사람 접근에는 사다리를 쓰지 않는다 — 처음부터 끝까지 느리다.
-PERSON_APPROACH_SPEED_PERCENT = 60.0
+PERSON_APPROACH_SPEED_PERCENT = 100.0
 # goal 재전송 임계(m). NavigateToPose 는 preempt 되지만 그때마다 BT 가 처음부터
 # 다시 시작한다. 사람이 조금 흔들릴 때마다 goal 을 바꾸면 재계획만 반복하고 한
 # 발도 못 뗀다(설계 5절).
@@ -388,13 +573,18 @@ TRACK_ID_NONE = 0
 APPROACH_DESTINATION_PREFIX = "approach:"
 APPROACH_DESTINATION_NAME = "접근 대상"
 
-# 접근 세 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이 이 셋이다.
+# 접근 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이다. SEEKING
+# 이 빠지면 회전 중 음성 목적지 요청이 그대로 통과해 Navigate 가 나가고,
+# 진행 중인 SpinInPlace 를 취소하지 않은 채 두 goal 이 동시에 나가게 된다
+# (TURNING 과 같은 처리 — 설계 4절, 2026-09-10).
 _APPROACH_STATES = (
-    State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING
+    State.APPROACHING, State.AWAITING_USER, State.TURNING, State.RETURNING,
+    State.SEEKING,
 )
 # Nav2 goal 이 살아 있는 상태. E-stop·긴급어가 goal 을 취소해야 하는 구간이다.
 _GOAL_ACTIVE_STATES = (
-    State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING
+    State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING,
+    State.SEEKING,
 )
 
 _REJECT_MESSAGES = {
@@ -641,6 +831,21 @@ def check_approach_cancel_gate(state: State, estop_active: bool) -> GateReason:
     return GateReason.OK
 
 
+def wrap_to_pi(rad: float) -> float:
+    """각도를 -π~π 로 접는다 — 언제나 짧은 쪽으로 돈다."""
+    return math.atan2(math.sin(rad), math.cos(rad))
+
+
+def doa_to_spin_yaw(doa_deg: float, sign: float = 1.0) -> float:
+    """마이크 DOA(0~359°, 정면 0 / 핸들 180)를 제자리 회전량(rad)으로.
+
+    SpinInPlace 는 양수 = 반시계다. sign 은 마이크 각도가 반시계로
+    커지면 +1, 시계로 커지면 -1 이며 장비마다 실측으로 정한다 — 틀리면
+    로봇이 정확히 반대로 돈다.
+    """
+    return wrap_to_pi(math.radians(float(doa_deg) * float(sign)))
+
+
 def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
     """도(deg) yaw → 쿼터니언 (x, y, z, w). 변환은 goal 생성 시에만 (함정 2번)."""
     import math
@@ -678,6 +883,13 @@ class MissionLogic:
         auto_return_home: bool = False,
         approach_turn_yaw_rad: float = math.pi,
         arrival_dialog: bool = False,
+        wake_doa_sign: float = 1.0,
+        seek_look_sec: float = SEEK_LOOK_SEC,
+        near_call_max_m: float = NEAR_CALL_MAX_M,
+        near_call_no_spin_m: float = NEAR_CALL_NO_SPIN_M,
+        return_resume_sec: float = RETURN_RESUME_SEC,
+        handle_side_min_yaw_rad: float = HANDLE_SIDE_MIN_YAW_RAD,
+        dest_retry_return_sec: float = DEST_RETRY_RETURN_SEC,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -731,7 +943,78 @@ class MissionLogic:
         self._returning_home: bool = False
         # 수락 후 제자리 회전량. 0.0 이면 회전 없이 예전처럼 바로 끝낸다.
         self.approach_turn_yaw_rad = approach_turn_yaw_rad
+        # 호출 접근. 마이크 각도 증가 방향(+1 반시계 / -1 시계)은 장비 실측값
+        # 이고 노드가 파라미터로 넣어 준다.
+        self.wake_doa_sign = wake_doa_sign
+        self.seek_look_sec = seek_look_sec
+        # 근접 호출 임계값. 근거는 위 상수 정의에 있다.
+        self.near_call_max_m = near_call_max_m
+        self.near_call_no_spin_m = near_call_no_spin_m
+        # 홈 복귀 재개. 근거는 RETURN_RESUME_SEC 주석에 있다.
+        self.return_resume_sec = return_resume_sec
+        # 핸들 쪽 호출 사각지대(위 SEEK_MIN_YAW_RAD 의 거울쌍). 근거는
+        # HANDLE_SIDE_MIN_YAW_RAD 주석에 있다. 실기에서 폭을 조정한다.
+        self.handle_side_min_yaw_rad = handle_side_min_yaw_rad
+        # 온보딩 뒤 빈손 되묻기 사다리의 "leaving" 단 대기시간. 근거는
+        # DEST_RETRY_RETURN_SEC 주석에 있다.
+        self.dest_retry_return_sec = dest_retry_return_sec
+        # on_wake/on_return_brake 가 실제로 상태를 바꾼 시각. on_wake_doa 가
+        # 이 시각으로부터 WAKE_CONSUMED_GUARD_SEC 이내면 거절한다 — 두 토픽의
+        # 도착 순서와 무관하게 결과가 같아지게 하려는 것이다.
+        self._wake_consumed_at: Optional[float] = None
+        # 접근 회전이 끝나 사용자가 손잡이를 받아든 것으로 보는 만료 시각
+        # (USER_ATTACHED_SUPPRESS_SEC). on_wake_doa 가 이 값이 살아 있는 동안
+        # 거절한다. _to_idle() 은 이 값을 비우지 않는다 — 회전 완료가 곧장
+        # _to_idle() 을 부르므로 거기서 지우면 억제가 걸리기도 전에 사라진다.
+        # on_wake 는 이 값이 이미 살아 있을 때만 now + USER_ATTACHED_SUPPRESS_SEC
+        # 로 되감는다 — 사용자가 계속 말을 거는 동안은 대화가 이어지는 한
+        # 막힌 채로 있고, 말이 없으면 이 값을 지나는 순간 자연히 풀린다.
+        # 만료는 시간 비교(now 와의 대소)만으로 판정하므로 별도로 None 처리할
+        # 지점이 필요 없다 — 지울 곳을 하나라도 놓치면 억제가 예상보다 오래
+        # 남거나 일찍 사라지는 실수가 생기는데, 그 실수 자체를 없앤 것이다.
+        self._user_attached_until: Optional[float] = None
+        # 원래 자세로 돌아가기 위해 돌아야 할 누적 각도. 탐색 창 중에 다시
+        # 부르면 또 돌므로 덮어쓰지 않고 더한다. None 이면 지금이 복귀 회전이다.
+        self._seek_return_yaw: Optional[float] = None
+        # 회전을 마치고 사람을 찾는 창의 만료 시각. 이 값이 살아 있는 동안
+        # 상태는 IDLE 이다 — 접근 관문을 건드리지 않으려는 설계다.
+        self._seek_deadline: Optional[float] = None
         self._turn_deadline: Optional[float] = None
+        # 홈 복귀 재개(2026-09-10). "복귀가 끊겨 있다"는 사실과 "언제 재개할지"
+        # 를 따로 든다 — 탐색 회전(SEEKING)이 끼어들어도 사실은 살아남아야
+        # 하고, 시각은 회전이 끝나 IDLE 로 돌아온 시점 기준으로 다시 잡아야
+        # 한다. _return_interrupted 는 _to_idle() 이 지우지 않는다(그게
+        # 이 기능의 요점이다) — 지우는 자리는 on_intent·on_app_destination
+        # (새 목적지로 주행 시작)과 on_return_home_request(관리자 직접 복귀
+        # 명령), 그리고 이 사다리 자신이 실제로 복귀를 재개하는 순간뿐이다.
+        self._return_interrupted: bool = False
+        self._return_resume_deadline: Optional[float] = None
+        self._return_notice_given: bool = False
+        # 온보딩 뒤 빈손 되묻기 사다리(2026-09-11). stage 는 "asked" →
+        # "retried" → "leaving" → "notice" 순으로 전진하며, None 이면 사다리가
+        # 안 걸려 있다는 뜻이다. _arm_dest_prompt/_advance_dest_prompt/
+        # _forget_dest_prompt 참고.
+        self._dest_prompt_stage: Optional[str] = None
+        self._dest_prompt_deadline: Optional[float] = None
+        # 근접 호출로 들어온 AWAITING_USER 에서 수락해도 회전을 생략할지.
+        # on_person_detection 이 거리로 정하고 on_approach_answer 가 소비한다.
+        # AWAITING_USER 로 새로 들어올 때마다(정상 접근·근접 호출 두 진입점
+        # 모두) 다시 명시적으로 정해지므로 묵은 값이 남을 자리가 없다.
+        self._near_call_no_spin: bool = False
+        # 이 AWAITING_USER 에 "걸어서 다가간 적이 없는가"(Ruling 10, I-1).
+        # 핸들 쪽 호출(on_wake_doa)만 세운다 — 정상 접근·근접 호출은 걸어서건
+        # 코앞이건 실제로 그 사람 쪽으로 움직였으므로 물러날 여지가 있다.
+        # 핸들 쪽은 사람이 이미 손잡이 자리(로봇 뒤)에 서 있어 물러날 곳이
+        # 없다: 거절·무응답에 복귀 주행을 걸면 출발 회전이 손잡이로 그
+        # 사람을 훑는다. _near_call_no_spin(회전 생략 여부)과는 뜻이 달라
+        # 겹쳐 쓰지 않는다.
+        self._never_approached: bool = False
+        # 손잡이 힌트(MSG_HANDLE_HINT) 재생이 끝나면 진동을 내야 하는가(I-2,
+        # 2026-09-11). `Haptic` 을 힌트와 같은 순간에 내면 1200ms 진동이 TTS
+        # 큐에서 밀린 멘트보다 먼저 끝나 "진동이 나는 곳"이 거짓말이 된다 —
+        # on_approach_question_spoken 과 같은 방식으로, 노드가 재생 완료를
+        # 알려줄 때(on_handle_hint_spoken)까지 여기 담아 둔다.
+        self._pending_handle_hint: bool = False
         # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
         self._estop_announced = False
 
@@ -751,6 +1034,10 @@ class MissionLogic:
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
         self._ear_grace_until: Optional[float] = None
+        # 사용자가 실제로 말을 시작했는가("speech") — 창이 열렸을 뿐("open")
+        # 인 상태와 구분한다. 온보딩 되묻기 사다리의 시계는 이것만 본다.
+        self._ear_speaking = False
+        self._ear_speech_since: Optional[float] = None
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
@@ -809,6 +1096,12 @@ class MissionLogic:
         nav_ready: bool,
         now: float,
     ) -> list:
+        # LLM 이 뭐든 intent 를 만들어 왔다는 것 자체가 대화를 넘겨받았다는
+        # 뜻이라 온보딩 되묻기 사다리부터 청산한다 — navigate 가 아닌 것도
+        # 포함한다. LLM-unknown("안내와 관련된 요청이 아니에요")은 음성
+        # 노드가 스스로 되묻고 재청취를 열므로, 미션까지 겹쳐 되물으면 두
+        # 번 묻는 사고가 난다.
+        self._forget_dest_prompt()
         if intent.intent != "navigate":
             # 질문/잡담 등은 LLM(reply)과 ros_tts_node 몫 — 여기선 관여하지 않는다.
             return []
@@ -821,9 +1114,12 @@ class MissionLogic:
             return [Say(MSG_BUSY, priority="response")]
 
         if self.state in _APPROACH_STATES:
-            # 접근·질문·복귀 중에는 새 목적지를 받지 않는다. 특히
-            # AWAITING_USER 는 방금 던진 질문의 답을 기다리는 구간이라, 그 자리에
-            # 다른 목적지를 끼워 넣으면 누구의 요청인지 알 수 없게 된다(설계 4절).
+            # 접근·질문·회전(TURNING)·탐색(SEEKING)·복귀 중에는 새 목적지를
+            # 받지 않는다. 특히 AWAITING_USER 는 방금 던진 질문의 답을
+            # 기다리는 구간이라, 그 자리에 다른 목적지를 끼워 넣으면 누구의
+            # 요청인지 알 수 없게 된다(설계 4절). TURNING·SEEKING 은 진행 중인
+            # SpinInPlace 를 취소하지 않은 채 Navigate 가 나가는 사고를 막는다
+            # (설계 4절, 2026-09-10).
             return [Say(MSG_APPROACH_BUSY, priority="response")]
 
         if intent.need_confirm:
@@ -870,6 +1166,15 @@ class MissionLogic:
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
+        # 탐색 창(SEEKING)이 열린 채로 이 길을 타면 창이 살아남는다 — 이 길은
+        # _to_idle() 을 거치지 않기 때문이다. 비우지 않으면 이번 안내가 끝나고
+        # 한참 뒤 낡은 복귀각으로 갑자기 도는 사고가 난다(2026-09-10 재현).
+        self._seek_deadline = None
+        self._seek_return_yaw = None
+        # 끊긴 복귀를 잊는다 — 이번이 그 재개다(음성으로 새 목적지를 받았으니
+        # 사용자는 이미 응답한 것이다). 안 지우면 이번 안내를 마치고 한참 뒤
+        # 낡은 복귀 사다리가 갑자기 홈으로 떠난다.
+        self._forget_interrupted_return()
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(say_destination(MSG_START, dest.name)),
@@ -882,6 +1187,12 @@ class MissionLogic:
         if self.state != State.CONFIRMING:
             return None
         return self._confirming_dest_id
+
+    @property
+    def return_interrupted(self) -> bool:
+        """복귀 재개 사다리가 도는 중인가. on_wake_doa 와 노드의 진단 로그가
+        같은 값을 보게 하려고 공개한다(wake_guard_active 와 같은 이유)."""
+        return self._return_interrupted
 
     def on_confirm_answer(
         self,
@@ -934,18 +1245,24 @@ class MissionLogic:
         """진행 중인 모든 활동을 강제 정리한다 (앱 선점·전체 취소 전용).
 
         상태별 정리가 흩어지면 하나를 빠뜨려 유령(낡은 타이머·보관 목적지)이
-        생긴다 — 한곳에 모은다. Nav2 goal 이 있는 상태만 CancelNav 를 낸다.
-        TURNING 의 spin 은 nav goal 이 아니라 여기서 못 끊는다 — 몇 초짜리라
-        새 Navigate 가 큐에서 자연히 이어받는다.
+        생긴다 — 한곳에 모은다. goal 이 살아 있는 상태(_GOAL_ACTIVE_STATES) 는
+        전부 CancelNav 를 낸다 — TURNING·SEEKING 의 spin 도 nav goal 과 같은
+        Nav2 task 라 여기서 끊긴다(2026-09-10 재현: 예전엔 등록 목적지 상태만
+        취소해 SEEKING 중 앱 선점이 spin 을 못 끊고 Navigate 와 함께 나가
+        /cmd_vel_req 에 두 발행자가 붙었다). `CancelNav(None)` 이 안전한 것은
+        on_emergency 의 E-stop 경로가 이미 증명한다.
         """
         # 말부터 끊는다 — 이후 붙는 새 멘트(취소 확인·새 안내 시작)가
         # 낡은 멘트 뒤에 줄 서지 않게 한다 (2026-09-01 큐 청소).
         actions: list = [StopSpeech(), SetNavSpeedLimit(NO_SPEED_LIMIT)]
-        if (self.state in (State.NAVIGATING, State.APPROACHING, State.RETURNING)
-                and self.active_destination is not None):
+        if self.state in _GOAL_ACTIVE_STATES:
             actions.append(CancelNav(self.active_destination))
         self._reset_arrival_dialog()
         self._to_idle()   # 보관 목적지·재시도 예약·확인 대기까지 전부 정리
+        # 끊긴 복귀 재개 사다리도 함께 청산한다(2026-09-10 사용자 결정) —
+        # 앱 선점·취소는 사용자가 명시적으로 내린 지시라, 그 뒤 로봇이
+        # 서 있는 것은 정당하다.
+        self._forget_interrupted_return()
         return actions
 
     def on_app_destination(self, dest: Optional[Destination],
@@ -983,6 +1300,8 @@ class MissionLogic:
             return [], GateReason.POSE_INVALID
         if not nav_ready:
             return [], GateReason.NAV_NOT_READY
+        # 끊긴 복귀를 잊는다 — 관리자가 새 목적지로 선점했으니 이번이 그
+        # 재개다(on_intent 와 같은 이유). _force_clear_all 이 한다.
         actions = self._force_clear_all(now)
         self.state = State.NAVIGATING
         self.active_destination = dest
@@ -1010,6 +1329,10 @@ class MissionLogic:
         if self.estop_active or self.state == State.ESTOPPED:
             return [], GateReason.ESTOP_ACTIVE
         if self.state == State.IDLE:
+            # 끊긴 복귀 재개 사다리가 도는 중일 수 있다(2026-09-10 사용자
+            # 결정) — 조용히 수락하는 척만 하고 사다리를 그대로 두면 18초
+            # 뒤 로봇이 취소를 무시한 것처럼 보인다.
+            self._forget_interrupted_return()
             return [], GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
         actions = self._force_clear_all(now)
         actions.append(Say(MSG_CANCELED, priority="response"))
@@ -1193,6 +1516,94 @@ class MissionLogic:
         self._response_deadline = now + self.approach_response_timeout_sec
         return []
 
+    def on_handle_hint_spoken(self, now: float) -> list:
+        """손잡이 위치 안내(MSG_HANDLE_HINT) 재생이 끝났다 — 이 순간 진동을
+        낸다(I-2, 2026-09-11).
+
+        `Haptic` 을 힌트와 같은 순간에 내면 HAPTIC_CMD_LONG 1200ms 가 TTS
+        큐에서 밀린 문구보다 먼저 끝나 "진동이 나는 곳을 잡아주세요"가
+        재생될 즈음엔 이미 멎어 있다. on_approach_question_spoken 과 같은
+        방식으로, 재생 시간은 TTS 만 알 수 있어 노드가 문구 대조로 이
+        시점을 알려준다 — 상태기계는 여기서도 ROS 를 모른다.
+
+        `_pending_handle_hint` 가 없으면(힌트를 낸 적이 없거나 이미
+        소비했으면) 아무 일도 하지 않는다 — 이중 발사 방지.
+        """
+        if not self._pending_handle_hint:
+            return []
+        self._pending_handle_hint = False
+        return [Haptic(HAPTIC_PATTERN_HANDLE_HINT)]
+
+    def _enter_awaiting_user(self, now: float) -> list:
+        """질문을 던지고 AWAITING_USER 로 들어간다.
+
+        걸어서 도착한 정상 접근(on_tick 의 APPROACHING→SUCCEEDED), 코앞이라
+        걸어가지 않는 근접 호출(on_person_detection), 핸들 쪽에서 와 카메라
+        확인도 없이 곧장 들어오는 호출(on_wake_doa) 셋 다 여기로 온다 — 질문
+        멘트·재청취·탈출용 안전망(APPROACH_QUESTION_STUCK_SEC)이 세 경로에서
+        완전히 같기 때문이다. 회전 여부(_near_call_no_spin)는 호출부가 이 함수
+        호출 전후로 각자 정한다 — 여기서는 다루지 않는다.
+        """
+        self.state = State.AWAITING_USER
+        # 여기서는 탈출용 안전망만 건다. 진짜 응답 8초는 질문 재생이 끝난
+        # 시점(on_approach_question_spoken)부터 — 도착 후 대화와 같은 방식.
+        # 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
+        self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
+        self._approach.reset()
+        return [
+            SetNavSpeedLimit(NO_SPEED_LIMIT),
+            Say(MSG_APPROACH_QUESTION, priority="response", expects_reply=True),
+        ]
+
+    def on_person_detection(
+        self,
+        track_id: int,
+        distance_m: float,
+        stable: bool,
+        approachable: bool,
+        now: float,
+    ) -> list:
+        """/vica/person_detection 원본 결과 (근접 호출, 2026-09-10 확장).
+
+        탐색 창(IDLE + `_seek_deadline` 살아있음) 중에만 본다 — 그 밖에서는
+        기존 동작이 전부 그대로여야 한다. `approachable=true` 는 다루지 않는다
+        — RequestApproach service 를 거치는 기존 경로(_on_approach_request)가
+        그대로 처리한다.
+
+        detection_gate 는 신뢰도·추적·안정(1초)·정지(3초창 0.3 m) 관문을 전부
+        통과시킨 뒤 거리 하나만으로 TOO_NEAR 거절한다 — 즉 `approachable=false`
+        인데 `stable=true`면 "코앞에 서 있는 진짜 사람"이라는 뜻이다. 그 값을
+        안 쓰고 버리면 로봇이 8초 동안 사람을 보면서도 아무 말 없이 원위치로
+        돌아가는 동작이 된다(부른 사람 관점에선 "쳐다보고 무시").
+
+        `distance_m` 이 `near_call_max_m` 이상이면(또는 NaN·억제 중이면) 이
+        경로가 관여할 일이 아니다 — 그 거리는 접근 goal(1.1 m)을 만들 수 있는
+        자리라 기존 탐지→요청→접근 경로가 담당한다.
+        """
+        if self.state != State.IDLE or self._seek_deadline is None:
+            return []
+        if approachable or not stable:
+            return []
+        if track_id == TRACK_ID_NONE:
+            return []
+        if math.isnan(distance_m) or distance_m >= self.near_call_max_m:
+            return []
+        if self.estop_active:
+            return []
+        self._prune_suppressed(now)
+        if self._is_suppressed(track_id, now):
+            return []
+
+        # 대화가 시작됐다 — 복귀 회전이 나가면 안 된다(사람에게 응대하러
+        # 갔으므로). _to_idle() 을 부르지 않는다 — 그 함수는 state 도 IDLE 로
+        # 내리는데, 여기서는 AWAITING_USER 로 곧장 들어가야 한다.
+        self._seek_deadline = None
+        self._seek_return_yaw = None
+        self.approach_track_id = track_id
+        self.active_destination = None
+        self._near_call_no_spin = distance_m < self.near_call_no_spin_m
+        return self._enter_awaiting_user(now)
+
     def on_approach_answer(self, affirmative: bool, now: float) -> list:
         """접근 질문에 대한 사람의 답. 여기서는 갈래만 만든다.
 
@@ -1209,23 +1620,48 @@ class MissionLogic:
             # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 회전 전에 건다.
             track_id = self.approach_track_id
             self._suppress_track(track_id, now)
-            if self.approach_turn_yaw_rad == 0.0:
+            if self.approach_turn_yaw_rad == 0.0 or self._near_call_no_spin:
                 # 회전이 없으면 회전 예고는 거짓말 — 온보딩으로 바로 간다.
                 # 온보딩 끝은 질문이라 expects_reply 로 재청취 창이 열린다.
+                # _near_call_no_spin(근접 호출 1.0 m 미만)도 같은 길을 탄다 —
+                # 손잡이가 뒤로 길게 나와 있어 이 거리의 180도 회전은 손잡이가
+                # 사람을 칠 수 있다(NEAR_CALL_NO_SPIN_M 근거 참고).
                 self._to_idle()
-                return [Say(MSG_APPROACH_ONBOARDING, priority="response",
-                            expects_reply=True)]
+                # 온보딩 질문을 던지는 자리 셋 중 하나 — 빈손 되묻기 사다리를
+                # 켠다(_pending_handle_hint 와 같은 자리·같은 이유: _to_idle()
+                # 이 지운다).
+                self._arm_dest_prompt(now)
+                # 회전을 껐어도 사용자는 이미 승낙하고 그 자리에 있다 —
+                # State.TURNING 을 거치는 길과 같은 억제를 건다.
+                self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
+                # 손잡이 위치 안내 (2026-09-10 사용자 결정): 회전이 없어도
+                # 사용자는 손잡이가 어디인지 모른다 — 온보딩보다 먼저. 진동은
+                # 여기서 내지 않는다 — 힌트 재생이 끝난 시점에 노드가
+                # on_handle_hint_spoken 을 불러야 낸다(I-2).
+                self._pending_handle_hint = True
+                return [
+                    Say(MSG_HANDLE_HINT, priority="response"),
+                    Say(MSG_APPROACH_ONBOARDING, priority="response",
+                        expects_reply=True),
+                ]
             self.state = State.TURNING
             self.active_destination = None
             self._response_deadline = None
             self._turn_deadline = now + APPROACH_TURN_TIMEOUT_SEC
             return [
                 Say(MSG_APPROACH_ACCEPTED, priority="response"),
-                SpinInPlace(self.approach_turn_yaw_rad),
+                SpinInPlace(self.approach_turn_yaw_rad, reason="수락 — 핸들을 사람 쪽으로"),
             ]
 
         actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
-        actions.extend(self._enter_returning(now))
+        if self._never_approached:
+            # 걸어간 적이 없다(핸들 쪽 호출) — 물러날 곳이 없다. 사람이 이미
+            # 손잡이 자리(로봇 뒤)에 서 있어, 복귀 주행을 걸면 출발 회전이
+            # 손잡이로 그 사람을 훑는다(Ruling 10, I-1). 홈 미지정일 때의
+            # 기존 동작과 같은 모양으로 제자리에서 끝낸다.
+            self._to_idle()
+        else:
+            actions.extend(self._enter_returning(now))
         return actions
 
     # -- 도착 후 대화 (arrival-dialog-flow) ------------------------------------
@@ -1240,21 +1676,66 @@ class MissionLogic:
         return self.state == State.WAITING
 
     def on_listen_state(self, state: str, now: float) -> list:
-        """/vica/listen_state (open/speech/closed/empty). 발화 없음.
+        """/vica/listen_state (open/speech/closed/empty[:이유]). 발화 없음.
 
         closed = 발화가 STT 를 통과해 LLM 으로 가는 중 — 유예를 준다.
-        empty = 빈손 — 유예 없이 시계가 그대로 흐른다.
+        empty[:이유] = 빈손("empty:ghost"·"empty:short-reject" 등) — 유예
+        없이 시계가 그대로 흐른다.
         """
         if state in ("open", "speech"):
             if not self._ear_busy:
                 self._ear_busy_since = now
             self._ear_busy = True
+            if state == "speech":
+                if not self._ear_speaking:
+                    self._ear_speech_since = now
+                self._ear_speaking = True
+            else:
+                self._ear_speaking = False
         elif state == "closed":
             self._ear_busy = False
+            self._ear_speaking = False
             self._ear_grace_until = now + EAR_GRACE_SEC
-        else:   # "empty"
+        else:   # "empty" 또는 "empty:이유"
             self._ear_busy = False
+            self._ear_speaking = False
             self._ear_grace_until = None
+        # 온보딩 뒤 빈손 되묻기 사다리(2026-09-11): 빈손이 실제로 도착하면
+        # 폴백 시계(DEST_PROMPT_FALLBACK_SEC)까지 기다리지 않고 곧장
+        # 전진한다. "leaving"·"notice" 단은 이미 되물은 뒤라 다시 듣지
+        # 않는다 — 그 뒤는 시간(dest_retry_return_sec·LEAVING_GRACE_SEC)만
+        # 으로 전진한다(on_tick).
+        if state.startswith("empty") and self._dest_prompt_stage in (
+            "asked", "retried",
+        ):
+            return self._advance_dest_prompt(now)
+        return []
+
+    def _dest_prompt_holds(self, now: float) -> bool:
+        """온보딩 되묻기 사다리의 시계를 잡아둘 이유가 있는가.
+
+        _ear_holds 와 달리 "창이 열려 있다(open)"는 잡지 않는다 — 질문 뒤
+        청취 창은 30초라 열림을 잡으면 DEST_ANSWER_WAIT_SEC 가 무의미해진다.
+        사용자가 말을 시작한 신호(speech)와, 말이 STT 를 지나 LLM 으로 가는
+        유예(closed 뒤 EAR_GRACE_SEC)만 잡는다. 상한(EAR_HOLD_MAX_SEC)은
+        닫힘 신호 유실 대비다.
+        """
+        if (self._ear_speaking and self._ear_speech_since is not None
+                and now - self._ear_speech_since <= EAR_HOLD_MAX_SEC):
+            return True
+        return (self._ear_grace_until is not None
+                and now < self._ear_grace_until)
+
+    def on_dest_prompt_spoken(self, now: float) -> list:
+        """온보딩(MSG_APPROACH_ONBOARDING)·되묻기(MSG_DEST_RETRY) 재생이
+        끝났다 — 답 대기 시계(DEST_ANSWER_WAIT_SEC)는 여기서부터 센다.
+        on_approach_question_spoken 과 같은 방식이다: 재생에 몇 초가 걸리는지는
+        TTS 만 알아 노드가 tts_done 문구 대조로 알려준다. 안 오면
+        _arm_dest_prompt·_advance_dest_prompt 가 걸어 둔 폴백(DEST_PROMPT_
+        FALLBACK_SEC)이 탈출을 맡는다.
+        """
+        if self._dest_prompt_stage in ("asked", "retried"):
+            self._dest_prompt_deadline = now + DEST_ANSWER_WAIT_SEC
         return []
 
     def _ear_holds(self, now: float) -> bool:
@@ -1274,6 +1755,11 @@ class MissionLogic:
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             self._reset_arrival_dialog()
             self.state = State.IDLE
+            # _to_idle() 을 거치지 않는 유일한 IDLE 진입로라 탐색 창이 안
+            # 비워진다 — 안내 한 판이 통째로 지난 뒤 낡은 복귀각으로 갑자기
+            # 도는 사고로 이어진다(2026-09-10 재현).
+            self._seek_deadline = None
+            self._seek_return_yaw = None
 
     def _ask_arrival(self, dest: Optional[Destination], now: float,
                      arrival_text: str = "") -> list:
@@ -1320,7 +1806,14 @@ class MissionLogic:
         마디(짧은 "그래" 오전사 등)가 옛 질문의 답으로 오인 접수된다.
         접는 멘트는 없다: 사용자는 이미 새 말을 하려는 참이다.
         RETURNING 의 복귀 브레이크는 노드가 on_return_brake 로 따로 보낸다.
+
+        접근 온보딩 직후 억제(`_user_attached_until`)가 살아 있으면 되감는다
+        (USER_ATTACHED_SUPPRESS_SEC 근거 참고) — 붙어 있는 사용자가 계속
+        말을 거는 동안은 대화가 이어지는 한 계속 막고, 조용해지면 그 값을
+        새로 만들지 않으므로 결국 시간이 다 되어 풀린다.
         """
+        # 새 대화다 — 온보딩 되묻기 사다리가 돌고 있었다면 청산한다.
+        self._forget_dest_prompt()
         if self.state == State.WAITING:
             # 각성 질문("다시 안내를 시작할까요?")은 2026-09-01 삭제(A안) —
             # "네"가 도착-대화 문법(대기 승낙→시간 질문)으로 새는 오배선이
@@ -1329,22 +1822,139 @@ class MissionLogic:
             self._wait_until = None
             self._reset_arrival_dialog()
             self._to_idle()
+            # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
+            self._wake_consumed_at = now
             return []
         if self.state == State.CONFIRMING:
             self._to_idle()
+            self._wake_consumed_at = now
             return []
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             self._reset_arrival_dialog()
             self._to_idle()
+            self._wake_consumed_at = now
             return []
         if self.state == State.AWAITING_USER:
+            if self.wake_guard_active(now):
+                # 이 질문을 연 것 자체가 wake_doa 였을 수 있다(핸들 쪽 호출,
+                # 회전 없이 곧장 질문). /vica/wake 와 /vica/wake_doa 는 같은
+                # 호출에서 수 ms 간격으로 오고 처리 순서가 보장되지 않는다
+                # (2026-09-11 실기 재현) — 도장이 방금(3초 이내) 찍혀 있으면
+                # 이 wake 는 그 형제 신호이지 새 "비카야"가 아니다. 접지
+                # 않고 질문을 그대로 둔다.
+                return []
             # 같은 사람을 곧장 다시 쫓지 않게 억제하고 제자리에 선다 —
             # 부른 사람과의 새 대화가 이어진다 (복귀 주행은 하지 않는다).
             self._suppress_track(self.approach_track_id, now)
             self._approach.reset()
             self._to_idle()
+            self._wake_consumed_at = now
             return []
+        if self.user_attached_guard_active(now):
+            # 되감기. 새로 억제를 걸지는 않는다(이미 살아 있을 때만) — 없던
+            # 억제를 여기서 새로 만들면 접근·온보딩과 무관한 "비카야"에도
+            # USER_ATTACHED_SUPPRESS_SEC 짜리 억제가 생긴다.
+            self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
         return []
+
+    def wake_guard_active(self, now: float) -> bool:
+        """`_wake_consumed_at` 직후 가드가 지금 유효한가.
+
+        on_wake_doa 안과 진단 로그(mission_manager_node._on_wake_doa)가 정확히
+        같은 조건으로 판정하게 하려고 메서드로 뺐다 — 로그가 이 조건을 따로
+        베끼면 언젠가 어긋나고, 그러면 로그가 실제 관문과 다른 이야기를 하게
+        된다.
+        """
+        return (self._wake_consumed_at is not None
+                and now - self._wake_consumed_at < WAKE_CONSUMED_GUARD_SEC)
+
+    def user_attached_guard_active(self, now: float) -> bool:
+        """접근 온보딩 직후 억제(`_user_attached_until`)가 지금 유효한가.
+
+        이유는 wake_guard_active 와 같다.
+        """
+        return (self._user_attached_until is not None
+                and now < self._user_attached_until)
+
+    def on_wake_doa(self, doa_deg: float, nav_ready: bool, now: float) -> list:
+        """"비카야"가 온 방향으로 고개를 돌린다 (호출 접근 설계 §4).
+
+        대기 중에만 연다. 다른 상태의 호출은 기존 on_wake 의 몫이다 —
+        안내 중 "비카야"는 지금 안내받는 사용자의 명령이지 새 부름이 아니다.
+
+        마이크는 거리를 모르고 각도도 ±4~16° 라, 소리로 목표점을 만들지
+        않는다. 돌아서 카메라가 확인한 뒤에야 기존 접근 경로가 이어받는다.
+
+        /vica/wake 와 이 토픽은 같은 호출에서 수 ms 간격으로 오고 처리 순서가
+        보장되지 않는다(2026-09-10 실기 재현). wake 가 먼저 오면 위 state != IDLE
+        관문이 거절하지만, wake 가 답-대기 상태를 IDLE 로 접은 **직후**라면
+        state 만으로는 "방금 접힌 옛 대화"와 "진짜 새 호출"을 구분 못 한다.
+        그래서 wake/on_return_brake 가 상태를 바꾼 시각을 함께 본다 — 그 직후
+        WAKE_CONSUMED_GUARD_SEC 이내면 옛 대화의 여진으로 보고 거절한다.
+
+        같은 이유로, 접근 온보딩 직후(USER_ATTACHED_SUPPRESS_SEC 이내)도
+        거절한다. 이 전이는 wake 가 아니라 회전 완료(on_tick 의 TURNING
+        분기)가 일으킨 것이라 _wake_consumed_at 도장이 없다 — 손잡이를 막
+        받아든 사용자 옆에서 같은 사고가 재현되는 것을 막는다.
+
+        복귀 재개 사다리가 도는 동안(_return_interrupted)도 통째로 거절한다
+        (2026-09-10 사용자 결정). 회전이면 왕복 최대 16초, 못 찾으면 사다리가
+        다시 18초를 센다 — 오탐 한 번이 30초 넘게 로봇을 통행로에 붙잡을 수
+        있어 "부른 쪽을 본다"의 이득보다 위험이 크다는 판단이다. 이 관문
+        하나로 무회전 분기(정면 호출, 아래 SEEK_MIN_YAW_RAD 미만)가 탐색
+        창(_seek_deadline)만 여는 경로도 함께 막힌다 — 그 경로는 state 를
+        IDLE 에 둔 채 _to_idle() 을 거치지 않아, 이 관문이 없으면 탐색 창과
+        복귀 사다리(_return_resume_deadline)가 같은 IDLE 위에서 겹쳤다.
+        SEEK_LOOK_SEC 이 RETURN_RESUME_SEC 보다 얼마나 작은지와 무관하게
+        막히므로, 둘 중 어느 값을 나중에 올려도 이 관문은 그대로 유효하다.
+
+        핸들 쪽 사각지대(HANDLE_SIDE_MIN_YAW_RAD, 위 정면 사각지대의 거울쌍):
+        회전량이 180°에 가까우면(부채꼴 180°±45°) 소리가 핸들 옆에서 왔다는
+        뜻이고, 그 자체가 "이미 핸들 옆에 서 있다"는 증거라 카메라 확인을
+        기다리지 않고 곧바로 접근 질문으로 들어간다(2026-09-10 사용자 결정).
+        여기서 만들어진 대화는 track_id 가 없다 — 카메라로 확인한 적이 없기
+        때문이다(approach_track_id=None). 수락해도 회전하지 않는다
+        (_near_call_no_spin 재사용 — 이름은 "근접"이지만 뜻은 같다: 이미
+        올바른 자리에 있으니 180도를 돌리지 않는다).
+        """
+        if self.state != State.IDLE or self.estop_active or not nav_ready:
+            return []
+        if self._return_interrupted:
+            return []
+        if self.wake_guard_active(now):
+            return []
+        if self.user_attached_guard_active(now):
+            return []
+        yaw = doa_to_spin_yaw(doa_deg, self.wake_doa_sign)
+        # 돌아야 할 만큼 돌았다고 치고 복귀각을 먼저 누적한다 — 창 중에 다시
+        # 부르면 또 돌기 때문에 덮어쓰면 원래 자세로 못 돌아온다.
+        back = wrap_to_pi((self._seek_return_yaw or 0.0) - yaw)
+        if abs(yaw) < SEEK_MIN_YAW_RAD:
+            # 이미 그쪽을 보고 있다. 돌지 않고 찾는 창만 연다.
+            self._seek_return_yaw = back
+            self._seek_deadline = now + self.seek_look_sec
+            return []
+        if abs(yaw) > self.handle_side_min_yaw_rad:
+            # 핸들 쪽이다. 돌지 않고 곧바로 질문한다 — 탐색 창(_seek_deadline)
+            # 도 열지 않는다: 카메라로 찾을 필요가 없다.
+            self._seek_return_yaw = None
+            self._seek_deadline = None
+            self.approach_track_id = None
+            self.active_destination = None
+            self._near_call_no_spin = True
+            # 걸어서건 코앞이건 이 사람 쪽으로 움직인 적이 없다 — 거절·
+            # 무응답이 복귀 주행으로 새면 안 된다(Ruling 10, I-1).
+            self._never_approached = True
+            # 이 호출의 형제 신호인 /vica/wake 가 수 ms 뒤 따라올 수 있다
+            # (2026-09-11 실기 재현) — 도장을 찍어 on_wake 의 AWAITING_USER
+            # 분기가 방금 연 이 질문을 "옛 대화"로 오인해 접지 않게 한다.
+            self._wake_consumed_at = now
+            return self._enter_awaiting_user(now)
+        self.state = State.SEEKING
+        self._seek_return_yaw = back
+        self._seek_deadline = None
+        self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
+        return [SpinInPlace(yaw, reason="호출 방향으로")]
 
     def on_arrival_answer(self, intent: "IntentData", now: float,
                           next_dest: Optional[Destination] = None) -> list:
@@ -1441,6 +2051,60 @@ class MissionLogic:
         """
         return self._enter_returning(now, dialog_finish=True)
 
+    def _arm_dest_prompt(self, now: float) -> None:
+        """온보딩 질문(MSG_APPROACH_ONBOARDING)을 던진 직후 되묻기 사다리를
+        켠다 — 회전 생략·회전 성공·회전 실패, 온보딩이 나가는 세 자리 모두
+        여기를 부른다.
+
+        deadline 은 우선 보험(DEST_PROMPT_FALLBACK_SEC)으로 건다 — 정상 경로는
+        온보딩 재생이 끝날 때 노드가 on_dest_prompt_spoken 을 불러
+        DEST_ANSWER_WAIT_SEC 짜리 진짜 시계로 갈아 끼우고, 그 전에 음성의
+        빈손 신호(on_listen_state 의 empty:*)가 오면 그것이 더 일찍 전진시킨다.
+
+        끊긴 옛 복귀 사다리(_return_interrupted)를 함께 잊는다 — 사람 접근은
+        그 사다리가 도는 중에도 카메라로 열릴 수 있어(2026-09-10 설계), 새
+        온보딩이 시작된 이상 두 사다리가 같은 IDLE 위에서 겹치면 안 된다.
+        """
+        self._dest_prompt_stage = "asked"
+        self._dest_prompt_deadline = now + DEST_PROMPT_FALLBACK_SEC
+        self._forget_interrupted_return()
+
+    def _forget_dest_prompt(self) -> None:
+        """온보딩 되묻기 사다리를 청산한다 — 대화가 다른 경로로 넘어가거나
+        (on_wake·on_intent) 주행이 시작되거나(_enter_returning) IDLE 을 새로
+        떠날 때(_to_idle) 부른다."""
+        self._dest_prompt_stage = None
+        self._dest_prompt_deadline = None
+
+    def _advance_dest_prompt(self, now: float) -> list:
+        """되묻기 사다리를 한 단 전진한다.
+
+        빈손 신호(on_listen_state)가 불렀든 폴백 시계 만료(on_tick)가
+        불렀든 전진 규칙은 하나다 — "이 단에서 더 기다릴 이유가 없다"는
+        사실만 다르게 도착할 뿐이다.
+
+        asked → retried  : 한 번 되묻는다(MSG_DEST_RETRY).
+        retried → leaving: 조용히 기다린다(dest_retry_return_sec).
+        leaving → notice : 떠남을 예고한다(MSG_LEAVING_NOTICE, 재사용).
+        notice → (청산)  : 사다리를 접고 홈으로 돌아간다.
+        """
+        if self._dest_prompt_stage == "asked":
+            self._dest_prompt_stage = "retried"
+            self._dest_prompt_deadline = now + DEST_PROMPT_FALLBACK_SEC
+            return [Say(MSG_DEST_RETRY, priority="response", expects_reply=True)]
+        if self._dest_prompt_stage == "retried":
+            self._dest_prompt_stage = "leaving"
+            self._dest_prompt_deadline = now + self.dest_retry_return_sec
+            return []
+        if self._dest_prompt_stage == "leaving":
+            self._dest_prompt_stage = "notice"
+            self._dest_prompt_deadline = now + LEAVING_GRACE_SEC
+            return [Say(MSG_LEAVING_NOTICE, priority="response")]
+        if self._dest_prompt_stage == "notice":
+            self._forget_dest_prompt()
+            return self._go_home(now)
+        return []
+
     def on_return_brake(self, now: float, quiet: bool = False) -> list:
         """홈 복귀 중 "비카야"/늦은 답 (작업 E). 복귀를 취소한다.
 
@@ -1450,6 +2114,8 @@ class MissionLogic:
         긴급어("멈춰")는 별도 경로로 어느 상태든 항상 통한다."""
         if self.state != State.RETURNING:
             return []
+        # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
+        self._wake_consumed_at = now
         cancel_dest = self.active_destination
         self.active_destination = None
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
@@ -1464,6 +2130,12 @@ class MissionLogic:
         else:
             self._reset_arrival_dialog()
             self._to_idle()
+            # 복귀가 끊긴 채로 IDLE 에 섰다 — 재개 사다리를 지금 이 시각
+            # 기준으로 건다(청취 창이 몇 초든 이 시각과 무관하다, 근거는
+            # RETURN_RESUME_SEC 주석). on_tick 의 IDLE 분기가 이어받는다.
+            self._return_interrupted = True
+            self._return_resume_deadline = now + self.return_resume_sec
+            self._return_notice_given = False
         return actions
 
     def _reset_arrival_dialog(self) -> None:
@@ -1475,6 +2147,18 @@ class MissionLogic:
         self._wait_until = None
         self._response_deadline = None
 
+    def _forget_interrupted_return(self) -> None:
+        """복귀 재개 사다리를 청산한다 — "복귀가 끊겨 있다"는 사실과 그
+        시각을 모두 지운다. 부르는 자리: 사다리 자신이 실제로 복귀를
+        재개할 때 · 새 목적지로 주행을 시작할 때(음성·앱) · 관리자가
+        복귀나 취소를 직접 명령할 때. `_to_idle()` 은 이 사실을 지우지
+        않는다(탐색 회전 등 다른 경로로 IDLE 을 거칠 때도 복귀가 잊히면
+        안 되기 때문) — 그래서 지우는 자리를 여기 한 곳에 모아 둔다.
+        """
+        self._return_interrupted = False
+        self._return_resume_deadline = None
+        self._return_notice_given = False
+
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
 
@@ -1485,8 +2169,9 @@ class MissionLogic:
             return []
 
         actions: list = []
-        # 접근·복귀 중에도 goal 이 살아 있다. 로봇이 사람을 향해 움직이는 구간이
-        # 있으므로 여기서 취소가 빠지면 긴급어 경로가 죽는다(설계 7절).
+        # 접근·복귀·탐색(SEEKING) 중에도 goal 이 살아 있다. 로봇이 사람을 향해
+        # 움직이거나 소리 쪽으로 도는 구간이 있으므로 여기서 취소가 빠지면
+        # 긴급어 경로가 죽는다(설계 7절).
         if self.state in _GOAL_ACTIVE_STATES:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
@@ -1616,26 +2301,78 @@ class MissionLogic:
         elif self.state == State.APPROACHING:
             if nav_status == NavStatus.SUCCEEDED:
                 # 사람 앞 1.1 m 에 섰다. 여기서부터 주도권은 음성 쪽으로 넘어가고
-                # Mission 은 타임아웃만 센다(설계 4절).
-                self.state = State.AWAITING_USER
-                # 여기서는 탈출용 안전망만 건다. 진짜 응답 8초는 질문 재생이
-                # 끝난 시점(on_approach_question_spoken)부터 — 도착 후 대화와
-                # 같은 방식. 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
-                self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
-                self._approach.reset()
-                actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                actions.append(
-                    Say(
-                        MSG_APPROACH_QUESTION,
-                        priority="response",
-                        expects_reply=True,
-                    )
-                )
+                # Mission 은 타임아웃만 센다(설계 4절). 걸어서 도착했으니 정상
+                # 접근이다 — 근접 호출(on_person_detection)의 회전 생략은 이
+                # 경로와 무관하다(도착 거리 1.1 m > near_call_no_spin_m 1.0 m).
+                self._near_call_no_spin = False
+                actions.extend(self._enter_awaiting_user(now))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
                 # 접근은 재시도하지 않는다. 등록 목적지는 제자리에 있지만 사람은
                 # 3초 뒤 그 자리에 없다. 실패하면 돌아가서 다시 탐지하는 편이
                 # 빠르고, 같은 자리로 되풀이 진입하면 통행에 방해가 된다.
                 actions.extend(self._enter_returning(now))
+
+        elif self.state == State.SEEKING:
+            if nav_status in (NavStatus.SUCCEEDED, NavStatus.FAILED,
+                              NavStatus.CANCELED):
+                # 복귀각이 남아 있으면 방금 것은 '가는' 회전이다 — IDLE 로
+                # 내려놓고 사람을 찾는 창을 연다. IDLE 이어야 접근 관문을
+                # 그대로 통과한다. 없으면 방금 것이 복귀 회전이라 끝이다.
+                #
+                # 회전이 거부돼도(FAILED) 찾아는 본다. 카메라가 이미 사람을
+                # 보고 있을 수 있고, 못 봐도 창이 닫히면 조용히 끝난다.
+                back = self._seek_return_yaw
+                self._to_idle()
+                if back is not None:
+                    self._seek_return_yaw = back
+                    self._seek_deadline = now + self.seek_look_sec
+            elif (self._turn_deadline is not None
+                  and now >= self._turn_deadline):
+                # spin 이 시작조차 안 됐다. 시계로 탈출한다.
+                self._to_idle()
+
+        elif self.state == State.IDLE:
+            # 찾는 창이 닫혔다. 아무도 못 찾았으니 조용히 원래 자세로.
+            # 되돌리지 않으면 오작동 한 번에 카메라가 벽만 보는 자세로 굳는다.
+            if self._seek_deadline is not None and now >= self._seek_deadline:
+                back = self._seek_return_yaw
+                self._seek_deadline = None
+                self._seek_return_yaw = None
+                if back is not None and abs(back) >= SEEK_MIN_YAW_RAD:
+                    self.state = State.SEEKING
+                    self._turn_deadline = now + SEEK_TURN_TIMEOUT_SEC
+                    actions.append(SpinInPlace(back, reason="못 찾아 원위치로"))
+
+            # 복귀 재개 사다리 (2026-09-10). 위 탐색 창 처리가 이번 tick 에
+            # SEEKING 을 새로 열었을 수 있으므로 state 를 다시 본다 — 그
+            # 상태에서 아래를 마저 돌리면 방금 낸 SpinInPlace 위에 _go_home 의
+            # Navigate 가 겹친다. 탐색 창(_seek_deadline)과는 필드가 달라
+            # 서로 방해하지 않는다.
+            if self.state == State.IDLE and self._return_interrupted:
+                if self._return_resume_deadline is None:
+                    # 회전이 끼어들었다 IDLE 로 막 돌아온 시점 — 여기서부터
+                    # 다시 잰다(호출 시각부터 누적하지 않는다).
+                    self._return_resume_deadline = now + self.return_resume_sec
+                elif now >= self._return_resume_deadline:
+                    if not self._return_notice_given:
+                        self._return_notice_given = True
+                        self._return_resume_deadline = now + LEAVING_GRACE_SEC
+                        actions.append(Say(MSG_LEAVING_NOTICE, priority="response"))
+                    else:
+                        self._forget_interrupted_return()
+                        actions.extend(self._go_home(now))
+
+            # 온보딩 뒤 빈손 되묻기 사다리 (2026-09-11). 위 두 블록 중 하나가
+            # 이번 tick 에 state 를 이미 바꿨을 수 있으므로(SEEKING 진입,
+            # _go_home 의 RETURNING 전이) state 를 다시 본다 — 같은 이유로
+            # 위 두 사다리도 서로 state 를 재확인한다. 사용자가 말하는 동안
+            # (_dest_prompt_holds: speech·LLM 유예)은 시계가 끝나도 기다린다.
+            # 창이 열렸다는 것(open)만으로는 기다리지 않는다 — 그 창은 30초다.
+            if (self.state == State.IDLE and self._dest_prompt_stage is not None
+                    and self._dest_prompt_deadline is not None
+                    and now >= self._dest_prompt_deadline
+                    and not self._dest_prompt_holds(now)):
+                actions.extend(self._advance_dest_prompt(now))
 
         elif self.state == State.TURNING:
             if nav_status == NavStatus.SUCCEEDED:
@@ -1644,8 +2381,21 @@ class MissionLogic:
                 # 창이 열리고, 회전으로 사용자가 핸들 방향에 정렬됐으므로
                 # DOA 방향 관문도 자연히 유효해진다.
                 self._to_idle()
+                # 온보딩 질문을 던지는 자리 셋 중 하나 — 빈손 되묻기 사다리를 켠다.
+                self._arm_dest_prompt(now)
+                # 사용자가 손잡이를 받아든 시점이다 — 재청취 창이 만료된 뒤
+                # 다른 "비카야"가 이 사람을 새 호출로 오인하지 않도록 얼마간
+                # wake_doa 를 거절한다. _to_idle() 은 이 값을 지우지 않으므로
+                # 호출 순서는 상관없다.
+                self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 온보딩 질문이
                 # 완료를 대신한다.
+                # 손잡이 위치 안내 (2026-09-10 사용자 결정): 온보딩 앞에서
+                # 손잡이가 어디인지 말한다. 진동은 여기서 내지 않는다 —
+                # 힌트 재생이 끝난 시점에 노드가 on_handle_hint_spoken 을
+                # 불러야 낸다(I-2).
+                self._pending_handle_hint = True
+                actions.append(Say(MSG_HANDLE_HINT, priority="response"))
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
@@ -1653,6 +2403,16 @@ class MissionLogic:
                 # 수락한 사람을 침묵 속에 버려두지 않도록 온보딩은 한다.
                 # (핸들 방향은 어긋났을 수 있다 - 안내 실패는 아니다.)
                 self._to_idle()
+                # 온보딩 질문을 던지는 자리 셋 중 하나 — 빈손 되묻기 사다리를 켠다.
+                self._arm_dest_prompt(now)
+                # 회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다 —
+                # 위와 같은 억제를 건다.
+                self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
+                # 회전이 실패해도 손잡이 안내는 그대로 나간다 — 사용자는 이미
+                # 승낙하고 서 있다(2026-09-10 사용자 결정). 진동은 위와 같은
+                # 이유로 여기서 내지 않는다(I-2).
+                self._pending_handle_hint = True
+                actions.append(Say(MSG_HANDLE_HINT, priority="response"))
                 actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                                    expects_reply=True))
             elif (self._turn_deadline is not None
@@ -1666,7 +2426,12 @@ class MissionLogic:
                 # 오탐이라 답할 이유가 없었을 수도, 답할 수 없는 상황일 수도 있다.
                 # 어느 쪽이든 계속 서서 기다리면 사람 앞을 막는 셈이 된다.
                 actions.append(Say(MSG_APPROACH_NO_ANSWER, priority="response"))
-                actions.extend(self._enter_returning(now))
+                if self._never_approached:
+                    # 거절과 같은 이유(Ruling 10, I-1) — 걸어간 적이 없어
+                    # 물러날 곳이 없다.
+                    self._to_idle()
+                else:
+                    actions.extend(self._enter_returning(now))
 
         elif self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             # 무응답 사다리 (arrival-dialog 3절). 떠나기 예고 후면 유예를 세고,
@@ -1841,6 +2606,9 @@ class MissionLogic:
         )
         if reason is not GateReason.OK:
             return False, reason, []
+        # 끊긴 복귀를 잊는다 — 관리자가 지금 직접 복귀를 명령했으니 이번이
+        # 그 재개다(on_intent 와 같은 이유).
+        self._forget_interrupted_return()
         return True, reason, self._enter_returning(now, is_home=True)
 
     def _enter_returning(
@@ -1876,6 +2644,8 @@ class MissionLogic:
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
+        # 어떤 이유로든 주행이 시작되면 온보딩 되묻기 사다리는 끝이다.
+        self._forget_dest_prompt()
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
         if destination is not None:
             actions.append(Navigate(destination))
@@ -1955,6 +2725,20 @@ class MissionLogic:
         self._estop_entered_at = None
         self._estop_clear_since = None
         self._turn_deadline = None
+        self._seek_return_yaw = None
+        self._seek_deadline = None
+        # 복귀 재개 사다리의 "언제"만 지운다 — 탐색 회전이 여기를 지나갈 때마다
+        # 시계를 멈추기 위해서다. "사실"(_return_interrupted)은 남겨 둔다:
+        # 여기서 같이 지우면 회전 한 번으로 끊긴 복귀를 영영 잊는다(설계 요점).
+        self._return_resume_deadline = None
+        self._return_notice_given = False
+        # 온보딩 되묻기 사다리는 위 복귀 재개 사다리와 달리 "사실"까지
+        # 통째로 지운다 — 이어받을 회전이 없다. E-stop 해제처럼
+        # on_wake·on_intent·_enter_returning 어느 것도 거치지 않고 곧장
+        # 여기로 오는 경로가 있어(on_tick 의 ESTOPPED 분기), 이 함수 자체가
+        # 마지막 청산 지점이다.
+        self._dest_prompt_stage = None
+        self._dest_prompt_deadline = None
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
@@ -1973,3 +2757,8 @@ class MissionLogic:
         self.approach_goal_pose = None
         self._response_deadline = None
         self._nav_from_app = False
+        # 다음 AWAITING_USER 진입(정상 접근·근접 호출 어느 쪽이든)이 각자 다시
+        # 명시적으로 정하므로, 여기서 지우지 않아도 안전과는 무관하다 —
+        # 다만 묵은 값을 들고 있을 이유도 없어 다른 접근 상태값들과 함께 비운다.
+        self._near_call_no_spin = False
+        self._never_approached = False

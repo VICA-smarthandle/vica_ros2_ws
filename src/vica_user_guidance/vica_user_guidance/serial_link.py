@@ -98,6 +98,37 @@ class SerialLink:
         self._fault_code = FAULT_NONE
         return True
 
+    def send_raw(self, byte: int, now_ns: int) -> bool:
+        """상태코드가 아닌 바이트(햅틱 명령 등)를 1개 전송한다. 성공하면 True.
+
+        send() 와 갈라 둔 이유는 last_state_code 다. 햅틱 바이트를 send() 로 보내면
+        진단이 "마지막 상태 16"이라는 헛소리를 하게 된다 — 그 필드는 아두이노가
+        마지막으로 받은 **표시 상태**여야 한다. 오류 처리는 send() 와 같다.
+
+        [주의] 상태코드 범위(0~7)는 여기로 보내지 않는다. 워치독 계약(코드 4 금지)
+        을 우회하게 되기 때문이다. 그 검사는 send() 에만 있다.
+        """
+        if 0 <= byte <= protocol.STATE_CHARGED:
+            raise ValueError(
+                f"상태코드 범위({byte})는 send_raw 로 보내지 않는다. send() 를 쓸 것."
+            )
+
+        if self._port is None:
+            return False
+
+        try:
+            self._port.write(bytes([byte]))
+            self._port.flush()
+        except Exception:
+            self._write_error_count += 1
+            self._fault_code = FAULT_WRITE_FAIL
+            self._close_port()
+            self._last_attempt_ns = now_ns
+            return False
+
+        self._fault_code = FAULT_NONE
+        return True
+
     # ── 수신 ───────────────────────────────────────────
 
     def read_available(self, now_ns: int) -> bytes:

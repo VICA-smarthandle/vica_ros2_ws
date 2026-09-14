@@ -14,7 +14,7 @@ from std_msgs.msg import Bool
 from .can_link import CanLink
 from .can_preflight import require_can_interface_up
 from .freshness import is_fresh_ns, sec_to_ns
-from .motor_watchdog import motor_speed_ratio
+from .motor_watchdog import motor_speed_ratio, normalize_knob_pct
 
 
 # ============================================================
@@ -97,6 +97,19 @@ class MdrobotCanKeyboardKnobNode(Node):
         # knob 값 0~100 중 이 값 이하는 정지로 처리
         self.declare_parameter('deadzone_pct', 5)
 
+        # 속도 조절 줄이 **실제로** 움직이는 knob 구간. 이 사이를 0~100 으로 편다.
+        # 기본값(0, 100)이면 아무것도 바꾸지 않는다 — 종전 동작 그대로다.
+        #
+        # 2026-09-09 실기: 이 로봇의 줄은 55~98 만 움직여 눈금의 가운데 43 %만
+        # 쓰고 있었다. 그래서 완전히 당겨도 55 % 라 정지 기준(5 %)에 못 미쳤고,
+        # 조금 놓으면 60~98 % 가 전부 주행 상한 0.5 m/s 위여서 속도가 변하지
+        # 않았다. 줄이 아무 역할도 못 하던 상태다.
+        #
+        # 줄이나 연결부를 고쳐 실제로 0~100 이 나오게 되면 이 두 값을 0, 100 으로
+        # 되돌린다.
+        self.declare_parameter('knob_min_pct', 0)
+        self.declare_parameter('knob_max_pct', 100)
+
         # knob 패킷이 이 시간 이상 안 들어오면 안전 정지
         self.declare_parameter('knob_timeout_sec', 0.8)
 
@@ -130,6 +143,8 @@ class MdrobotCanKeyboardKnobNode(Node):
         self.send_hz = float(self.get_parameter('send_hz').value)
         self.resend_interval_sec = float(self.get_parameter('resend_interval_sec').value)
         self.deadzone_pct = int(self.get_parameter('deadzone_pct').value)
+        self.knob_min_pct = int(self.get_parameter('knob_min_pct').value)
+        self.knob_max_pct = int(self.get_parameter('knob_max_pct').value)
         self.knob_timeout_sec = float(self.get_parameter('knob_timeout_sec').value)
         self.cmd_timeout_sec = float(self.get_parameter('cmd_timeout_sec').value)
 
@@ -443,10 +458,13 @@ class MdrobotCanKeyboardKnobNode(Node):
         # cmd·knob 신선도 판정 (단일 STEADY_TIME clock)
         # cmd 또는 knob 중 하나라도 stale·시간역전·미수신이면 0.0 → 정지
         # -------------------------
+        # 줄이 실제로 움직이는 구간을 0~100 으로 편 값. 로그에도 같은 값을 쓴다.
+        knob_norm = normalize_knob_pct(
+            int(self.knob1), self.knob_min_pct, self.knob_max_pct)
         speed_ratio = motor_speed_ratio(
             cmd_last_ns=self.last_cmd_ns,
             knob_last_ns=self.last_knob_ns,
-            knob_pct=int(self.knob1),
+            knob_pct=knob_norm,
             now_ns=now,
             cmd_timeout_ns=self.cmd_timeout_ns,
             knob_timeout_ns=self.knob_timeout_ns,
@@ -553,7 +571,7 @@ class MdrobotCanKeyboardKnobNode(Node):
         )
         if print_due:
             self.get_logger().info(
-                f'knob1={self.knob1:3d}% '
+                f'knob1={self.knob1:3d}%->{knob_norm:3d}% '
                 f'limit=({allowed_linear:.2f}m/s,{allowed_angular:.2f}rad/s) '
                 f'cmd=({raw_linear_x:+.2f},{raw_angular_z:+.2f}) '
                 f'out=({limited_linear_x:+.2f},{limited_angular_z:+.2f}) '

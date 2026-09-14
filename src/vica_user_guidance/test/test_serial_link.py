@@ -239,3 +239,45 @@ def test_close_closes_underlying_port():
     link.close()
     assert port.closed is True
     assert link.connected is False
+
+
+# ── send_raw: 햅틱 명령 바이트 (2026-09-04) ────────────
+
+
+def test_send_raw_writes_byte_but_keeps_last_state_code():
+    """햅틱 바이트는 last_state_code 를 더럽히지 않는다.
+
+    그 필드는 아두이노가 마지막으로 받은 **표시 상태**다. 0x10 이 찍히면 진단이
+    "마지막 상태 16"이라는 헛소리를 한다.
+    """
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.send(protocol.STATE_LEFT, NOW) is True
+    assert link.send_raw(protocol.HAPTIC_CMD_LONG, NOW) is True
+    assert port.written[-1] == bytes([protocol.HAPTIC_CMD_LONG])
+    assert link.last_state_code == protocol.STATE_LEFT
+
+
+def test_send_raw_rejects_state_code_range():
+    """상태코드 범위(0~7)는 send_raw 로 못 보낸다 — 워치독 계약(코드 4 금지) 우회 방지."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    with pytest.raises(ValueError):
+        link.send_raw(protocol.STATE_LINK_LOST, NOW)
+    assert port.written == []
+
+
+def test_send_raw_write_failure_is_counted_and_faulted():
+    """write 예외는 send() 와 같게 다룬다 — 세고, fault 로 표시하고, 포트를 닫는다."""
+    port = FakePort(fail_write=True)
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    assert link.send_raw(protocol.HAPTIC_CMD_SHORT, NOW) is False
+    assert link.write_error_count == 1
+    assert link.fault_code == protocol_fault("WRITE_FAIL")
+    assert link.connected is False
