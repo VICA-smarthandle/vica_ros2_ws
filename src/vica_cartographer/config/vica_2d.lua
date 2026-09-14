@@ -22,6 +22,10 @@ options = {
   -- External odom/EKF provides odom -> base_footprint.
   provide_odom_frame = false,
   publish_frame_projected_to_2d = true,
+  -- 앱 매핑 화면의 로봇 화살표용(2026-09-04). map 프레임 기준 base_footprint
+  -- 자세를 /tracked_pose 로 낸다. TF 와 같은 pose_publish_period_sec 박자다.
+  -- SLAM 계산에는 관여하지 않는 노드 옵션이고, 구독자는 map_preview_node 뿐이다.
+  publish_tracked_pose = true,
 
   use_odometry = true,
   use_nav_sat = false,

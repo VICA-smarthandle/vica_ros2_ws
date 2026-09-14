@@ -103,6 +103,13 @@ class PoseBootstrapNode(Node):
         # 않는다. 서 있는 채로 확정하면 아무 일도 안 일어난 것처럼 보인다.
         self.declare_parameter('nomotion_delay_sec', 0.5)
         self.declare_parameter('settle_sec', 2.0)
+        # 세션 게이트(2026-09-01). scan 상시 수신 + TF 청취기가 이 노드 CPU의
+        # 사실상 전부(코어의 ~16%)였는데, 정작 쓰이는 건 초기위치를 잡는 몇
+        # 분뿐이다. 그래서 서비스가 불릴 때만 귀를 열고, 마지막 요청 후 이
+        # 시간이 지나면 닫는다. 닫혀 있어도 서비스가 오면 스스로 열고 첫
+        # 스캔을 잠깐 기다리므로(MultiThreadedExecutor 라 구독은 계속 돈다)
+        # 앱 쪽 변경은 필요 없다.
+        self.declare_parameter('session_idle_timeout_sec', 300.0)
 
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.min_score = float(self.get_parameter('min_score').value)
@@ -120,8 +127,11 @@ class PoseBootstrapNode(Node):
         self._scan = None
         self._amcl_pose = None
 
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        # scan·TF 는 세션 게이트가 열고 닫는다(_arm/_disarm). 여기서는 자리만.
+        self.tf_buffer = None
+        self.tf_listener = None
+        self._scan_sub = None
+        self._last_session_at = None
 
         map_topic = str(self.get_parameter('map_topic').value)
         # QoS 함정. map_server 는 TRANSIENT_LOCAL 로 지도를 한 번만 걸어 두고,
@@ -141,14 +151,13 @@ class PoseBootstrapNode(Node):
             )
 
         # 라이다 드라이버는 BEST_EFFORT 다. RELIABLE 로 구독하면 매칭이 안 된다.
-        self.create_subscription(
-            LaserScan, str(self.get_parameter('scan_topic').value), self._on_scan,
-            QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.BEST_EFFORT,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-            ),
+        # 구독 자체는 _arm 이 세션 시작 때 만든다 — QoS 만 여기 적어 둔다.
+        self._scan_topic = str(self.get_parameter('scan_topic').value)
+        self._scan_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
         )
         self.create_subscription(
             PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl_pose, 10,
@@ -171,9 +180,63 @@ class PoseBootstrapNode(Node):
             Empty, '/request_nomotion_update', callback_group=ReentrantCallbackGroup(),
         )
 
+        # 세션이 끝난 뒤 귀를 닫는 청소 타이머. 30초마다 들여다보기만 한다.
+        self.create_timer(30.0, self._maybe_disarm)
+
         self.get_logger().info(
-            'pose_bootstrap_node 준비. 합격선 점수 %.0f · 빔 %d · 격차 %.0f'
+            'pose_bootstrap_node 준비(대기 모드 — 첫 요청 때 scan·TF 를 연다). '
+            '합격선 점수 %.0f · 빔 %d · 격차 %.0f'
             % (self.min_score, self.min_beams, self.min_margin)
+        )
+
+    # --- 세션 게이트 -------------------------------------------------------
+
+    def _ensure_ready(self) -> None:
+        """서비스 진입점. 귀가 닫혀 있으면 열고, 첫 스캔을 잠깐 기다린다.
+
+        서비스는 전용 callback group + MultiThreadedExecutor 라 여기서 기다려도
+        구독 콜백은 다른 스레드에서 계속 돈다. 1.5초 안에 스캔이 안 오면 그냥
+        진행한다 — _inputs 가 no_scan 사유로 우아하게 거절한다.
+        """
+        self._last_session_at = time.monotonic()
+        if self._scan_sub is None:
+            self._arm()
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if self._scan is not None:
+                        break
+                time.sleep(0.05)
+
+    def _arm(self) -> None:
+        """scan 구독과 TF 청취기를 연다. TF 의 라이다 오프셋은 /tf_static
+        (보관 방송)이라 청취기를 연 직후에도 바로 조회된다."""
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self._scan_sub = self.create_subscription(
+            LaserScan, self._scan_topic, self._on_scan, self._scan_qos,
+        )
+        self.get_logger().info('세션 시작 — scan·TF 수신을 연다.')
+
+    def _maybe_disarm(self) -> None:
+        if self._scan_sub is None or self._last_session_at is None:
+            return
+        idle = time.monotonic() - self._last_session_at
+        if idle < float(self.get_parameter('session_idle_timeout_sec').value):
+            return
+        self.destroy_subscription(self._scan_sub)
+        self._scan_sub = None
+        try:
+            self.tf_listener.unregister()
+        except AttributeError:
+            pass  # tf2_ros 버전에 unregister 가 없으면 참조 해제로 충분하다
+        self.tf_listener = None
+        self.tf_buffer = None
+        with self._lock:
+            # 닫힌 사이 로봇이 움직였을 수 있다. 옛 스캔으로 채점하면 안 된다.
+            self._scan = None
+        self.get_logger().info(
+            '세션 종료(%.0f초 무사용) — scan·TF 수신을 닫는다.' % idle
         )
 
     # --- 입력 --------------------------------------------------------------
@@ -205,6 +268,8 @@ class PoseBootstrapNode(Node):
 
     def _sensor_offset(self, frame_id: str):
         """base_footprint 에서 본 라이다 위치. 18.5 cm 앞이라 빼먹으면 그만큼 밀린다."""
+        if self.tf_buffer is None:
+            return None
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.base_frame, frame_id, rclpy.time.Time(),
@@ -233,6 +298,7 @@ class PoseBootstrapNode(Node):
     # --- 확인 --------------------------------------------------------------
 
     def _on_check(self, request, response):
+        self._ensure_ready()
         bundle, reason = self._inputs()
         if bundle is None:
             response.ok = False
@@ -283,6 +349,7 @@ class PoseBootstrapNode(Node):
     # --- 확정 --------------------------------------------------------------
 
     def _on_commit(self, request, response):
+        self._ensure_ready()
         bundle, reason = self._inputs()
         if bundle is None:
             response.accepted = False

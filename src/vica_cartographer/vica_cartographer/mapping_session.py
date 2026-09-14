@@ -17,6 +17,7 @@ rclpy 도 subprocess 도 쓰지 않는다. 노트북에서 pytest 로 전부 검
 from enum import Enum
 import re
 import signal
+import unicodedata
 
 
 class MappingState(str, Enum):
@@ -200,3 +201,49 @@ def normalise_map_name(raw: str, date_suffix: str):
     if len(name) > MAP_NAME_MAX:
         return None, f'지도 이름이 너무 깁니다({len(name)}자). {MAP_NAME_MAX}자 이내로 해주세요.'
     return name, ''
+
+
+# 사람이 읽는 표시 이름(한글 가능). 파일·URL·yaml·터미널에는 절대 들어가지 않고
+# maps/<id>.meta.json 과 앱 목록(map_name), 터미네이터 배너에만 산다. 그래서 한글이
+# 들어와도 지도를 쓰는 다른 노드는 아무것도 달라지지 않는다(2026-09-04).
+DISPLAY_NAME_MAX = 40
+_DISPLAY_NAME_FORBIDDEN = re.compile(r'[\x00-\x1f/\\]')
+
+
+def plan_map_save(raw: str, date_suffix: str, time_suffix: str):
+    """Decide the machine id and the human name for one save request.
+
+    Returns (map_id, display_name, error). 성공이면 error 가 '', 실패면 나머지가 None.
+
+    영문 이름은 예전과 똑같다 — 'lobby' 는 id 'lobby_0904' 가 되고 표시 이름도 그것.
+    한글·공백이 섞인 이름은 표시 이름으로만 쓰고 id 는 map_<날짜>_<시각> 으로 자동
+    생성한다. id 가 파일·URL·yaml·터미널 명령에 그대로 들어가기 때문이다. macOS 가
+    한글을 풀어 쓰는(NFD) 사고를 막으려고 표시 이름은 NFC 로 고정한다.
+    """
+    name = unicodedata.normalize('NFC', raw or '').strip()
+    if not name:
+        return None, None, '지도 이름을 입력해 주세요.'
+    if MAP_NAME_PATTERN.match(name):
+        map_id, error = normalise_map_name(name, date_suffix)
+        if map_id is None:
+            return None, None, error
+        return map_id, map_id, ''
+    if _DISPLAY_NAME_FORBIDDEN.search(name):
+        return None, None, '지도 이름에 슬래시(/, \\)나 제어 문자는 쓸 수 없습니다.'
+    if len(name) > DISPLAY_NAME_MAX:
+        return None, None, (
+            f'지도 이름이 너무 깁니다({len(name)}자). {DISPLAY_NAME_MAX}자 이내로 해주세요.'
+        )
+    return f'map_{date_suffix}_{time_suffix}', name, ''
+
+
+def save_label(map_id: str, display_name) -> str:
+    """사람에게 보이는 저장 문구용 이름. 표시 이름이 따로 있으면 id 를 괄호에 붙인다."""
+    if not display_name or display_name == map_id:
+        return map_id
+    return f'{display_name} ({map_id})'
+
+
+def map_meta_document(map_id: str, display_name: str, saved_at: str) -> dict:
+    """maps/<id>.meta.json 의 내용. map_list_node 와 scripts/vica_map_resolve.py 가 읽는다."""
+    return {'map_id': map_id, 'display_name': display_name, 'saved_at': saved_at}

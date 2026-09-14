@@ -219,7 +219,8 @@ def test_validate_component_rejects_unknown():
 def test_validate_fault_code_accepts_catalog_entries():
     """카탈로그 항목을 통과시킨다."""
     assert validate_fault_code('MOTOR_CAN_TIMEOUT') is None
-    assert validate_fault_code('NVBLOX_SLICE_STALE') is None
+    # nvblox 는 감시 대상에서 뺐다(test_nvblox_is_no_longer_watched). 살아 있는 코드로 본다.
+    assert validate_fault_code('LIDAR_SCAN_STALE') is None
 
 
 def test_validate_fault_code_rejects_unknown():

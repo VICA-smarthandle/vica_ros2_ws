@@ -21,6 +21,15 @@ RViz 하나가 코어 1.5개를 쓴다. CPU 가 모자라면 EKF 가 30 Hz 에�
 
 **파일은 하나만 둔다.** 여러 장으로 쌓으면 30분 매핑에 900장 22 MB 가 되고, 앱 쪽
 이미지 캐시(디코딩하면 장당 약 1 MB)가 3분 만에 상한 100 MB 에 닿는다.
+
+**로봇 위치도 같은 메시지에 싣는다(2026-09-04).** 매핑 중에는 AMCL 이 없어
+/robot_status 의 위치가 /odom 좌표로 대체되고 map_id 도 비어, 앱이 미리보기 위에
+로봇을 그릴 길이 없었다. 그래서 Cartographer 의 /tracked_pose(map 프레임 기준
+base_footprint, vica_2d.lua 의 publish_tracked_pose) 를 받아 두었다가 period_sec
+마다 나가는 JSON 에 x·y·yaw 를 동봉한다. 앱이 /tracked_pose 를 rosbridge 로
+직접 받으면 100 Hz JSON 직렬화와 화면 재빌드가 생기고, 이 노드가 TF 청취기를 두면
+/tf 전체를 받게 된다(vica_status_app_node 가 같은 이유로 걷어낸 방식). 여기서
+받는 콜백은 값 저장뿐이라 100 Hz 여도 젯슨 CPU 1 % 안쪽이다.
 """
 
 from datetime import datetime
@@ -28,6 +37,7 @@ import json
 import os
 from pathlib import Path
 
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -41,7 +51,8 @@ from rclpy.qos import (
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from .map_preview import grid_to_png
+from .map_preview import POSE_MAX_AGE_SEC, grid_to_png, quaternion_to_yaw_degrees
+from .map_preview import robot_pose_fields
 
 # 앱이 이 경로로 받아 간다. supervisor_bringup 의 HTTP 서버가 vica_ros2_ws 를
 # 서빙하므로 그대로 URL 이 된다.
@@ -67,6 +78,10 @@ class MapPreviewNode(Node):
         self.declare_parameter('period_sec', 2.0)
         # zlib level. 실측 1: 6,686 B/0.5 ms, 6: 4,533 B/1.1 ms, 9: 3,478 B/6.4 ms.
         self.declare_parameter('compress_level', 6)
+        # Cartographer 가 publish_tracked_pose = true 일 때 내는 토픽(map 프레임).
+        self.declare_parameter('pose_topic', '/tracked_pose')
+        # 이보다 오래된 자세는 싣지 않는다. 위 map_preview.POSE_MAX_AGE_SEC 참조.
+        self.declare_parameter('pose_max_age_sec', POSE_MAX_AGE_SEC)
 
         self.period_sec = float(self.get_parameter('period_sec').value)
         self.compress_level = int(self.get_parameter('compress_level').value)
@@ -74,6 +89,10 @@ class MapPreviewNode(Node):
 
         self.seq = 0
         self.last_written_ns = None
+        # 마지막으로 받은 로봇 자세 (x, y, yaw_deg) 와 그 수신 시각.
+        self.robot_pose = None
+        self.robot_pose_ns = None
+        self.pose_max_age_sec = float(self.get_parameter('pose_max_age_sec').value)
 
         # QoS 주의: TRANSIENT_LOCAL 로 **구독**하면 발행자가 VOLATILE 일 때 아예
         # 매칭되지 않아 한 건도 못 받는다. 이 프로젝트에 같은 사고 기록이 있다
@@ -85,6 +104,20 @@ class MapPreviewNode(Node):
             QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            ),
+        )
+
+        # 로봇 자세. 발행자(cartographer)는 RELIABLE 이고 BEST_EFFORT 구독은 그와
+        # 호환된다. 100 Hz 로 오지만 콜백은 값 저장뿐이라 depth 1 이면 충분하다.
+        self.create_subscription(
+            PoseStamped,
+            str(self.get_parameter('pose_topic').value),
+            self.handle_pose,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
                 durability=DurabilityPolicy.VOLATILE,
                 history=HistoryPolicy.KEEP_LAST,
             ),
@@ -162,6 +195,24 @@ class MapPreviewNode(Node):
         self.seq += 1
         self._announce(info, len(png))
 
+    def handle_pose(self, msg: PoseStamped) -> None:
+        """Remember the latest map-frame pose. 저장만 하고 아무것도 계산하지 않는다."""
+        position = msg.pose.position
+        orientation = msg.pose.orientation
+        self.robot_pose = (
+            float(position.x),
+            float(position.y),
+            quaternion_to_yaw_degrees(
+                orientation.x, orientation.y, orientation.z, orientation.w
+            ),
+        )
+        self.robot_pose_ns = self.get_clock().now().nanoseconds
+
+    def _robot_pose_age_sec(self):
+        if self.robot_pose_ns is None:
+            return None
+        return (self.get_clock().now().nanoseconds - self.robot_pose_ns) / 1e9
+
     def _write_atomically(self, png: bytes) -> None:
         """Write a temp file then rename.
 
@@ -179,23 +230,27 @@ class MapPreviewNode(Node):
         """Publish the metadata the app needs.
 
         이미지만으로는 부족하다. 지도가 자라면 크기와 원점이 함께 바뀌므로 앱이
-        좌표를 그리려면 매번 같이 받아야 한다.
+        좌표를 그리려면 매번 같이 받아야 한다. 로봇 자세(robot_x·robot_y·robot_yaw,
+        yaw 는 도 단위 반시계 양수)는 알고 있을 때만 붙는다.
         """
-        message = String()
-        message.data = json.dumps(
-            {
-                'image_url': PREVIEW_URL_PREFIX + PREVIEW_FILENAME,
-                'seq': self.seq,
-                'width': int(info.width),
-                'height': int(info.height),
-                'resolution': float(info.resolution),
-                'origin_x': float(info.origin.position.x),
-                'origin_y': float(info.origin.position.y),
-                'bytes': size_bytes,
-                'timestamp': datetime.now().isoformat(timespec='seconds'),
-            },
-            ensure_ascii=False,
+        payload = {
+            'image_url': PREVIEW_URL_PREFIX + PREVIEW_FILENAME,
+            'seq': self.seq,
+            'width': int(info.width),
+            'height': int(info.height),
+            'resolution': float(info.resolution),
+            'origin_x': float(info.origin.position.x),
+            'origin_y': float(info.origin.position.y),
+            'bytes': size_bytes,
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+        }
+        payload.update(
+            robot_pose_fields(
+                self.robot_pose, self._robot_pose_age_sec(), self.pose_max_age_sec
+            )
         )
+        message = String()
+        message.data = json.dumps(payload, ensure_ascii=False)
         self.publisher.publish(message)
 
     def handle_clear(self, _request, response):
@@ -224,6 +279,8 @@ class MapPreviewNode(Node):
                 return response
         self.seq = 0
         self.last_written_ns = None
+        self.robot_pose = None
+        self.robot_pose_ns = None
         response.success = True
         response.message = f'미리보기 {removed}개를 지웠습니다.'
         self.get_logger().info(response.message)

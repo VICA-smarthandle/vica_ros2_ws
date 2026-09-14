@@ -7,6 +7,7 @@ Nav2 `NavigateToPose` Goal을 생성한다.
 
 - LLM·앱·`vica_goto_goal.py`는 Nav2 Goal을 직접 발행하지 않는다.
 - 공개 요청 서비스는 `/vica/mission/request_destination`이다.
+- 물류 배송 요청은 `/vica/mission/request_delivery`다. 요청 모양은 같고 `private` 목적지만 추가로 허용한다. 접근 가능·지도 경계·Nav2·E-stop 검사는 그대로다.
 - 요청의 `destination_id`는 현재 지도 catalog에 존재하는 UUID v4여야 한다.
 - `authorization != public` 또는 `is_approachable == false`인 목적지는 거부한다.
 - E-stop 해제 뒤 이전 Goal을 자동 재개하지 않는다.
@@ -19,6 +20,7 @@ Nav2 `NavigateToPose` Goal을 생성한다.
 | 구독 | `/vica/emergency` | `vica_interfaces/msg/EmergencyEvent` |
 | 구독 | `/emergency_stop` | `std_msgs/msg/Bool` |
 | 서비스 | `/vica/mission/request_destination` | `vica_interfaces/srv/RequestDestination` |
+| 서비스 | `/vica/mission/request_delivery` | `vica_interfaces/srv/RequestDestination` (물류 배송 전용, `private` 허용) |
 | 서비스 | `/vica/mission/reload_destinations` | `std_srvs/srv/Trigger` |
 | 발행 | `/vica_goal_event` | `std_msgs/msg/String` JSON |
 | 발행 | `/vica/tts_request` | `std_msgs/msg/String` |

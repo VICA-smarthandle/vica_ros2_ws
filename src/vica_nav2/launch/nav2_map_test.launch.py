@@ -4,10 +4,12 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -343,6 +345,55 @@ def generate_launch_description():
                         {"node_names": ["collision_monitor"]},
                     ],
                     respawn=False,
+                ),
+                # 기동을 한 번 더 시킨다 (2026-09-02 실기 재발 후).
+                #
+                # **왜 필요한가.** collision_monitor 는 /cmd_vel_req 를 만드는
+                # 유일한 노드다. 활성화에 실패하면 Nav2 가 멀쩡히 경로를 계산해도
+                # 명령이 밖으로 못 나가고, 노드는 살아 있어서 목록에는 보인다 —
+                # 알아채기 가장 어려운 고장이다. 실제로 두 번 겪었다
+                # (2026-09-02 오전·저녁).
+                #
+                # **왜 실패하나.** 관리자가 get_state 를 부르면 nav2_util 의
+                # ServiceClient 가 이렇게 동작한다.
+                #
+                #     while (!wait_for_service(1s)) { ... }      # 상대가 뜰 때까지 무한 대기
+                #     async_send_request(...)
+                #     spin_until_future_complete(future, 2s)     # 응답을 2초만 기다린다
+                #
+                # 요청 경로는 wait_for_service 가 보장하지만 **응답 경로는 보장하지
+                # 않는다.** 기동 순간 DDS 가 아직 응답 writer 를 매칭하지 못하면
+                # collision_monitor 가 답을 보내려다 버린다 — 그 순간이 로그에
+                # "failed to send response ... client will not receive response"
+                # 로 남는다. 관리자는 2초 뒤 포기하고 "Aborting bringup" 한다.
+                # **재시도가 없다.**
+                #
+                # **왜 타이머 지연이 아닌가.** 실측이 반증한다 — 실패한 회차가
+                # 오히려 더 늦게(프로세스 시작 +8.0초) 시작했고, 가장 빨리 시작한
+                # 회차(+6.3초)는 성공했다. 지연과 성패에 상관이 없다. 이 경합은
+                # 기다려서 피하는 것이 아니라 다시 해서 넘는 것이다.
+                #
+                # **왜 무해한가.** manage_nodes STARTUP 은 이미 active 인 노드에
+                # 대해 아무 일도 하지 않는다. 성공한 회차에서는 로그 한 줄만 남는다.
+                # 그래서 "실패했을 때만 살아나는" 안전핀이 된다.
+                #
+                # 12초로 두는 것은 실측 기준이다 — 정상 회차에서 Activating 이
+                # 프로세스 시작 +9.0초에 끝났다. 그보다 뒤여야 정상 기동을
+                # 방해하지 않는다.
+                TimerAction(
+                    period=12.0,
+                    actions=[
+                        ExecuteProcess(
+                            cmd=[
+                                "ros2", "service", "call",
+                                "/lifecycle_manager_collision_monitor/manage_nodes",
+                                "nav2_msgs/srv/ManageLifecycleNodes",
+                                "{command: 0}",   # 0 = STARTUP
+                            ],
+                            output="screen",
+                            shell=False,
+                        ),
+                    ],
                 ),
             ],
         ),

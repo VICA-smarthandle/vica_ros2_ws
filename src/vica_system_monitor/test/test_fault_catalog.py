@@ -181,3 +181,16 @@ def test_severity_name_covers_all_levels():
 def test_severity_name_handles_unexpected_value():
     """정의되지 않은 값에도 예외를 던지지 않는다."""
     assert 'UNKNOWN' in severity_name(99)
+
+
+def test_adapter_outage_is_one_degraded_fault_with_source_and_age():
+    """어댑터 사망은 감시 제한(DEGRADED) 한 건이고, 누가 얼마나 오래 침묵하는지 말한다."""
+    description = describe(
+        'MONITOR_DIAG_INPUT_STALE', source='external_diagnostics_node', age_sec='42'
+    )
+    assert description.component == 'monitor'
+    assert description.severity == SEVERITY_DEGRADED
+    assert 'external_diagnostics_node' in description.detail
+    assert '42초' in description.detail
+    assert '관측 불가' in description.detail
+    assert '주행' in description.suggested_action
