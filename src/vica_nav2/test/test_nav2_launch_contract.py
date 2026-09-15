@@ -198,8 +198,15 @@ def test_collision_monitor_has_no_rear_polygon():
     padded footprint 앞단이 +0.355 m 이므로 모든 x 가 그보다 커야 차체와도
     겹치지 않는다.
     """
-    monitor = _params()['collision_monitor']['ros__parameters']
-    front_edge = 0.355  # padded footprint 앞단
+    params = _params()
+    monitor = params['collision_monitor']['ros__parameters']
+    # 2026-09-15: 앞단을 0.355 로 박아 두었더니 base_link 원점이 구동륜 축으로
+    # 옮겨질 때 함께 낡았다(VICA.xacro axle_offset_x). footprint 에서 직접 구한다.
+    # Nav2 의 padFootprint 는 좌표마다 부호 방향으로 더하므로 앞단은
+    # max(x) + padding 이다.
+    costmap = params['local_costmap']['local_costmap']['ros__parameters']
+    footprint = yaml.safe_load(costmap['footprint'])
+    front_edge = max(pt[0] for pt in footprint) + costmap['footprint_padding']
 
     for name in monitor['polygons']:
         points = monitor[name]['points']

@@ -9,6 +9,43 @@
      인코딩하고 있어 함께 손봐야 한다. -->
 <xacro:property name="body_center_z" value="0.041" />
 <xacro:property name="base_link_height" value="0.19" />
+
+<!-- ── 2026-09-15 base_link 원점을 차체 중심에서 구동륜 축으로 옮긴다 ──────────
+     이 로봇은 차동구동이라 **실제 회전 중심은 구동륜 축 중점**이다. 그런데
+     base_link 원점은 CAD 원점인 차체 한가운데였고, 구동륜 joint 가 거기서
+     x +0.154 에 있었다. 두 점이 15.4 cm 어긋나 있었다는 뜻이다.
+
+     왜 문제인가. encoder_feedback.py 는 좌우 바퀴 이동거리의 평균과 차이로
+     d_center·d_theta 를 구해 odom -> base_footprint 로 낸다(293~299행). 이
+     계산이 뜻하는 점은 교과서대로 **구동륜 축 중점**이고 보정 항은 없다.
+     그래서 'TF 가 실제로 추적하는 점'과 '거기 붙여 둔 몸 모양(footprint·
+     라이다·카메라 위치)'이 15.4 cm 어긋나 있었다.
+
+     결과로 나타나던 것:
+       - 제자리 회전 시 뒤쪽이 쓸고 가는 반경을 Nav2 가 0.154 m 짧게 봤다
+         (0.4727 -> 실제 0.6248, padding 포함). 코너에서 뒤가 스쳤다.
+       - 180도 제자리 회전이면 차체 중앙이 실제로 0.308 m 움직이는데
+         Nav2 는 제자리로 계산했다.
+       - 라이다는 실제 회전축에서 3.1 cm 앞인데 TF 는 18.5 cm 로 알아,
+         회전 중 라이다가 움직일 거리를 6배 크게 예측했다.
+
+     로봇은 설정과 무관하게 이미 구동륜 축으로 돈다. 이 수정은 로봇을 바꾸는
+     것이 아니라 로봇이 자기 몸을 제대로 알게 하는 것이다.
+
+     같이 움직여야 하는 것(하나라도 빠지면 지도·costmap 이 전부 틀어진다):
+       ① base_link 의 visual·collision·inertial origin  (이 파일)
+       ② base_link 를 parent 로 하는 joint 9개          (이 파일)
+       ③ nav2_params.yaml 의 footprint 2곳 · collision_monitor 다각형 2개
+       ④ test_footprint_contract.py 의 실측 기준 좌표
+     base_footprint 는 base_link 의 부모이고 x 오프셋이 0 이라 함께 따라온다.
+
+     이 값이 틀리면 전부 틀린다. 줄자로 **앞 범퍼 끝에서 구동축 중심까지**를
+     재면 0.305 - 0.154 = 0.151 m 가 나와야 한다. 다르면 여기만 고친다. -->
+<xacro:property name="axle_offset_x" value="0.154" />
+
+<!-- 아래 센서 x 값은 전부 **차체 중심** 기준 줄자 실측이다. base_link 원점은
+     이제 구동륜 축이므로 joint 에서 axle_offset_x 를 뺀다. 실측값 자체는
+     그대로 두어야 다음 사람이 줄자와 대조할 수 있다. -->
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
@@ -99,7 +136,7 @@
 
 <link name="base_link">
   <inertial>
-    <origin xyz="0.004031215194176557 3.002726997808124e-17 0.03506562657816282" rpy="0 0 0"/>
+    <origin xyz="${0.004031215194176557 - axle_offset_x} 3.002726997808124e-17 0.03506562657816282" rpy="0 0 0"/>
     <mass value="90.84709962539795"/>
     <inertia ixx="2.402108" iyy="3.622523" izz="4.166828" ixy="0.0" iyz="-0.0" ixz="0.343284"/>
   </inertial>
@@ -112,14 +149,14 @@
        기준이라 실물 완성 후 재실측 전에는 바꾸지 않는다.
        실물 CAD 가 나오면 이 메시를 교체한다. -->
   <visual>
-    <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
+    <origin xyz="${-axle_offset_x} 0 -${body_center_z}" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://vica_description/meshes/base_link_mast.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="body_blue"/>
   </visual>
   <collision>
-    <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
+    <origin xyz="${-axle_offset_x} 0 -${body_center_z}" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://vica_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
@@ -285,14 +322,14 @@
 </link>
 
 <joint name="left_wheel_joint" type="continuous">
-  <origin xyz="0.154 ${wheel_y} -0.125" rpy="0 0 0"/>
+  <origin xyz="${0.154 - axle_offset_x} ${wheel_y} -0.125" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="left_wheel_1"/>
   <axis xyz="0.0 1.0 0.0"/>
 </joint>
 
 <joint name="right_wheel_joint" type="continuous">
-  <origin xyz="0.154 ${-wheel_y} -0.125" rpy="0 0 0"/>
+  <origin xyz="${0.154 - axle_offset_x} ${-wheel_y} -0.125" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="right_wheel_1"/>
   <axis xyz="0.0 1.0 0.0"/>
@@ -313,14 +350,14 @@
 </joint>
 
 <joint name="front_right_caster_steer_joint" type="continuous">
-  <origin xyz="-0.222 ${-caster_steer_y} -0.0825" rpy="0 0 0"/>
+  <origin xyz="${-0.222 - axle_offset_x} ${-caster_steer_y} -0.0825" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="front_right_caster_steer_1"/>
   <axis xyz="0.0 0.0 -1.0"/>
 </joint>
 
 <joint name="front_left_caster_steer_joint" type="continuous">
-  <origin xyz="-0.222 ${caster_steer_y} -0.0825" rpy="0 0 0"/>
+  <origin xyz="${-0.222 - axle_offset_x} ${caster_steer_y} -0.0825" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="front_left_caster_steer_1"/>
   <axis xyz="0.0 0.0 -1.0"/>
@@ -328,7 +365,7 @@
 
 <!-- Sensor positions are expressed relative to the body-centered base_link. -->
 <joint name="laser_joint" type="fixed">
-  <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
+  <origin xyz="${laser_x - axle_offset_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
 </joint>
@@ -364,7 +401,7 @@
   <xacro:usonic_visual/>
 </link>
 <joint name="usonic_front_left_joint" type="fixed">
-  <origin xyz="${usonic_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <origin xyz="${usonic_x - axle_offset_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="usonic_front_left"/>
 </joint>
@@ -373,7 +410,7 @@
   <xacro:usonic_visual/>
 </link>
 <joint name="usonic_front_right_joint" type="fixed">
-  <origin xyz="${usonic_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <origin xyz="${usonic_x - axle_offset_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="usonic_front_right"/>
 </joint>
@@ -391,7 +428,7 @@
                         하단에 걸리기 시작한다. 이 위로 기울이지 말 것.
      기울기를 바꿔도 IMU 어댑터 파라미터는 안 바꾼다 - TF 회전을 자동으로 읽는다. -->
 <joint name="camera_joint" type="fixed">
-  <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 ${camera_pitch} 0"/>
+  <origin xyz="${camera_x - axle_offset_x} ${camera_y} ${camera_z}" rpy="0 ${camera_pitch} 0"/>
   <parent link="base_link"/>
   <child link="camera_link"/>
 </joint>

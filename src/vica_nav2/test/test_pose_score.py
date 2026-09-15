@@ -22,7 +22,10 @@ from vica_nav2.pose_score import (
 )
 
 RESOLUTION = 0.05
-LASER_OFFSET = (0.185, 0.0, 0.0)   # 라이다가 로봇 중심보다 18.5 cm 앞이다
+# 시험용 오프셋이다. 2026-09-15 에 base_link 원점이 구동륜 축으로 옮겨져
+# 실제 라이다는 base_link 보다 3.1 cm 앞이지만(0.185 - 0.154), 이 시험이 보는 것은
+# "오프셋을 빼먹으면 그만큼 밀린다"는 성질이라 값은 크게 잡아 두는 편이 낫다.
+LASER_OFFSET = (0.185, 0.0, 0.0)
 
 
 def _blank(width_m, height_m):

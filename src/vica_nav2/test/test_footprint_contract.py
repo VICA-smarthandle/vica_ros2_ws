@@ -5,7 +5,13 @@ footprint 전방이 +0.15 m로 선언되어 있었으나 실제 차체는 +0.305
 Nav2가 15.5 cm를 free 공간으로 오인한 것이었다. 좌우도 각 4 cm 짧았다.
 
 이 테스트는 같은 종류의 회귀(차체보다 작은 footprint)를 막는다.
+
+2026-09-15부터 좌표 기준점도 함께 감시한다. base_link 원점이 차체 중심에서
+구동륜 축으로 옮겨졌으므로, URDF 의 axle_offset_x 와 여기 AXLE_OFFSET_X 가
+어긋나면 footprint 가 조용히 차체와 따로 놀게 된다.
 """
+import math
+import re
 import struct
 from pathlib import Path
 
@@ -29,13 +35,24 @@ STL_SCALE = 0.001
 # 후방은 -0.305 - 0.11 = -0.415 다. 2026-08-13 값(-0.495, 손잡이 19 cm)에서
 # 손잡이가 다시 8 cm 짧아졌다. 그 전은 2026-08-02 의 -0.595(손잡이 29 cm)였다.
 # 앞과 반폭은 세 회차 내내 그대로다 - 줄어든 것은 손잡이뿐이다.
+#
+# ── 2026-09-15 좌표 기준점이 바뀌었다 ─────────────────────────────────────────
+# base_link 원점이 차체 중심에서 구동륜 축으로 15.4 cm 앞으로 옮겨졌다
+# (VICA.xacro 의 axle_offset_x 주석 참고). 아래 MEASURED_* 와 STL 은 여전히
+# **차체 중심** 기준 실측이다. 줄자가 재는 것은 차체이지 회전축이 아니기
+# 때문이다. 그래서 footprint 와 비교하기 직전에 AXLE_OFFSET_X 를 빼서
+# base_link 좌표로 옮긴다. 실측값 자체는 손대지 않는다.
+AXLE_OFFSET_X = 0.154
 MEASURED_REAR = -0.415
 MEASURED_HALF_WIDTH = 0.225
 # STL과 실측이 이보다 더 벌어지면 둘 중 하나가 낡은 것이므로 사람이 봐야 한다.
 # 현재 차이는 반폭에서 1.5 mm(STL 0.2265 vs 실측 0.225)로, padding 5 cm 안에 묻힌다.
 STL_TOLERANCE = 0.01
+# 둘 다 차체 중심 기준이다(위 문단과 같은 이유). 비교 시 AXLE_OFFSET_X 를 뺀다.
 LASER_X = 0.185  # VICA.xacro laser_x
-CAMERA_X = 0.28683  # VICA.xacro camera_x
+# 2026-09-15 정정: 옛 0.28683 은 2026-08-18 마스트 이설 전 값이라 낡아 있었다.
+# 지금 카메라는 마스트 위라 차체 중심보다 뒤에 있다(VICA.xacro camera_x).
+CAMERA_X = -0.225
 
 
 def _load_params():
@@ -47,6 +64,35 @@ def _footprint(costmap_name):
     params = _load_params()
     raw = params[costmap_name][costmap_name]['ros__parameters']['footprint']
     return yaml.safe_load(raw)
+
+
+def _padded(points, padding):
+    """Nav2 의 padFootprint 와 같은 규칙으로 여유를 더한다.
+
+    다각형을 바깥으로 밀어내는 것이 아니라 **좌표마다 부호 방향으로** 더한다
+    (nav2_costmap_2d/src/footprint.cpp). 이 차이로 외접반경이 달라지므로
+    직접 구현한다 - 0 인 좌표는 그대로 둔다.
+    """
+    def shift(v):
+        return 0.0 if v == 0 else (padding if v > 0 else -padding)
+    return [(p[0] + shift(p[0]), p[1] + shift(p[1])) for p in points]
+
+
+def _inscribed(points):
+    """원점에서 가장 가까운 변까지의 거리.
+
+    Nav2 의 calculateMinAndMaxDistances 와 같다. 꼭짓점과 변을 모두 본다.
+    """
+    best = float('inf')
+    n = len(points)
+    for i in range(n):
+        ax, ay = points[i]
+        bx, by = points[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len_sq = dx * dx + dy * dy
+        t = 0.0 if len_sq == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / len_sq))
+        best = min(best, math.hypot(ax + t * dx, ay + t * dy))
+    return best
 
 
 def _stl_path():
@@ -86,16 +132,21 @@ def test_footprint_covers_the_real_chassis(costmap):
 
     # 전방은 STL과 줄자가 일치한다(+0.305). 여기서 짧으면 범퍼가 costmap상
     # free 공간을 쓸고 지나가 충돌한다 -- 2026-07-27에 실제로 그랬다.
-    assert front >= max_x, (
-        f'{costmap} footprint 전방 {front}이 실제 차체 {max_x:.3f}보다 짧다'
+    # STL 은 차체 중심 기준이므로 base_link(=구동축) 좌표로 옮겨 비교한다.
+    stl_front = max_x - AXLE_OFFSET_X
+    assert front >= stl_front, (
+        f'{costmap} footprint 전방 {front}이 실제 차체 {stl_front:.3f}보다 짧다'
+        f' (STL 차체중심 {max_x:.3f} - 축 오프셋 {AXLE_OFFSET_X})'
     )
     # 좌우·후방은 줄자 실측이 기준이다. CAD 후방부가 실물과 다르다는 것이
     # 확인됐기 때문이다(위 상수 주석).
     assert half_width >= MEASURED_HALF_WIDTH, (
         f'{costmap} footprint 반폭 {half_width}이 실측 {MEASURED_HALF_WIDTH}보다 좁다'
     )
-    assert rear <= MEASURED_REAR, (
-        f'{costmap} footprint 후방 {rear}이 실측 차체 {MEASURED_REAR}보다 짧다'
+    measured_rear = MEASURED_REAR - AXLE_OFFSET_X
+    assert rear <= measured_rear, (
+        f'{costmap} footprint 후방 {rear}이 실측 차체 {measured_rear:.3f}보다 짧다'
+        f' (줄자 차체중심 {MEASURED_REAR} - 축 오프셋 {AXLE_OFFSET_X})'
     )
     # 다만 STL을 아주 버리지는 않는다. 실측과 CAD가 크게 벌어지면 둘 중 하나가
     # 낡은 것이고, 그걸 모르고 지나가면 2026-07-27 같은 충돌로 돌아온다.
@@ -111,8 +162,8 @@ def test_footprint_contains_forward_mounted_sensors(costmap):
     # LiDAR·카메라가 footprint 밖에 있으면 그 자체로 footprint가 틀렸다는 신호다.
     # 구 footprint(전방 +0.15)는 둘 다 바깥이었고, 실제로 충돌로 이어졌다.
     front = max(p[0] for p in _footprint(costmap))
-    assert front >= LASER_X
-    assert front >= CAMERA_X
+    assert front >= LASER_X - AXLE_OFFSET_X
+    assert front >= CAMERA_X - AXLE_OFFSET_X
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
@@ -241,8 +292,11 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     params = _load_params()
     cm = params[costmap][costmap]['ros__parameters']
     padding = cm['footprint_padding']
-    half_width = max(abs(p[1]) for p in _footprint(costmap))
-    inscribed = half_width + padding
+    # 2026-09-15: 예전에는 inscribed = 반폭 + padding 이었다. 원점이 차체 중심일
+    # 때는 가장 가까운 변이 옆면이라 그 식이 맞았다. 원점이 구동륜 축으로 옮겨진
+    # 뒤로는 앞면이 더 가까워(0.151 + padding) 그 식이 틀린다. Nav2 가 실제로
+    # 쓰는 방식 그대로 가장 가까운 변까지의 거리를 구한다.
+    inscribed = _inscribed(_padded(_footprint(costmap), padding))
     inflation_radius = cm['inflation_layer']['inflation_radius']
 
     # 하한: 경로 추종 오차를 흡수할 완충이 있어야 한다.
@@ -363,3 +417,33 @@ def test_local_and_global_costmap_use_the_same_footprint():
     local = params['local_costmap']['local_costmap']['ros__parameters']
     global_ = params['global_costmap']['global_costmap']['ros__parameters']
     assert local['footprint_padding'] == global_['footprint_padding']
+
+
+def test_urdf_axle_offset_matches_this_contract():
+    """URDF 의 axle_offset_x 와 이 파일의 AXLE_OFFSET_X 는 같아야 한다.
+
+    base_link 원점을 옮기는 값이 두 곳에 적혀 있다. URDF 에서만 고치고 여기를
+    안 고치면 footprint 가 차체보다 앞으로 밀려, 2026-07-27 범퍼 충돌과 같은
+    종류('Nav2 가 실제 차체보다 작게 안다')로 돌아온다. 한쪽만 바뀌면 멈춘다.
+
+    반대로 이 상수만 고치는 경우는 위 차체 덮기 시험이 잡는다 - footprint 후방
+    기준(MEASURED_REAR - AXLE_OFFSET_X)이 함께 움직이기 때문이다.
+    """
+    xacro_path = (
+        Path(__file__).parents[2] / 'vica_description' / 'urdf' / 'VICA.xacro'
+    )
+    if not xacro_path.exists():
+        pytest.skip('vica_description/urdf/VICA.xacro 없음')
+
+    text = xacro_path.read_text(encoding='utf-8')
+    found = re.search(
+        r'<xacro:property\s+name="axle_offset_x"\s+value="([-0-9.]+)"', text
+    )
+    assert found, (
+        'VICA.xacro 에 axle_offset_x 속성이 없다. base_link 원점을 차체 중심으로'
+        ' 되돌렸다면 이 시험과 footprint 좌표도 함께 되돌려야 한다'
+    )
+    assert float(found.group(1)) == pytest.approx(AXLE_OFFSET_X, abs=1e-9), (
+        f'URDF axle_offset_x {found.group(1)} 와 이 시험의 {AXLE_OFFSET_X} 가 다르다.'
+        ' 한쪽만 고치면 footprint 가 차체와 어긋난다'
+    )

@@ -268,7 +268,11 @@ class PoseBootstrapNode(Node):
     # --- 센서 위치 ---------------------------------------------------------
 
     def _sensor_offset(self, frame_id: str):
-        """base_footprint 에서 본 라이다 위치. 18.5 cm 앞이라 빼먹으면 그만큼 밀린다."""
+        """base_footprint 에서 본 라이다 위치. 빼먹으면 그만큼 밀린다.
+
+        값은 TF 에서 읽으므로 URDF 를 따라간다. 2026-09-15 원점 이동 뒤로는
+        18.5 cm 가 아니라 3.1 cm 다(구동륜 축 기준).
+        """
         if self.tf_buffer is None:
             return None
         try:
