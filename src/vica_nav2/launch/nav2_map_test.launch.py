@@ -13,7 +13,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, SetRemap
 from nav2_common.launch import RewrittenYaml
 
@@ -52,6 +52,20 @@ def generate_launch_description():
         "behavior_trees",
         "vica_navigate_to_pose_no_backup.xml",
     )
+    # ── 2026-09-16 레일(Route Server) 용 트리 ──────────────────────────────
+    # use_route:=true 면 이 트리로 바뀐다. 트리 안에서 레일을 먼저 보고,
+    # 막혀 있으면 기존 planner 로 넘어간다. 상세는 그 파일 주석 참고.
+    route_bt = os.path.join(
+        vica_nav2_dir,
+        "behavior_trees",
+        "vica_navigate_to_pose_route.xml",
+    )
+    # 플래그 하나로 트리까지 함께 바뀌게 한다. 따로 두면 레일을 켜고 트리를
+    # 안 바꾸는 실수가 난다 — 그때 로봇은 아무 말 없이 종전대로 달린다.
+    selected_bt = PythonExpression([
+        "'", route_bt, "' if '", LaunchConfiguration("use_route"),
+        "'.lower() in ('true', '1') else '", active_bt, "'",
+    ])
     wheel_ekf_launch = os.path.join(
         vica_localization_dir,
         "launch",
@@ -73,9 +87,68 @@ def generate_launch_description():
     configured_params = RewrittenYaml(
         source_file=params_file,
         root_key="",
-        param_rewrites={"default_nav_to_pose_bt_xml": active_bt},
+        param_rewrites={"default_nav_to_pose_bt_xml": selected_bt},
         convert_types=True,
     )
+
+    def route_actions(context):
+        """레일(Route Server)을 띄운다. use_route:=true 이고 파일이 있을 때만.
+
+        keepout_actions 와 같은 이유로 OpaqueFunction 이다 — 레일 파일 경로는
+        map 인자에서 유도하므로 실행할 때 perform 해야 존재를 볼 수 있다.
+
+        route_graph 를 비워 두면 map 인자에서 <이름>_route.geojson 을 찾는다.
+        사람이 지도 이름을 두 번 적게 만들면 언젠가 다른 지도의 레일을 물린다.
+        """
+        if LaunchConfiguration("use_route").perform(context).lower() not in (
+            "true", "1",
+        ):
+            return []
+
+        explicit = LaunchConfiguration("route_graph").perform(context).strip()
+        if explicit:
+            graph = explicit
+        else:
+            map_path = LaunchConfiguration("map").perform(context)
+            stem = os.path.splitext(os.path.basename(map_path))[0]
+            graph = os.path.join(os.path.dirname(map_path), f"{stem}_route.geojson")
+
+        if not os.path.isfile(graph):
+            # 레일을 켜라고 했는데 파일이 없다. 조용히 넘어가면 트리는 레일
+            # 트리인데 서버가 없어 ComputeRoute 가 매번 실패한다 — 겉으로는
+            # 종전 주행처럼 보여서 알아채기 어렵다. 그래서 크게 알린다.
+            return [
+                LogInfo(msg=f"[route] **레일 파일이 없다**: {graph}"),
+                LogInfo(msg="[route] scripts/vica_route_graph.py <지도> 로 만든다. "
+                            "지금은 레일 없이(자유 주행) 달린다."),
+            ]
+
+        return [
+            LogInfo(msg=f"[route] 레일을 적용한다: {graph}"),
+            Node(
+                package="nav2_route",
+                executable="route_server",
+                name="route_server",
+                output="screen",
+                parameters=[configured_params, {"graph_filepath": graph}],
+                respawn=False,
+            ),
+            # 전용 lifecycle_manager. nav2_bringup 의 lifecycle_nodes 목록에
+            # route_server 가 없어서 관리자를 붙이지 않으면 unconfigured 로
+            # 남고, 그래프를 읽지도 액션을 열지도 않는다. keepout 과 같은 이유다.
+            Node(
+                package="nav2_lifecycle_manager",
+                executable="lifecycle_manager",
+                name="lifecycle_manager_route",
+                output="screen",
+                parameters=[
+                    {"use_sim_time": use_sim_time},
+                    {"autostart": True},
+                    {"node_names": ["route_server"]},
+                ],
+                respawn=False,
+            ),
+        ]
 
     def keepout_actions(context):
         """금지구역 마스크 서버 두 개를 띄운다. 마스크 파일이 있을 때만 띄운다.
@@ -170,6 +243,21 @@ def generate_launch_description():
                 "찾고, 그 파일이 없으면 금지구역 없이 실행한다."
             ),
         ),
+        DeclareLaunchArgument(
+            "use_route",
+            default_value="false",
+            description=(
+                "레일(Route Server)을 쓴다. 켜면 BT 도 레일 트리로 함께 바뀐다. "
+                "레일 파일은 scripts/vica_route_graph.py 로 만든다."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "route_graph",
+            default_value="",
+            description=(
+                "레일 GeoJSON. 비우면 map 인자에서 <이름>_route.geojson 을 찾는다."
+            ),
+        ),
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("autostart", default_value="true"),
@@ -253,6 +341,9 @@ def generate_launch_description():
         # behavior_server 지정이라 여기까지 오지 않지만, 마스크 서버는 Nav2
         # 주행 배선과 무관한 데이터 공급자라 섞지 않는 편이 읽기 쉽다.
         OpaqueFunction(function=keepout_actions),
+        # 레일 서버. keepout 과 같은 이유로 GroupAction 밖에 둔다 — 주행 배선이
+        # 아니라 데이터 공급자다.
+        OpaqueFunction(function=route_actions),
         GroupAction(
             actions=[
                 # 2026-08-15 [NAV2-B5]: velocity_smoother와 /cmd_vel_req 사이에

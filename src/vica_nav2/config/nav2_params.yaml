@@ -128,6 +128,19 @@ bt_navigator:
     # 얻은 것이 없었다(costmap 장애물 밀도는 두 주행이 동일했다).
     # 경로 각짐을 풀려면 smoother가 아니라 costmap을 아는 planner가 필요하다.
     plugin_lib_names:
+      # ── 2026-09-16 Route Server(레일) 용 두 개를 추가한다 ───────────────
+      # 이 둘이 없으면 BT XML 에 <ComputeRoute> 를 써도 bt_navigator 가
+      # 트리 로드를 통째로 실패한다. 라이브러리는 ros-humble-nav2-route 가
+      # /opt/ros/humble/lib 에 깔아 둔다.
+      #
+      # **이름에 'action' 이 없다.** 위아래 다른 항목은 전부
+      # nav2_..._action_bt_node 인데 route 둘만 다르다. 2026-09-16 에
+      # nav2_compute_route_action_bt_node 로 적었다가 bt_navigator 가
+      # unconfigured 에서 멈췄고, 그 뒤 planner·controller 가 줄줄이 inactive 로
+      # 남아 **목적지 요청을 받을 노드가 아예 없었다.** 로그에는 '거부'만 보인다.
+      # test_bt_plugin_libraries_exist 가 이 실수를 잡는다.
+      - nav2_compute_route_bt_node
+      - nav2_compute_and_track_route_bt_node
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
       - nav2_smooth_path_action_bt_node
@@ -143,6 +156,9 @@ bt_navigator:
       - nav2_goal_updated_condition_bt_node
       - nav2_globally_updated_goal_condition_bt_node
       - nav2_is_path_valid_condition_bt_node
+      # VICA 자작(vica_nav2_bt_plugins). 레일 경로가 점 1개이거나 로봇에서
+      # 멀면 거른다. 2026-09-16 run1·3·5 'zero length' 사고의 직접 수리.
+      - vica_is_route_path_usable_condition_bt_node
       - nav2_initial_pose_received_condition_bt_node
       - nav2_reinitialize_global_localization_service_bt_node
       - nav2_rate_controller_bt_node
@@ -1094,7 +1110,7 @@ local_costmap:
       # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
       range_sensor_front_left:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False
         topics: ["/ultrasonic/front_left"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1102,7 +1118,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_front_right:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False
         topics: ["/ultrasonic/front_right"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1575,6 +1591,78 @@ map_saver:
     free_thresh_default: 0.25
     occupied_thresh_default: 0.65
     map_subscribe_transient_local: True
+
+# ===== Route Server — 레일 위로 다니게 한다 (2026-09-16 신설) =====
+#
+# 무엇인가. planner 를 대체하는 것이 아니라 **위에 얹는** 것이다. 지도에 사람이
+# 미리 그려 둔 선(레일) 중에서 갈 길을 고르고, 그 선 위의 다음 지점을 기존
+# planner 에게 목표로 준다. 공식 README 의 "Practical Architectures" 2번이다.
+#
+#   "Route Server's output sparse route -> Planner Server to plan to the next
+#    node(s) -> Controller Server to track global path ... useful when you want
+#    to follow the general route, but wish to have the flexibility to leave the
+#    route when obstacles are in the way"
+#
+# 왜 2번인가. 1번(레일의 촘촘한 경로를 컨트롤러에 직접)은 재계획이 없어 복도에
+# 사람이 서면 못 비킨다. 3번(Waypoint Follower/NavigateThroughPoses)은 우리
+# 자작 BT 를 못 쓰고 Nav2 기본 트리가 쓰이는데 그 안에 BackUp 0.30 m 가 있다 —
+# 뒤에 사람이 손잡이를 잡고 서 있어 금지 항목이다(백로그 §9). 4번(레일 밖
+# 출발·도착 잇기)은 2번과 경쟁하는 선택지가 아니라 함께 오는 짝이다. 우리
+# 목적지는 앱에서 등록한 임의 좌표라 레일 위에 있을 리가 없다.
+#
+# 레일 파일은 scripts/vica_route_graph.py 가 지도에서 만든다. 목적지들을 고리로
+# 잇고 열린 공간 한가운데로 지나간다. 형식은
+# /opt/ros/humble/share/nav2_route/graphs/*.geojson 의 실제 파일에서 확인했다.
+route_server:
+  ros__parameters:
+    use_sim_time: false
+    # launch 가 <지도>_route.geojson 으로 채운다. keepout 마스크와 같은 방식이다.
+    # RewrittenYaml 은 '이미 존재하는 키'만 치환하므로 여기 자리가 있어야 한다.
+    graph_filepath: ""
+
+    graph_file_loader: "GeoJsonGraphFileLoader"
+    GeoJsonGraphFileLoader:
+      plugin: "nav2_route::GeoJsonGraphFileLoader"
+
+    # 어느 선으로 갈지 고르는 점수표. 지금은 거리 하나만 본다.
+    # 2026-09-16 실측: plugin 줄을 빼면 "Can not get 'plugin' param value for
+    # DistanceScorer" 로 configure 가 FATAL 로 죽는다. 이름만 적으면 안 된다.
+    #
+    # [미시험] CostmapScorer 를 넣으면 막힌 선의 점수를 올려 우회시킬 수 있다.
+    # costmap 구독이 필요해 1단계에서는 넣지 않는다.
+    edge_cost_functions: ["DistanceScorer"]
+    DistanceScorer:
+      plugin: "nav2_route::DistanceScorer"
+
+    max_planning_time: 2.0
+
+    # ComputeAndTrackRoute(추적) 전용. 우리는 ComputeRoute 만 쓰므로 지금은
+    # 영향이 없다. 레일 노드 간격이 1.0 m 이하(2026-09-16 2판)라 기본값 2.0 을
+    # 두면 노드를 건너뛰므로 간격보다 작게 둔다.
+    radius_to_achieve_node: 0.6
+
+    # ── 출발·도착 노드 잘라내기 (goal_intent_extractor.cpp, 1.1.20 기본값) ──
+    # 로봇이 첫 노드를 지나쳤으면(dot>0) 그 노드를 지운다. 엣지가 하나뿐일 때
+    # 지우면 엣지 0개 -> 경로가 점 1개가 된다. 이 값을 만지지 않는다 — 점 1개는
+    # BT 의 IsRoutePathUsable 이 거르고 자유주행으로 넘긴다. 여기서 잘라내기를
+    # 끄면 경로가 로봇 뒤 노드에서 시작해 DWB 가 잘라야 하는데, 검증되지 않았다.
+    #   prune_goal: true
+    #   min_prune_dist_from_start: 0.10
+    #   min_prune_dist_from_goal: 0.15
+    #   max_prune_dist_from_edge: 8.0
+
+    # 레일 경로 모양. 끝 방향은 목적지 yaw 가 아니라 마지막 엣지 방향이다
+    # (path_converter.cpp). 그래서 BT 가 2단계(자유주행 마무리)를 따로 둔다.
+    #
+    # smooth_corners: 2026-09-16 run6 에서 true -> false. 켜 두니 (1) 엣지가 1 m 라
+    # 반지름 1.0 이 안 들어가 "Unable to smooth corner" 498회, (2) 일직선 위 중간역
+    # 사이의 '코너'(180도)를 둥글리다 좌표에 NaN 이 들어갔다(34경로). NaN 경로는
+    # FollowPath 가 매 틱 새 goal 로 보내 controller 가 "Aborting handle" 970회.
+    # 1.1.20 기본값이 false 다. 코너는 DWB 가 알아서 돈다(run4 의 lattice 경로처럼).
+    smooth_corners: false
+    smoothing_radius: 1.0   # smooth_corners 가 false 라 지금은 안 쓰인다
+    path_density: 0.05
+    tracker_update_rate: 50.0
 
 planner_server:
   ros__parameters:

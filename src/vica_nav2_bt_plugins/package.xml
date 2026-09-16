@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_nav2_bt_plugins</name>
+  <version>0.1.0</version>
+  <description>
+    VICA 전용 Behavior Tree 노드. 프로세스(ROS 노드)가 아니라 bt_navigator 가
+    여는 공유 라이브러리다 — CPU·기동 순서에 영향이 없다.
+
+    IsRoutePathUsable (2026-09-16)
+      레일(Route Server) 경로를 controller 에 넘기기 전에 거른다.
+      run1·run3·run5 실주행에서 route_server 가 "1 nodes and 0 edges" 로
+      점 하나짜리 경로를 내놓았고, controller 가 "Received plan with zero
+      length" 를 2739·999·237회 뱉으며 섰다. 기성 IsPathValid 는 점 하나도
+      "유효"로 통과시킨다(빈 경로만 거른다). 그래서 이 노드가 필요하다.
+  </description>
+  <maintainer email="mjw41177@gmail.com">ji_w</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>behaviortree_cpp_v3</depend>
+  <depend>nav2_behavior_tree</depend>
+  <depend>nav2_util</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

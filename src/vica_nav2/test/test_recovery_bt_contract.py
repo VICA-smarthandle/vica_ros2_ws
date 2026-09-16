@@ -19,6 +19,7 @@ BtActionNode::createActionClient가 액션 서버를 못 찾으면 예외를 던
 (throw std::runtime_error) BT 생성이 실패하고 주행 전체가 죽는다.
 """
 import importlib.util
+import os
 import re
 from pathlib import Path
 
@@ -381,6 +382,10 @@ def test_bt_navigator_declares_the_key_so_launch_can_rewrite_it():
     )
 
 
+# 2026-09-16 신설. use_route:=true 일 때 쓰는 트리.
+ROUTE_BT = 'vica_navigate_to_pose_route.xml'
+
+
 def test_launch_rewrites_the_bt_path_to_the_installed_tree(monkeypatch, tmp_path):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
 
@@ -410,11 +415,30 @@ def test_launch_rewrites_the_bt_path_to_the_installed_tree(monkeypatch, tmp_path
     assert 'default_nav_to_pose_bt_xml' in rewrites
 
     value = rewrites['default_nav_to_pose_bt_xml']
-    if not isinstance(value, str):
-        value = perform_substitutions(context, value)
-    assert value.endswith(f'behavior_trees/{ACTIVE_BT}'), (
-        f'BT 경로가 활성 트리({ACTIVE_BT})를 가리키지 않는다: {value}'
+
+    # 2026-09-16: 레일(use_route)을 켜면 BT 도 함께 바뀌므로 이 값이 문자열이
+    # 아니라 조건식이 됐다. 두 갈래를 모두 확인한다 — 어느 쪽이든 **설치된
+    # 트리**를 가리켜야 한다. 소스 트리를 가리키면 colcon build 를 해도 옛
+    # 트리로 달리고, 그 사실이 로그에 남지 않는다.
+    def _resolve(use_route):
+        if isinstance(value, str):
+            return value
+        ctx = LaunchContext()
+        ctx.launch_configurations['use_route'] = use_route
+        return perform_substitutions(ctx, value)
+
+    off = _resolve('false')
+    assert off.endswith(f'behavior_trees/{ACTIVE_BT}'), (
+        f'레일을 끄면 활성 트리({ACTIVE_BT})여야 한다: {off}'
     )
+    on = _resolve('true')
+    assert on.endswith(f'behavior_trees/{ROUTE_BT}'), (
+        f'레일을 켜면 레일 트리({ROUTE_BT})여야 한다: {on}'
+    )
+    assert _bt_path(ROUTE_BT).is_file(), (
+        f'레일 트리 {ROUTE_BT} 가 설치본에 없다. setup.py 의 behavior_trees 확인'
+    )
+    value = off
     # 나머지 하나는 되돌릴 자리로 남아 있어야 한다.
     other = BT_NAME if ACTIVE_BT != BT_NAME else CLEARING_ONLY_BT
     assert _bt_path(other).is_file(), (
@@ -427,4 +451,44 @@ def test_installed_bt_is_shipped_by_setup_py():
     setup_py = (_pkg_dir() / 'setup.py').read_text(encoding='utf-8')
     assert 'behavior_trees' in setup_py, (
         'setup.py data_files에 behavior_trees가 없어 share에 설치되지 않는다'
+    )
+
+
+def test_bt_plugin_libraries_exist():
+    """plugin_lib_names 에 적은 이름이 실제 .so 로 존재해야 한다.
+
+    2026-09-16 사고. route 용 두 개를 nav2_compute_route_action_bt_node 로
+    적었는데 실제 파일은 nav2_compute_route_bt_node 였다('action' 이 없다).
+    bt_navigator 가 없는 라이브러리를 열려다 configure 에서 멈췄고, 그 뒤
+    planner·controller 가 inactive 로 남아 **목적지 요청을 받을 노드가 아예
+    없었다.** 사용자에게는 "주행이 거부됐다"로만 보인다 — 원인이 이름 오타라는
+    단서가 어디에도 없다.
+
+    이름만 목록에 있으면 통과하던 종전 시험으로는 못 잡는다. 파일을 직접 본다.
+    """
+    params = _params()
+    names = params['bt_navigator']['ros__parameters']['plugin_lib_names']
+    assert names, 'plugin_lib_names 가 비었다'
+
+    # ament 가 알려 주는 라이브러리 경로를 전부 뒤진다. 설치 위치가 배포판마다
+    # 다르므로 /opt/ros/humble/lib 을 박아 두지 않는다.
+    roots = []
+    for var in ('LD_LIBRARY_PATH', 'AMENT_PREFIX_PATH'):
+        for chunk in os.environ.get(var, '').split(':'):
+            if not chunk:
+                continue
+            roots.append(Path(chunk))
+            roots.append(Path(chunk) / 'lib')
+    roots = [r for r in dict.fromkeys(roots) if r.is_dir()]
+    if not roots:
+        pytest.skip('라이브러리 경로를 못 찾았다. source 후 실행한다')
+
+    missing = []
+    for name in names:
+        if not any((r / f'lib{name}.so').is_file() for r in roots):
+            missing.append(name)
+    assert not missing, (
+        'plugin_lib_names 에 있으나 실제 라이브러리가 없다: '
+        f'{missing}. bt_navigator 가 configure 에서 멈추고 주행 요청을 받을 '
+        '노드가 사라진다. 이름을 ls /opt/ros/humble/lib 로 대조할 것'
     )
