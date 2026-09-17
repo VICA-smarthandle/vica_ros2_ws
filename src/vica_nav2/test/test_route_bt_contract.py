@@ -66,41 +66,52 @@ def _graph():
 
 # ── BT ──────────────────────────────────────────────────────────────────────
 
-def test_route_bt_guards_the_route_path_before_following():
-    """ComputeRoute -> IsRoutePathUsable -> IsPathValid. 순서가 곧 안전이다.
+def test_route_bt_plans_only_to_a_carrot_on_the_rail():
+    """README 방식 2 (5판). ComputeRoute -> 거름망 -> 앞 3 m -> 끝점(당근) -> planner(당근).
 
-    거름망이 빠지면 점 1개 경로가 controller 로 간다(run5). IsPathValid 가
-    빠지면 레일 위 장애물로 그대로 들어간다.
+    run10: 출발 순간 레일 첫 0.8 m 위에 뒤따르는 사람이 서 있어 레일이 무효였고, 그때
+    planner 가 최종 목적지까지 그린 자유주행이 로봇을 다른 복도(휴게실 대각선)로 끌고
+    갔다. planner 목표를 레일 위 3 m 앞으로 묶으면 사람을 돌아 레일로 복귀한다.
     """
-    seqs = [s for s in _bt_root().iter('Sequence')
-            if s.get('name') == 'RouteIfUsableAndClear']
-    assert len(seqs) == 1, 'RouteIfUsableAndClear 시퀀스가 하나여야 한다'
+    seqs = [s for s in _bt_root().iter('Sequence') if s.get('name') == 'RouteCarrot']
+    assert len(seqs) == 1, 'RouteCarrot 시퀀스가 하나여야 한다'
     tags = [c.tag for c in seqs[0]]
-    assert tags == ['ComputeRoute', GUARD, 'IsPathValid'], tags
+    assert tags == ['ComputeRoute', GUARD, 'TruncatePathLocal', 'GetPoseFromPath',
+                    'ComputePathToPose'], tags
+    guard, trunc, pick, plan = seqs[0][1], seqs[0][2], seqs[0][3], seqs[0][4]
 
-    guard = seqs[0][1]
-    assert guard.get('path') == '{path}'
+    assert guard.get('path') == '{path}' and guard.get('goal') == '{goal}'
     assert int(guard.get('min_poses', '0')) >= 2, '점 2개 미만은 선이 아니다'
     assert 0 < float(guard.get('max_dist_from_path', '0')) < 3.0, (
         'DWB 지역 창 반폭(3 m)보다 작아야 "0 poses" 를 막는다')
-    assert guard.get('robot_base_frame') == _params()['bt_navigator'][
-        'ros__parameters']['robot_base_frame']
-    # run6 입구: 레일 끝 방향(남)과 목적지(북)가 반대라 제자리 180도 회전 40초.
-    # 목적지 근처는 planner 가 도착 방향까지 맞춰 그리도록 넘겨야 한다.
-    assert guard.get('goal') == '{goal}', '인계 판정에 목적지가 필요하다'
     assert 1.0 <= float(guard.get('handoff_dist_to_goal', '0')) <= 3.0, (
         '1 m 미만이면 제자리 회전이 남고, 3 m 넘으면 레일을 너무 일찍 버린다')
+    base = _params()['bt_navigator']['ros__parameters']['robot_base_frame']
+    assert guard.get('robot_base_frame') == base
 
+    assert trunc.get('input_path') == '{path}'
+    ahead = trunc.get('output_path')
+    assert ahead and ahead != '{path}', '자른 조각이 {path} 를 덮으면 레일 전체를 잃는다'
+    assert 2.0 <= float(trunc.get('distance_forward', '0')) <= 4.0, (
+        '2 m 미만이면 당근이 너무 가까워 planner 가 매초 급하게 꺾고, 4 m 넘으면 지역 창을 벗어난다')
+    assert float(trunc.get('distance_backward', '1')) == 0.0, '뒤(사람이 선 곳)는 보지 않는다'
+    assert trunc.get('robot_frame') == base
 
-def test_route_server_does_not_smooth_corners():
-    """run6: 코너 둥글리기가 NaN 좌표를 만들어 controller abort 970회. 끈다."""
-    rs = _params()['route_server']['ros__parameters']
-    assert rs.get('smooth_corners') is False, (
-        'smooth_corners 가 켜져 있다. 1 m 엣지·일직선 중간역과 함께 쓰면 NaN 경로가 나온다')
+    assert pick.get('path') == ahead and pick.get('index') == '-1', '당근은 조각의 마지막 점'
+    carrot = pick.get('pose')
+    assert carrot and carrot != '{goal}'
+    assert plan.get('goal') == carrot and plan.get('path') == '{path}', (
+        'planner 는 당근까지만 그리고, 그 결과가 FollowPath 의 {path} 가 된다')
+    assert not list(seqs[0].iter('IsPathValid')), (
+        'IsPathValid 는 뺐다 — planner 가 장애물을 직접 피한다. 되살리면 레일 전체 무효 사고가 돌아온다')
+
+    names = _params()['bt_navigator']['ros__parameters']['plugin_lib_names']
+    for lib in ('nav2_truncate_path_local_action_bt_node', 'nav2_get_pose_from_path_action_bt_node'):
+        assert lib in names, f'{lib} 미등록 — bt_navigator 가 XML 을 읽다 멈춘다'
 
 
 def test_route_bt_falls_back_to_freespace_when_route_unusable():
-    """레일이 안 되면 Fallback 의 두 번째 자식(자유주행)이 있어야 한다."""
+    """레일(당근)이 안 되면 Fallback 의 두 번째 자식(목적지까지 자유주행)이 있어야 한다."""
     fb = [f for f in _bt_root().iter('Fallback') if f.get('name') == 'RouteThenFreespace']
     assert len(fb) == 1
     tags = [c.tag for c in fb[0]]
@@ -108,26 +119,27 @@ def test_route_bt_falls_back_to_freespace_when_route_unusable():
     assert fb[0][1].get('goal') == '{goal}' and fb[0][1].get('path') == '{path}'
 
 
-def test_route_bt_has_last_mile_freespace_phase():
-    """공식 README 4번(Last-Mile). 레일 끝 노드 -> 목적지는 자유주행으로.
+def test_route_bt_skips_last_mile_when_already_at_goal():
+    """run10 안내소→입구 31 s: 이미 도착했는데 2단계 planner 가 1.2 m 고리를 그려 한 바퀴 더.
 
-    레일 경로는 가장 가까운 노드에서 끝나고 끝 방향은 마지막 엣지 방향이다
-    (nav2_route path_converter.cpp). 목적지 yaw 로 맞추려면 2단계가 있어야 한다.
+    2단계는 GoalReached 가 실패할 때만(레일 밖 목적지) 돈다.
     """
     root = _bt_root()
-    pipes = [p.get('name') for p in root.iter('PipelineSequence')]
-    assert pipes == ['RailWithReplanning', 'LastMileWithReplanning'], pipes
-
-    last = next(p for p in root.iter('PipelineSequence')
-                if p.get('name') == 'LastMileWithReplanning')
+    seq = [s for s in root.iter('Sequence') if s.get('name') == 'RailThenLastMile']
+    assert len(seq) == 1
+    assert [c.tag for c in seq[0]] == ['PipelineSequence', 'Fallback']
+    assert seq[0][0].get('name') == 'RailWithReplanning'
+    gate = seq[0][1]
+    assert gate.get('name') == 'LastMileIfNeeded'
+    assert [c.tag for c in gate] == ['GoalReached', 'PipelineSequence']
+    assert gate[0].get('goal') == '{goal}'
+    assert gate[0].get('robot_base_frame') == _params()['bt_navigator']['ros__parameters']['robot_base_frame']
+    last = gate[1]
+    assert last.get('name') == 'LastMileWithReplanning'
     assert not list(last.iter('ComputeRoute')), '2단계는 레일을 다시 보지 않는다'
     assert len(list(last.iter('ComputePathToPose'))) == 1
     assert len(list(last.iter('FollowPath'))) == 1
-
-    # 두 단계는 Sequence 로 묶여 1단계가 성공해야 2단계로 간다.
-    seq = [s for s in root.iter('Sequence') if s.get('name') == 'RailThenLastMile']
-    assert len(seq) == 1
-    assert [c.get('name') for c in seq[0]] == pipes
+    assert 'nav2_goal_reached_condition_bt_node' in _params()['bt_navigator']['ros__parameters']['plugin_lib_names']
 
 
 @pytest.mark.parametrize('node_name', REVERSE_CAPABLE_NODES)

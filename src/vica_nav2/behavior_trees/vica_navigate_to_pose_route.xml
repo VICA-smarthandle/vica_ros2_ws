@@ -1,50 +1,45 @@
 <!--
-  레일(Route Server) 위로 다니는 트리. 2026-09-16 신설, 같은 날 2판.
+  레일(Route Server) 위로 다니는 트리. 2026-09-16 신설, 09-17 5판.
 
-  ── 무엇을 하나 ────────────────────────────────────────────────────────────
-  공식 nav2_route README "Practical Architectures" 의 4번(Last-Mile Coverage)
-  을 그대로 옮겼다:
-      "BT 로 레일 끝 노드까지 간 뒤, 마지막 노드에서 목적지까지 자유주행"
+  ── 무엇을 하나 (공식 nav2_route README "Practical Architectures" 2번 + 4번) ──
+      1단계  레일   ComputeRoute -> [거름망] -> 앞 3 m 자르기 -> 그 끝점(당근)
+                    -> ComputePathToPose(당근) -> FollowPath
+                    거름망이 막으면(목적지 2 m 안·레일에서 1.5 m 초과·점 부족·NaN)
+                    -> ComputePathToPose(목적지) -> FollowPath
+      2단계  마무리 목적지에 아직 안 닿았을 때만 ComputePathToPose(목적지) -> FollowPath
 
-      1단계  레일   ComputeRoute -> [거름망] -> IsPathValid -> FollowPath
-                    막혔거나 못 쓰면 -> ComputePathToPose(자유주행) -> FollowPath
-      2단계  마무리 ComputePathToPose(목적지 정확한 위치·방향) -> FollowPath
+  ── 왜 "당근"인가 (5판, run9·run10 bag 으로 확정) ──────────────────────────
+  4판까지는 레일이 costmap 에서 무효면 planner 가 **최종 목적지까지** 자유주행을 그렸다.
+  그런데 출발 순간 레일 첫 0.8 m 위에 뒤따르는 사람이 서 있어(run10: 치명 칸이 로봇 뒤
+  0.78~0.80 m, ±170°) 첫 틱이 늘 무효였고, 그 한 번의 자유주행이 로봇을 planner 가
+  좋아하는 대각선(휴게실 경유)으로 끌고 갔다. 그 뒤론 레일의 "앞"이 곧 로봇 뒤(사람)라
+  계속 무효 -> 레일과 자유주행이 1초마다 엇갈려 배회(화장실→안내소 46~70 s).
+  planner 가 **레일 위 3 m 앞 지점(당근)까지만** 그리면 사람을 돌아 레일로 복귀하는
+  짧은 경로가 나오고, 최종 목적지까지 그릴 일이 없어 다른 복도로 새지 않는다.
+  매초 당근이 3 m 앞으로 옮겨져 레일 끝까지 따라간다. IsPathValid 는 planner 가
+  장애물을 직접 피하므로 뺐다.
+      TruncatePathLocal : 로봇에서 가장 가까운 레일 점부터 앞으로 3 m (truncate_path_local_action.cpp)
+      GetPoseFromPath   : index -1 = 마지막 점, 방향은 레일 점 방향 그대로 (get_pose_from_path_action.cpp)
+      1판에 "ComputeRoute 는 성긴 route 를 안 내놓는다"고 포기했던 방식 2 를 이 둘로 만든다.
 
-  ── 왜 2단계가 필요한가 (소스 확인, nav2_route 1.1.20) ─────────────────────
-  * 레일 경로는 목적지가 아니라 **가장 가까운 노드**에서 끝난다. 목적지가 레일
-    에서 떨어져 있으면 1단계는 노드에서 멈춘다. 2단계가 그 나머지를 간다.
-  * 레일 경로의 끝 방향은 목적지 yaw 가 아니라 **마지막 엣지의 방향**이다
-    (path_converter.cpp: orientationAroundZAxis(atan2(dy,dx))). run3 에서
-    "입구에서 방향이 안 맞았다"가 이것이다. 2단계 planner 가 목적지 yaw 로 푼다.
+  ── 왜 2단계에 문지기가 있나 ────────────────────────────────────────────
+  목적지 2 m 안에서는 거름망이 자유주행으로 넘겨 1단계가 이미 정확한 위치·yaw 로
+  도착한다. 그런데 2단계 planner 가 남은 0.17 m 를 1.2 m 고리로 그려(lattice 는 제자리
+  이동을 못 그린다) 한 바퀴 더 돌았다(run10 안내소→입구 31 s). GoalReached 로 이미
+  닿았으면 2단계를 건너뛴다. 레일 밖 목적지(마지막 노드가 목적지에서 2 m 초과)만 2단계.
 
-  ── 왜 거름망(IsRoutePathUsable)이 필요한가 ───────────────────────────────
-  * route_server 는 로봇이 첫 노드를 지나쳤으면 그 노드를 잘라낸다
-    (goal_intent_extractor.cpp pruneStartandGoal). 남은 엣지가 하나뿐이면
-    잘라낸 뒤 엣지 0개가 되고, 경로는 **점 하나**가 된다.
-  * 기성 IsPathValid 는 빈 경로만 거르고 점 하나는 통과시킨다. 그래서 run1·
-    run3·run5 에서 controller 가 "Received plan with zero length" 를 2739·999·
-    237회 뱉으며 섰다. route 없이 달린 run4 는 0회.
-  * 거름망은 (1) 점 2개 미만, (2) 로봇이 경로에서 1.5 m 넘게 떨어짐 — 두 경우에
-    FAILURE 를 내어 자유주행으로 넘긴다. (2)는 레일 경로가 로봇이 아니라 노드
-    에서 시작하기 때문이다. 노드가 멀면 DWB 지역 창(3 m) 밖이라 실패한다.
-
-  ── 장애물 ───────────────────────────────────────────────────────────────
-  ComputeRoute 는 costmap 을 보지 않는다. IsPathValid 가 레일 경로 위의 치명
-  칸을 보고 거르면 Fallback 이 자유주행으로 넘어가 돌아간다. 장애물이 치워지면
-  다음 1초 틱에서 레일 경로가 다시 유효해져 레일로 돌아온다.
-  ComputeAndTrackRoute 의 CollisionMonitor 연산(그래프 위에서 우회)은 쓰지
-  않는다 — 우리 레일은 고리 하나라 "우회"가 곧 반대 방향 한 바퀴다.
+  ── 거름망(IsRoutePathUsable) ──────────────────────────────────────────
+  점 2개 미만(1판 zero length), NaN(run6 abort 970), 로봇이 경로에서 1.5 m 초과(DWB 지역
+  창 밖), 목적지 2 m 안(도착 방향은 planner 가 그린다, run6 입구 40 s)이면 FAILURE.
 
   ── 손대지 않은 것 ────────────────────────────────────────────────────────
   복구 예산 20회, Wait 1초, BackUp·Spin 없음. 근거는 no_backup.xml 주석.
   로봇을 움직이는 복구는 넣지 않는다 — 뒤에 사람이 손잡이를 잡고 서 있다.
 
   ── [미검증] ─────────────────────────────────────────────────────────────
-  * 1단계 FollowPath 는 노드에서 '정지'해야 성공한다(StoppedGoalChecker).
-    목적지가 레일 위면 노드 = 목적지라 티가 안 나지만, 떨어져 있으면 노드에서
-    한 번 멈췄다가 2단계로 간다. 그 멈춤이 사용자에게 어떻게 느껴지는지.
-  * 자기 몸통 라이다 반사(발자국 안 치명 13~17칸)가 IsPathValid 를 얼마나 자주
-    떨어뜨리는지. run4 기준으론 완주에 지장이 없었다.
+  * 당근이 치명 칸 위에 놓이면(사람이 정확히 3 m 앞 레일 위) planner 가 실패해 그 틱은
+    목적지까지 자유주행으로 떨어진다. 다음 틱에 당근이 옮겨지면 복귀할 것으로 본다.
+  * 1 Hz 마다 3 m 계획: lattice 계획 시간은 짧지만 CPU 가 밀릴 때의 동작은 미측정.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -55,26 +50,25 @@
         <PipelineSequence name="RailWithReplanning">
           <RateController hz="1.0">
             <RecoveryNode number_of_retries="1" name="ComputeRailPath">
-              <!-- 앞 자식이 실패해야 뒤를 본다. 레일이 우선, 안 되면 자유주행. -->
+              <!-- 앞 자식이 실패해야 뒤를 본다. 레일(당근)이 우선, 안 되면 목적지까지 자유주행. -->
               <Fallback name="RouteThenFreespace">
-                <Sequence name="RouteIfUsableAndClear">
+                <Sequence name="RouteCarrot">
                   <!-- use_poses=true : node id 가 아니라 좌표로 묻는다.
                        use_start=false : 출발점은 TF 에서 읽는다. -->
                   <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
                                 path="{path}" server_name="compute_route"/>
-                  <!-- FAILURE 조건 (vica_nav2_bt_plugins):
-                         점 2개 미만            "zero length" 사고(run5)
-                         NaN 좌표               "Aborting handle" 970회(run6)
-                         로봇이 경로에서 1.5 m 초과   DWB 지역 창 밖
-                         목적지 2.0 m 안          레일 끝 방향과 목적지 방향이 반대면 제자리
-                                                180도 회전이 남는다(run6 입구 40초).
-                                                planner 가 도착 방향까지 맞춰 그리게 넘긴다 -->
                   <IsRoutePathUsable path="{path}" goal="{goal}" min_poses="2"
                                      max_dist_from_path="1.5" handoff_dist_to_goal="2.0"
                                      global_frame="map" robot_base_frame="base_footprint"
                                      transform_tolerance="0.2"/>
-                  <!-- 레일 위에 장애물이 있으면 FAILURE. 이 줄을 빼면 장애물로 들어간다. -->
-                  <IsPathValid path="{path}"/>
+                  <!-- 로봇에서 가장 가까운 레일 점부터 앞으로 3 m. 뒤(사람이 선 곳) 0. -->
+                  <TruncatePathLocal input_path="{path}" output_path="{rail_ahead}"
+                                     distance_forward="3.0" distance_backward="0.0"
+                                     robot_frame="base_footprint" transform_tolerance="0.2"/>
+                  <!-- 그 조각의 마지막 점 = 당근. 방향은 레일 방향. -->
+                  <GetPoseFromPath path="{rail_ahead}" index="-1" pose="{carrot}"/>
+                  <!-- planner 는 당근까지만 그린다. 사람·유령은 돌아가고 레일로 복귀한다. -->
+                  <ComputePathToPose goal="{carrot}" path="{path}" planner_id="GridBased"/>
                 </Sequence>
                 <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
               </Fallback>
@@ -89,21 +83,24 @@
           </RecoveryNode>
         </PipelineSequence>
 
-        <!-- ═══ 2단계: 마지막 구간 — 목적지의 정확한 위치와 방향 ═══ -->
-        <PipelineSequence name="LastMileWithReplanning">
-          <RateController hz="1.0">
-            <RecoveryNode number_of_retries="1" name="ComputeLastMilePath">
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"
-                                  service_name="global_costmap/clear_entirely_global_costmap"/>
+        <!-- ═══ 2단계: 아직 목적지에 안 닿았을 때만 — 정확한 위치와 방향 ═══ -->
+        <Fallback name="LastMileIfNeeded">
+          <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+          <PipelineSequence name="LastMileWithReplanning">
+            <RateController hz="1.0">
+              <RecoveryNode number_of_retries="1" name="ComputeLastMilePath">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"
+                                    service_name="global_costmap/clear_entirely_global_costmap"/>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="1" name="FollowLastMile">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ClearEntireCostmap name="ClearLocalCostmap-LastMile"
+                                  service_name="local_costmap/clear_entirely_local_costmap"/>
             </RecoveryNode>
-          </RateController>
-          <RecoveryNode number_of_retries="1" name="FollowLastMile">
-            <FollowPath path="{path}" controller_id="FollowPath"/>
-            <ClearEntireCostmap name="ClearLocalCostmap-LastMile"
-                                service_name="local_costmap/clear_entirely_local_costmap"/>
-          </RecoveryNode>
-        </PipelineSequence>
+          </PipelineSequence>
+        </Fallback>
 
       </Sequence>
 
