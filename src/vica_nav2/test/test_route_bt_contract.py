@@ -82,20 +82,28 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert tags == ['ComputeRoute', GUARD, 'TruncatePathLocal', 'Fallback'], tags
     guard, trunc, mode = seqs[0][1], seqs[0][2], seqs[0][3]
     assert mode.get('name') == 'RailIfClearElseCarrot'
-    assert [c.tag for c in mode] == ['Sequence', 'Sequence'] and [c.get('name') for c in mode] == ['RailDirect', 'CarrotBeyond']
-    rail_direct, carrot_seq = mode[0], mode[1]
+    # 8판-2(run19): 모드 셋 — 레일 직접(가깝고 비면) / 복귀 당근 3 m(멀지만 비면) / 회피 당근 6 m(막히면).
+    assert [c.tag for c in mode] == ['Sequence', 'Sequence', 'Sequence'] and \
+        [c.get('name') for c in mode] == ['RailDirect', 'RejoinCarrot', 'CarrotBeyond']
+    rail_direct, rejoin, carrot_seq = mode[0], mode[1], mode[2]
+    assert [c.tag for c in rejoin] == ['IsPathValid', 'GetPoseFromPath', 'Fallback'], '복귀 = 조각 비었는지 → 3 m 조각 끝점 → planner'
+    assert rejoin[0].get('path') == trunc.get('output_path') and rejoin[1].get('path') == trunc.get('output_path')
+    near_carrot = rejoin[1].get('pose')
+    assert near_carrot and near_carrot not in ('{goal}', '{carrot}'), '복귀 당근은 회피 당근과 다른 키(bag 에서 갈라 세기 위해)'
+    assert [c.tag for c in rejoin[2]] == ['ComputePathToPose', 'ComputeRoute'] and rejoin[2][0].get('goal') == near_carrot \
+        and rejoin[2][0].get('path') == '{path}' and rejoin[2][1].get('path') == '{path}'
     # 8판: 앞 3 m 조각이 비어 있으면 레일 그대로. IsPathValid 는 조각만 본다(레일 전체를 보던 3판 사고 금지).
     # 8판-1(run18): 레일에서 가까울 때만 — 멀리서 레일 모드가 켜지면 DWB 가 옆 선에 붙느라 지그재그(직진 w 표준편차 0.23).
     assert [c.tag for c in rail_direct] == [GUARD, 'IsPathValid', 'ComputeRoute'], '레일 직접 = 가까움 검사 → 3 m 조각 검사 → 레일을 {path} 에'
     near_gate = rail_direct[0]
     assert near_gate.get('path') == seqs[0][0].get('path') and near_gate.get('goal') == '{goal}'
-    assert 0.3 <= float(near_gate.get('max_dist_from_path', '0')) <= 0.8, (
-        '0.3 m 미만이면 정상 주행의 흔들림에도 레일을 버리고, 0.8 m 넘으면 호 U턴 끝에서 옆 선에 붙는 지그재그가 돌아온다')
+    assert 0.6 <= float(near_gate.get('max_dist_from_path', '0')) <= 1.0, (
+        '0.6 m 미만이면 정상 주행(0.5 m 밖 13 %)까지 걸어 당근 모드가 되고(run19), 1.0 m 넘으면 호 U턴 끝(1.3~1.4 m)에서 옆 선에 붙는 지그재그가 돌아온다(run18)')
     assert float(near_gate.get('max_dist_from_path')) < float(seqs[0][1].get('max_dist_from_path')), '안쪽 문은 바깥 거름망보다 좁아야 한다'
     assert rail_direct[2].get('path') == '{path}' and rail_direct[2].get('goal') == '{goal}'
     valids = list(seqs[0].iter('IsPathValid'))
-    assert len(valids) == 1 and valids[0].get('path') == trunc.get('output_path'), (
-        'IsPathValid 는 앞 3 m 조각({rail_ahead})만 검사한다. 레일 전체({rail_path})를 주면 run9 의 "치명 칸 하나에 레일 통째 거부" 가 돌아온다')
+    assert len(valids) == 2 and all(v.get('path') == trunc.get('output_path') for v in valids), (
+        'IsPathValid 는 앞 3 m 조각({rail_ahead})만 검사한다(레일 직접·복귀 두 곳). 레일 전체({rail_path})를 주면 run9 의 "치명 칸 하나에 레일 통째 거부" 가 돌아온다')
     # 막혔을 때만 당근: 6 m 조각 끝점 -> planner, 실패 시 레일 후퇴(6판).
     assert [c.tag for c in carrot_seq] == ['TruncatePathLocal', 'GetPoseFromPath', 'Fallback'], [c.tag for c in carrot_seq]
     far, pick, cor = carrot_seq[0], carrot_seq[1], carrot_seq[2]
