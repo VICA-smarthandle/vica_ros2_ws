@@ -85,38 +85,11 @@
                        bag 에서 두 모드는 {path} 첫 점으로 갈린다: 레일 = 가까운 노드, 당근 = 로봇 위치. -->
                   <Fallback name="RailIfClearElseCarrot">
                     <Sequence name="RailDirect">
-                      <!-- 8판-1 (run18): 레일에서 0.5 m 안에 있을 때만 레일 직접. run18 에서 뒤에 선 사용자가
-                           조각을 막아 당근 모드로 넓은 호 U턴(이탈 1.39 m)을 그린 뒤, 호 끝에서 레일 모드가
-                           멀리서 켜지자 레일 경로(가까운 노드에서 시작하는 선)가 로봇 옆 1.3 m 에 놓여 DWB 가
-                           w ±0.5 로 좌우를 번갈아 치며 8 s 를 다가붙었다(407호→화장실 직진 흔들림, w 표준편차
-                           0.23). 0.5 m 밖이면 당근 모드가 매끄러운 복귀선을 그린다. 바깥 거름망(1.5 m)과 같은
-                           플러그인이라 실패 로그에 "자유주행" 이라 찍히지만 실제로는 당근 모드로 간다. -->
-                      <!-- 8판-2 (run19): 문턱 0.5→0.8 m. 0.5 는 정상 주행의 13 %(run16·18 실측)까지 걸어 잠가
-                           당근 모드가 81 % 가 됐고 코너가 다시 당근식(붙어 감·펄스)이 됐다. 레일선 0.8 m 밖은
-                           3~6 %, 1.0 m 밖은 0~4 % 로 전부 U턴 뒤 복귀 구간이다. -->
-                      <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
-                                         max_dist_from_path="0.8" handoff_dist_to_goal="2.0"
-                                         global_frame="map" robot_base_frame="base_footprint"
-                                         transform_tolerance="0.2" name="NearRailGate"/>
                       <IsPathValid path="{rail_ahead}"/>
                       <!-- {path} 에 레일을 다시 받는다(SetBlackboard 는 Path 를 못 옮긴다, 0.4 ms).
                            거름망을 통과한 뒤라 점 1개 사고(6판)는 없다. -->
                       <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
                                     path="{path}" server_name="compute_route"/>
-                    </Sequence>
-                    <!-- 8판-2: 복귀용 짧은 당근. 앞 3 m 조각은 비어 있는데 레일선에서 0.8 m 밖(U턴 호 끝 등)이면
-                         3 m 조각 끝점을 당근으로 planner 가 완만한 대각선 복귀선을 그린다. run18 은 이 상황에서
-                         레일 모드가 켜져 DWB 가 옆 선에 붙느라 지그재그(w 표준편차 0.23), run19 는 6 m 당근이
-                         복도 안쪽을 가로질렀다(코너 이탈 1.3 m). 3 m 면 곧 0.8 m 안으로 들어와 레일 모드로 돌아간다.
-                         bag 에선 경로 끝 거리(≈3 m / ≈6 m)로 회피 당근과 갈린다. -->
-                    <Sequence name="RejoinCarrot">
-                      <IsPathValid path="{rail_ahead}"/>
-                      <GetPoseFromPath path="{rail_ahead}" index="-1" pose="{carrot_near}"/>
-                      <Fallback name="RejoinOrRail">
-                        <ComputePathToPose goal="{carrot_near}" path="{path}" planner_id="GridBased"/>
-                        <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
-                                      path="{path}" server_name="compute_route"/>
-                      </Fallback>
                     </Sequence>
                     <!-- 막혔을 때만 당근. 당근은 6 m 앞(8판, 3→6). run16: 당근이 3 m 앞 레일 위 고정점이라
                          사람을 비켜도 곧 그 점으로 되돌아오는 좁은 S 만 그려 횡 이탈이 0.27 m 에 묶였다
