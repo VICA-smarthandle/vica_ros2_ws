@@ -40,6 +40,8 @@
   * 당근이 치명 칸 위에 놓이면(사람이 정확히 3 m 앞 레일 위) planner 가 실패해 그 틱은
     목적지까지 자유주행으로 떨어진다. 다음 틱에 당근이 옮겨지면 복귀할 것으로 본다.
   * 1 Hz 마다 3 m 계획: lattice 계획 시간은 짧지만 CPU 가 밀릴 때의 동작은 미측정.
+  * 8판(09-17): 앞 3 m 레일이 비면 레일 직접(FollowPath 가 레일 경로), 막히면 6 m 당근. 두 모드가
+    1초마다 갈릴 수 있다(유령 자국) — 표시 6 m·소거 8 m 로 자국이 줄었지만 실주행에서 볼 것.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -71,19 +73,47 @@
                   <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead}"
                                      distance_forward="3.0" distance_backward="0.0"
                                      robot_frame="base_footprint" transform_tolerance="0.2"/>
-                  <!-- 그 조각의 마지막 점 = 당근. 방향은 레일 방향. -->
-                  <GetPoseFromPath path="{rail_ahead}" index="-1" pose="{carrot}"/>
-                  <!-- planner 는 당근까지만 그린다. 사람·유령은 돌아가고 레일로 복귀한다.
-                       planner 가 실패하면(run11: 벽 옆에서 뒤에 사람이 붙어 "Starting point in
-                       lethal" 140회, 11 s·28 s 정지) 레일 경로를 다시 받아 그대로 따른다 —
-                       4판까지의 동작. DWB 가 사람·벽을 보며 스스로 움직이고 벗어나면
-                       다음 틱에 당근이 다시 잡힌다. 실패한 ComputePathToPose 가 {path} 를
-                       비울 수 있으므로 SetBlackboard 로 복사하지 않고 ComputeRoute 를 다시
-                       부른다(0.4 ms). -->
-                  <Fallback name="CarrotOrRail">
-                    <ComputePathToPose goal="{carrot}" path="{path}" planner_id="GridBased"/>
-                    <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
-                                  path="{path}" server_name="compute_route"/>
+                  <!-- 8판 (2026-09-17, 0903_d run15~17): 앞 3 m 레일이 비어 있으면 레일을 그대로 따른다.
+                       5~7판은 늘 당근 planner 가 그렸는데, 그 경로는 매초 로봇 방향을 22.5° 눈금으로
+                       반올림한 자리에서 R 0.10 급으로 꺾었다 직진하는 모양이라 코너에서 w 가 4~9번
+                       켜졌다 꺼졌고(끊어 돌기, 기존 planner 도 같음), 레일에 굽어 둔 호는 쓰이지 않았다
+                       (접점 이탈 1 m). 4판(레일 직접)은 코너 w 표준편차 0.18·파고들기 0 이었다.
+                       4판의 배회는 "막히면 최종 목적지까지 자유주행" 탓이었고 그 부분은 돌아오지
+                       않는다 — 막히면 아래 당근(6 m)이다. IsPathValid 는 3 m 조각만 본다(레일 전체를
+                       보던 3판 사고와 다르다). Humble 의 IsPathValid 는 치명·내접 칸만 거르므로 레일
+                       옆 0.2~0.5 m 에 비껴 선 사람은 여기서 못 거른다(DWB 몫) — 다음 판 과제.
+                       bag 에서 두 모드는 {path} 첫 점으로 갈린다: 레일 = 가까운 노드, 당근 = 로봇 위치. -->
+                  <Fallback name="RailIfClearElseCarrot">
+                    <Sequence name="RailDirect">
+                      <IsPathValid path="{rail_ahead}"/>
+                      <!-- {path} 에 레일을 다시 받는다(SetBlackboard 는 Path 를 못 옮긴다, 0.4 ms).
+                           거름망을 통과한 뒤라 점 1개 사고(6판)는 없다. -->
+                      <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
+                                    path="{path}" server_name="compute_route"/>
+                    </Sequence>
+                    <!-- 막혔을 때만 당근. 당근은 6 m 앞(8판, 3→6). run16: 당근이 3 m 앞 레일 위 고정점이라
+                         사람을 비켜도 곧 그 점으로 되돌아오는 좁은 S 만 그려 횡 이탈이 0.27 m 에 묶였다
+                         (기존 planner 0.62 m, 정지 폴리곤이 세움). 6 m 면 2 m 안 사람 너머에 당근이 놓여
+                         planner 가 복도 폭을 쓴다. 당근이 지역 창(±3 m) 밖이지만 DWB 는 창 안 경로만 쓴다. -->
+                    <Sequence name="CarrotBeyond">
+                      <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead_far}"
+                                         distance_forward="6.0" distance_backward="0.0"
+                                         robot_frame="base_footprint" transform_tolerance="0.2"/>
+                      <!-- 그 조각의 마지막 점 = 당근. 방향은 레일 방향. -->
+                      <GetPoseFromPath path="{rail_ahead_far}" index="-1" pose="{carrot}"/>
+                      <!-- planner 는 당근까지만 그린다. 사람·유령은 돌아가고 레일로 복귀한다.
+                           planner 가 실패하면(run11: 벽 옆에서 뒤에 사람이 붙어 "Starting point in
+                           lethal" 140회, 11 s·28 s 정지) 레일 경로를 다시 받아 그대로 따른다 —
+                           4판까지의 동작. DWB 가 사람·벽을 보며 스스로 움직이고 벗어나면
+                           다음 틱에 당근이 다시 잡힌다. 실패한 ComputePathToPose 가 {path} 를
+                           비울 수 있으므로 SetBlackboard 로 복사하지 않고 ComputeRoute 를 다시
+                           부른다(0.4 ms). -->
+                      <Fallback name="CarrotOrRail">
+                        <ComputePathToPose goal="{carrot}" path="{path}" planner_id="GridBased"/>
+                        <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
+                                      path="{path}" server_name="compute_route"/>
+                      </Fallback>
+                    </Sequence>
                   </Fallback>
                 </Sequence>
                 <!-- 레일을 못 쓸 때(목적지 2 m 안·레일에서 멀리·점 부족): 목적지까지 자유주행.

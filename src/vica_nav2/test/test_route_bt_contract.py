@@ -67,18 +67,32 @@ def _graph():
 # ── BT ──────────────────────────────────────────────────────────────────────
 
 def test_route_bt_plans_only_to_a_carrot_on_the_rail():
-    """README 방식 2 (5판). ComputeRoute -> 거름망 -> 앞 3 m -> 끝점(당근) -> planner(당근).
+    """README 방식 1+2 (8판). ComputeRoute -> 거름망 -> 앞 3 m -> [비면 레일 직접 | 막히면 6 m 당근 -> planner].
 
     run10: 출발 순간 레일 첫 0.8 m 위에 뒤따르는 사람이 서 있어 레일이 무효였고, 그때
     planner 가 최종 목적지까지 그린 자유주행이 로봇을 다른 복도(휴게실 대각선)로 끌고
-    갔다. planner 목표를 레일 위 3 m 앞으로 묶으면 사람을 돌아 레일로 복귀한다.
+    갔다. planner 목표를 레일 위 앞 지점(당근)으로 묶으면 사람을 돌아 레일로 복귀한다.
+    run15~17(0903_d): 늘 당근이면 코너를 끊어 돌고(planner 경로가 매초 22.5° 눈금에서 새로
+    시작) 레일의 호를 못 쓴다 → 앞 3 m 가 비면 레일을 그대로 따른다(8판). 당근이 3 m 고정점이면
+    사람을 비켜도 곧 되돌아오는 좁은 S 라 횡 이탈 0.27 m → 막혔을 때 당근은 6 m.
     """
     seqs = [s for s in _bt_root().iter('Sequence') if s.get('name') == 'RouteCarrot']
     assert len(seqs) == 1, 'RouteCarrot 시퀀스가 하나여야 한다'
     tags = [c.tag for c in seqs[0]]
-    assert tags == ['ComputeRoute', GUARD, 'TruncatePathLocal', 'GetPoseFromPath',
-                    'Fallback'], tags
-    guard, trunc, pick, cor = seqs[0][1], seqs[0][2], seqs[0][3], seqs[0][4]
+    assert tags == ['ComputeRoute', GUARD, 'TruncatePathLocal', 'Fallback'], tags
+    guard, trunc, mode = seqs[0][1], seqs[0][2], seqs[0][3]
+    assert mode.get('name') == 'RailIfClearElseCarrot'
+    assert [c.tag for c in mode] == ['Sequence', 'Sequence'] and [c.get('name') for c in mode] == ['RailDirect', 'CarrotBeyond']
+    rail_direct, carrot_seq = mode[0], mode[1]
+    # 8판: 앞 3 m 조각이 비어 있으면 레일 그대로. IsPathValid 는 조각만 본다(레일 전체를 보던 3판 사고 금지).
+    assert [c.tag for c in rail_direct] == ['IsPathValid', 'ComputeRoute'], '레일 직접 = 3 m 조각 검사 뒤 레일을 {path} 에'
+    assert rail_direct[1].get('path') == '{path}' and rail_direct[1].get('goal') == '{goal}'
+    valids = list(seqs[0].iter('IsPathValid'))
+    assert len(valids) == 1 and valids[0].get('path') == trunc.get('output_path'), (
+        'IsPathValid 는 앞 3 m 조각({rail_ahead})만 검사한다. 레일 전체({rail_path})를 주면 run9 의 "치명 칸 하나에 레일 통째 거부" 가 돌아온다')
+    # 막혔을 때만 당근: 6 m 조각 끝점 -> planner, 실패 시 레일 후퇴(6판).
+    assert [c.tag for c in carrot_seq] == ['TruncatePathLocal', 'GetPoseFromPath', 'Fallback'], [c.tag for c in carrot_seq]
+    far, pick, cor = carrot_seq[0], carrot_seq[1], carrot_seq[2]
     # 6판(run11): 당근 planner 가 실패해도 레일을 다시 받아 그대로 따른다. 매 틱 planner 에
     # 기대면 벽 옆에서 뒤에 사람이 붙을 때 "Starting point in lethal" 로 둘 다 막혀 선다.
     assert cor.get('name') == 'CarrotOrRail'
@@ -109,16 +123,24 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert float(trunc.get('distance_backward', '1')) == 0.0, '뒤(사람이 선 곳)는 보지 않는다'
     assert trunc.get('robot_frame') == base
 
-    assert pick.get('path') == ahead and pick.get('index') == '-1', '당근은 조각의 마지막 점'
+    # 8판: 막혔을 때 당근은 먼 조각(6 m)의 끝점. 3 m 고정점이면 회피 폭이 0.27 m 에 묶인다(run16).
+    assert far.get('input_path') == rail_key and far.get('robot_frame') == base
+    far_key = far.get('output_path')
+    assert far_key and far_key not in ('{path}', ahead), '먼 조각은 {path}·검사 조각과 다른 키에'
+    assert 5.0 <= float(far.get('distance_forward', '0')) <= 8.0, (
+        '5 m 미만이면 2 m 안 사람 너머에 당근이 안 놓이고, 8 m 넘으면 표시 범위(6 m)를 벗어나 planner 가 못 본 곳까지 그린다')
+    assert float(far.get('distance_forward')) > float(trunc.get('distance_forward')), '당근 조각은 검사 조각보다 길어야 한다'
+    assert float(far.get('distance_backward', '1')) == 0.0
+
+    assert pick.get('path') == far_key and pick.get('index') == '-1', '당근은 먼 조각의 마지막 점'
     carrot = pick.get('pose')
     assert carrot and carrot != '{goal}'
     assert plan.get('goal') == carrot and plan.get('path') == '{path}', (
         'planner 는 당근까지만 그리고, 그 결과가 FollowPath 의 {path} 가 된다')
-    assert not list(seqs[0].iter('IsPathValid')), (
-        'IsPathValid 는 뺐다 — planner 가 장애물을 직접 피한다. 되살리면 레일 전체 무효 사고가 돌아온다')
 
     names = _params()['bt_navigator']['ros__parameters']['plugin_lib_names']
-    for lib in ('nav2_truncate_path_local_action_bt_node', 'nav2_get_pose_from_path_action_bt_node'):
+    for lib in ('nav2_truncate_path_local_action_bt_node', 'nav2_get_pose_from_path_action_bt_node',
+                'nav2_is_path_valid_condition_bt_node'):
         assert lib in names, f'{lib} 미등록 — bt_navigator 가 XML 을 읽다 멈춘다'
 
 
