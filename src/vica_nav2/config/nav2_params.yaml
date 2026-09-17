@@ -1508,12 +1508,21 @@ global_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
-          # 아래 네 값은 local_costmap 과 같아야 한다(그쪽 주석에 [근거 없음]
-          # 표식과 판단 재료를 적어 뒀다). 다르면 planner 가 통과 가능하다고 본
-          # 경로를 controller 가 거부한다.
-          raytrace_max_range: 3.5
+          # 2026-09-17 run15(0903_d 레일 7판): 사람이 3 m 안에 들어와야 costmap 에
+          # 적혀 당근 planner 의 유효 반응 거리가 1.2 m 였다(경로 이탈 시작 전방
+          # 1.16~1.25 m, 40 % 감속 0.9~1.0 m, 정지 폴리곤 0.6~0.7 m). 표시 6 m·소거 8 m.
+          #   - raytrace(소거) > obstacle(표시) 는 유지한다. 안 지키면 지워지지 않는
+          #     마크(유령)가 남는다(devlog/2026-07-31.md 270-274행).
+          #   - local 과 달라진다. local 은 6×6 창이라 3 m 가 물리 한계다. "planner 가
+          #     통과 가능하다고 본 경로를 controller 가 거부" 하는 위험은 global 이
+          #     local 보다 **덜** 볼 때 생기므로, global 만 넓히는 이 방향엔 없다.
+          #   - 비용은 devlog/2026-07-31.md §6.1(3→5 m: 갱신 영역 2.78배, 주기 불변
+          #     예상). 실주행 적용은 이번이 처음 — 주기 미달·CPU·유리창 반사 잡점을 본다.
+          #   - min_range 둘은 그대로(0.30 인상은 08-15 실측으로 금지).
+          # 실측 기록: devlog/2026-09-17-route-0903d-복도-레일-실주행.md §5.3
+          raytrace_max_range: 8.0
           raytrace_min_range: 0.05
-          obstacle_max_range: 3.0
+          obstacle_max_range: 6.0
           obstacle_min_range: 0.12
           # local_costmap과 같은 값이어야 한다. 다르면 planner가 통과 가능하다고
           # 본 경로를 controller가 거부한다(근거는 local_costmap 주석 참고).
