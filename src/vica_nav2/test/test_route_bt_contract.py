@@ -77,8 +77,15 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert len(seqs) == 1, 'RouteCarrot 시퀀스가 하나여야 한다'
     tags = [c.tag for c in seqs[0]]
     assert tags == ['ComputeRoute', GUARD, 'TruncatePathLocal', 'GetPoseFromPath',
-                    'ComputePathToPose'], tags
-    guard, trunc, pick, plan = seqs[0][1], seqs[0][2], seqs[0][3], seqs[0][4]
+                    'Fallback'], tags
+    guard, trunc, pick, cor = seqs[0][1], seqs[0][2], seqs[0][3], seqs[0][4]
+    # 6판(run11): 당근 planner 가 실패해도 레일을 다시 받아 그대로 따른다. 매 틱 planner 에
+    # 기대면 벽 옆에서 뒤에 사람이 붙을 때 "Starting point in lethal" 로 둘 다 막혀 선다.
+    assert cor.get('name') == 'CarrotOrRail'
+    assert [c.tag for c in cor] == ['ComputePathToPose', 'ComputeRoute'], (
+        '당근 planner 실패 시 ComputeRoute 로 레일을 다시 받아야 한다 (실패한 ComputePathToPose 는 {path} 를 비울 수 있다)')
+    plan = cor[0]
+    assert cor[1].get('path') == '{path}' and cor[1].get('goal') == '{goal}'
 
     assert guard.get('path') == '{path}' and guard.get('goal') == '{goal}'
     assert int(guard.get('min_poses', '0')) >= 2, '점 2개 미만은 선이 아니다'
@@ -115,8 +122,15 @@ def test_route_bt_falls_back_to_freespace_when_route_unusable():
     fb = [f for f in _bt_root().iter('Fallback') if f.get('name') == 'RouteThenFreespace']
     assert len(fb) == 1
     tags = [c.tag for c in fb[0]]
-    assert tags == ['Sequence', 'ComputePathToPose'], tags
-    assert fb[0][1].get('goal') == '{goal}' and fb[0][1].get('path') == '{path}'
+    assert tags == ['Sequence', 'Fallback'], tags
+    near = fb[0][1]
+    # 6판(run11): 목적지 0.25 m 안에서 매초 새 경로를 그리면 lattice 고리를 쫓아 지나친다
+    # (안내소 정렬 24·19 s). 닿았으면 마지막 경로를 유지해 RotateToGoal 로 제자리 정렬.
+    assert near.get('name') == 'NearGoalKeepPath'
+    assert [c.tag for c in near] == ['GoalReached', 'ComputePathToPose'], (
+        '0.25 m 안이면 재계획을 멈추고(GoalReached), 아니면 목적지까지 자유주행')
+    assert near[0].get('goal') == '{goal}'
+    assert near[1].get('goal') == '{goal}' and near[1].get('path') == '{path}'
 
 
 def test_route_bt_skips_last_mile_when_already_at_goal():
