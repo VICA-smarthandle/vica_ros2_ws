@@ -85,8 +85,14 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert [c.tag for c in mode] == ['Sequence', 'Sequence'] and [c.get('name') for c in mode] == ['RailDirect', 'CarrotBeyond']
     rail_direct, carrot_seq = mode[0], mode[1]
     # 8판: 앞 3 m 조각이 비어 있으면 레일 그대로. IsPathValid 는 조각만 본다(레일 전체를 보던 3판 사고 금지).
-    assert [c.tag for c in rail_direct] == ['IsPathValid', 'ComputeRoute'], '레일 직접 = 3 m 조각 검사 뒤 레일을 {path} 에'
-    assert rail_direct[1].get('path') == '{path}' and rail_direct[1].get('goal') == '{goal}'
+    # 8판-1(run18): 레일에서 가까울 때만 — 멀리서 레일 모드가 켜지면 DWB 가 옆 선에 붙느라 지그재그(직진 w 표준편차 0.23).
+    assert [c.tag for c in rail_direct] == [GUARD, 'IsPathValid', 'ComputeRoute'], '레일 직접 = 가까움 검사 → 3 m 조각 검사 → 레일을 {path} 에'
+    near_gate = rail_direct[0]
+    assert near_gate.get('path') == seqs[0][0].get('path') and near_gate.get('goal') == '{goal}'
+    assert 0.3 <= float(near_gate.get('max_dist_from_path', '0')) <= 0.8, (
+        '0.3 m 미만이면 정상 주행의 흔들림에도 레일을 버리고, 0.8 m 넘으면 호 U턴 끝에서 옆 선에 붙는 지그재그가 돌아온다')
+    assert float(near_gate.get('max_dist_from_path')) < float(seqs[0][1].get('max_dist_from_path')), '안쪽 문은 바깥 거름망보다 좁아야 한다'
+    assert rail_direct[2].get('path') == '{path}' and rail_direct[2].get('goal') == '{goal}'
     valids = list(seqs[0].iter('IsPathValid'))
     assert len(valids) == 1 and valids[0].get('path') == trunc.get('output_path'), (
         'IsPathValid 는 앞 3 m 조각({rail_ahead})만 검사한다. 레일 전체({rail_path})를 주면 run9 의 "치명 칸 하나에 레일 통째 거부" 가 돌아온다')
