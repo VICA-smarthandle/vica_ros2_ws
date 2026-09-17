@@ -87,7 +87,12 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     plan = cor[0]
     assert cor[1].get('path') == '{path}' and cor[1].get('goal') == '{goal}'
 
-    assert guard.get('path') == '{path}' and guard.get('goal') == '{goal}'
+    # 7판(run12): 레일 원본은 {path} 에 두지 않는다. 목적지 옆에서 점 1개(방향 0°)로 줄어든 레일이
+    # {path} 를 덮으면, GoalReached 로 재계획을 멈춘 뒤 FollowPath 가 그 점을 목표로 삼아 0° 에서
+    # 도착 처리한다(방2 +80°, 입구 −155°). {path} 는 planner 결과와 후퇴용 레일만.
+    rail_key = seqs[0][0].get('path')
+    assert rail_key and rail_key != '{path}', 'ComputeRoute 원본은 {path} 가 아닌 키에 받아야 한다'
+    assert guard.get('path') == rail_key and guard.get('goal') == '{goal}'
     assert int(guard.get('min_poses', '0')) >= 2, '점 2개 미만은 선이 아니다'
     assert 0 < float(guard.get('max_dist_from_path', '0')) < 3.0, (
         'DWB 지역 창 반폭(3 m)보다 작아야 "0 poses" 를 막는다')
@@ -96,7 +101,7 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     base = _params()['bt_navigator']['ros__parameters']['robot_base_frame']
     assert guard.get('robot_base_frame') == base
 
-    assert trunc.get('input_path') == '{path}'
+    assert trunc.get('input_path') == rail_key
     ahead = trunc.get('output_path')
     assert ahead and ahead != '{path}', '자른 조각이 {path} 를 덮으면 레일 전체를 잃는다'
     assert 2.0 <= float(trunc.get('distance_forward', '0')) <= 4.0, (

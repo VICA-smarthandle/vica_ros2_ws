@@ -1,5 +1,5 @@
 <!--
-  레일(Route Server) 위로 다니는 트리. 2026-09-16 신설, 09-17 6판.
+  레일(Route Server) 위로 다니는 트리. 2026-09-16 신설, 09-17 7판.
 
   ── 무엇을 하나 (공식 nav2_route README "Practical Architectures" 2번 + 4번) ──
       1단계  레일   ComputeRoute -> [거름망] -> 앞 3 m 자르기 -> 그 끝점(당근)
@@ -55,14 +55,20 @@
                 <Sequence name="RouteCarrot">
                   <!-- use_poses=true : node id 가 아니라 좌표로 묻는다.
                        use_start=false : 출발점은 TF 에서 읽는다. -->
+                  <!-- 레일 경로는 {path} 가 아니라 {rail_path} 에 받는다 (7판, run12 수리).
+                       6판에서 {path} 에 받았더니 목적지 옆에서 레일이 점 1개(방향 0°)로 줄었을 때
+                       거름망이 거르기 전에 {path} 가 그걸로 덮였고, GoalReached 가 참이라 새 경로를
+                       안 그리니 FollowPath 가 그 점 1개(방향 0°)를 목표로 삼아 **목적지 방향이 아니라
+                       0°에서 도착 처리**했다(run12: 방2 +48/+80/+82°, 입구 −155°, 안내소 −144°).
+                       {path} 에는 planner 가 그린 경로(당근·목적지)와 후퇴용 레일만 들어간다. -->
                   <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
-                                path="{path}" server_name="compute_route"/>
-                  <IsRoutePathUsable path="{path}" goal="{goal}" min_poses="2"
+                                path="{rail_path}" server_name="compute_route"/>
+                  <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
                                      max_dist_from_path="1.5" handoff_dist_to_goal="2.0"
                                      global_frame="map" robot_base_frame="base_footprint"
                                      transform_tolerance="0.2"/>
                   <!-- 로봇에서 가장 가까운 레일 점부터 앞으로 3 m. 뒤(사람이 선 곳) 0. -->
-                  <TruncatePathLocal input_path="{path}" output_path="{rail_ahead}"
+                  <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead}"
                                      distance_forward="3.0" distance_backward="0.0"
                                      robot_frame="base_footprint" transform_tolerance="0.2"/>
                   <!-- 그 조각의 마지막 점 = 당근. 방향은 레일 방향. -->
