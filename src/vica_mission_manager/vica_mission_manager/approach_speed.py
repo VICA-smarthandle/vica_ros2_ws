@@ -163,6 +163,18 @@ class ApproachSpeedLadder:
     """잔여거리에 따라 한 방향으로만 내려가는 최대속도 제한 사다리.
 
     시간에 의존하지 않는다 — 판정 입력은 잔여거리 하나뿐이다.
+
+    단계에 들어가려면 **그 단계 거리보다 먼 곳에 있었던 적이 있어야 한다**
+    (2026-09-16 run7 수리). Nav2 1.1.20 은 새 goal 을 받아도 blackboard 의 옛
+    경로를 지우지 않아(navigate_to_pose.cpp initializeGoalPose), 새 goal 첫
+    feedback 의 잔여거리가 **옛 경로**(로봇이 그 끝에 서 있음) 기준 0.0x~0.3 m 로
+    나온다. 그걸 "다 왔다"로 읽어 60 % 로 내려간 뒤 13 m 를 내내 0.30 m/s 로 달렸다
+    (bag noroute0916_run7 화장실→안내소 69 s, 레일 회차 38 s). 이 규칙은 시간을
+    안 쓰고 그 사고를 막는다: 0.2 m 만 보고는 어느 단계에도 못 들어가고, 새 경로가
+    13 m 를 보여 준 뒤 0.8 m 로 줄어야 첫 단계가 열린다. 짧은 구간에서 처음부터 어떤
+    단계 안에 있으면 그 단계는 건너뛴다(그 거리에서 접근한 적이 없으니 감속할 Δv 도
+    없다). 옛 경로 잔여거리가 정확히 단계 거리와 같은 경우만 못 거른다 — 실제
+    잔여는 도착 허용치 0.25 m 안이라 0.4 m 단계엔 못 닿는다.
     """
 
     def __init__(self, stages: Optional[Sequence] = None) -> None:
@@ -172,6 +184,8 @@ class ApproachSpeedLadder:
         )
         # -1 은 "아직 어느 단계에도 들어가지 않음" = 제한 없음.
         self._index = -1
+        # 이번 goal 에서 본 가장 먼 잔여거리. 단계 자격의 근거다(클래스 docstring).
+        self._farthest_seen = 0.0
 
     @property
     def stages(self) -> StageList:
@@ -191,6 +205,7 @@ class ApproachSpeedLadder:
     def reset(self) -> None:
         """새 Goal 용 초기화. 다음 접근에서 다시 처음 단계부터 내려간다."""
         self._index = -1
+        self._farthest_seen = 0.0
 
     def update(self, distance_remaining: Optional[float]) -> Optional[float]:
         """이번 tick 에 새로 진입한 단계의 제한율. 바뀐 것이 없으면 None.
@@ -198,6 +213,8 @@ class ApproachSpeedLadder:
         None 을 돌려주면 노드는 아무것도 발행하지 않는다. 같은 제한을 매 tick
         다시 발행할 이유가 없고, 발행하지 않는 것이 곧 latch 유지다.
         """
+        if distance_remaining is not None and distance_remaining > self._farthest_seen:
+            self._farthest_seen = float(distance_remaining)
         target = self._stage_index_for(distance_remaining)
         if target <= self._index:
             # 거리가 늘었거나(재계획·역주행) 같은 단계면 그대로 유지한다.
@@ -216,6 +233,8 @@ class ApproachSpeedLadder:
         index = -1
         for i, (threshold, _) in enumerate(self._stages):
             # 경계값은 포함이다. 잔여거리가 정확히 1.5 m 면 첫 단계에 들어간다.
-            if distance_remaining <= threshold:
+            # 단, 그 단계 거리보다 먼 곳에 있었던 적이 없으면 자격이 없다 — 새 goal
+            # 직후 옛 경로의 잔여거리(≈0)가 들어오는 사고를 막는다(클래스 docstring).
+            if distance_remaining <= threshold and self._farthest_seen >= threshold:
                 index = i
         return index

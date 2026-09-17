@@ -76,6 +76,7 @@ def test_skipping_stages_jumps_to_deepest():
     0.3 m 인데 80 % 를 먼저 거는 것은 이미 늦은 감속이다.
     """
     ladder = ApproachSpeedLadder()
+    assert ladder.update(2.0) is None   # 먼 곳을 먼저 봐야 단계 자격이 생긴다(run7 수리)
     assert ladder.update(0.3) == 60.0
     assert ladder.index == 1
 
@@ -86,6 +87,7 @@ def test_skipping_stages_jumps_to_deepest():
 def test_limit_holds_when_distance_grows_again():
     """재계획으로 잔여거리가 늘어도 제한은 유지된다."""
     ladder = ApproachSpeedLadder()
+    assert ladder.update(2.0) is None
     assert ladder.update(0.9) == 80.0
     assert ladder.update(3.0) is None
     assert ladder.update(9.0) is None
@@ -95,6 +97,7 @@ def test_limit_holds_when_distance_grows_again():
 def test_backward_motion_does_not_raise_limit():
     """역주행(뒤로 밀림)으로 거리가 계속 늘어도 마지막 단계를 유지한다."""
     ladder = ApproachSpeedLadder()
+    ladder.update(2.0)
     ladder.update(0.4)
     for distance in (0.6, 0.9, 1.2, 1.6, 4.0):
         assert ladder.update(distance) is None
@@ -103,12 +106,41 @@ def test_backward_motion_does_not_raise_limit():
 
 def test_reset_starts_over_for_new_goal():
     ladder = ApproachSpeedLadder()
+    ladder.update(2.0)
     ladder.update(0.4)
     ladder.reset()
 
     assert ladder.index == -1
     assert ladder.percent == NO_SPEED_LIMIT
     assert ladder.update(2.0) is None
+    assert ladder.update(1.0) == 80.0
+
+
+# ---- 새 goal 직후 옛 경로 잔여거리 (2026-09-16 run7) ---------------------------
+def test_stale_small_distance_at_goal_start_does_not_arm_the_ladder():
+    """Nav2 1.1.20 은 새 goal 때 blackboard 경로를 안 지운다. 첫 feedback 잔여거리는
+    옛 경로(로봇이 그 끝에 서 있음) 기준 0.0x~0.3 m 다. run7 에서 이 값이 60 % 를
+    걸고 13 m 를 내내 0.30 m/s 로 달리게 했다. 먼 곳을 본 적이 없으면 못 들어간다."""
+    ladder = ApproachSpeedLadder()
+    assert ladder.update(0.12) is None          # 옛 경로 잔여거리
+    assert ladder.percent == NO_SPEED_LIMIT
+    assert ladder.update(13.4) is None          # 새 경로가 들어왔다
+    assert ladder.update(5.0) is None
+    assert ladder.update(1.0) == 80.0           # 이제야 정상 접근 감속
+    assert ladder.update(0.5) == 60.0
+
+
+def test_short_leg_skips_stages_it_never_approached_from():
+    """구간이 첫 단계 거리보다 짧으면 그 단계는 건너뛰고 다음 단계부터 건다."""
+    ladder = ApproachSpeedLadder(stages=[(3.0, 80.0), (1.5, 60.0)])
+    assert ladder.update(2.0) is None           # 3.0 m 밖에 있었던 적이 없다
+    assert ladder.update(1.4) == 60.0           # 1.5 m 단계는 2.0 > 1.5 라 자격 있음
+    assert ladder.percent == 60.0
+
+
+def test_stale_distance_equal_to_boundary_still_enters():
+    """경계값 포함 규칙은 유지된다(정확히 단계 거리면 들어간다)."""
+    ladder = ApproachSpeedLadder()
     assert ladder.update(1.0) == 80.0
 
 
@@ -127,6 +159,7 @@ def test_missing_distance_changes_nothing():
 
 def test_missing_distance_keeps_current_stage():
     ladder = ApproachSpeedLadder()
+    ladder.update(2.0)
     ladder.update(0.9)
     assert ladder.update(None) is None
     assert ladder.update(0.0) is None

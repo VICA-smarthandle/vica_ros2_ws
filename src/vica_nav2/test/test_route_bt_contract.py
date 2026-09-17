@@ -174,6 +174,21 @@ def test_route_graph_edges_are_short():
     assert not long, f'{MAX_EDGE_M} m 를 넘는 엣지: {long}'
 
 
+def test_route_graph_corners_are_rounded():
+    """run8: smooth_corners 를 끄니 코너가 뾰족해 DWB 가 지나쳤다 되돌아왔다(w ±0.29).
+    생성기가 15~120° 코너를 호로 바꾼다. 30~120° 로 한 번에 꺾이는 노드가 남으면 안 된다.
+    120° 초과는 목적지 스퍼의 되돌림이라 예외."""
+    nodes, edges = _graph()
+    ids = sorted(nodes); n = len(ids); sharp = []
+    for i, k in enumerate(ids):
+        a, b, c = nodes[ids[i - 1]], nodes[k], nodes[ids[(i + 1) % n]]
+        v1 = (b[0] - a[0], b[1] - a[1]); v2 = (c[0] - b[0], c[1] - b[1])
+        ang = abs(math.degrees(math.atan2(v1[0]*v2[1] - v1[1]*v2[0], v1[0]*v2[0] + v1[1]*v2[1])))
+        if 30 <= ang <= 120:
+            sharp.append((k, round(ang)))
+    assert not sharp, f'뾰족한 코너가 남았다 (노드, 각도): {sharp}'
+
+
 def test_route_graph_is_a_bidirectional_ring():
     """엣지는 방향이 있다. 양쪽으로 다니려면 쌍이어야 하고, 고리는 끊기면 안 된다."""
     nodes, edges = _graph()
