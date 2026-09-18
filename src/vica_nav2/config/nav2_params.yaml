@@ -305,8 +305,182 @@ controller_server:
       # 위치·방향뿐 아니라 실제 저속 상태까지 확인한 뒤 도착으로 판정한다.
       trans_stopped_velocity: 0.03
       rot_stopped_velocity: 0.05
-    # DWB parameters
+    # ═══════════════════════════════════════════════════════════════════════
+    # MPPI (2026-09-18 전환). 되돌리려면 아래 FollowPath 블록을 지우고
+    # FollowPathDWB 를 FollowPath 로 이름만 바꾸면 된다 — DWB 설정은 그대로 남겨 뒀다.
+    #
+    # ── 왜 바꾸나 ────────────────────────────────────────────────────────────
+    # 레일(8판-3)까지 와서 남은 것이 controller 축이다. 09-17~18 실주행 8회에서
+    # 코너 조향이 여전히 펄스로 남았고(버스트 3.9·부호 반전 2.7), 그 원인은
+    # "1 Hz 로 바뀌는 planner 경로를 DWB 가 이산 속도 격자에서 매번 새로 쫓는 것"
+    # 이었다. MPPI 는 이전 명령에 잡음을 얹어 궤적 수천 개를 굴리고 가중평균을
+    # 내므로 경로가 조금 바뀌어도 명령이 튀지 않는다.
+    # 2026-08-29 실측(4회차, 브랜치 nav2/mppi2 5a6acc7)에서 이미 확인됐다:
+    #   손 횡속도 0.055 -> 0.018~0.029 · 회전 방향 반전 8.1 -> 1.1~1.6 회/분
+    #   경로 이탈 0.043 -> 0.031 m · 제어주기 놓침 566 -> 95
+    #
+    # ── 그때 왜 못 썼나, 지금은 무엇이 다른가 ────────────────────────────────
+    # 그때 미채택 사유는 "도착을 못 한다"였다. |w| 가 DWB 의 1/3(0.132 -> 0.043)
+    # 이라 유턴을 못 했고, planner 가 **목적지까지** 그린 긴 경로를 따라가다
+    # 금지구역에 들어가면 회복하지 못했다. 지금은 둘 다 조건이 다르다:
+    #   * 레일 8판-3 이라 planner 목표는 3 m 앞 당근이다. 긴 경로를 쫓을 일이 없다.
+    #   * 0903_d 는 복도 폭이 넓다(주행 중 벽 여유 평균 1.27 m).
+    #   * 탐색 폭이 회전의 진짜 노브임을 그때 알아냈다(vx_std·wz_std).
+    #
+    # ── 안전 전제 [미해결·주의] ──────────────────────────────────────────────
+    # inflation_radius 0.55 < padding 포함 외접반경 0.620 (09-15 base_link 이동으로
+    # 08-29 에 풀렸던 전제가 되살아났다). 벽에서 0.55~0.62 m 구간은 costmap 비용이
+    # 0 이라 어떤 critic 도 보지 않는다 — DWB 의 ObstacleFootprint 가 막고 있던
+    # 사각지대다. MPPI 에서는 ObstaclesCritic.consider_footprint: true 로 메우되,
+    # **로봇 중심 셀 비용이 0 이면 발자국 검사 자체를 건너뛴다**는 한계가 남는다
+    # (회전 중 뒤쪽 모서리 0.570 m 가 벽에 닿는 경우). 그래서 이번 전환은
+    # **넓은 복도(0903_d)에서만** 시험하고, 0630 같은 좁은 지도로 가기 전에
+    # inflation 을 0.62 이상으로 올린다(사용자 결정 2026-09-18, backlog NAV2-B3).
+    #
+    # ── 사용자 요구 4가지를 어느 값이 맡는가 ─────────────────────────────────
+    #   ① 좁은 곳에서 제자리 회전 말고 최소한의 호로 유턴
+    #        PathAngleCritic.offset_from_furthest 4->6 · PathFollowCritic 5.0->6.0,
+    #        offset 5->8 · TwirlingCritic 3.0->2.0 · vx_std 0.30->0.35 · wz_std 0.50->0.45
+    #        (PreferForwardCritic 은 **후진에만** 벌점이라 vx_min 0.0 인 우리 설정에서
+    #         제자리 회전을 못 막는다. 그래서 전진 유인은 PathFollow 쪽에 준다.)
+    #   ② 코너에 붙지 않기        ObstaclesCritic.repulsion_weight 1.5 -> 2.2
+    #   ③ 손잡이 좌우 흔들림 없기 MPPI 구조(가중평균·warm start) + temperature 0.3
+    #   ④ 동적 장애물 회피 유지   critical_weight 20 · collision_cost 10000 ·
+    #                            collision_margin_distance 0.10 (08-29 값 그대로)
+    #   ⑤ 초음파 8개 예정        local costmap 의 range 레이어가 그대로 ObstaclesCritic
+    #                            입력이 된다. 설치 후 trajectory_point_step(현재 2)을
+    #                            내릴지 CPU 를 재고 정한다. 지금은 2개뿐이라 그대로.
+    # ═══════════════════════════════════════════════════════════════════════
     FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      # 1.8 s 지평(36 x 0.05). DWB sim_time 2.0 과 거의 같게 맞춰 A/B 가 성립한다.
+      time_steps: 36
+      model_dt: 0.05
+      # 08-29 실측: batch 1000 이 DWB 의 2.5배 계산량인데 제어주기 놓침은 6배 적었다
+      # (점당 비용이 다르다). run23 기준 CPU 45~52 % 라 여유가 있다.
+      batch_size: 1000
+      iteration_count: 1
+      temperature: 0.3
+      gamma: 0.015
+      prune_distance: 1.5
+      transform_tolerance: 0.2
+      visualize: false
+      reset_period: 1.0
+      motion_model: "DiffDrive"
+
+      # 속도·가속 상한은 DWB 와 같은 값을 쓴다(A/B 성립 조건, 2026-08-29).
+      vx_max: 0.5
+      vx_min: 0.0          # 후진 금지 — 뒤에 사람이 손잡이를 잡고 서 있다
+      vy_max: 0.0
+      wz_max: 0.5
+      ax_max: 2.0
+      ax_min: -2.0
+      az_max: 2.0
+
+      # ── 탐색 폭: 회전의 진짜 노브 (2026-08-29 §6.6) ──────────────────────
+      # MPPI 는 '지금 명령 + 잡음'으로 후보를 만든다. 잡음 폭에 없는 동작은
+      # critic 을 아무리 조정해도 고를 수 없다. 08-29 에 wz_std 0.3->0.5 가
+      # 제자리 회전을 1.5 -> 4.1 s 로 **늘렸다**. 우리는 제자리 대신 호를 원하므로
+      # wz_std 를 0.45 로 조금 낮추고 vx_std 를 0.35 로 올려 'vx 가 있는 회전'
+      # 후보의 비중을 키운다.
+      vx_std: 0.35
+      vy_std: 0.0
+      wz_std: 0.45
+
+      AckermannConstraints:
+        min_turning_r: 0.5          # DiffDrive 에서는 참조되지 않는다
+
+      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic",
+                "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic",
+                "PathAngleCritic", "PreferForwardCritic", "TwirlingCritic"]
+
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+
+      # 장애물. consider_footprint 가 이 설정의 안전 축이다(위 전제 문단).
+      ObstaclesCritic:
+        enabled: true
+        cost_power: 1
+        # 1.5 -> 2.2 : 코너 안쪽으로 파고들지 않게 벽에서 밀어낸다.
+        # run23 에서 일반 코너 벽 여유 최소가 0.73 m 였다. 이 값을 올리면 그 여유가
+        # 늘지만, 너무 올리면 좁은 곳에서 모든 궤적이 벌점을 받아 못 지나간다
+        # (DWB ObstacleFootprint.scale 0.6 의 '궤적 전멸 152회'와 같은 함정).
+        repulsion_weight: 2.2
+        critical_weight: 20.0
+        consider_footprint: true
+        collision_cost: 10000.0
+        collision_margin_distance: 0.10
+        near_goal_distance: 0.5
+        # 아래 둘은 costmap 의 inflation_layer 와 **반드시 같아야** 한다.
+        # critic 이 이 값으로 비용에서 거리를 역산하기 때문이다.
+        inflation_radius: 0.55
+        cost_scaling_factor: 3.5
+
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        # 경로의 5 % 넘게 점유되면 정렬을 포기한다 — 레일 위에 사람이 섰을 때
+        # 억지로 경로에 붙지 않고 ObstaclesCritic 이 이기게 하는 장치다.
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 3
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+
+      # 경로 위 '앞 점'을 향해 나아가는 힘. 제자리 회전 대신 호를 그리게 하는
+      # 주 장치다(PreferForward 는 후진에만 벌점이라 이 역할을 못 한다).
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 6.0            # 5.0 -> 6.0
+        offset_from_furthest: 8     # 5 -> 8 : 더 먼 점을 보게 해 완만한 호로 간다
+        threshold_to_consider: 1.4
+
+      # 로봇 방향과 '앞 점' 방향의 차이에 벌점. 유턴처럼 각이 클 때 강하게 걸려
+      # **제자리에서 빨리 돌라**는 압력이 된다. offset 을 늘려 기준점을 멀리 두면
+      # 같은 유턴도 더 완만한 각으로 계산돼 호가 유리해진다.
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 6     # 4 -> 6
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        forward_preference: true
+
+      # 후진에만 벌점(vx_min 0.0 이라 사실상 보험). 제자리 회전과는 무관하다.
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        threshold_to_consider: 0.5
+
+      # 모든 회전에 벌점 → 손잡이 흔들림을 잡는 장치이자 유턴을 막는 장치이기도
+      # 하다. 08-29 에 10 -> 3 으로 낮춰 |w| 가 0.043 -> 0.056 이 됐다. 호 유턴을
+      # 위해 한 단계 더 낮춘다. 흔들림이 늘면 여기부터 되돌린다.
+      TwirlingCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0            # 3.0 -> 2.0
+
+    # ── 이전 controller (되돌릴 때 이름을 FollowPath 로 바꾼다) ──────────────
+    # DWB parameters
+    FollowPathDWB:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: True
       min_vel_x: 0.0

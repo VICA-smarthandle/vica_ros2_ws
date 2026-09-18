@@ -165,18 +165,26 @@ def test_planner_and_controller_use_the_same_collision_model():
     """
     params = _load_params()
     active, _alternative = _planner_blocks(params)
-    critics = params['controller_server']['ros__parameters']['FollowPath']['critics']
+    follow_path = params['controller_server']['ros__parameters']['FollowPath']
+    critics = follow_path['critics']
 
     planner_sees_footprint = active['plugin'] in FOOTPRINT_AWARE_PLUGINS
-    controller_sees_footprint = 'ObstacleFootprint' in critics
-    controller_sees_point = 'BaseObstacle' in critics
-
-    assert controller_sees_footprint != controller_sees_point, (
-        f'DWB critics {critics}에 장애물 critic이 없거나 둘 다 있다.'
-        ' BaseObstacle(점)이나 ObstacleFootprint(면) 중 하나만 둔다'
-    )
+    if 'mppi' in follow_path['plugin'].lower():
+        # 2026-09-18 MPPI 전환. MPPI 의 장애물 critic 은 하나(ObstaclesCritic)이고
+        # 점/면은 critic 이름이 아니라 consider_footprint 가 정한다.
+        assert 'ObstaclesCritic' in critics, (
+            f'MPPI critics {critics} 에 장애물 critic 이 없다')
+        controller_sees_footprint = bool(
+            follow_path['ObstaclesCritic']['consider_footprint'])
+    else:
+        controller_sees_footprint = 'ObstacleFootprint' in critics
+        controller_sees_point = 'BaseObstacle' in critics
+        assert controller_sees_footprint != controller_sees_point, (
+            f'DWB critics {critics}에 장애물 critic이 없거나 둘 다 있다.'
+            ' BaseObstacle(점)이나 ObstacleFootprint(면) 중 하나만 둔다'
+        )
     assert planner_sees_footprint == controller_sees_footprint, (
-        f'planner {active["plugin"]}와 DWB critic이 로봇 형태를 다르게 본다.'
+        f'planner {active["plugin"]}와 controller 가 로봇 형태를 다르게 본다.'
         f' planner footprint={planner_sees_footprint},'
         f' controller footprint={controller_sees_footprint}.'
         ' 한쪽이 통과 가능으로 만든 경로를 다른 쪽이 거부해'

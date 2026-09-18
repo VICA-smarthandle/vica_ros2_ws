@@ -15,11 +15,52 @@ def _load_params():
     return yaml.safe_load(config_path.read_text(encoding='utf-8'))
 
 
+def _controller_limits(params):
+    """컨트롤러 종류와 무관하게 속도·가속 한계를 같은 이름으로 돌려준다.
+
+    2026-09-18 MPPI 전환. 아래 계약들이 지키는 것은 "컨트롤러가 계획한 가·감속을
+    velocity_smoother 가 막지 않는가", "완만한 정지가 goal tolerance 안에서
+    끝나는가" 같은 **관계**이지 키 이름이 아니다. 그래서 이름만 옮겨 준다.
+
+        DWB                MPPI            뜻
+        max_vel_x          vx_max          직진 상한
+        min_vel_x          vx_min          후진 허용 여부
+        max_vel_theta      wz_max          회전 상한
+        acc_lim_x          ax_max          직진 가속
+        decel_lim_x        ax_min          직진 감속(음수)
+        acc_lim_theta      az_max          회전 가속
+        decel_lim_theta    -az_max         회전 감속 — MPPI 는 가·감속이 대칭이다
+        xy_goal_tolerance  (goal_checker)  MPPI 는 자체 도착 판정이 없다
+    """
+    controller = params['controller_server']['ros__parameters']
+    fp = controller['FollowPath']
+    if 'mppi' in fp['plugin'].lower():
+        gc = controller['general_goal_checker']
+        return {
+            'plugin_family': 'mppi',
+            'max_vel_x': fp['vx_max'], 'min_vel_x': fp['vx_min'],
+            'max_vel_theta': fp['wz_max'],
+            'acc_lim_x': fp['ax_max'], 'decel_lim_x': fp['ax_min'],
+            'acc_lim_theta': fp['az_max'], 'decel_lim_theta': -fp['az_max'],
+            'xy_goal_tolerance': gc['xy_goal_tolerance'],
+            'trans_stopped_velocity': gc['trans_stopped_velocity'],
+        }
+    return {
+        'plugin_family': 'dwb',
+        'max_vel_x': fp['max_vel_x'], 'min_vel_x': fp['min_vel_x'],
+        'max_vel_theta': fp['max_vel_theta'],
+        'acc_lim_x': fp['acc_lim_x'], 'decel_lim_x': fp['decel_lim_x'],
+        'acc_lim_theta': fp['acc_lim_theta'], 'decel_lim_theta': fp['decel_lim_theta'],
+        'xy_goal_tolerance': fp['xy_goal_tolerance'],
+        'trans_stopped_velocity': fp['trans_stopped_velocity'],
+    }
+
+
 def test_goal_is_reached_only_after_the_robot_slows_to_a_stop():
     params = _load_params()
     controller = params['controller_server']['ros__parameters']
     goal_checker = controller['general_goal_checker']
-    follow_path = controller['FollowPath']
+    lim = _controller_limits(params)
 
     assert goal_checker['plugin'] == (
         'nav2_controller::StoppedGoalChecker'
@@ -29,14 +70,10 @@ def test_goal_is_reached_only_after_the_robot_slows_to_a_stop():
     assert goal_checker['stateful'] is False
     assert goal_checker['trans_stopped_velocity'] == 0.03
     assert goal_checker['rot_stopped_velocity'] == 0.05
-    assert (
-        follow_path['trans_stopped_velocity']
-        == goal_checker['trans_stopped_velocity']
-    )
-    assert (
-        follow_path['xy_goal_tolerance']
-        == goal_checker['xy_goal_tolerance']
-    )
+    # DWB 는 자체 도착 판정도 하므로 goal_checker 와 같은 값이어야 한다.
+    # MPPI 는 자체 판정이 없어 goal_checker 하나가 정본이다(_controller_limits).
+    assert lim['trans_stopped_velocity'] == goal_checker['trans_stopped_velocity']
+    assert lim['xy_goal_tolerance'] == goal_checker['xy_goal_tolerance']
 
 
 def test_dwb_deceleration_limit_keeps_full_emergency_braking_power():
@@ -44,10 +81,10 @@ def test_dwb_deceleration_limit_keeps_full_emergency_braking_power():
     제동에도 쓰이는 전역 값이다. 목적지 도착을 부드럽게 하려고 이 값을
     약화시키면 안 된다 — 완화는 velocity_smoother.max_decel에서만 한다."""
     params = _load_params()
-    follow_path = params['controller_server']['ros__parameters']['FollowPath']
+    lim = _controller_limits(params)
 
-    assert abs(follow_path['decel_lim_x']) >= 1.0
-    assert abs(follow_path['decel_lim_theta']) >= 1.0
+    assert abs(lim['decel_lim_x']) >= 1.0
+    assert abs(lim['decel_lim_theta']) >= 1.0
 
 
 def test_velocity_smoother_arrival_softening_stays_within_goal_tolerance():
@@ -56,7 +93,7 @@ def test_velocity_smoother_arrival_softening_stays_within_goal_tolerance():
     끝나고 progress_checker가 실패로 판단하기 훨씬 전에 끝나야 한다."""
     params = _load_params()
     controller = params['controller_server']['ros__parameters']
-    follow_path = controller['FollowPath']
+    lim = _controller_limits(params)
     progress_checker = controller['progress_checker']
     smoother = params['velocity_smoother']['ros__parameters']
 
@@ -66,7 +103,7 @@ def test_velocity_smoother_arrival_softening_stays_within_goal_tolerance():
     stop_time = max_vel_x / max_decel_x
     stop_distance = max_vel_x ** 2 / (2.0 * max_decel_x)
 
-    assert stop_distance < follow_path['xy_goal_tolerance']
+    assert stop_distance < lim['xy_goal_tolerance']
     assert stop_time < progress_checker['movement_time_allowance']
 
 
@@ -98,10 +135,10 @@ def test_smoother_lets_dwb_stop_rotating_as_fast_as_it_plans_to():
     직선 감속도 같은 이유로 정합해야 한다(아래 별도 테스트).
     """
     params = _load_params()
-    follow_path = params['controller_server']['ros__parameters']['FollowPath']
+    lim = _controller_limits(params)
     smoother = params['velocity_smoother']['ros__parameters']
 
-    dwb_yaw_decel = abs(follow_path['decel_lim_theta'])
+    dwb_yaw_decel = abs(lim['decel_lim_theta'])
     smoother_yaw_decel = abs(smoother['max_decel'][2])
 
     assert smoother_yaw_decel >= dwb_yaw_decel, (
@@ -113,12 +150,12 @@ def test_smoother_lets_dwb_stop_rotating_as_fast_as_it_plans_to():
 def test_smoother_does_not_throttle_dwb_rotational_acceleration():
     """회전 가속도 방향도 마찬가지로 smoother가 DWB보다 약하면 안 된다."""
     params = _load_params()
-    follow_path = params['controller_server']['ros__parameters']['FollowPath']
+    lim = _controller_limits(params)
     smoother = params['velocity_smoother']['ros__parameters']
 
-    assert smoother['max_accel'][2] >= follow_path['acc_lim_theta'], (
+    assert smoother['max_accel'][2] >= lim['acc_lim_theta'], (
         f"smoother 회전 가속 {smoother['max_accel'][2]}이 "
-        f"DWB acc_lim_theta {follow_path['acc_lim_theta']}보다 약하다"
+        f"controller 회전 가속 {lim['acc_lim_theta']}보다 약하다"
     )
 
 
@@ -147,12 +184,12 @@ def test_smoother_lets_dwb_stop_moving_as_fast_as_it_plans_to():
     경로 이탈로 나타나기 때문이다.
     """
     params = _load_params()
-    follow_path = params['controller_server']['ros__parameters']['FollowPath']
+    lim = _controller_limits(params)
     smoother = params['velocity_smoother']['ros__parameters']
 
-    dwb_x_decel = abs(follow_path['decel_lim_x'])
+    dwb_x_decel = abs(lim['decel_lim_x'])
     smoother_x_decel = abs(smoother['max_decel'][0])
-    max_vel_x = follow_path['max_vel_x']
+    max_vel_x = lim['max_vel_x']
     padding = params['local_costmap']['local_costmap']['ros__parameters'][
         'footprint_padding'
     ]
@@ -179,11 +216,11 @@ def test_stopping_distance_is_documented_against_padding():
     넘어 통과 자체가 불가능해지므로, 해결은 드라이버 지연 쪽에 있다.
     """
     params = _load_params()
-    follow_path = params['controller_server']['ros__parameters']['FollowPath']
+    lim = _controller_limits(params)
     smoother = params['velocity_smoother']['ros__parameters']
     local = params['local_costmap']['local_costmap']['ros__parameters']
 
-    v = follow_path['max_vel_x']
+    v = lim['max_vel_x']
     decel = abs(smoother['max_decel'][0])
     driver_delay_sec = 0.3  # 실측: CAN·드라이버 구간
 
