@@ -118,13 +118,20 @@
                                       path="{path}" server_name="compute_route"/>
                       </Fallback>
                     </Sequence>
-                    <!-- 막혔을 때만 당근. 당근은 6 m 앞(8판, 3→6). run16: 당근이 3 m 앞 레일 위 고정점이라
-                         사람을 비켜도 곧 그 점으로 되돌아오는 좁은 S 만 그려 횡 이탈이 0.27 m 에 묶였다
-                         (기존 planner 0.62 m, 정지 폴리곤이 세움). 6 m 면 2 m 안 사람 너머에 당근이 놓여
-                         planner 가 복도 폭을 쓴다. 당근이 지역 창(±3 m) 밖이지만 DWB 는 창 안 경로만 쓴다. -->
+                    <!-- 막혔을 때 당근. **8판-3(2026-09-18): 6 → 3 m 로 되돌린다.**
+                         8판에서 3→6 으로 늘린 근거는 "run16 에서 회피 횡 이탈이 0.27 m 에 묶였다" 하나였는데
+                         실주행으로 반증됐다 — 6 m 로 늘려도 횡 이탈은 0.25~0.37 m 로 그대로였다(run18·19·20).
+                         DWB 는 거리가 아니라 시간을 본다(sim_time 2.0 × 0.5 + 발자국 0.355 ≈ 1.4 m). 경로가
+                         6 m 뒤까지 돌아도 따라가는 것은 앞 1.4 m 뿐이고 사람은 1.5~2 m 에서 나타난다.
+                         반면 비용은 컸다. U턴 창에서 planner 경로가 **옆으로 벌어진 폭**이 3 m 일 때 0.52 m,
+                         6 m 일 때 3.02~4.31 m(굽이는 1.04~1.06 로 같다 — 폭만 목표 거리에 비례). 그 폭이
+                         레일 이탈 0.6~0.9 m 를 만들어 안쪽 문(0.8 m)을 58 % 실패시키고 모드 갈림·흔들림으로
+                         이어졌다. 0630 7판 run13 은 3 m 로 15/15·도착 yaw ≤12° 였다. devlog §14.
+                         3 m 는 DWB 지역 창(반폭 3 m)과 global 표시 범위(6 m) 안쪽이기도 하다.
+                         되돌리려면 이 값만 6.0 으로 돌리면 된다(구조는 그대로 뒀다). -->
                     <Sequence name="CarrotBeyond">
                       <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead_far}"
-                                         distance_forward="6.0" distance_backward="0.0"
+                                         distance_forward="3.0" distance_backward="0.0"
                                          robot_frame="base_footprint" transform_tolerance="0.2"/>
                       <!-- 그 조각의 마지막 점 = 당근. 방향은 레일 방향. -->
                       <GetPoseFromPath path="{rail_ahead_far}" index="-1" pose="{carrot}"/>

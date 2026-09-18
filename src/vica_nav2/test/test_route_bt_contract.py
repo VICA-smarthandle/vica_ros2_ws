@@ -137,13 +137,17 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert float(trunc.get('distance_backward', '1')) == 0.0, '뒤(사람이 선 곳)는 보지 않는다'
     assert trunc.get('robot_frame') == base
 
-    # 8판: 막혔을 때 당근은 먼 조각(6 m)의 끝점. 3 m 고정점이면 회피 폭이 0.27 m 에 묶인다(run16).
+    # 8판-3(run21·22 뒤): 막혔을 때 당근은 3 m. 6 m 로 늘린 근거(회피 폭)는 실주행으로 반증됐고
+    # (횡 이탈 3 m 0.27 vs 6 m 0.25~0.37), U턴 창 경로의 옆 폭이 0.52 → 3.0~4.3 m 로 커져
+    # 레일 이탈 → 안쪽 문 실패 58 % 를 만들었다. 0630 run13 은 3 m 로 15/15.
     assert far.get('input_path') == rail_key and far.get('robot_frame') == base
     far_key = far.get('output_path')
-    assert far_key and far_key not in ('{path}', ahead), '먼 조각은 {path}·검사 조각과 다른 키에'
-    assert 5.0 <= float(far.get('distance_forward', '0')) <= 8.0, (
-        '5 m 미만이면 2 m 안 사람 너머에 당근이 안 놓이고, 8 m 넘으면 표시 범위(6 m)를 벗어나 planner 가 못 본 곳까지 그린다')
-    assert float(far.get('distance_forward')) > float(trunc.get('distance_forward')), '당근 조각은 검사 조각보다 길어야 한다'
+    assert far_key and far_key not in ('{path}',), '당근 조각은 {path} 를 덮으면 안 된다'
+    assert 2.5 <= float(far.get('distance_forward', '0')) <= 6.0, (
+        '2.5 m 미만이면 당근이 너무 가까워 planner 가 매초 급하게 꺾고, 6 m 넘으면 U턴에서 경로가 옆으로 3 m 이상 '
+        '벌어져 레일 이탈 → 안쪽 문 실패를 만든다(devlog §14)')
+    assert float(far.get('distance_forward')) >= float(trunc.get('distance_forward')), (
+        '당근 조각은 검사 조각보다 짧으면 안 된다(검사한 곳 너머를 목표로 삼게 된다)')
     assert float(far.get('distance_backward', '1')) == 0.0
 
     assert pick.get('path') == far_key and pick.get('index') == '-1', '당근은 먼 조각의 마지막 점'
