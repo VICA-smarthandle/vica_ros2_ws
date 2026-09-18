@@ -379,13 +379,14 @@ controller_server:
 
       # ── 탐색 폭: 회전의 진짜 노브 (2026-08-29 §6.6) ──────────────────────
       # MPPI 는 '지금 명령 + 잡음'으로 후보를 만든다. 잡음 폭에 없는 동작은
-      # critic 을 아무리 조정해도 고를 수 없다. 08-29 에 wz_std 0.3->0.5 가
-      # 제자리 회전을 1.5 -> 4.1 s 로 **늘렸다**. 우리는 제자리 대신 호를 원하므로
-      # wz_std 를 0.45 로 조금 낮추고 vx_std 를 0.35 로 올려 'vx 가 있는 회전'
-      # 후보의 비중을 키운다.
-      vx_std: 0.35
+      # critic 을 아무리 조정해도 고를 수 없다.
+      #
+      # [2026-09-18 run24 후 되돌림] 0.35/0.45 로 '호 유턴'을 유도하려 했으나
+      # 유턴은 나아지지 않고(제자리 38 -> 51 %) 직진만 망가졌다. 08-29 실측
+      # 조합(0.3/0.5)으로 되돌린다. 유턴은 뒤에 이 두 값만 따로 건드린다.
+      vx_std: 0.3
       vy_std: 0.0
-      wz_std: 0.45
+      wz_std: 0.5
 
       AckermannConstraints:
         min_turning_r: 0.5          # DiffDrive 에서는 참조되지 않는다
@@ -403,11 +404,13 @@ controller_server:
       ObstaclesCritic:
         enabled: true
         cost_power: 1
-        # 1.5 -> 2.2 : 코너 안쪽으로 파고들지 않게 벽에서 밀어낸다.
-        # run23 에서 일반 코너 벽 여유 최소가 0.73 m 였다. 이 값을 올리면 그 여유가
-        # 늘지만, 너무 올리면 좁은 곳에서 모든 궤적이 벌점을 받아 못 지나간다
-        # (DWB ObstacleFootprint.scale 0.6 의 '궤적 전멸 152회'와 같은 함정).
-        repulsion_weight: 2.2
+        # [2026-09-18 run24 후 되돌림] 2.2 로 올려 일반 코너 벽 여유를
+        # 0.73 -> 0.95 m 로 벌었지만(요구 ② 유일한 성공), 같은 회차에 직진
+        # 흔들림이 17.3 -> 46.3 회/분으로 터졌다. 공식 README 가 "장애물 critic 이
+        # 잘 조율되지 않으면 심하게 흔들린다"고 경고하는 값이라 함께 되돌린다.
+        # 다만 직진 구간 벽 여유가 평균 1.31 m(> inflation 0.55)라 이 값이
+        # 직진 흔들림의 주범일 수는 없다 — 코너 쪽 몫만 되돌리는 것이다.
+        repulsion_weight: 1.5
         critical_weight: 20.0
         consider_footprint: true
         collision_cost: 10000.0
@@ -442,23 +445,34 @@ controller_server:
         offset_from_furthest: 20
         use_path_orientations: false
 
-      # 경로 위 '앞 점'을 향해 나아가는 힘. 제자리 회전 대신 호를 그리게 하는
-      # 주 장치다(PreferForward 는 후진에만 벌점이라 이 역할을 못 한다).
+      # 경로 위 '앞 점'을 향해 나아가는 힘. (PreferForward 는 후진에만 벌점이라
+      # 이 역할을 못 한다 — 이 판단 자체는 run24 에서도 유효했다.)
+      #
+      # [2026-09-18 run24 후 되돌림] 6.0/offset 8 은 실패했다. offset 은 '미터'가
+      # 아니라 **경로 점 개수**이고 우리 경로 점 간격은 5 cm 다. 게다가 기준점은
+      # 로봇이 아니라 **궤적이 닿는 가장 먼 경로점**에서 재므로, 제자리에서 돌면
+      # 궤적이 안 나아가 기준점이 1.2 m -> 0.4 m 로 무너진다. 코앞을 보면 크게
+      # 돌라는 답이 나오고, 크게 돌면 또 안 나아간다(제자리가 제자리를 부른다).
+      #
+      # [함께 보지 말 것] threshold_to_consider 1.4 는 "경로 끝이 1.4 m 안이면
+      # 이 critic 을 끈다"는 뜻이고, GoalCritic 은 같은 1.4 m 에서 **켜진다**.
+      # prune_distance 가 1.5 m 라 그 스위치에서 10 cm 옆에 산다. 이 축을 건드릴
+      # 거면 threshold 가 아니라 prune_distance 를 늘려야 한다(3순위 후보).
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 6.0            # 5.0 -> 6.0
-        offset_from_furthest: 8     # 5 -> 8 : 더 먼 점을 보게 해 완만한 호로 간다
+        cost_weight: 5.0            # 08-29 실측값
+        offset_from_furthest: 5     # 08-29 실측값 (nav2 기본은 6)
         threshold_to_consider: 1.4
 
       # 로봇 방향과 '앞 점' 방향의 차이에 벌점. 유턴처럼 각이 클 때 강하게 걸려
-      # **제자리에서 빨리 돌라**는 압력이 된다. offset 을 늘려 기준점을 멀리 두면
-      # 같은 유턴도 더 완만한 각으로 계산돼 호가 유리해진다.
+      # **제자리에서 빨리 돌라**는 압력이 된다.
+      # [2026-09-18 run24 후 되돌림] offset 6 은 PathFollow 와 같은 덫에 걸린다.
       PathAngleCritic:
         enabled: true
         cost_power: 1
         cost_weight: 2.0
-        offset_from_furthest: 6     # 4 -> 6
+        offset_from_furthest: 4     # 08-29 실측값
         threshold_to_consider: 0.5
         max_angle_to_furthest: 1.0
         forward_preference: true
@@ -470,13 +484,17 @@ controller_server:
         cost_weight: 2.0
         threshold_to_consider: 0.5
 
-      # 모든 회전에 벌점 → 손잡이 흔들림을 잡는 장치이자 유턴을 막는 장치이기도
-      # 하다. 08-29 에 10 -> 3 으로 낮춰 |w| 가 0.043 -> 0.056 이 됐다. 호 유턴을
-      # 위해 한 단계 더 낮춘다. 흔들림이 늘면 여기부터 되돌린다.
+      # 모든 회전에 벌점 → 손잡이 흔들림을 잡는 **감쇠**이자 유턴을 막는 장치다.
+      # nav2 기본은 10.0. 08-29 에 10 -> 3 으로 낮춰 |w| 가 0.043 -> 0.056 이 됐다.
+      #
+      # [2026-09-18 run24 후 되돌림] "흔들림이 늘면 여기부터 되돌린다"고 적어 뒀고,
+      # 실제로 늘었다(17.3 -> 46.3 회/분). 3.0 으로 되돌린다.
+      # 제어의 기본이다 — 따라가는 힘(PathFollow)을 올리면서 감쇠(여기)를 같이
+      # 낮추면 반드시 진동한다. run24 는 그 둘을 동시에 반대로 돌린 대가였다.
       TwirlingCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 2.0            # 3.0 -> 2.0
+        cost_weight: 3.0            # 08-29 실측값
 
     # ── 이전 controller (되돌릴 때 이름을 FollowPath 로 바꾼다) ──────────────
     # DWB parameters
