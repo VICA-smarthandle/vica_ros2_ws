@@ -1028,6 +1028,8 @@ class MissionLogic:
         self._nav_from_app = False
         self._asking_entered_at: Optional[float] = None  # 시계 유실 폴백 기준
         self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
+        self._asking_question = ""       # 지금 던져 둔 도착 질문(침묵 시 같은 질문을 다시 묻는다)
+        self._deny_reconfirmed = False   # 대기형 질문의 거절을 종료형으로 되물었나 (2026-09-20)
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
         # 귀 상태 (/vica/listen_state). 무응답 판정 전에 귀 사정을 본다.
@@ -1785,6 +1787,8 @@ class MissionLogic:
         self._asking_time_after_yes = ask_time
         self._asking_entered_at = now
         self._arrival_retried = False
+        self._asking_question = question
+        self._deny_reconfirmed = False
         self._leaving_deadline = None
         self._response_deadline = None   # 재생완료(on_arrival_question_spoken)에서 시작
         text = f"{arrival_text} {question}".strip() if arrival_text else question
@@ -1998,6 +2002,7 @@ class MissionLogic:
                                                default_msg=True)
                 self.state = State.ASKING_WAIT_TIME
                 self._asking_entered_at = now
+                self._asking_question = MSG_ASK_WAIT_TIME
                 self._response_deadline = None
                 return [Say(MSG_ASK_WAIT_TIME, priority="response",
                             expects_reply=True)]
@@ -2008,6 +2013,17 @@ class MissionLogic:
             if self._asking_is_finish:
                 return self._enter_waiting(WAIT_MINUTES_CAP, now,
                                            default_msg=True)
+            if not self._deny_reconfirmed:
+                # 2026-09-20 사용자 결정: 대기형 질문의 '아니오' 한 번으로는 떠나지
+                # 않는다 — "그럴래?"를 거절로 잘못 들어 가 버린 사건(실기 18:18).
+                # 종료형 질문으로 한 번 더 묻는다: "네"=끝(홈행), "아니오"=대기.
+                self._deny_reconfirmed = True
+                self._asking_is_finish = True
+                self._asking_time_after_yes = False
+                self._asking_question = MSG_ASK_ENTRANCE
+                self._asking_entered_at = now
+                self._response_deadline = None
+                return [Say(MSG_ASK_ENTRANCE, priority="response", expects_reply=True)]
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
 
@@ -2032,6 +2048,17 @@ class MissionLogic:
             self._response_deadline = None
             self._asking_entered_at = now   # 재질문도 새 시계 유실 폴백 기준
             return [Say(MSG_ARRIVAL_RETRY, priority="response", expects_reply=True)]
+        return self._leaving_notice(now)
+
+    def _arrival_silence(self, now: float) -> list:
+        """침묵 사다리 (2026-09-20 사용자 결정): 8초 침묵이면 같은 질문을 한 번 더
+        묻고, 그래도 침묵이면 떠나기 예고. 옛 동작(침묵 → 바로 예고)은 귀가 답을
+        놓쳤을 때(노드 사망·오전사) 사용자가 서 있는데 로봇이 가 버리게 했다."""
+        if not self._arrival_retried and self._asking_question:
+            self._arrival_retried = True
+            self._response_deadline = None
+            self._asking_entered_at = now
+            return [Say(self._asking_question, priority="response", expects_reply=True)]
         return self._leaving_notice(now)
 
     def _leaving_notice(self, now: float) -> list:
@@ -2143,6 +2170,8 @@ class MissionLogic:
         self._asking_time_after_yes = False
         self._asking_entered_at = None
         self._arrival_retried = False
+        self._asking_question = ""
+        self._deny_reconfirmed = False
         self._leaving_deadline = None
         self._wait_until = None
         self._response_deadline = None
@@ -2435,8 +2464,8 @@ class MissionLogic:
 
         elif self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             # 무응답 사다리 (arrival-dialog 3절). 떠나기 예고 후면 유예를 세고,
-            # 아니면 8초 침묵을 센다. 완전 침묵은 재질문 없이 바로 예고로 간다
-            # (자리를 뜬 신호). 말을 알아듣는 쪽은 음성이다.
+            # 아니면 8초 침묵을 센다. 침묵은 같은 질문을 한 번 더 묻고(2026-09-20,
+            # _arrival_silence) 그래도 침묵이면 예고로 간다. 말을 알아듣는 쪽은 음성이다.
             if (self._leaving_deadline is not None
                     and now >= self._leaving_deadline
                     and not self._ear_holds(now)):
@@ -2447,7 +2476,7 @@ class MissionLogic:
                   and self._response_deadline is not None
                   and now >= self._response_deadline
                   and not self._ear_holds(now)):
-                actions.extend(self._leaving_notice(now))
+                actions.extend(self._arrival_silence(now))
             elif (self._leaving_deadline is None
                   and self._response_deadline is None
                   and self._asking_entered_at is not None
