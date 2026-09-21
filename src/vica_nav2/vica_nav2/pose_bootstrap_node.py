@@ -160,9 +160,9 @@ class PoseBootstrapNode(Node):
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
         )
-        self.create_subscription(
-            PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl_pose, 10,
-        )
+        # /amcl_pose 도 세션 때만 연다(_arm/_disarm). 예전에는 항상 열려 있었는데,
+        # 콜백은 값 저장뿐이라도 주행 내내 깨우는 비용이 실행기 스레드 수만큼 붙었다.
+        self._amcl_sub = None
 
         self.initial_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10,
@@ -217,7 +217,10 @@ class PoseBootstrapNode(Node):
         self._scan_sub = self.create_subscription(
             LaserScan, self._scan_topic, self._on_scan, self._scan_qos,
         )
-        self.get_logger().info('세션 시작 — scan·TF 수신을 연다.')
+        self._amcl_sub = self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl_pose, 10,
+        )
+        self.get_logger().info('세션 시작 — scan·TF·amcl_pose 수신을 연다.')
 
     def _maybe_disarm(self) -> None:
         if self._scan_sub is None or self._last_session_at is None:
@@ -227,6 +230,9 @@ class PoseBootstrapNode(Node):
             return
         self.destroy_subscription(self._scan_sub)
         self._scan_sub = None
+        if self._amcl_sub is not None:
+            self.destroy_subscription(self._amcl_sub)
+            self._amcl_sub = None
         try:
             self.tf_listener.unregister()
         except AttributeError:
@@ -234,8 +240,9 @@ class PoseBootstrapNode(Node):
         self.tf_listener = None
         self.tf_buffer = None
         with self._lock:
-            # 닫힌 사이 로봇이 움직였을 수 있다. 옛 스캔으로 채점하면 안 된다.
+            # 닫힌 사이 로봇이 움직였을 수 있다. 옛 스캔·옛 위치로 채점하면 안 된다.
             self._scan = None
+            self._amcl_pose = None
         self.get_logger().info(
             '세션 종료(%.0f초 무사용) — scan·TF 수신을 닫는다.' % idle
         )
@@ -454,7 +461,14 @@ def main(args=None) -> None:
     """Spin the node on a multi-threaded executor."""
     rclpy.init(args=args)
     node = PoseBootstrapNode()
-    executor = MultiThreadedExecutor()
+    # **인자를 비우면 rclpy 가 CPU 코어 수만큼 스레드를 만든다.** 젯슨 8코어에서
+    # 실측 28 스레드였고, 세션이 하나도 안 열린 대기 상태에서 **코어 하나의 12.6 %**
+    # 를 썼다(2026-09-21 run30 에서 CPU 상위 소비의 15 %). 일이 없어도 각 스레드가
+    # 대기집합을 들여다보는 비용이다.
+    # 여럿이 필요한 이유는 하나뿐이다 — 확정이 2.5초 넘게 걸리는 동안 지도·스캔
+    # 구독이 멈추면 안 된다(서비스는 MutuallyExclusiveCallbackGroup 으로 따로 묶여 있다).
+    # 그 목적에는 2개면 충분하다.
+    executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
     try:
         executor.spin()
