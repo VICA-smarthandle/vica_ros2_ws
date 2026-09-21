@@ -205,7 +205,15 @@ bt_navigator_navigate_to_pose_rclcpp_node:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    controller_frequency: 20.0
+    # [2026-09-21] 20.0 -> 10.0. **model_dt 와 반드시 짝이다**(아래 FollowPath).
+    # optimizer.cpp setOffset(): controller_period > model_dt 이면 **runtime_error 로
+    # 죽고**, 정확히 같아야 warm start 의 control sequence shifting 이 켜진다.
+    #   1/10 = 0.1  →  model_dt 0.1 로 함께 간다.
+    # 왜 낮추나: run27 에서 제어주기 놓침 225회(그 전 네 회차는 0). 그런데 local
+    # costmap 은 애초에 초당 5회만 갱신된다 — 20 Hz 는 같은 지도를 네 번 다시 본다.
+    # 잃는 것은 반응 지연 2.2 cm(0.44 m/s x 50 ms)뿐이고, 급정지는 collision_monitor
+    # 가 별도 노드로 담당하므로 안전 경로는 이 값과 무관하다.
+    controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -353,15 +361,25 @@ controller_server:
     # ═══════════════════════════════════════════════════════════════════════
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      # [2026-09-21 시야 축] 36 -> 56(nav2 기본). 지평 1.8 -> 2.8 s.
+      # [2026-09-21 2차] 56 -> 28, model_dt 0.05 -> 0.1. **지평 2.8 s 는 그대로다**
+      # (28 x 0.1 = 2.8). 제어주기를 10 Hz 로 낮추면서 model_dt 를 0.1 로 맞춰야
+      # 하므로(setOffset 강제), 같은 지평을 유지하려면 step 수를 절반으로 줄인다.
+      #   초당 궤적 점 2,240,000 -> 560,000 (x1/4). 주기 예산은 50 -> 100 ms.
+      #   점당 시간 여유가 4배가 되므로 run27 의 놓침 225회는 사라져야 한다.
+      # 대가: 궤적을 0.1 s 간격으로 찍어 거칠어진다(0.44 m/s 에서 4.4 cm 간격).
+      #   로봇 폭 0.45 m 라 발자국 충돌 검사에는 충분하다.
+      # 공식 README: 지평(steps x dt) x vx_max 가 costmap 반경보다 크면 인위적으로
+      #   제한된다. 2.8 x 0.5 = 1.4 m < local costmap 반경 3 m 이므로 안전하다.
+      #
+      # [이전] 36 -> 56(nav2 기본). 지평 1.8 -> 2.8 s.
       # run26 에서 일반 코너 속도가 DWB 0.464 대 MPPI 0.407 로 12 % 낮았다. 원인은
       # 근시다 — 1.8 s 궤적(0.8 m)으로 1.5 m 창의 굽은 경로를 따라가려니 속도를
       # 줄이는 수밖에 없었다. 지평을 늘리면 코너를 미리 보고 빠른 선을 고른다.
       # 궤적이 닿는 거리 0.8 -> 1.4 m 로, local costmap 반경 3 m 안이라 안전하다
       # (공식 README: 지평이 costmap 보다 커지면 인위적으로 제한된다).
       # **대가는 계산량이다** — batch 와 곱해져 궤적 점이 36,000 -> 112,000(x3.11).
-      time_steps: 56
-      model_dt: 0.05
+      time_steps: 28
+      model_dt: 0.1
       # [2026-09-21 잡음 축] 1000 -> 2000. 표본 잡음은 1/√N 로 준다(7.1 식) → x0.71.
       # 08-29 실측: batch 1000 이 DWB 의 2.5배 계산량인데 제어주기 놓침은 6배 적었다
       # (점당 비용이 다르다).
@@ -385,7 +403,14 @@ controller_server:
       # [되돌리기] 0.3 이 nav2 기본값이다.
       # [함께 보지 말 것] critic 가중치는 이 축이 아니다 — run24→run25 에서 7개를
       #   되돌렸는데 직진 반전은 46.3 -> 47.9 로 그대로였다.
-      temperature: 0.6
+      # [2026-09-21 2차] 0.6 -> 1.2. run27 에서 실효 표본이 986/1000 -> 578/2000 으로
+      # 무너졌다 — temperature 는 절대값이 아니라 **궤적 비용 규모 대비** 값이라
+      # time_steps 가 바꾼다. 지평을 늘리자 점수 차가 벌어져 심사가 까다로워졌다.
+      # **주의**: 이번에 step 수를 56 -> 28 로 줄였으므로 합산 비용도 대략 절반이 되어
+      # 선택성이 이미 상당히 돌아온다. 1.2 는 그 위에 얹는 것이라 run26(98.6 %)보다
+      # 더 평평해질 수 있고, 지나치면 평균이 비용을 거의 안 보게 된다(둔해진다).
+      # 실효 표본을 bag 에서 재어 1500~2000/2000 이면 과하다 — 0.6~0.8 로 내린다.
+      temperature: 1.2
       gamma: 0.015
       # [2026-09-21 시야 축] 1.5 -> 3.0. MPPI 가 보는 경로 길이다(DWB 는 costmap
       # 전체 3 m). 두 가지를 동시에 고친다.
