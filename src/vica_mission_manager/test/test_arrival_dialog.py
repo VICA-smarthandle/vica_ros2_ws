@@ -589,3 +589,23 @@ class TestAppCancelAll:
         logic.on_estop(True, 0.0)
         _, reason = logic.on_app_cancel(1.0)
         assert reason != GateReason.OK
+
+
+class TestLedgerAccessors:
+    """대장(P1)이 읽는 대기 접근자 — 판단이 아니라 값 노출."""
+
+    def test_wait_minutes_and_left(self):
+        logic = arrive("")                                    # "여기서 대기할까요?"
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
+        assert logic.state == State.WAITING
+        assert logic.wait_minutes_requested() == 10
+        assert logic.wait_left_sec(63.0) == 540
+        assert logic.wait_left_sec(3.0 + 601.0) == 0
+
+    def test_not_waiting_is_minus_one(self):
+        logic = MissionLogic()
+        assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(0.0) == -1
+        logic = arrive("")
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
+        logic.on_wake(10.0)                                   # 대기 접음
+        assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(10.0) == -1

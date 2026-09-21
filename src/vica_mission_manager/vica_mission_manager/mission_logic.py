@@ -1032,6 +1032,7 @@ class MissionLogic:
         self._deny_reconfirmed = False   # 대기형 질문의 거절을 종료형으로 되물었나 (2026-09-20)
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
+        self._wait_minutes_requested = -1    # 대장(P1): 대기 요청 분. WAITING 밖에서는 -1
         # 귀 상태 (/vica/listen_state). 무응답 판정 전에 귀 사정을 본다.
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
@@ -1189,6 +1190,16 @@ class MissionLogic:
         if self.state != State.CONFIRMING:
             return None
         return self._confirming_dest_id
+
+    def wait_minutes_requested(self) -> int:
+        """대장(P1): 대기 요청 분. WAITING 이 아니면 -1."""
+        return self._wait_minutes_requested if self.state == State.WAITING else -1
+
+    def wait_left_sec(self, now: float) -> int:
+        """대장(P1): 대기 남은 초(0 이상). WAITING 이 아니면 -1."""
+        if self.state != State.WAITING or self._wait_until is None:
+            return -1
+        return max(0, int(self._wait_until - now))
 
     @property
     def return_interrupted(self) -> bool:
@@ -1824,6 +1835,7 @@ class MissionLogic:
             # 실기에서 혼란→무응답 판정→홈행 연쇄를 만들었다. "네?"가 이미
             # 말할 차례를 알리므로, 대기를 접고 새 대화로 받는다.
             self._wait_until = None
+            self._wait_minutes_requested = -1
             self._reset_arrival_dialog()
             self._to_idle()
             # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
@@ -2035,6 +2047,7 @@ class MissionLogic:
         """WAITING 진입 + 대기 확정 멘트. 사람접근은 WAITING 상태값으로 자연히 꺼진다."""
         self.state = State.WAITING
         self._wait_until = now + minutes * 60.0
+        self._wait_minutes_requested = int(minutes)
         self._response_deadline = None
         self._leaving_deadline = None
         msg = (MSG_WAIT_DEFAULT if default_msg
@@ -2174,6 +2187,7 @@ class MissionLogic:
         self._deny_reconfirmed = False
         self._leaving_deadline = None
         self._wait_until = None
+        self._wait_minutes_requested = -1
         self._response_deadline = None
 
     def _forget_interrupted_return(self) -> None:
