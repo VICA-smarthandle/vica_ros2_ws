@@ -24,7 +24,10 @@ def load_map_meta(destinations_path: str) -> MapMeta:
     path = Path(destinations_path).expanduser().parent / "map.yaml"
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, ValueError, yaml.YAMLError):
+        # ValueError 는 UnicodeDecodeError(파일이 utf-8 이 아님)를 포함한다.
+        # 이 로더는 노드 __init__ 에서 불리므로 못 잡으면 노드 기동 자체가
+        # 죽는다(최종 리뷰 2절 M2).
         return MapMeta()
     if not isinstance(data, dict):
         return MapMeta()

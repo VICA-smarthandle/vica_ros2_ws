@@ -21,3 +21,8 @@ def test_bad_values_fall_back(tmp_path):
 def test_non_mapping_yaml_is_unknown(tmp_path):
     (tmp_path / "map.yaml").write_text("- 1\n- 2\n", encoding="utf-8")
     assert load_map_meta(str(tmp_path / "destinations.yaml")) == MapMeta()
+
+
+def test_invalid_utf8_is_empty(tmp_path):
+    (tmp_path / "map.yaml").write_bytes(b"\xff\xfe")
+    assert load_map_meta(str(tmp_path / "destinations.yaml")) == MapMeta()
