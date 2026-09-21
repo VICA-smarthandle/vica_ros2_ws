@@ -66,6 +66,11 @@ class TestStore:
         store.path = tmp_path            # 디렉터리에 쓰기 → 실패
         assert store.write(Ledger()) is False
 
+    def test_invalid_utf8_is_empty(self, tmp_path):
+        store = LedgerStore(str(tmp_path / "destinations.yaml"))
+        store.path.write_bytes(b'{"last_destination": "\xff\xfe"}')
+        assert store.read() == Ledger()
+
 
 class TestStateFields:
     def test_fields_are_derived_not_judged(self):

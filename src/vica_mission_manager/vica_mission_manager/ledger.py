@@ -87,7 +87,7 @@ class LedgerStore:
     def read(self) -> Ledger:
         try:
             return Ledger.from_json(self.path.read_text(encoding="utf-8"))
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return Ledger()
 
     def write(self, ledger: Ledger) -> bool:
