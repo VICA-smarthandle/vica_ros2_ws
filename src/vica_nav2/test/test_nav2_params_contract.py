@@ -31,9 +31,34 @@ def _controller_limits(params):
         acc_lim_theta      az_max          회전 가속
         decel_lim_theta    -az_max         회전 감속 — MPPI 는 가·감속이 대칭이다
         xy_goal_tolerance  (goal_checker)  MPPI 는 자체 도착 판정이 없다
+
+    2026-09-21 RPP 전환. RPP 는 더 적다 — **회전 상한도 가·감속도 없다.**
+    그 셋은 velocity_smoother 가 유일한 방어라 거기서 읽는다.
+
+        RPP                             뜻
+        desired_linear_vel              직진 상한
+        (없음 · allow_reversing false)  후진 허용 여부
+        smoother.max_velocity[2]        회전 상한      ← 컨트롤러에 없다
+        smoother.max_accel[0]           직진 가속      ← 컨트롤러에 없다
+        smoother.max_decel[0]           직진 감속      ← 컨트롤러에 없다
+        smoother.max_accel[2]           회전 가속      ← 컨트롤러에 없다
     """
     controller = params['controller_server']['ros__parameters']
     fp = controller['FollowPath']
+    if 'purepursuit' in fp['plugin'].lower().replace('_', ''):
+        gc = controller['general_goal_checker']
+        sm = params['velocity_smoother']['ros__parameters']
+        return {
+            'plugin_family': 'rpp',
+            'max_vel_x': fp['desired_linear_vel'],
+            # allow_reversing false 면 후진을 안 쓴다 = min_vel_x 0 과 같은 뜻이다.
+            'min_vel_x': 0.0 if not fp.get('allow_reversing', False) else -fp['desired_linear_vel'],
+            'max_vel_theta': sm['max_velocity'][2],
+            'acc_lim_x': sm['max_accel'][0], 'decel_lim_x': sm['max_decel'][0],
+            'acc_lim_theta': sm['max_accel'][2], 'decel_lim_theta': sm['max_decel'][2],
+            'xy_goal_tolerance': gc['xy_goal_tolerance'],
+            'trans_stopped_velocity': gc['trans_stopped_velocity'],
+        }
     if 'mppi' in fp['plugin'].lower():
         gc = controller['general_goal_checker']
         return {

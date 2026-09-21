@@ -166,9 +166,21 @@ def test_planner_and_controller_use_the_same_collision_model():
     params = _load_params()
     active, _alternative = _planner_blocks(params)
     follow_path = params['controller_server']['ros__parameters']['FollowPath']
-    critics = follow_path['critics']
 
     planner_sees_footprint = active['plugin'] in FOOTPRINT_AWARE_PLUGINS
+    if 'purepursuit' in follow_path['plugin'].lower().replace('_', ''):
+        # 2026-09-21 RPP 전환. RPP 에는 critic 이 없다. 대신 inCollision() 이
+        # **조건 없이** footprintCostAtPose(x, y, theta, footprint) 를 부른다 —
+        # 몸통 전체를 매번 검사한다(MPPI 는 중심 셀 비용이 0 이면 건너뛴다).
+        # 그래서 use_collision_detection 만 켜져 있으면 면으로 본다.
+        assert follow_path.get('use_collision_detection', True), (
+            'RPP 의 use_collision_detection 이 꺼져 있다 — 충돌 검사를 안 한다')
+        controller_sees_footprint = True
+        assert planner_sees_footprint == controller_sees_footprint, (
+            f'planner {active["plugin"]} 는 점 로봇으로 보는데 RPP 는 면으로 본다')
+        return
+
+    critics = follow_path['critics']
     if 'mppi' in follow_path['plugin'].lower():
         # 2026-09-18 MPPI 전환. MPPI 의 장애물 critic 은 하나(ObstaclesCritic)이고
         # 점/면은 critic 이름이 아니라 consider_footprint 가 정한다.

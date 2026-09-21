@@ -359,7 +359,90 @@ controller_server:
     #                            입력이 된다. 설치 후 trajectory_point_step(현재 2)을
     #                            내릴지 CPU 를 재고 정한다. 지금은 2개뿐이라 그대로.
     # ═══════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    # RPP (Regulated Pure Pursuit) — 2026-09-21. MPPI 는 FollowPathMPPI 로 보존.
+    #
+    # 왜 넘어왔나 (MPPI 열한 회차 뒤)
+    #   MPPI 는 손잡이 진동의 **크기**·벽 여유·동적 장애물·CPU 에서 DWB 를 이겼지만
+    #   비카가 가장 아쉬운 둘은 끝내 못 고쳤다.
+    #     ① 방향 바뀜   DWB 35.8 회/분 vs MPPI 최선 37.5 (구조적 — 평균이라 명령이
+    #                   거의 매 주기 바뀐다. 같은 값 유지 5 % vs DWB 76 %)
+    #     ② U턴 제자리  DWB 38 % vs MPPI 50~61 % (어떤 값으로도 못 내렸다)
+    #   `wz_std` 하나가 둘을 반대로 돌리고 분리할 값이 없다. run34(0.42)가 마지막
+    #   절충이었는데 코너 제자리는 3 % 로 좋아졌지만 손잡이 흔들림이 0.071 -> 0.107
+    #   로 **DWB(0.084)보다 나빠졌다**(wz_std 1.2배에 흔들림 1.51배 — 비례보다 빠름).
+    #
+    # RPP 가 다른 점 (공식 README)
+    #   "소비자·산업·서비스 로봇의 필요에 초점". 두 가지 조절이 기본이다.
+    #     곡률 감속 — 급한 회전에서 알아서 늦춘다. 코너 멈칫의 반대다.
+    #     근접 감속 — 장애물에 가까울수록 늦춘다. run28 의 "벽과 나란히 0.5 m/s
+    #                 전속" 이 구조적으로 안 난다.
+    #   그리고 충돌 검사를 **조건 없이 몸통 전체**로 한다(MPPI 는 중심 셀 비용이 0 이면
+    #   발자국 검사를 건너뛴다) — 미해결 inflation 0.55 < 외접 0.620 사각지대에서 더 안전.
+    #
+    # 08-13 철회의 진짜 원인과 지금 다른 점
+    #   그때 회전 반전 6.1 -> 24.3 회/분. 범인은 `rotate_to_heading` 임계 진동이다.
+    #   소스: |atan2(carrot_y, carrot_x)| > min_angle 이면 linear_vel = 0 으로 끊고
+    #   제자리 회전. **히스테리시스가 없다.** 당시 planner 가 목적지까지 그린 경로가
+    #   1 Hz 로 통째로 바뀌어 조준점 각도가 임계 근처를 오갔다 → 매초 뒤집혔다.
+    #   lookahead 를 1.5 -> 2.5 로 늘려도 24.7 로 그대로였던 이유: lookahead 는
+    #   조준점의 *거리*를 바꾸지만 이 판정은 *각도*만 본다.
+    #   **지금은 레일 8판-3 이라 planner 목표가 3 m 앞 당근이고, 앞 3 m 가 비면 레일
+    #   경로를 그대로 쓴다(RailDirect). 경로가 통째로 안 흔들린다.**
+    #
+    # [한계·미리 알고 간다] 공식 README: "순수 추종 컨트롤러는 동적 장애물에 관심도
+    #   걱정도 없이 경로만 따라간다." **RPP 는 사람을 피하지 못한다. 멈출 뿐이다.**
+    #   회피는 레일 BT 가 맡는다(앞 3 m 막힘 -> 당근 모드 -> planner 우회).
+    #   **레일 옆 0.2~0.5 m 에 비껴 선 사람은 IsPathValid 도 못 거른다 — 판정 1순위.**
+    #
+    # [되돌리기] FollowPathMPPI 를 FollowPath 로 이름만 바꾸면 된다. DWB 는
+    #   FollowPathDWB 로 그대로 있다.
+    # ══════════════════════════════════════════════════════════════════════
     FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # MPPI vx_max 와 같은 값 — A/B 가 성립하려면 물리 상한이 같아야 한다.
+      desired_linear_vel: 0.5
+
+      # 조준점(carrot). 08-24 실측: 1.5 는 도착 실패 10회·timeout 47 이었고 2.5 는 0/1.
+      use_velocity_scaled_lookahead_dist: true
+      lookahead_time: 2.5
+      min_lookahead_dist: 0.45      # 0.30 은 잔경로를 추종해 흔들렸다
+      max_lookahead_dist: 0.75      # 코너 잘라내기 37 cm = 실측 통로 여유
+      use_interpolation: true
+
+      # 곡률 감속. min_radius 를 올리면 감속이 일찍·세게 걸려 더 조밀한 호가 된다.
+      # 0.9(08-24) -> 1.2. 회전 상한 0.5 와의 정합:
+      #   R 1.0 -> v 0.42·w 0.42 / R 0.5 -> 0.21·0.42 / R 0.3 -> 0.13·0.43
+      #   R 0.24 -> 0.12(하한)·0.50 = 실현 최소 반경
+      # **낮추면 부등식이 깨져 planner 호를 못 따라가고 "직선에서도 흔들린다" 가 난다.**
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 1.2
+      regulated_linear_scaling_min_speed: 0.12
+
+      # 근접 감속 — 장애물에 가까울수록 늦춘다. MPPI 에 없던 안전장치다.
+      use_cost_regulated_linear_velocity_scaling: true
+      cost_scaling_dist: 0.35
+      cost_scaling_gain: 1.0
+      # **costmap 의 cost_scaling_factor 와 반드시 같아야** 비용->거리 역산이 맞다.
+      inflation_cost_scaling_factor: 3.5
+
+      # 제자리 회전. 1.0(08-24) -> 1.3 rad = 74.5° 까지는 호로 돈다(요구 ①).
+      # 끄면 안 된다 — 조준점이 정확히 뒤일 때 carrot_y≈0 -> 곡률 0 -> **벽으로 직진**.
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 1.3
+      rotate_to_heading_angular_vel: 0.35    # 손잡이 끝 0.22 m/s
+      max_angular_accel: 1.2                 # 제자리 회전 시작·정지 충격
+      allow_reversing: false                 # 뒤에 사람. use_rotate_to_heading 과 동시 true 불가
+
+      # 충돌 예측. 0.5 x 1.2 = 0.60 m, 정지거리 27.5 cm 의 2배.
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.2
+
+      transform_tolerance: 0.2
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.6
+
+    FollowPathMPPI:
       plugin: "nav2_mppi_controller::MPPIController"
       # [2026-09-21 2차] 56 -> 28, model_dt 0.05 -> 0.1. **지평 2.8 s 는 그대로다**
       # (28 x 0.1 = 2.8). 제어주기를 10 Hz 로 낮추면서 model_dt 를 0.1 로 맞춰야
@@ -2400,9 +2483,14 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # 2026-08-13: 직선 0.26 -> 0.5 (사용자 요구). 회전 1.0 은 그대로 둔다 —
     # DWB 는 자체 max_vel_theta(0.4)를 갖고 있어 여기가 회전 상한이 아니다.
-    max_velocity: [0.5, 0.0, 1.0]
+    # [2026-09-21 RPP] 회전 상한 1.0 -> 0.5. **RPP 에는 회전 상한 파라미터가 없다.**
+    # MPPI 는 자체 wz_max 0.5 가 있어 이 값이 안 걸렸다. 그대로 두면 손잡이 끝
+    # (회전중심에서 0.62 m)이 **0.62 m/s** 로 휘둘린다. MPPI wz_max 와 같은 0.5 로 맞춘다.
+    max_velocity: [0.5, 0.0, 0.5]
     min_velocity: [-0.5, 0.0, -1.0]
-    max_accel: [2.5, 0.0, 3.2]
+    # [2026-09-21 RPP] 회전 가속 3.2 -> 2.0. RPP 는 곡률 추종 구간에 각가속 제한이
+    # 없다(max_angular_accel 은 제자리 회전에만 걸린다). 스무더가 유일한 방어다.
+    max_accel: [2.5, 0.0, 2.0]
     # [x] 직선(-2.5): 회전에서 고친 것과 같은 정합 문제가 직선에도 있었다.
     #   -1.0일 때 DWB의 decel_lim_x(-2.5)와 2.5배 어긋나, DWB는 0.104 s에
     #   멈출 수 있다고 보고 궤적을 골랐지만 실제로는 0.26 s가 걸렸다.
@@ -2439,7 +2527,7 @@ velocity_smoother:
     #   되돌릴 때는 속도도 함께 내린다. 이 둘은 한 세트다.
     #
     # planner 비교와 무관한 공통 항목이다. NavFn 쪽 브랜치와 같은 값을 쓴다.
-    max_decel: [-1.25, 0.0, -3.2]
+    max_decel: [-1.25, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
