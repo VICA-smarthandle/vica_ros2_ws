@@ -51,7 +51,7 @@ from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
-from .ledger import Ledger, LedgerStore, state_fields
+from .ledger import Ledger, LedgerStore, apply_goal_event, confirm_abort_name, state_fields
 from .map_meta import load_map_meta
 from .mission_logic import (
     HANDLE_SIDE_MIN_YAW_RAD,
@@ -1358,15 +1358,17 @@ class MissionManagerNode(Node):
         )
         actions = self.logic.on_tick(self._now(), status, distance)
         # 대장(P1): 확인 대기(CONFIRMING)였다가 출발 없이 접혔으면(거절·시간초과·호출로 접음)
-        # 그 목적지가 "하려다 만 곳"이다. 상태 전이만 보고 적는다 — 판단이 아니다.
+        # 그 목적지가 "하려다 만 곳"이다. 전이표는 ledger.confirm_abort_name (순수
+        # 함수, 최종 리뷰 6절 M4) — 여기는 결과만 복사·저장한다.
         confirming = self.logic.confirming_dest_id
-        if (self._ledger_prev_confirming and not confirming
-                and self.logic.state not in (State.NAVIGATING, State.CONFIRMING)
-                and self.logic.active_destination is None):
-            prev = self.destinations.get(self._ledger_prev_confirming)
-            if prev is not None:
-                self._ledger.aborted_destination = prev.name
-                self._save_ledger()
+        active_dest_id = self.logic.active_destination.id if self.logic.active_destination else None
+        aborted_name = confirm_abort_name(
+            self._ledger_prev_confirming, confirming, before, self.logic.state,
+            active_dest_id, self.destinations,
+        )
+        if aborted_name is not None:
+            self._ledger.aborted_destination = aborted_name
+            self._save_ledger()
         self._ledger_prev_confirming = confirming
         self._run_actions(actions)
         if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
@@ -1668,24 +1670,13 @@ class MissionManagerNode(Node):
         빈 값으로 채우는 이유는 앱이 키 부재와 빈 값을 다르게 다루지 않기
         때문이고, 키를 빼면 옛 앱에서 KeyError 가 날 수 있어서다.
         """
-        # 대장(P1): 사건 → 사실. 홈 복귀는 목적지가 아니다.
-        name = destination.name if (destination and destination.id != "__home__") else ""
-        if event in ("goal_sent", "goal_accepted") and name:
-            self._ledger.active_destination = name
-            self._ledger.aborted_destination = ""
-        elif event == "goal_succeeded" and name:
-            self._ledger.last_destination = name
-            self._ledger.last_arrived_at = time.time()
-            self._ledger.active_destination = ""
+        # 대장(P1): 사건 → 사실. 전이표는 ledger.apply_goal_event(순수 함수,
+        # 최종 리뷰 4·6절 M1·M4) — 홈·사람 접근 합성 목적지는 거기서 이름을
+        # ""로 걸러 대장에 안 남긴다. 여기는 결과만 복사·필요하면 저장한다.
+        dest_id = destination.id if destination else ""
+        dest_name = destination.name if destination else ""
+        if apply_goal_event(self._ledger, event, dest_id, dest_name, time.time()):
             self._save_ledger()
-        elif event in ("goal_failed", "goal_rejected", "goal_canceled"):
-            if name:
-                self._ledger.aborted_destination = name
-            self._ledger.active_destination = ""
-            self._save_ledger()
-        elif event in ("return_home_sent", "return_home_succeeded", "return_home_failed",
-                       "return_home_canceled", "state_idle"):
-            self._ledger.active_destination = ""
 
         msg = String()
         msg.data = json.dumps(
