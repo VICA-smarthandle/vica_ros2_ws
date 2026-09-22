@@ -9,21 +9,51 @@
 //
 // 설계 계획서: devlog/2026-07-28-smart-handle-guidance-plan.md
 //
+// ── 2026-09-22 보드 교체: Arduino Nano → ESP32U (ESP32-WROOM-32U, CP2102 USB) ──
+// 시나리오·상태코드·프레임·타이밍은 **한 줄도 바꾸지 않았다.** 바뀐 것은 보드에
+// 종속된 네 가지뿐이다. 이식 기록: devlog/2026-09-22-esp32-스마트핸들-이식.md
+//   1. 핀 번호 (아래 #define). 5V 부품은 레벨시프터를 거친다 — OE 핀이 새로 생겼다.
+//   2. 서보 라이브러리: AVR 전용 <Servo.h> → <ESP32Servo.h> (같은 API·같은 기본 펄스폭)
+//   3. I2C: Wire.begin(SDA, SCL) 로 핀 명시, setWireTimeout(AVR 전용) → setTimeOut(ms)
+//   4. LED 개수 30 → 31 (실물 확인: 한쪽 끝 1개가 안 켜졌다 — 사용자, 2026-09-22)
+// 빌드: arduino-cli compile --fqbn esp32:esp32:esp32 firmware/smart_handle_firmware
+//
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
 //        LED 표시는 모터 정지를 보장하지 않는다. 정지 권한은 Safety 계층에 있다.
 
-#include <Servo.h>
+// ESP32 에는 AVR 의 <Servo.h> 가 없다(architectures 에 esp32 미포함). ESP32Servo 는
+// attach/write/read 가 같고 기본 펄스폭도 544~2400us 로 같아 각도→펄스 변환이 나노와
+// 동일하다(ESP32Servo README "Useful Defaults"). 내부는 LEDC 하드웨어 PWM 이다.
+#include <ESP32Servo.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 
 // ══════════════════════════════════════════
-#define NUM_LEDS_A  30
-#define NUM_LEDS_B  30
+#define NUM_LEDS_A  31   // 2026-09-22 30→31. 실물에서 끝 1개가 안 켜져 사용자가 +1 요청
+#define NUM_LEDS_B  31
 // ══════════════════════════════════════════
 
-#define SERVO_PIN   7
-#define LED_A_PIN   8
-#define LED_B_PIN   9
+// ── ESP32U 핀 (2026-09-22 배선표) ────────────────────────────────────────
+// 서보·LED 는 5V 부품이라 3.3V GPIO → 5V 레벨시프터(TXS/TXB 계열)를 거친다.
+// 시프터는 OE 가 HIGH 일 때만 출력이 살아난다(LOW = 전 채널 Hi-Z, TI 데이터시트).
+// 나노 시절엔 5V 보드라 이 핀이 없었다 — setup() 맨 앞에서 HIGH 로 올린다.
+// GPIO16·17 은 WROVER(PSRAM) 모듈에서만 예약이고 WROOM-32U 에서는 자유 핀이다.
+// 부팅 스트래핑 핀(0·2·5·12·15)은 하나도 쓰지 않는다.
+#define SERVO_PIN        19   // 시프터 A1 → 서보 신호     (나노 D7 자리)
+// LED 좌우는 2026-09-22 실물로 잡았다: 처음 A=18/B=17 로 올렸더니 서보는 왼쪽인데
+// 오른쪽 줄이 흘렀다(사용자 육안). 코드의 뜻(A=왼쪽·B=오른쪽)은 그대로 두고 핀만 맞바꿨다.
+#define LED_A_PIN        17   // 시프터 A4 → LED 왼쪽 줄   (나노 D8 자리)
+#define LED_B_PIN        18   // 시프터 A2 → LED 오른쪽 줄 (나노 D9 자리)
+#define SHIFTER_OE_PIN   16   // 시프터 OE, HIGH = 출력 켜짐
+// I2C 는 ESP32 기본(SDA21/SCL22)과 **반대로** 꽂혀 있다. 2026-09-22 스캔 실측:
+// SDA21/SCL22 → 응답 없음, SDA22/SCL21 → 0x68 응답. 배선표의 "22 lv1 / 21 lv2" 는
+// 시프터 채널 이름일 뿐이라 어느 쪽이 SDA 인지 말해 주지 않는다 — 스캔이 정본이다.
+#define I2C_SDA_PIN      22   // I2C 시프터 lv1 → 센서 SDA
+#define I2C_SCL_PIN      21   // I2C 시프터 lv2 → 센서 SCL
+// 서보 펄스폭. 나노 Servo.h 기본값과 같은 값을 명시해 각도 해석이 바뀌지 않게 한다.
+#define SERVO_US_MIN    544
+#define SERVO_US_MAX   2400
+#define SERVO_HZ         50
 #define BLINK_MS    300
 #define WAVE_MS     30
 #define LINE_LEN    25
@@ -117,11 +147,17 @@ bool arriveTailPending = false;
 // 타이밍: 채널당 GAP 5ms → TRIG → WAIT 100ms → READ. 2채널 = 약 210ms,
 // 프레임 약 4.8Hz. I2C 트랜잭션은 블로킹이지만 50kHz 에서 1ms 미만이라
 // 14ms 서보 스텝을 방해하지 않는다. NeoPixel show()와는 같은 loop()에서
-// 순차 실행되므로 겹치지 않는다. show()가 인터럽트를 끄는 동안 millis()가
-// 1~2ms 밀릴 수 있어 WAIT 에 여유(데이터시트 80 + 10ms)를 둔다.
+// 순차 실행되므로 겹치지 않는다. 나노에서는 show()가 인터럽트를 끄는 동안 millis()가
+// 1~2ms 밀릴 수 있어 WAIT 에 여유(데이터시트 80 + 10ms)를 뒀다. ESP32 의 show()는
+// RMT 하드웨어로 보내 인터럽트를 끄지 않지만(Adafruit_NeoPixel esp.c), 여유는 그대로 둔다.
 //
-// 채널 0 = front_left  (7bit 0x68 — usonic_addr_setup 스케치로 주소 굽기)
-// 채널 1 = front_right (7bit 0x74 — 공장 기본)
+// ── 2026-09-22 센서 8개 재주소 (사용자가 usonic_addr_setup 으로 굽고, 10cm 장애물로 자리 실측) ──
+//   1 왼쪽 바퀴 옆 0x68 · 2 앞 왼쪽 0x69 · 3 앞 오른쪽 0x6A · 4 오른쪽 바퀴 옆 0x6B
+//   5 오른쪽 뒷바퀴 옆 0x6F · 6 후방 오른쪽 0x6E · 7 후방 왼쪽 0x6D · 8 왼쪽 뒷바퀴 옆 0x6C
+//   (5~8 은 굽힌 순서와 장착 자리가 달라 주소가 번호 순이 아니다 — 실측이 정본)
+// 이 펌웨어는 그중 앞 두 개만 읽는다. 8채널 확장은 프레임·ROS·costmap 계약 변경이라 별도 승인.
+// 채널 0 = front_left  (7bit 0x69 — 옛 0x68 은 이제 '왼쪽 바퀴 옆' 센서다)
+// 채널 1 = front_right (7bit 0x6A — 옛 공장 기본 0x74 는 더 이상 버스에 없다)
 // ══════════════════════════════════════════════════════════════════
 #define US_N          2
 #define US_TRIG_CMD   0xBC  // 150cm·mm 단위. 2026-08-31 실기 확정 — 0xBD(50cm)는
@@ -148,7 +184,7 @@ bool arriveTailPending = false;
 #define US_FRAME_H1   0xAA
 #define US_FRAME_H2   0x55
 
-// ── 터치센서 (D11, 2026-09-05 인수인계 문서 기준) ──────────────────────
+// ── 터치센서 (ESP32 GPIO14 · 나노 시절 D11, 2026-09-05 인수인계 문서 기준) ─────
 // **idle HIGH / 터치 LOW** 인 active-low 타입이다. 2026-09-04 에 "잡으면 HIGH"
 // 로 잘못 알고 짰던 것을 문서 실측(idle=HIGH, touch=LOW, idle noise 0/994)
 // 으로 바로잡았다.
@@ -176,7 +212,7 @@ bool arriveTailPending = false;
 // HIGH 가 끼어들어도 200ms 안에 다음 LOW 가 오면 끊기지 않는다. 채터링을
 // 필터링하는 게 아니라 무시하는 구조다. 이것도 판정이 아니라 신호 정리다 —
 // 사람 손의 3초·0.5초와는 자릿수가 다르다.
-#define TOUCH_PIN        11
+#define TOUCH_PIN        14   // 2026-09-22 ESP32U: 11→14. 내부 풀업 있음(약 45kΩ)
 #define TOUCH_FRAME_H1   0xAA
 #define TOUCH_FRAME_H2   0x56
 #define TOUCH_FLAG_ON    0x01
@@ -188,8 +224,8 @@ unsigned long touchLastLow = 0;      // 마지막으로 LOW(터치)를 본 시�
 bool          touchSeenLow = false;  // 부팅 후 LOW 를 한 번이라도 봤나
 unsigned long touchSentAt  = 0;
 
-// ── 진동모터 (D10, 2026-09-04) ─────────────────────────────────────────
-// MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). 나노 GPIO 로 모터를
+// ── 진동모터 (ESP32 GPIO4 · 나노 시절 D10, 2026-09-04) ──────────────────────
+// MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). MCU GPIO 로 모터를
 // 직접 구동하지 않는다 — 전류 초과. 플라이백 다이오드가 드라이버 쪽에 있다.
 //
 // **수동 명령 전용이다.** 젯슨이 0x10/0x11 을 보내면 그 패턴대로 한 번 떨린다.
@@ -201,7 +237,7 @@ unsigned long touchSentAt  = 0;
 //
 // 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
 // 멈춘다.
-#define HAPTIC_PIN            10
+#define HAPTIC_PIN             4   // 2026-09-22 ESP32U: 10→4. 시프터 없이 3.3V 로 게이트 구동
 #define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
 #define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (비상 패턴)
 #define HAPTIC_SHORT_ON_MS    300   // 2026-09-04 150->300. 모터가 회전 올라올 시간(50~100ms)을 준다
@@ -242,7 +278,7 @@ void hapticTask(unsigned long now) {
   }
 }
 
-const uint8_t US_ADDR7[US_N] = { 0x68, 0x74 };
+const uint8_t US_ADDR7[US_N] = { 0x69, 0x6A };   // 2026-09-22 {0x68,0x74} → 앞 왼쪽·앞 오른쪽 실측 주소
 
 enum UsPhase { US_TRIG, US_WAIT, US_READ };
 UsPhase       usPhase   = US_TRIG;
@@ -462,13 +498,13 @@ void applyState(uint8_t state) {
     // 맞았지만 서보가 함께 뒤집혔다 — 코드 하나가 LED와 서보를 같이 정하기
     // 때문이다. test_left_cue_sends_left_code가 그 재발을 막는다.
     case STATE_LEFT:
-      currentMode = WAVE_A;   // D8 = 왼쪽 (2026-08-02 실측)
+      currentMode = WAVE_A;   // A = 왼쪽 (나노 D8 실측 2026-08-02 → ESP32 GPIO17, 09-22 실물 확인)
       setB(SKY); setA(OFF);   // 주황이 흐르는 A는 끄고 반대쪽 B를 하늘색으로
       servoMoveTo(SERVO_LEFT);    // 2026-09-04 반전. 이전에는 SERVO_RIGHT 였다
       break;
 
     case STATE_RIGHT:
-      currentMode = WAVE_B;   // D9 = 오른쪽 (2026-08-02 실측)
+      currentMode = WAVE_B;   // B = 오른쪽 (나노 D9 실측 2026-08-02 → ESP32 GPIO18, 09-22 실물 확인)
       setA(SKY); setB(OFF);
       servoMoveTo(SERVO_RIGHT);   // 2026-09-04 반전. 이전에는 SERVO_LEFT 였다
       break;
@@ -502,7 +538,17 @@ void applyState(uint8_t state) {
 
 void setup() {
   Serial.begin(115200);
-  myServo.attach(SERVO_PIN);
+
+  // 레벨시프터부터 켠다. 이 줄이 없으면 아래 서보·LED 신호가 시프터에서 끊겨
+  // 부팅 대기 표시(SKY)도, 서보 중립도 실물에 닿지 않는다.
+  pinMode(SHIFTER_OE_PIN, OUTPUT);
+  digitalWrite(SHIFTER_OE_PIN, HIGH);
+
+  // ESP32Servo: 타이머 1개를 이 라이브러리에 배정하고(ESP32Servo 예제 관례),
+  // 50Hz·544~2400us 로 붙인다 — 나노 Servo.h 와 같은 조건이라 각도 값은 그대로다.
+  ESP32PWM::allocateTimer(0);
+  myServo.setPeriodHertz(SERVO_HZ);
+  myServo.attach(SERVO_PIN, SERVO_US_MIN, SERVO_US_MAX);
   myServo.write(SERVO_CENTER);
 
   ledA.begin(); ledA.show();
@@ -522,11 +568,13 @@ void setup() {
 
   // ── 초음파 I2C ──
   // 케이블이 길어 데이터시트 상한(100kHz)의 절반으로 시작한다(§4.2-4).
-  // setWireTimeout: SDA 락업 시 25ms 후 자동 복구 — 없으면 loop() 전체가 멎어
-  // 서보·LED·워치독까지 같이 죽는다.
-  Wire.begin();
+  // 센서는 5V 급전이라 SDA/SCL 은 I2C 레벨시프터(양방향)를 거쳐 GPIO22/21 에 온다.
+  // 타임아웃: 나노의 setWireTimeout(us) 은 AVR 전용이라 ESP32 에선 setTimeOut(ms) 을
+  // 쓴다(arduino-esp32 I2C API). 25ms 뒤 트랜잭션이 실패로 끝나 loop() 가 계속 돈다 —
+  // 없으면(기본 50ms) 락업 한 번에 서보 스텝 14ms 가 몇 번 밀린다.
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(50000);
-  Wire.setWireTimeout(25000, true);
+  Wire.setTimeOut(25);
 
   // 지향각 레벨 1을 전원 인가 시마다 굽는다. 레지스터 휘발 여부가 데이터시트에
   // 없어, 기본값(레벨 4·60°)으로 돌아가면 높이 91.3mm 수평 장착에서 16cm 앞부터

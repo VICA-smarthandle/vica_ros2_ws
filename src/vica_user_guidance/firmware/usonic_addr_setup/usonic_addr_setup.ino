@@ -20,7 +20,15 @@
 
 #include <Wire.h>
 
-#define DO_BURN_ADDR 0       // front_left 주소 굽기 시에만 1 (센서 하나만 연결!)
+// 2026-09-22 ESP32U 이식: 본 펌웨어와 같은 핀(SDA 22 / SCL 21 — 기본과 반대, 스캔 실측)·
+// 같은 타임아웃 API 를 쓴다. 빌드: arduino-cli compile --fqbn esp32:esp32:esp32 firmware/usonic_addr_setup
+#define I2C_SDA_PIN 22
+#define I2C_SCL_PIN 21
+
+// [2026-09-22] 센서 8개를 0xD0~0xDE(7bit 0x68~0x6F)로 굽었다. 자리↔주소 실측표는 본 펌웨어
+// smart_handle_firmware.ino 의 초음파 절과 devlog/2026-09-22-esp32-스마트핸들-이식.md 참조.
+// 아래 굽기 코드는 옛 2채널 절차(front_left=0xD0) 그대로다 — 새 센서를 굽을 땐 ADDR8_NEW 를 고쳐 쓴다.
+#define DO_BURN_ADDR 0       // 주소 굽기 시에만 1 (센서 하나만 연결!)
 
 #define ADDR7_DEFAULT 0x74   // 0xE8>>1 공장 기본 → front_right 로 쓴다
 #define ADDR8_NEW     0xD0   // 8bit 표기. 레지스터 0x05 에는 8bit 값을 쓴다
@@ -67,9 +75,9 @@ bool rd16(uint8_t addr7, uint8_t reg, uint16_t *out) {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin();
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(50000);              // 케이블이 길다. 상한 100k 의 절반부터(§4.2-4)
-  Wire.setWireTimeout(25000, true);  // I2C 락업 자동 복구
+  Wire.setTimeOut(25);               // I2C 락업 자동 복구 (ESP32: ms 단위. AVR setWireTimeout 은 없다)
   delay(1000);                       // 센서 전원 안정화 ≤1000ms (§2.3)
 
   scan("before");
