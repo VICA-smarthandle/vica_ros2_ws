@@ -1305,7 +1305,12 @@ local_costmap:
       # 마크까지 지웠다 — LETHAL 109→0→109 깜빡임, 로봇이 상자를 밀고 감.
       # 레이어를 나누면 clear 는 자기 장부만 지우고, master 는 max 결합이라
       # 한쪽이라도 "장애물"이면 남는다. (사용자 제안, 2026-08-31)
-      plugins: ["voxel_layer", "range_sensor_front_left", "range_sensor_front_right", "inflation_layer"]
+      plugins: ["voxel_layer",
+                "range_sensor_front_left", "range_sensor_front_right",
+                "range_sensor_left_wheel", "range_sensor_right_wheel",
+                "range_sensor_right_rear_wheel", "range_sensor_rear_right",
+                "range_sensor_rear_left", "range_sensor_left_rear_wheel",
+                "inflation_layer"]
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
@@ -1490,31 +1495,87 @@ local_costmap:
           # 스캔에 물체가 없는 방향은 inf 로 온다. 그것을 최대거리로 바꿔
           # 빈 공간 청소에 쓴다. false 면 빈 곳이 안 지워진다.
           inf_is_valid: true
-      # 전방 초음파 2개 (DYP-A22, 지면 91.3mm 수평 장착, 지향각 30도).
+      # 초음파 8개 (DYP-A22, 지면 91.3mm 수평 장착, 물리 빔 50도·발행 fov 30도).
       # 라이다(0.382m 층)와 depth_scan(0.30~1.05m 띠)이 못 보는 지면~0.30m
       # 낮은 장애물, 그리고 유리를 맡는다. 발행원은 user_guidance_driver_node
-      # (스마트핸들 나노 경유, 채널당 약 4.8Hz). 설계·근거:
-      # docs/handoff_jetson_ultrasonic_i2c.md §6.5. global costmap 에는 넣지
-      # 않는다 — 방위 분해능이 없어 저장 지도를 뭉갠다.
-      # 공통 설정 주석 (두 레이어 동일):
+      # (스마트핸들 ESP32U 경유). 설계·근거: docs/handoff_jetson_ultrasonic_i2c.md §6.5.
+      # global costmap 에는 넣지 않는다 — 방위 분해능이 없어 저장 지도를 뭉갠다.
+      #
+      # 2026-09-16 두 채널 enabled False 는 그 회차들에 초음파가 미연결이었기 때문
+      # (51213e7). 2026-09-23 보드를 ESP32U 로 바꾸고 8개를 붙이면서 전부 True 로.
+      # 채널당 약 2.4Hz (4라운드 × 105ms). 센서별 레이어 분리는 08-31 확정(한 레이어에
+      # 여러 토픽을 넣으면 한 센서의 clear 가 다른 센서의 mark 를 지운다).
+      # 공식 문서(docs.nav2.org Range Sensor Parameters): topics·clear_on_max_reading·
+      # input_sensor_type 이 기본 축이고, 부채꼴 폭은 Range 메시지의 field_of_view 를 쓴다
+      # (드라이버 ultrasonic_fov_rad 0.524). phi(1.2)·inflate_cone(1.0)은 기본값.
+      # 자리↔주소·URDF frame: vica_description/urdf/VICA.xacro 초음파 절.
+      # 공통 설정 주석 (여덟 레이어 동일):
       # - clear_on_max_reading true: 드라이버가 "에코 없음"을 range=max_range 로
       #   발행하면 그 부채꼴을 지운다. false 면 유령이 rolling window 밖으로
       #   나갈 때까지 남는다.
       # - no_readings_timeout 0.0: 초음파가 죽어도 costmap 을 stale 로 만들지
       #   않는다(보조 센서라 fail-open). 단절 진단은 /vica/smart_handle_state.
       # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
-      range_sensor_front_left:
+      range_sensor_front_left:   # 2번 앞 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False
+        enabled: True
         topics: ["/ultrasonic/front_left"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
         mark_threshold: 0.8
-      range_sensor_front_right:
+      range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False
+        enabled: True
         topics: ["/ultrasonic/front_right"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/left_wheel"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_right_wheel:   # 4번 오른쪽 바퀴 옆
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/right_wheel"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_right_rear_wheel:   # 5번 오른쪽 뒷바퀴 옆
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/right_rear_wheel"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_rear_right:   # 6번 후방 오른쪽
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/rear_right"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_rear_left:   # 7번 후방 왼쪽
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/rear_left"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_left_rear_wheel:   # 8번 왼쪽 뒷바퀴 옆
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/left_rear_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2

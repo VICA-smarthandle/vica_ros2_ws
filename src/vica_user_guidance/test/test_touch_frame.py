@@ -24,8 +24,10 @@ def touch_bytes(seq: int, touched: bool) -> bytes:
 
 
 def us_bytes(seq: int, d0: int = 1000, d1: int = 1200) -> bytes:
-    """비교용 초음파 8바이트."""
-    body = bytes([seq, d0 & 0xFF, d0 >> 8, d1 & 0xFF, d1 >> 8])
+    """비교용 초음파 8채널 프레임(20바이트). 앞 두 채널만 값을 넣고 나머지는 0."""
+    body = bytes([seq])
+    for d in (d0, d1) + (0,) * (protocol.US_CHANNELS - 2):
+        body += bytes([d & 0xFF, d >> 8])
     x = 0
     for b in body:
         x ^= b
@@ -112,7 +114,7 @@ def test_ultrasonic_survives_touch_traffic():
     stream = touch_bytes(1, True) + us_bytes(1) + touch_bytes(2, False) + us_bytes(2)
     got = acc.feed(stream)
     assert [f.seq for f in got] == [1, 2]
-    assert all(f.distances_mm == (1000, 1200) for f in got)
+    assert all(f.distances_mm[:2] == (1000, 1200) for f in got)
 
 
 def test_interleaved_mid_frame():

@@ -63,9 +63,11 @@ user_guidance_driver_node:
 
     enable_serial: true
 
-    # ── 초음파 (DYP-A22 IIC x2, 2026-08-31) ─────────────────────────────
-    # 설계 정본: docs/handoff_jetson_ultrasonic_i2c.md §6.4
-    # 같은 포트의 상향 8B 프레임(약 4.8Hz)을 읽어 sensor_msgs/Range 로 발행한다.
+    # ── 초음파 (DYP-A22 IIC x8, 2026-08-31 2개 → 2026-09-23 8개) ────────────
+    # 설계 정본: docs/handoff_jetson_ultrasonic_i2c.md §6.4, 8채널 확장은
+    # devlog/2026-09-23-초음파-8채널.md. 같은 포트의 상향 20B 프레임(AA 57, 약 2.4Hz)을
+    # 읽어 sensor_msgs/Range 로 채널마다 발행한다. 펌웨어가 호환용으로 같이 보내는
+    # 옛 8B 프레임(AA 55)은 이 판의 파서가 무시한다.
     ultrasonic_enabled: true
     ultrasonic_rate_hz: 20.0     # (남겨둔 값 — 실제 읽기 주기는 uplink_rate_hz 다)
 
@@ -102,10 +104,30 @@ user_guidance_driver_node:
     # system_monitor 의 handle_state 프로브(max_hz 4.0)를 넘길 수 있다. 100ms 면
     # 상위 지연은 충분히 작고 프로브 상한도 안 넘는다.
     touch_publish_min_interval_sec: 0.1
-    # 채널 순서 고정: [front_left(I2C 0x68), front_right(0x74)] — 실측 확정
-    ultrasonic_topics: [/ultrasonic/front_left, /ultrasonic/front_right]
+    # 채널 순서 = 자리 번호 순 (2026-09-22 10cm 장애물 실측, 펌웨어 US_ADDR7 과 동일):
+    #   1 왼쪽 바퀴 옆 0x68 · 2 앞 왼쪽 0x69 · 3 앞 오른쪽 0x6A · 4 오른쪽 바퀴 옆 0x6B
+    #   5 오른쪽 뒷바퀴 옆 0x6F · 6 후방 오른쪽 0x6E · 7 후방 왼쪽 0x6D · 8 왼쪽 뒷바퀴 옆 0x6C
+    # 토픽 이름은 nav2_params.yaml 의 range_sensor_* 레이어와 짝이다.
+    ultrasonic_topics:
+      - /ultrasonic/left_wheel
+      - /ultrasonic/front_left
+      - /ultrasonic/front_right
+      - /ultrasonic/right_wheel
+      - /ultrasonic/right_rear_wheel
+      - /ultrasonic/rear_right
+      - /ultrasonic/rear_left
+      - /ultrasonic/left_rear_wheel
     # URDF 링크 이름과 반드시 일치해야 한다. 다르면 TF 를 못 찾아 costmap 이 버린다.
-    ultrasonic_frame_ids: [usonic_front_left, usonic_front_right]
+    # (vica_description/urdf/VICA.xacro 초음파 절)
+    ultrasonic_frame_ids:
+      - usonic_left_wheel
+      - usonic_front_left
+      - usonic_front_right
+      - usonic_right_wheel
+      - usonic_right_rear_wheel
+      - usonic_rear_right
+      - usonic_rear_left
+      - usonic_left_rear_wheel
     # 2026-08-31 실험(사용자 요청): 레벨 1(30도)/0.30m -> 레벨 4(60도)/0.80m.
     # 계산상 60도 수평 장착은 바닥 에코가 0.13~0.16m 부터지만, 이 바닥(매끈한
     # 재질)이 정반사로 에코를 안 돌려주는 것이 실측돼 시험한다. 빈 전방에서
@@ -142,7 +164,10 @@ user_guidance_driver_node:
     ultrasonic_fov_rad: 0.524    # 마킹 폭 30도 (물리 빔은 50도 유지) — A/B 확정
     ultrasonic_min_range_m: 0.02
     ultrasonic_max_range_m: 1.50
-    # 순차 발사라 채널별 측정 시점이 다르다. 펌웨어 GAP 5+WAIT 100ms 기준.
+    # 라운드 발사라 채널별 측정 시점이 다르다. 8채널 프레임은 라운드 D 를 읽은 직후
+    # 나가고, 각 채널은 자기 라운드의 트리거 시각(GAP 5 + WAIT 100 = 105ms 단위)만큼
+    # 과거다: A(앞 왼쪽·후방 오른쪽) 420 / B(앞 오른쪽·후방 왼쪽) 315 /
+    # C(바퀴 옆 둘) 210 / D(뒷바퀴 옆 둘) 105. 순서는 위 채널 순서와 같다.
     # 트리거 명령을 바꾸면(0xBC->다른 것) 펌웨어 US_WAIT_MS 와 함께 바꾼다.
-    ultrasonic_measurement_delay_ms: [210, 105]
+    ultrasonic_measurement_delay_ms: [210, 420, 315, 210, 105, 420, 315, 105]
     ultrasonic_stale_warn_sec: 2.0

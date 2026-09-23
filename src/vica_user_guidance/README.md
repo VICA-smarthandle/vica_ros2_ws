@@ -50,7 +50,7 @@ Safety 결정 사항이다.
 | LED 왼쪽 줄(A) | GPIO17 | 5V 레벨시프터 A4, 31개 (09-22 실물 확인) |
 | LED 오른쪽 줄(B) | GPIO18 | 5V 레벨시프터 A2, 31개 |
 | 레벨시프터 OE | GPIO16 | HIGH=출력 켜짐. 펌웨어가 setup() 첫 줄에서 올린다 |
-| 초음파 I2C | SDA GPIO22 / SCL GPIO21 | 5V I2C 레벨시프터 경유. ESP32 기본과 반대(스캔 실측). 센서 8개(0x68~0x6F) 중 앞 왼쪽 0x69·앞 오른쪽 0x6A 만 읽는다. 자리↔주소 표는 `.ino` 초음파 절 |
+| 초음파 I2C | SDA GPIO22 / SCL GPIO21 | 5V I2C 레벨시프터 경유. ESP32 기본과 반대(스캔 실측). 센서 8개(0x68~0x6F)를 서로 등진 2개씩 4라운드로 읽는다(채널당 약 2.4 Hz). 자리↔주소 표는 `.ino` 초음파 절 |
 | 진동모터(MOSFET 게이트) | GPIO4 | |
 | 터치센서 | GPIO14 | INPUT_PULLUP, active-low |
 

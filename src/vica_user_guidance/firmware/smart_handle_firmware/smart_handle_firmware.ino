@@ -18,6 +18,10 @@
 //   4. LED 개수 30 → 31 (실물 확인: 한쪽 끝 1개가 안 켜졌다 — 사용자, 2026-09-22)
 // 빌드: arduino-cli compile --fqbn esp32:esp32:esp32 firmware/smart_handle_firmware
 //
+// ── 2026-09-23 초음파 8채널 (사용자 승인) ──
+// 상향에 8채널 프레임(AA 57, 20B)을 추가했다. 옛 2채널 프레임(AA 55)은 호환용으로 함께
+// 보낸다. 젯슨 파서·설정·URDF·costmap 레이어가 같은 커밋에서 8채널로 바뀐다.
+//
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
 //        LED 표시는 모터 정지를 보장하지 않는다. 정지 권한은 Safety 계층에 있다.
 
@@ -155,11 +159,28 @@ bool arriveTailPending = false;
 //   1 왼쪽 바퀴 옆 0x68 · 2 앞 왼쪽 0x69 · 3 앞 오른쪽 0x6A · 4 오른쪽 바퀴 옆 0x6B
 //   5 오른쪽 뒷바퀴 옆 0x6F · 6 후방 오른쪽 0x6E · 7 후방 왼쪽 0x6D · 8 왼쪽 뒷바퀴 옆 0x6C
 //   (5~8 은 굽힌 순서와 장착 자리가 달라 주소가 번호 순이 아니다 — 실측이 정본)
-// 이 펌웨어는 그중 앞 두 개만 읽는다. 8채널 확장은 프레임·ROS·costmap 계약 변경이라 별도 승인.
-// 채널 0 = front_left  (7bit 0x69 — 옛 0x68 은 이제 '왼쪽 바퀴 옆' 센서다)
-// 채널 1 = front_right (7bit 0x6A — 옛 공장 기본 0x74 는 더 이상 버스에 없다)
+//
+// ── 2026-09-23 8채널 확장 (사용자 승인) ──────────────────────────────────
+// 채널 번호 = 자리 번호 - 1 (ch0 = 1번 왼쪽 바퀴 옆 … ch7 = 8번 왼쪽 뒷바퀴 옆).
+// 같은 방향을 보는 센서끼리는 서로의 메아리를 읽으므로(§4.2) 한 번에 쏘지 않는다.
+// 대신 **서로 등진 두 개**를 한 라운드로 묶어 동시에 쏜다 — 앞 vs 뒤, 왼쪽 vs 오른쪽은
+// 빔이 만날 수 없다. 4라운드 × (GAP 5 + WAIT 100) = 420 ms/바퀴, 채널당 약 2.4 Hz
+// (2채널 시절 4.8 Hz 의 절반. 올리려면 08-31 devlog 의 '완료 폴링' 방식).
+//   라운드 A: ch1 앞 왼쪽      + ch5 후방 오른쪽
+//   라운드 B: ch2 앞 오른쪽    + ch6 후방 왼쪽     → 이 뒤에 옛 2채널 프레임(AA 55) 송신
+//   라운드 C: ch0 왼쪽 바퀴 옆 + ch3 오른쪽 바퀴 옆
+//   라운드 D: ch7 왼쪽 뒷바퀴 옆 + ch4 오른쪽 뒷바퀴 옆 → 이 뒤에 8채널 프레임(AA 57) 송신
+// 옛 2채널 프레임을 계속 보내는 이유: 젯슨 파서가 아직 옛 판인 워크스페이스(다른 브랜치
+// 빌드)에서도 앞 두 개는 계속 보이게 하기 위해서다. 새 파서는 AA 57 만 읽고 AA 55 는
+// 헤더가 달라 그냥 지나친다. 8채널 파서가 모든 브랜치에 들어가면 US_SEND_LEGACY 를 0 으로.
+// 라운드 B 뒤에 보내는 이유: 그 시점의 앞 두 값이 옛 설정 measurement_delay [210, 105]
+// 와 정확히 맞는다(ch1 은 210 ms 전, ch2 는 105 ms 전에 트리거).
 // ══════════════════════════════════════════════════════════════════
-#define US_N          2
+#define US_N          8
+#define US_ROUNDS     4
+#define US_PER_ROUND  2
+#define US_SEND_LEGACY        1   // 1: 라운드 B 뒤 옛 AA 55 프레임(앞 왼쪽·앞 오른쪽)도 보낸다
+#define US_LEGACY_AFTER_ROUND 1   // 라운드 B (0 부터 셈)
 #define US_TRIG_CMD   0xBC  // 150cm·mm 단위. 2026-08-31 실기 확정 — 0xBD(50cm)는
                             // 0xFFFD 만 반환했고 0xBC 는 실거리를 반환했다(§2.10)
 #define US_WAIT_MS    100   // 0xBC 최대 측정시간 90ms + show() 지터 여유
@@ -176,13 +197,17 @@ bool arriveTailPending = false;
 #define US_GAP_MS     5     // 채널 사이 간격. 앞 채널 잔향이 다음 측정에 남지 않게
 #define US_REG_DIST   0x02
 #define US_REG_CMD    0x10
-// 상향 프레임 8B: AA 55 seq d0L d0H d1L d1H xor (거리 mm, little-endian).
-// 헤더 0xAA/0x55 는 하향 상태코드(0~7)와 겹치지 않아 양방향이 섞여도 안전하다.
+// 상향 8채널 프레임 20B (2026-09-23): AA 57 seq d0L d0H … d7L d7H xor
+//   (거리 mm little-endian, xor = seq ^ 거리 16바이트. 채널 순서 = 자리 번호 순).
+// 옛 상향 프레임 8B (호환용, US_SEND_LEGACY): AA 55 seq d0L d0H d1L d1H xor
+//   (d0 = 앞 왼쪽 ch1, d1 = 앞 오른쪽 ch2).
+// 헤더 0xAA/0x55·0x57 은 하향 상태코드(0~7)와 겹치지 않아 양방향이 섞여도 안전하다.
 // 값 규약: 0 = 채널 무효(3회 연속 실패, 젯슨 쪽은 그 채널 미발행)
 //          1~3000 = 실거리 mm
 //          3001 = 범위 내 에코 없음(clear, 젯슨 쪽은 max_range 로 발행해 부채꼴을 지운다)
 #define US_FRAME_H1   0xAA
-#define US_FRAME_H2   0x55
+#define US_FRAME_H2   0x55   // 옛 2채널 프레임
+#define US_FRAME8_H2  0x57   // 8채널 프레임
 
 // ── 터치센서 (ESP32 GPIO14 · 나노 시절 D11, 2026-09-05 인수인계 문서 기준) ─────
 // **idle HIGH / 터치 LOW** 인 active-low 타입이다. 2026-09-04 에 "잡으면 HIGH"
@@ -278,18 +303,37 @@ void hapticTask(unsigned long now) {
   }
 }
 
-const uint8_t US_ADDR7[US_N] = { 0x69, 0x6A };   // 2026-09-22 {0x68,0x74} → 앞 왼쪽·앞 오른쪽 실측 주소
+// 채널(자리 번호-1) → 7bit 주소. 2026-09-22 10cm 장애물 실측표 그대로.
+const uint8_t US_ADDR7[US_N] = {
+  0x68,  // ch0 1번 왼쪽 바퀴 옆
+  0x69,  // ch1 2번 앞 왼쪽      (옛 front_left)
+  0x6A,  // ch2 3번 앞 오른쪽    (옛 front_right)
+  0x6B,  // ch3 4번 오른쪽 바퀴 옆
+  0x6F,  // ch4 5번 오른쪽 뒷바퀴 옆
+  0x6E,  // ch5 6번 후방 오른쪽
+  0x6D,  // ch6 7번 후방 왼쪽
+  0x6C,  // ch7 8번 왼쪽 뒷바퀴 옆
+};
+// 라운드별로 동시에 쏘는 채널 쌍. 서로 등진 방향만 묶는다(위 절 참조).
+const uint8_t US_ROUND_CH[US_ROUNDS][US_PER_ROUND] = {
+  { 1, 5 },  // A: 앞 왼쪽 + 후방 오른쪽
+  { 2, 6 },  // B: 앞 오른쪽 + 후방 왼쪽
+  { 0, 3 },  // C: 왼쪽 바퀴 옆 + 오른쪽 바퀴 옆
+  { 7, 4 },  // D: 왼쪽 뒷바퀴 옆 + 오른쪽 뒷바퀴 옆
+};
+#define US_LEGACY_CH0 1   // 옛 프레임 d0 = 앞 왼쪽
+#define US_LEGACY_CH1 2   // 옛 프레임 d1 = 앞 오른쪽
 
 enum UsPhase { US_TRIG, US_WAIT, US_READ };
 UsPhase       usPhase   = US_TRIG;
-uint8_t       usCh      = 0;
-bool          usTrigOk  = false;
+uint8_t       usRound   = 0;
+bool          usTrigOk[US_PER_ROUND] = { false, false };
 unsigned long usPhaseAt = 0;
 uint8_t       usSeq     = 0;
-uint16_t      usDist[US_N]  = { 0, 0 };  // 프레임에 실을 값. 0 = 무효
-uint8_t       usFails[US_N] = { 0, 0 };  // 연속 실패 수
+uint16_t      usDist[US_N]  = { 0 };     // 프레임에 실을 값. 0 = 무효
+uint8_t       usFails[US_N] = { 0 };     // 연속 실패 수
 uint16_t      usBuf[US_N][3];            // 3점 중앙값용 최근 유효 샘플
-uint8_t       usBufN[US_N]  = { 0, 0 };
+uint8_t       usBufN[US_N]  = { 0 };
 
 bool usWrite8(uint8_t addr7, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(addr7);
@@ -338,18 +382,39 @@ void usFail(uint8_t ch) {
   }
 }
 
-void usSendFrame() {
+// 8채널 프레임 20B. 한 바퀴(4라운드)가 끝날 때 한 번 보낸다.
+void usSendFrame8() {
+  uint8_t f[3 + 2 * US_N + 1];
+  f[0] = US_FRAME_H1;
+  f[1] = US_FRAME8_H2;
+  f[2] = usSeq++;
+  uint8_t x = f[2];
+  for (uint8_t ch = 0; ch < US_N; ch++) {
+    f[3 + 2 * ch]     = usDist[ch] & 0xFF;
+    f[4 + 2 * ch]     = usDist[ch] >> 8;
+    x ^= f[3 + 2 * ch] ^ f[4 + 2 * ch];
+  }
+  f[3 + 2 * US_N] = x;
+  Serial.write(f, sizeof(f));
+}
+
+#if US_SEND_LEGACY
+// 옛 2채널 프레임 8B(호환용). 앞 왼쪽·앞 오른쪽만 싣는다. seq 는 8채널 프레임과 따로 센다 —
+// 옛 파서가 순번 누락으로 오해하지 않게.
+uint8_t usLegacySeq = 0;
+void usSendLegacyFrame() {
   uint8_t f[8];
   f[0] = US_FRAME_H1;
   f[1] = US_FRAME_H2;
-  f[2] = usSeq++;
-  f[3] = usDist[0] & 0xFF;
-  f[4] = usDist[0] >> 8;
-  f[5] = usDist[1] & 0xFF;
-  f[6] = usDist[1] >> 8;
+  f[2] = usLegacySeq++;
+  f[3] = usDist[US_LEGACY_CH0] & 0xFF;
+  f[4] = usDist[US_LEGACY_CH0] >> 8;
+  f[5] = usDist[US_LEGACY_CH1] & 0xFF;
+  f[6] = usDist[US_LEGACY_CH1] >> 8;
   f[7] = f[2] ^ f[3] ^ f[4] ^ f[5] ^ f[6];
   Serial.write(f, 8);
 }
+#endif
 
 // 터치 원시값을 읽어 시간 브리지만 통과시킨다. 판정은 하지 않는다.
 void touchPoll() {
@@ -378,12 +443,16 @@ void touchPoll() {
 }
 
 // 트리거 실패도 WAIT 를 그대로 거친다 — 센서가 빠져 있어도 주기가 흔들리지
-// 않아 프레임이 항상 약 5Hz 로 나간다(실패 시 시리얼 폭주 방지).
+// 않아 프레임이 항상 같은 박자로 나간다(실패 시 시리얼 폭주 방지).
+// 한 라운드 = 서로 등진 채널 2개를 연달아 트리거(I2C 쓰기 2번, 1ms 미만) → 100ms 대기 →
+// 둘 다 읽기. 라운드 4개가 한 바퀴다.
 void usTask(unsigned long now) {
   switch (usPhase) {
     case US_TRIG:
       if (now - usPhaseAt < US_GAP_MS) return;
-      usTrigOk  = usWrite8(US_ADDR7[usCh], US_REG_CMD, US_TRIG_CMD);
+      for (uint8_t k = 0; k < US_PER_ROUND; k++) {
+        usTrigOk[k] = usWrite8(US_ADDR7[US_ROUND_CH[usRound][k]], US_REG_CMD, US_TRIG_CMD);
+      }
       usPhase   = US_WAIT;
       usPhaseAt = now;
       return;
@@ -394,24 +463,30 @@ void usTask(unsigned long now) {
       return;
 
     case US_READ: {
-      uint16_t raw;
       // 0xFFFF = 측정 미완료, 0xFFFE = 동주파수 간섭 — 둘 다 거리가 아니다(§2.9)
       // 0xFFFD = 범위 내 에코 없음(2026-08-31 실기 관찰, 데이터시트 미기재)
       //          — 정상 상황이므로 clear 로 저장한다. 실패로 치면 앞이 뚫려
       //          있을 때마다 채널이 무효(0)가 되어 costmap 을 지울 수 없다.
-      if (usTrigOk && usReadDist(US_ADDR7[usCh], &raw)) {
-        if (raw >= 1 && raw <= 3000)      usStore(usCh, raw);
-        else if (raw == 0xFFFD)           usStore(usCh, US_CLEAR_MM);
-        else                              usFail(usCh);
-      } else {
-        usFail(usCh);
+      for (uint8_t k = 0; k < US_PER_ROUND; k++) {
+        uint8_t  ch = US_ROUND_CH[usRound][k];
+        uint16_t raw;
+        if (usTrigOk[k] && usReadDist(US_ADDR7[ch], &raw)) {
+          if (raw >= 1 && raw <= 3000)      usStore(ch, raw);
+          else if (raw == 0xFFFD)           usStore(ch, US_CLEAR_MM);
+          else                              usFail(ch);
+        } else {
+          usFail(ch);
+        }
       }
+#if US_SEND_LEGACY
+      if (usRound == US_LEGACY_AFTER_ROUND) usSendLegacyFrame();
+#endif
       usPhase   = US_TRIG;
       usPhaseAt = now;
-      usCh++;
-      if (usCh >= US_N) {
-        usCh = 0;
-        usSendFrame();
+      usRound++;
+      if (usRound >= US_ROUNDS) {
+        usRound = 0;
+        usSendFrame8();
       }
       return;
     }

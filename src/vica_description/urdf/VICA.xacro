@@ -415,6 +415,39 @@
   <child link="usonic_front_right"/>
 </joint>
 
+<!-- ── 2026-09-23 초음파 6개 추가 → 8개 배치 (자리↔주소 실측표: devlog/2026-09-22-esp32-스마트핸들-이식.md) ──
+     아래 x/y 는 줄자 실측이 **아니라 차체 치수(footprint 주석)에서 추정한 값**이다 [미검증].
+     기준은 앞 센서와 같은 차체 중심이고, joint 에서 axle_offset_x 를 뺀다.
+       바퀴 옆(1·4번)      x = +0.154 (구동륜 축)          y = ±0.225 (차체 반폭)
+       뒷바퀴 옆(8·5번)    x = -0.252 (앞 캐스터 x 의 대칭 가정) y = ±0.225
+       후방(7·6번)         x = -0.305 (차체 뒷면)          y = ±0.107 (앞 센서와 같은 간격 가정)
+       높이는 전부 앞 센서와 같다고 가정(usonic_z).
+     yaw 는 센서가 보는 방향: 왼쪽 +90° / 오른쪽 -90° / 후방 180°. 부채꼴(Range)은 이
+     방향으로 그려지므로, RViz 에서 실물과 어긋나면 **줄자로 재서 이 값들을 고친다.**
+     link 이름은 user_guidance.yaml 의 ultrasonic_frame_ids 와 반드시 일치해야 한다. -->
+<xacro:property name="usonic_side_x"       value="0.154" />
+<xacro:property name="usonic_side_y"       value="0.225" />
+<xacro:property name="usonic_rear_wheel_x" value="-0.252" />
+<xacro:property name="usonic_rear_x"       value="-0.305" />
+
+<xacro:macro name="usonic_link" params="name x y yaw">
+  <link name="${name}">
+    <xacro:usonic_visual/>
+  </link>
+  <joint name="${name}_joint" type="fixed">
+    <origin xyz="${x - axle_offset_x} ${y} ${usonic_z}" rpy="0 0 ${yaw}"/>
+    <parent link="base_link"/>
+    <child link="${name}"/>
+  </joint>
+</xacro:macro>
+
+<xacro:usonic_link name="usonic_left_wheel"       x="${usonic_side_x}"       y="${usonic_side_y}"  yaw="${pi/2}"/>   <!-- 1번 -->
+<xacro:usonic_link name="usonic_right_wheel"      x="${usonic_side_x}"       y="${-usonic_side_y}" yaw="${-pi/2}"/>  <!-- 4번 -->
+<xacro:usonic_link name="usonic_right_rear_wheel" x="${usonic_rear_wheel_x}" y="${-usonic_side_y}" yaw="${-pi/2}"/>  <!-- 5번 -->
+<xacro:usonic_link name="usonic_rear_right"       x="${usonic_rear_x}"       y="${-usonic_y}"      yaw="${pi}"/>     <!-- 6번 -->
+<xacro:usonic_link name="usonic_rear_left"        x="${usonic_rear_x}"       y="${usonic_y}"       yaw="${pi}"/>     <!-- 7번 -->
+<xacro:usonic_link name="usonic_left_rear_wheel"  x="${usonic_rear_wheel_x}" y="${usonic_side_y}"  yaw="${pi/2}"/>   <!-- 8번 -->
+
 <!-- 마스트 장착 기울기. 2026-08-29 실측으로 위 3.0도(camera_pitch)를 넣었다.
      이 값은 "이렇게 달자"는 설계값이 아니라 "실제로 이렇게 달려 있다"는 실측값이다.
      마스트를 손대면 반드시 다시 재서 이 값을 고쳐야 한다. 안 고치면 바닥이

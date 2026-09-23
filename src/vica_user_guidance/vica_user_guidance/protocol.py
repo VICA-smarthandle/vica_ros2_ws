@@ -54,13 +54,21 @@ FIRMWARE_BAUDRATE: int = 115200
 # (거리 little-endian, xor 는 seq~d1H 5바이트). 헤더 0xAA/0x55 는 하향
 # 상태코드(0~7)와 겹치지 않아 한 포트에서 양방향이 섞여도 안전하다.
 # 채널 0 = front_left(I2C 0x68), 채널 1 = front_right(0x74) — 2026-08-31 실측.
-US_FRAME_HEADER: bytes = b"\xaa\x55"
-US_FRAME_LEN: int = 8
-US_CHANNELS: int = 2
+# 2026-09-23 8채널 (자리 번호 순). 정본은 펌웨어 usSendFrame8().
+#   0 왼쪽 바퀴 옆 · 1 앞 왼쪽 · 2 앞 오른쪽 · 3 오른쪽 바퀴 옆
+#   4 오른쪽 뒷바퀴 옆 · 5 후방 오른쪽 · 6 후방 왼쪽 · 7 왼쪽 뒷바퀴 옆
+US_FRAME_HEADER: bytes = b"\xaa\x57"
+US_CHANNELS: int = 8
+US_FRAME_LEN: int = 3 + 2 * US_CHANNELS + 1   # 헤더 2 + seq + 거리 16 + xor = 20
+# 옛 2채널 프레임(AA 55, 8B). 펌웨어가 호환용으로 함께 보내지만 이 파서는 헤더가
+# 달라 그냥 지나친다 — 다른 브랜치의 옛 파서(앞 두 채널)를 위한 것이다.
+US_LEGACY_FRAME_HEADER: bytes = b"\xaa\x55"
+US_LEGACY_FRAME_LEN: int = 8
+US_LEGACY_CHANNELS: int = 2
 US_DIST_INVALID: int = 0     # 3회 연속 측정 실패 — 그 채널은 발행하지 않는다
 US_DIST_MAX_MM: int = 3000   # 유효 실거리 상한
 US_CLEAR_MM: int = 3001      # 범위 내 에코 없음 — max_range 로 발행해 부채꼴을 지운다
-FIRMWARE_US_CYCLE_MS: int = 210  # GAP 5 + WAIT 100, 2채널. 프레임 약 4.8Hz
+FIRMWARE_US_CYCLE_MS: int = 420  # 4라운드 × (GAP 5 + WAIT 100). 8채널 프레임 약 2.4Hz
 
 # ── 상향 터치 프레임 (아두이노 → 젯슨, 2026-09-04 신설 · 09-05 재도입) ───
 # 정본은 펌웨어 touchPoll()이다. 5바이트: AA 56 seq flags xor (xor 는 seq^flags).
