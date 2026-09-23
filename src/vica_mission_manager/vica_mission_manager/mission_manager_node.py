@@ -21,8 +21,10 @@ from __future__ import annotations
 import json
 import math
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from uuid import UUID
 
 import rclpy
@@ -49,6 +51,8 @@ from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
+from .ledger import Ledger, LedgerStore, apply_goal_event, confirm_abort_name, state_fields
+from .map_meta import load_map_meta
 from .mission_logic import (
     HANDLE_SIDE_MIN_YAW_RAD,
     Haptic,
@@ -195,6 +199,17 @@ class MissionManagerNode(Node):
         configured_map_id = str(self.get_parameter("map_id").value).strip()
         self._map_id = configured_map_id or Path(self._destinations_path).parent.name
         self.destinations = load_destinations(self._destinations_path)
+
+        # ---- 로봇 대장 (P1, 스펙 3절) — 사실만 적고 방송한다 ---------------------
+        self._map_meta = load_map_meta(self._destinations_path)
+        self._ledger_store = LedgerStore(self._destinations_path)
+        self._ledger: Ledger = self._ledger_store.read()
+        self._ledger_prev_confirming: Optional[str] = None   # 확인 대기 → 안 감 전이 감지용
+        self._pose_cov_xy = 0.0                               # AMCL x·y 분산 합(초기 위치 전 판정)
+        self.get_logger().info(
+            f"대장: 건물 {self._map_meta.building or '?'} {self._map_meta.floor}층, "
+            f"직전 도착 {self._ledger.last_destination or '-'}, 파일 {self._ledger_store.path}")
+
         if Path(self._destinations_path).exists():
             self.get_logger().info(
                 f"목적지 {len(self.destinations)}개 로드: {self._destinations_path}"
@@ -1061,6 +1076,8 @@ class MissionManagerNode(Node):
             yaw_deg=yaw_deg,
             frame_id=msg.header.frame_id or "map",
         )
+        cov = msg.pose.covariance
+        self._pose_cov_xy = float(cov[0] + cov[7]) if len(cov) >= 8 else 0.0
 
     def _on_approach_request(
         self,
@@ -1340,6 +1357,19 @@ class MissionManagerNode(Node):
             self._nav_distance_remaining() if status == NavStatus.RUNNING else None
         )
         actions = self.logic.on_tick(self._now(), status, distance)
+        # 대장(P1): 확인 대기(CONFIRMING)였다가 출발 없이 접혔으면(거절·시간초과·호출로 접음)
+        # 그 목적지가 "하려다 만 곳"이다. 전이표는 ledger.confirm_abort_name (순수
+        # 함수, 최종 리뷰 6절 M4) — 여기는 결과만 복사·저장한다.
+        confirming = self.logic.confirming_dest_id
+        active_dest_id = self.logic.active_destination.id if self.logic.active_destination else None
+        aborted_name = confirm_abort_name(
+            self._ledger_prev_confirming, confirming, before, self.logic.state,
+            active_dest_id, self.destinations,
+        )
+        if aborted_name is not None:
+            self._ledger.aborted_destination = aborted_name
+            self._save_ledger()
+        self._ledger_prev_confirming = confirming
         self._run_actions(actions)
         if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
             # SEEKING 진입·이탈은 여기서도 일어난다(탐색 창 닫힘, 복귀 회전
@@ -1349,8 +1379,11 @@ class MissionManagerNode(Node):
 
     def _publish_robot_state(self) -> None:
         msg = RobotState()
-        msg.current_floor = int(self.get_parameter("current_floor").value)
-        msg.current_building = str(self.get_parameter("current_building").value)
+        floor_param = int(self.get_parameter("current_floor").value)
+        building_param = str(self.get_parameter("current_building").value)
+        # 층·건물: launch 인자가 있으면 우선, 없으면 목적지 폴더의 map.yaml (지도 = 한 층)
+        msg.current_floor = floor_param if floor_param >= 0 else self._map_meta.floor
+        msg.current_building = building_param or self._map_meta.building
         # SEEKING(제자리 회전) 중 영상은 화면이 통째로 흐른다. detection_gate 의
         # 변위 관문(0.3 m)이 어차피 트랙을 계속 깨뜨리므로, 쓰이지 않을 추론에
         # CPU 를 쓰지 않는다 — 이 로봇의 제1 병목은 CPU 다.
@@ -1359,6 +1392,14 @@ class MissionManagerNode(Node):
         msg.is_moving = self.logic.state in (State.NAVIGATING, State.SEEKING)
         # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
         msg.is_paused = self.logic.state == State.PAUSED
+        fields = state_fields(
+            self._ledger, self.logic.state.value, self._robot_pose, self._pose_cov_xy,
+            self.destinations, now_epoch=time.time(),
+            wait_minutes=self.logic.wait_minutes_requested(),
+            wait_left_sec=self.logic.wait_left_sec(self._now()),
+        )
+        for key, value in fields.items():
+            setattr(msg, key, value)
         self.pub_state.publish(msg)
 
     # -- Action 실행 -------------------------------------------------------------
@@ -1629,6 +1670,14 @@ class MissionManagerNode(Node):
         빈 값으로 채우는 이유는 앱이 키 부재와 빈 값을 다르게 다루지 않기
         때문이고, 키를 빼면 옛 앱에서 KeyError 가 날 수 있어서다.
         """
+        # 대장(P1): 사건 → 사실. 전이표는 ledger.apply_goal_event(순수 함수,
+        # 최종 리뷰 4·6절 M1·M4) — 홈·사람 접근 합성 목적지는 거기서 이름을
+        # ""로 걸러 대장에 안 남긴다. 여기는 결과만 복사·필요하면 저장한다.
+        dest_id = destination.id if destination else ""
+        dest_name = destination.name if destination else ""
+        if apply_goal_event(self._ledger, event, dest_id, dest_name, time.time()):
+            self._save_ledger()
+
         msg = String()
         msg.data = json.dumps(
             {
@@ -1646,6 +1695,11 @@ class MissionManagerNode(Node):
             ensure_ascii=False,
         )
         self.pub_goal_event.publish(msg)
+
+    def _save_ledger(self) -> None:
+        """대장 파일 갱신. 실패는 경고만 — 파일 오류로 노드가 죽지 않는다."""
+        if not self._ledger_store.write(self._ledger):
+            self.get_logger().warning(f"대장 파일 쓰기 실패: {self._ledger_store.path}")
 
 
 def main(args=None) -> None:

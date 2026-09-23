@@ -144,25 +144,77 @@ class TestNoAnswerLadder:
         acts2 = logic.on_arrival_answer(_intent("unknown"), 5.0)
         assert MSG_LEAVING_NOTICE in _say(acts2)      # 두 번째 실패 → 예고
 
-    def test_silence_8s_then_leaving_notice(self):
+    def test_silence_8s_reasks_same_question_then_leaving_notice(self):
+        # 2026-09-20 사용자 결정: 침묵 한 번으로 떠나지 않는다 — 같은 질문을 한 번 더.
         logic = arrive("restroom")   # 질문 재생완료 2.0 → 8초 데드라인 10.0
         assert _say(logic.on_tick(9.0, NavStatus.NONE)) == []
         acts = logic.on_tick(10.5, NavStatus.NONE)
-        assert MSG_LEAVING_NOTICE in _say(acts)
+        assert _say(acts) == [MSG_ASK_RESTROOM] and logic.state == State.ASKING_NEXT
+        logic.on_arrival_question_spoken(11.0)        # 재질문 재생완료 → 8초
+        assert _say(logic.on_tick(18.0, NavStatus.NONE)) == []
+        assert MSG_LEAVING_NOTICE in _say(logic.on_tick(19.5, NavStatus.NONE))
+
+    def test_reask_answered_wait_survives(self):
+        logic = arrive("restroom")
+        logic.on_tick(10.5, NavStatus.NONE)           # 재질문
+        acts = logic.on_arrival_answer(_intent("affirm"), 12.0)
+        assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
+
+    def _leaving(self, logic):
+        logic.on_tick(10.5, NavStatus.NONE)           # 재질문
+        logic.on_arrival_question_spoken(11.0)
+        logic.on_tick(19.5, NavStatus.NONE)           # 예고 (유예 3초 시작)
 
     def test_leaving_grace_then_goes_home(self):
         logic = arrive("restroom")
-        logic.on_tick(10.5, NavStatus.NONE)           # 예고 (유예 3초 시작)
-        acts = logic.on_tick(14.0, NavStatus.NONE)    # 유예 경과
+        self._leaving(logic)
+        acts = logic.on_tick(23.0, NavStatus.NONE)    # 유예 경과
         # 복귀 멘트는 9/1 감량 — 직전 떠나기 예고가 이미 말했으니 침묵 출발.
         assert not _say(acts)
         assert logic.state == State.RETURNING
 
     def test_grace_interrupt_returns_to_dialog(self):
         logic = arrive("restroom")
-        logic.on_tick(10.5, NavStatus.NONE)           # 예고
-        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=10), 11.0)
+        self._leaving(logic)
+        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=10), 20.0)
         assert logic.state == State.WAITING           # 끼어들면 산다
+
+    def test_unknown_then_silence_leaves_without_second_reask(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("unknown"), 3.0)   # 재질문(못 알아들음) 1회 소진
+        logic.on_arrival_question_spoken(4.0)
+        assert MSG_LEAVING_NOTICE in _say(logic.on_tick(12.5, NavStatus.NONE))
+
+
+class TestDenyReconfirm:
+    """대기형 질문의 '아니오'는 종료형으로 한 번 더 묻는다 (2026-09-20 사용자 결정)."""
+
+    def test_deny_on_wait_question_asks_finish_question(self):
+        logic = arrive("restroom")
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert _say(acts) == [MSG_ASK_ENTRANCE] and logic.state == State.ASKING_NEXT
+
+    def test_second_deny_means_wait(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("deny"), 3.0)
+        acts = logic.on_arrival_answer(_intent("deny"), 5.0)
+        assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
+
+    def test_affirm_after_reconfirm_finishes(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("deny"), 3.0)
+        acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
+        assert MSG_FINISH in _say(acts) and logic.state == State.RETURNING
+
+    def test_generic_question_deny_also_reconfirms(self):
+        logic = arrive("")   # "여기서 대기할까요?" (대기형·시간 질문)
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert _say(acts) == [MSG_ASK_ENTRANCE]
+
+    def test_entrance_deny_still_waits_without_reconfirm(self):
+        logic = arrive("entrance")   # 종료형: 아니오 = 대기 (기존 그대로)
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
 
 
 class TestWakeFoldsArrivalQuestion:
@@ -295,23 +347,23 @@ class TestEarHold:
         logic.on_listen_state("speech", 7.0)
         logic.on_listen_state("closed", 9.5)     # STT 통과 — LLM 진행 중
         assert _say(logic.on_tick(10.5, NavStatus.NONE)) == []   # 유예
-        acts = logic.on_tick(16.0, NavStatus.NONE)               # 유예 소진
-        assert any("돌아가겠습니다" in t for t in _say(acts))
+        acts = logic.on_tick(16.0, NavStatus.NONE)               # 유예 소진 → 침묵 사다리 1단(재질문)
+        assert _say(acts) == [MSG_ASK_RESTROOM]
 
     def test_empty_fires_promptly(self):
         logic = arrive("restroom")
         logic.on_listen_state("open", 3.0)
         logic.on_listen_state("empty", 8.5)      # 빈손 — 진짜 침묵
         acts = logic.on_tick(10.5, NavStatus.NONE)
-        assert any("돌아가겠습니다" in t for t in _say(acts))
+        assert _say(acts) == [MSG_ASK_RESTROOM]   # 침묵 사다리 1단(재질문), 2026-09-20
 
     def test_stuck_open_ear_has_failsafe_cap(self):
         """닫힘 신호를 영영 못 받아도 20초 상한 뒤엔 떠난다 (무한 대기 방지)."""
         logic = arrive("restroom")
         logic.on_listen_state("open", 3.0)       # 그리고 닫힘 신호 유실
         assert _say(logic.on_tick(15.0, NavStatus.NONE)) == []
-        acts = logic.on_tick(24.0, NavStatus.NONE)   # 3.0+20 상한 초과
-        assert any("돌아가겠습니다" in t for t in _say(acts))
+        acts = logic.on_tick(24.0, NavStatus.NONE)   # 3.0+20 상한 초과 → 침묵 사다리 1단(재질문)
+        assert _say(acts) == [MSG_ASK_RESTROOM]
 
 
 class TestReturnNet:
@@ -365,9 +417,12 @@ class TestGenericIsWaitStyle:
         assert logic.state == State.ASKING_WAIT_TIME
         assert MSG_ASK_WAIT_TIME in _say(acts)
 
-    def test_generic_deny_finishes(self):
+    def test_generic_deny_reconfirms_then_finishes(self):
+        # 2026-09-20: '아니오' 한 번으로 안 떠난다 — 종료형으로 되묻고 "네"에만 끝낸다.
         logic = arrive("reception")
         acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert logic.state == State.ASKING_NEXT and _say(acts) == [MSG_ASK_ENTRANCE]
+        acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
         assert logic.state == State.RETURNING
         assert MSG_FINISH in _say(acts)
 
@@ -534,3 +589,23 @@ class TestAppCancelAll:
         logic.on_estop(True, 0.0)
         _, reason = logic.on_app_cancel(1.0)
         assert reason != GateReason.OK
+
+
+class TestLedgerAccessors:
+    """대장(P1)이 읽는 대기 접근자 — 판단이 아니라 값 노출."""
+
+    def test_wait_minutes_and_left(self):
+        logic = arrive("")                                    # "여기서 대기할까요?"
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
+        assert logic.state == State.WAITING
+        assert logic.wait_minutes_requested() == 10
+        assert logic.wait_left_sec(63.0) == 540
+        assert logic.wait_left_sec(3.0 + 601.0) == 0
+
+    def test_not_waiting_is_minus_one(self):
+        logic = MissionLogic()
+        assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(0.0) == -1
+        logic = arrive("")
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
+        logic.on_wake(10.0)                                   # 대기 접음
+        assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(10.0) == -1
