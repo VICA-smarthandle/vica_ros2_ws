@@ -71,3 +71,51 @@ def test_firmware_defines_match_protocol():
     )
     # 칸 순서 = protocol.US_STAT_KIND_NAMES
     assert "enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US_ST_I2C };" in src
+
+
+# ── 설정 확인 프레임(AA 59)·시험 명령 ───────────────────────────────────
+from vica_user_guidance.ultrasonic_stats import (  # noqa: E402
+    ConfigFrameAccumulator,
+    format_config_line,
+)
+
+
+def _cfg(seq, levels):
+    payload = bytes(v for pair in levels for v in pair)
+    return protocol.US_CFG_FRAME_HEADER + bytes([seq]) + payload + bytes(
+        [checksum(bytes([seq]) + payload)]
+    )
+
+
+def test_config_frame_roundtrip():
+    lv = [(3, 1)] * 8
+    lv[0] = (4, 3)
+    lv[3] = (4, 0xFF)
+    got = ConfigFrameAccumulator().feed(b"\x01" + _cfg(5, lv))
+    assert len(got) == 1 and got[0].levels[0] == (4, 3)
+    line = format_config_line(got[0], [f"s{i}" for i in range(8)])
+    assert "s0 각4/잡음3" in line and "s3 각4/잡음?" in line
+
+
+def test_distance_and_stat_parsers_ignore_config_frames():
+    raw = _cfg(1, [(3, 1)] * 8) * 3
+    assert FrameAccumulator().feed(raw) == []
+    assert StatFrameAccumulator().feed(raw) == []
+
+
+def test_bench_commands_do_not_collide_with_state_or_haptic_codes():
+    cmds = {protocol.US_CMD_RESET}
+    cmds |= {protocol.US_CMD_NOISE_BASE + i for i in range(1, 6)}
+    cmds |= {protocol.US_CMD_SIDE_ANGLE_BASE + i for i in range(1, 5)}
+    used = set(protocol.STATE_NAMES) | {protocol.HAPTIC_CMD_SHORT, protocol.HAPTIC_CMD_LONG}
+    assert not (cmds & used)
+    assert not (cmds & set(protocol.SENDABLE_STATE_CODES))
+
+
+def test_firmware_bench_defines_match_protocol():
+    src = INO.read_text(encoding="utf-8")
+    assert "#define US_CFG_H2             0x59" in src
+    assert f"#define US_CMD_RESET          0x{protocol.US_CMD_RESET:02X}" in src
+    assert f"#define US_CMD_NOISE_BASE     0x{protocol.US_CMD_NOISE_BASE:02X}" in src
+    assert f"#define US_CMD_SIDE_ANGLE_BASE 0x{protocol.US_CMD_SIDE_ANGLE_BASE:02X}" in src
+    assert f"#define US_NOISE_DEFAULT      {protocol.US_NOISE_DEFAULT}" in src

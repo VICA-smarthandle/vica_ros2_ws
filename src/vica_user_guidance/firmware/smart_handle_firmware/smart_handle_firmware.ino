@@ -222,6 +222,26 @@ bool arriveTailPending = false;
 #define US_STAT_KINDS         6
 #define US_STAT_EVERY_CYCLES  12   // 12 × 420 ms ≈ 5 s
 enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US_ST_I2C };
+// ── 2026-09-24 레지스터 시험 명령 (하향 1바이트, 정지 시험 전용) ─────────────
+// 젯슨 드라이버는 이 값을 보내지 않는다(상태코드 0~7·진동 0x10/0x11 만). 벤치 스크립트
+// (firmware/usonic_register_bench.py)가 드라이버를 끈 상태에서 보낸다. 워치독은 건드리지 않는다.
+//   0x30        부팅 기본값으로 되돌림(지향각 US_ANGLE_LEVEL 전 채널, 노이즈 US_NOISE_DEFAULT 전 채널)
+//   0x31~0x35   노이즈 저감 레벨(레지스터 0x06) 1~5 를 8채널 모두에
+//   0x41~0x44   지향각 레벨(0x07) 1~4 를 바퀴 옆 두 채널(ch0 왼쪽·ch3 오른쪽)에만
+// 적용은 다음 라운드 트리거 직전(센서가 쉬는 때)에 하고, 곧바로 두 레지스터를 되읽어
+// 설정 확인 프레임(AA 59)을 보낸다. 부팅 때도 한 번 보낸다.
+//   AA 59 seq [ch0: angle noise] … [ch7] xor = 3 + 16 + 1 = 20B (되읽기 실패 = 0xFF)
+// 레지스터가 전원을 끄면 지워지는지는 데이터시트에 없다 — 부팅 때 기본값을 다시 쓰므로
+// 시험 값은 재부팅하면 사라진다.
+#define US_CMD_RESET          0x30
+#define US_CMD_NOISE_BASE     0x30   // 0x31~0x35 → 레벨 1~5
+#define US_CMD_SIDE_ANGLE_BASE 0x40  // 0x41~0x44 → 레벨 1~4
+#define US_NOISE_DEFAULT      1      // 데이터시트 출고값(배터리 전원용)
+#define US_REG_NOISE          0x06
+#define US_REG_ANGLE          0x07
+#define US_CFG_H2             0x59
+#define US_SIDE_CH_L          0      // ch0 왼쪽 바퀴 옆
+#define US_SIDE_CH_R          3      // ch3 오른쪽 바퀴 옆
 
 // ── 터치센서 (ESP32 GPIO14 · 나노 시절 D11, 2026-09-05 인수인계 문서 기준) ─────
 // **idle HIGH / 터치 LOW** 인 active-low 타입이다. 2026-09-04 에 "잡으면 HIGH"
@@ -350,6 +370,10 @@ uint16_t      usBuf[US_N][3];            // 3점 중앙값용 최근 유효 샘�
 uint8_t       usBufN[US_N]  = { 0 };
 uint8_t       usStat[US_N][US_STAT_KINDS] = { { 0 } };   // 통계 프레임용(창마다 0)
 uint8_t       usStatSeq    = 0;
+uint8_t       usAngleLv[US_N];            // 채널별 지향각 레벨(부팅 때 US_ANGLE_LEVEL)
+uint8_t       usNoiseLv[US_N];            // 채널별 노이즈 저감 레벨(부팅 때 US_NOISE_DEFAULT)
+bool          usCfgPending = false;       // 다음 트리거 직전에 쓰고 되읽을 것
+uint8_t       usCfgSeq     = 0;
 uint8_t       usStatCycles = 0;
 
 void usCount(uint8_t ch, uint8_t kind) {
@@ -372,6 +396,43 @@ bool usReadDist(uint8_t addr7, uint16_t *out) {
   uint8_t hi = Wire.read(), lo = Wire.read();
   *out = ((uint16_t)hi << 8) | lo;
   return true;
+}
+
+bool usRead8(uint8_t addr7, uint8_t reg, uint8_t *out) {
+  Wire.beginTransmission(addr7);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(addr7, (uint8_t)1) != 1) return false;
+  *out = Wire.read();
+  return true;
+}
+
+// 채널별 지향각·노이즈 레벨을 쓰고 되읽어 AA 59 로 보낸다. 센서가 쉬는 때만 부른다.
+void usApplyConfig() {
+  uint8_t f[3 + 2 * US_N + 1];
+  f[0] = 0xAA;
+  f[1] = US_CFG_H2;
+  f[2] = usCfgSeq++;
+  uint8_t x = f[2];
+  for (uint8_t ch = 0; ch < US_N; ch++) {
+    uint8_t a = 0xFF, n = 0xFF;
+    uint8_t tries = 3;
+    while (tries-- && !usWrite8(US_ADDR7[ch], US_REG_ANGLE, usAngleLv[ch])) delay(20);
+    tries = 3;
+    while (tries-- && !usWrite8(US_ADDR7[ch], US_REG_NOISE, usNoiseLv[ch])) delay(20);
+    // 노이즈 값을 실제로 바꾸면 센서가 잠깐(수십 ms) 응답하지 않는다(09-24 실측: 바꾼 직후
+    // 0x07 되읽기가 전 채널 실패, 같은 값을 다시 쓸 때는 정상 → 내부 저장으로 추정).
+    // 그래서 되읽기는 짧게 기다리며 몇 번 다시 한다. 부팅(값 그대로)에는 첫 시도에 끝난다.
+    tries = 5;
+    while (tries-- && !usRead8(US_ADDR7[ch], US_REG_ANGLE, &a)) { a = 0xFF; delay(30); }
+    tries = 5;
+    while (tries-- && !usRead8(US_ADDR7[ch], US_REG_NOISE, &n)) { n = 0xFF; delay(30); }
+    f[3 + 2 * ch] = a;
+    f[4 + 2 * ch] = n;
+    x ^= a ^ n;
+  }
+  f[3 + 2 * US_N] = x;
+  Serial.write(f, sizeof(f));
 }
 
 uint16_t usMedian3(uint16_t a, uint16_t b, uint16_t c) {
@@ -490,6 +551,10 @@ void usTask(unsigned long now) {
   switch (usPhase) {
     case US_TRIG:
       if (now - usPhaseAt < US_GAP_MS) return;
+      if (usCfgPending) {          // 레지스터 시험 명령·부팅 설정은 센서가 쉴 때 적용
+        usCfgPending = false;
+        usApplyConfig();
+      }
       for (uint8_t k = 0; k < US_PER_ROUND; k++) {
         usTrigOk[k] = usWrite8(US_ADDR7[US_ROUND_CH[usRound][k]], US_REG_CMD, US_TRIG_CMD);
       }
@@ -703,9 +768,12 @@ void setup() {
   // 없어, 기본값(레벨 4·60°)으로 돌아가면 높이 91.3mm 수평 장착에서 16cm 앞부터
   // 바닥이 장애물로 찍힌다(§3.1). 냉기동 직후 센서 안정화(≤1s) 대비 3회 재시도.
   for (uint8_t i = 0; i < US_N; i++) {
+    usAngleLv[i] = US_ANGLE_LEVEL;
+    usNoiseLv[i] = US_NOISE_DEFAULT;
     uint8_t tries = 3;
     while (tries-- && !usWrite8(US_ADDR7[i], 0x07, US_ANGLE_LEVEL)) delay(100);
   }
+  usCfgPending = true;   // 첫 라운드 직전에 노이즈 레벨까지 쓰고 되읽어 AA 59 로 알린다
   usPhaseAt = millis();
 }
 
@@ -721,6 +789,19 @@ void loop() {
       hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
     } else if (b == HAPTIC_CMD_LONG) {
       hapticStart(1, HAPTIC_LONG_ON_MS, 0);
+    } else if (b == US_CMD_RESET) {
+      for (uint8_t ch = 0; ch < US_N; ch++) {
+        usAngleLv[ch] = US_ANGLE_LEVEL;
+        usNoiseLv[ch] = US_NOISE_DEFAULT;
+      }
+      usCfgPending = true;
+    } else if (b > US_CMD_NOISE_BASE && b <= US_CMD_NOISE_BASE + 5) {
+      for (uint8_t ch = 0; ch < US_N; ch++) usNoiseLv[ch] = b - US_CMD_NOISE_BASE;
+      usCfgPending = true;
+    } else if (b > US_CMD_SIDE_ANGLE_BASE && b <= US_CMD_SIDE_ANGLE_BASE + 4) {
+      usAngleLv[US_SIDE_CH_L] = b - US_CMD_SIDE_ANGLE_BASE;
+      usAngleLv[US_SIDE_CH_R] = b - US_CMD_SIDE_ANGLE_BASE;
+      usCfgPending = true;
     } else if (b >= STATE_MIN && b <= STATE_MAX) {
       lastRxMillis    = now;
       watchdogTripped = false;

@@ -91,6 +91,17 @@ US_STAT_KINDS: int = len(US_STAT_KIND_NAMES)
 US_STAT_FRAME_LEN: int = 3 + US_CHANNELS * US_STAT_KINDS + 1   # 52
 FIRMWARE_US_STAT_EVERY_CYCLES: int = 12
 
+# ── 초음파 레지스터 설정 확인 프레임·시험 명령 (2026-09-24) ─────────────────────
+# AA 59 seq [ch0: angle noise] … [ch7] xor = 20바이트. 부팅 때와 시험 명령 뒤에 한 번씩.
+# 값은 센서에서 되읽은 것(실패 = 0xFF). 정본은 펌웨어 usApplyConfig().
+US_CFG_FRAME_HEADER: bytes = b"\xaa\x59"
+US_CFG_FRAME_LEN: int = 3 + 2 * US_CHANNELS + 1   # 20
+# 하향 시험 명령(드라이버는 보내지 않는다 — 벤치 스크립트 전용)
+US_CMD_RESET: int = 0x30                 # 부팅 기본값으로
+US_CMD_NOISE_BASE: int = 0x30            # + 1~5 → 노이즈 저감 레벨, 8채널 모두
+US_CMD_SIDE_ANGLE_BASE: int = 0x40       # + 1~4 → 지향각 레벨, 바퀴 옆 두 채널만
+US_NOISE_DEFAULT: int = 1
+
 TOUCH_FRAME_HEADER: bytes = b"\xaa\x56"
 TOUCH_FRAME_LEN: int = 5
 TOUCH_FLAG_CONTACT: int = 0x01   # bit0 = 잡고 있음. bit1~7 예약(0)
