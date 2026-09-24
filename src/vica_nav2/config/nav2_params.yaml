@@ -1558,7 +1558,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_rear_right:   # 6번 후방 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False   # 2026-09-24 run38: 손잡이 잡은 사람의 다리(0.12~0.23 m)를 찍어 출발 3~14 s 지연·회전 중 정지(collision ahead 1,325회)
         topics: ["/ultrasonic/rear_right"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1566,7 +1566,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_rear_left:   # 7번 후방 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False   # 2026-09-24 run38: 손잡이 잡은 사람의 다리(0.12~0.23 m)를 찍어 출발 3~14 s 지연·회전 중 정지(collision ahead 1,325회)
         topics: ["/ultrasonic/rear_left"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
