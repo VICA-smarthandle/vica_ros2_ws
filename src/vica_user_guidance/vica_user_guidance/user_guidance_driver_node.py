@@ -34,6 +34,7 @@ from .serial_link import SerialLink
 from .timebase import is_fresh_ns, sec_to_ns
 from .touch_frame import TouchFrameAccumulator, resolve_contact
 from .ultrasonic_frame import FrameAccumulator
+from .ultrasonic_stats import StatFrameAccumulator, format_stat_line
 
 
 class UserGuidanceDriverNode(Node):
@@ -380,6 +381,10 @@ class UserGuidanceDriverNode(Node):
         )
 
         self.us_acc = FrameAccumulator()
+        # 2026-09-24: 펌웨어 통계 프레임(AA 58). 0xFFFE(동주파수 간섭)를 다른 실패와
+        # 나눠 세어 약 5초마다 로그 한 줄로 남긴다(bag 의 /rosout 로 분석).
+        self.us_stat_acc = StatFrameAccumulator()
+        self.us_stat_names = [t.rsplit("/", 1)[-1] for t in topics]
         self.us_pubs = [self.create_publisher(Range, t, 10) for t in topics]
         self.us_last_frame_ns = None
         self.us_stale_warned = False
@@ -442,6 +447,8 @@ class UserGuidanceDriverNode(Node):
                 self.us_last_frame_ns = now
                 self.us_stale_warned = False
                 self._publish_ranges(frame)
+            for sframe in self.us_stat_acc.feed(data):
+                self.get_logger().info(format_stat_line(sframe, self.us_stat_names))
             self._warn_if_ultrasonic_stale(now)
 
         if self.touch_enabled:

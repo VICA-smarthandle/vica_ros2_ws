@@ -208,6 +208,20 @@ bool arriveTailPending = false;
 #define US_FRAME_H1   0xAA
 #define US_FRAME_H2   0x55   // 옛 2채널 프레임
 #define US_FRAME8_H2  0x57   // 8채널 프레임
+// ── 2026-09-24 측정 결과 통계 프레임 (AA 58, 52B) ─────────────────────────
+// 센서가 스스로 알리는 동주파수 간섭(0xFFFE)을 다른 실패와 구분해 세려고 추가했다.
+// 지금까지는 0xFFFF·0xFFFE·I2C 실패를 모두 usFail 로 뭉뚱그려 "간섭이 있나"를 알 수 없었다.
+// 거리 프레임(AA 57)과 판정 로직은 그대로 두고, 세기만 따로 보낸다.
+//   AA 58 seq  [ch0: ok clr ffff fffe oth i2c] … [ch7: …]  xor      = 3 + 8×6 + 1 = 52B
+//   ok   = 1~3000 mm 실거리        clr  = 0xFFFD 범위 내 에코 없음
+//   ffff = 측정 미완료             fffe = 동주파수 간섭(데이터시트 1.2절)
+//   oth  = 그 밖의 범위 밖 값      i2c  = 트리거 쓰기 또는 거리 읽기 실패
+// 칸마다 uint8(255 에서 멈춤). US_STAT_EVERY_CYCLES 바퀴마다 보내고 0 으로 되돌린다.
+// xor = seq ^ 48바이트. 옛 파서들은 헤더가 달라 1바이트씩 지나친다.
+#define US_STAT_H2            0x58
+#define US_STAT_KINDS         6
+#define US_STAT_EVERY_CYCLES  12   // 12 × 420 ms ≈ 5 s
+enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US_ST_I2C };
 
 // ── 터치센서 (ESP32 GPIO14 · 나노 시절 D11, 2026-09-05 인수인계 문서 기준) ─────
 // **idle HIGH / 터치 LOW** 인 active-low 타입이다. 2026-09-04 에 "잡으면 HIGH"
@@ -334,6 +348,13 @@ uint16_t      usDist[US_N]  = { 0 };     // 프레임에 실을 값. 0 = 무효
 uint8_t       usFails[US_N] = { 0 };     // 연속 실패 수
 uint16_t      usBuf[US_N][3];            // 3점 중앙값용 최근 유효 샘플
 uint8_t       usBufN[US_N]  = { 0 };
+uint8_t       usStat[US_N][US_STAT_KINDS] = { { 0 } };   // 통계 프레임용(창마다 0)
+uint8_t       usStatSeq    = 0;
+uint8_t       usStatCycles = 0;
+
+void usCount(uint8_t ch, uint8_t kind) {
+  if (usStat[ch][kind] < 255) usStat[ch][kind]++;
+}
 
 bool usWrite8(uint8_t addr7, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(addr7);
@@ -395,6 +416,25 @@ void usSendFrame8() {
     x ^= f[3 + 2 * ch] ^ f[4 + 2 * ch];
   }
   f[3 + 2 * US_N] = x;
+  Serial.write(f, sizeof(f));
+}
+
+// 통계 프레임 52B. US_STAT_EVERY_CYCLES 바퀴마다 한 번 보내고 칸을 비운다.
+void usSendStatFrame() {
+  uint8_t f[3 + US_N * US_STAT_KINDS + 1];
+  f[0] = US_FRAME_H1;
+  f[1] = US_STAT_H2;
+  f[2] = usStatSeq++;
+  uint8_t x = f[2];
+  for (uint8_t ch = 0; ch < US_N; ch++) {
+    for (uint8_t k = 0; k < US_STAT_KINDS; k++) {
+      uint8_t v = usStat[ch][k];
+      f[3 + ch * US_STAT_KINDS + k] = v;
+      x ^= v;
+      usStat[ch][k] = 0;
+    }
+  }
+  f[3 + US_N * US_STAT_KINDS] = x;
   Serial.write(f, sizeof(f));
 }
 
@@ -471,10 +511,14 @@ void usTask(unsigned long now) {
         uint8_t  ch = US_ROUND_CH[usRound][k];
         uint16_t raw;
         if (usTrigOk[k] && usReadDist(US_ADDR7[ch], &raw)) {
-          if (raw >= 1 && raw <= 3000)      usStore(ch, raw);
-          else if (raw == 0xFFFD)           usStore(ch, US_CLEAR_MM);
-          else                              usFail(ch);
+          if (raw >= 1 && raw <= 3000)      { usCount(ch, US_ST_OK);    usStore(ch, raw); }
+          else if (raw == 0xFFFD)           { usCount(ch, US_ST_CLEAR); usStore(ch, US_CLEAR_MM); }
+          else {
+            usCount(ch, raw == 0xFFFF ? US_ST_FFFF : raw == 0xFFFE ? US_ST_FFFE : US_ST_OTHER);
+            usFail(ch);
+          }
         } else {
+          usCount(ch, US_ST_I2C);
           usFail(ch);
         }
       }
@@ -487,6 +531,10 @@ void usTask(unsigned long now) {
       if (usRound >= US_ROUNDS) {
         usRound = 0;
         usSendFrame8();
+        if (++usStatCycles >= US_STAT_EVERY_CYCLES) {
+          usStatCycles = 0;
+          usSendStatFrame();
+        }
       }
       return;
     }

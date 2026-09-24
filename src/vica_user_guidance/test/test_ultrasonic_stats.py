@@ -1,0 +1,73 @@
+"""초음파 통계 프레임(AA 58) 파서와 펌웨어 상수 일치 시험 (2026-09-24)."""
+from pathlib import Path
+
+from vica_user_guidance import protocol
+from vica_user_guidance.ultrasonic_frame import FrameAccumulator
+from vica_user_guidance.ultrasonic_stats import (
+    StatFrameAccumulator,
+    checksum,
+    format_stat_line,
+)
+
+INO = (
+    Path(__file__).resolve().parents[1]
+    / "firmware" / "smart_handle_firmware" / "smart_handle_firmware.ino"
+)
+
+
+def _frame(seq, counts):
+    payload = bytes(v for row in counts for v in row)
+    return protocol.US_STAT_FRAME_HEADER + bytes([seq]) + payload + bytes(
+        [checksum(bytes([seq]) + payload)]
+    )
+
+
+def _counts():
+    return [[ch, 1, 2, 3 if ch == 5 else 0, 0, 4] for ch in range(protocol.US_CHANNELS)]
+
+
+def test_frame_length_is_52():
+    assert protocol.US_STAT_FRAME_LEN == 52
+    assert len(_frame(0, _counts())) == 52
+
+
+def test_parse_roundtrip_and_split_feed():
+    raw = b"\x00\x13" + _frame(7, _counts()) + b"\xaa"
+    acc = StatFrameAccumulator()
+    got = acc.feed(raw[:20]) + acc.feed(raw[20:])
+    assert len(got) == 1
+    f = got[0]
+    assert f.seq == 7
+    assert f.counts[5][protocol.US_STAT_KIND_NAMES.index("fffe")] == 3
+    assert f.counts[2] == (2, 1, 2, 0, 0, 4)
+
+
+def test_bad_checksum_is_skipped_but_next_frame_survives():
+    bad = bytearray(_frame(1, _counts()))
+    bad[-1] ^= 0xFF
+    acc = StatFrameAccumulator()
+    got = acc.feed(bytes(bad) + _frame(2, _counts()))
+    assert [f.seq for f in got] == [2]
+
+
+def test_distance_parser_ignores_stat_frames():
+    """기존 거리 누적기는 통계 프레임을 프레임으로 잡지 않는다."""
+    assert FrameAccumulator().feed(_frame(3, _counts()) * 3) == []
+
+
+def test_format_line_sums_fffe():
+    f = StatFrameAccumulator().feed(_frame(9, _counts()))[0]
+    line = format_stat_line(f, [f"s{i}" for i in range(8)])
+    assert line.endswith("fffe 합 3")
+    assert "s5 5/1/2/3/0/4" in line
+
+
+def test_firmware_defines_match_protocol():
+    src = INO.read_text(encoding="utf-8")
+    assert "#define US_STAT_H2            0x58" in src
+    assert f"#define US_STAT_KINDS         {protocol.US_STAT_KINDS}" in src
+    assert (
+        f"#define US_STAT_EVERY_CYCLES  {protocol.FIRMWARE_US_STAT_EVERY_CYCLES}" in src
+    )
+    # 칸 순서 = protocol.US_STAT_KIND_NAMES
+    assert "enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US_ST_I2C };" in src

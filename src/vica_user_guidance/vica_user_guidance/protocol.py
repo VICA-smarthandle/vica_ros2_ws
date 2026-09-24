@@ -81,6 +81,16 @@ FIRMWARE_US_CYCLE_MS: int = 420  # 4라운드 × (GAP 5 + WAIT 100). 8채널 프
 # 시간이 정하는 물리 한계인데, 손 놓음 판정 유예는 0.5초라 그사이 샘플이 2~3개
 # 뿐이다. [왜 헤더를 갈랐나] 8바이트를 9바이트로 늘리면 헤더가 같아, 옛 파서가
 # 체크섬 실패 -> 1바이트 밀기를 반복하며 **초음파까지 함께** 멈춘다.
+# ── 초음파 측정 결과 통계 프레임 (2026-09-24) ─────────────────────────────
+# AA 58 seq [ch0: ok clr ffff fffe oth i2c] … [ch7] xor = 3 + 8×6 + 1 = 52바이트.
+# 펌웨어 usSendStatFrame() 이 정본. 약 5초(12바퀴)마다 창 안의 횟수를 보내고 0 으로 되돌린다.
+# 목적: 센서가 스스로 알리는 동주파수 간섭(0xFFFE)을 다른 실패와 구분해 세기.
+US_STAT_FRAME_HEADER: bytes = b"\xaa\x58"
+US_STAT_KIND_NAMES = ("ok", "clr", "ffff", "fffe", "oth", "i2c")
+US_STAT_KINDS: int = len(US_STAT_KIND_NAMES)
+US_STAT_FRAME_LEN: int = 3 + US_CHANNELS * US_STAT_KINDS + 1   # 52
+FIRMWARE_US_STAT_EVERY_CYCLES: int = 12
+
 TOUCH_FRAME_HEADER: bytes = b"\xaa\x56"
 TOUCH_FRAME_LEN: int = 5
 TOUCH_FLAG_CONTACT: int = 0x01   # bit0 = 잡고 있음. bit1~7 예약(0)
