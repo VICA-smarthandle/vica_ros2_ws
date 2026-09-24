@@ -258,12 +258,7 @@ controller_server:
 
     # Progress checker parameters
     progress_checker:
-      # [2026-09-24] Simple -> Pose. Simple 은 "20 s 안에 0.10 m 이동"만 세어 제자리 회전을
-      # 진전으로 안 본다. run37 409호: 도착 정렬 회전 20 s -> "Failed to make progress" -> 복구가
-      # FollowPath 를 다시 보내자 그 자리에서 즉시 "도착"(-80 도). Pose 는 이동 또는 회전 중
-      # 하나만 있어도 진전이다(required_movement_angle). 반경·시간은 그대로.
-      plugin: "nav2_controller::PoseProgressChecker"
-      required_movement_angle: 0.5
+      plugin: "nav2_controller::SimpleProgressChecker"
       # 2026-07-31: 0.5/10.0 -> 0.10/20.0.
       #
       # SimpleProgressChecker는 "movement_time_allowance 안에
@@ -455,13 +450,8 @@ controller_server:
       # 끄면 안 된다 — 조준점이 정확히 뒤일 때 carrot_y≈0 -> 곡률 0 -> **벽으로 직진**.
       use_rotate_to_heading: true
       rotate_to_heading_min_angle: 1.3
-      # [2026-09-24] 0.35 -> 0.5(평활기 상한과 같음). 180 도 정렬 9 -> 6.3 s, 손잡이 끝 0.31 m/s.
-      rotate_to_heading_angular_vel: 0.5
-      # [2026-09-24] 1.2 -> 2.0(평활기 회전 가속 상한과 같음). rotateToHeading 은 실측 w 에서
-      # a*dt(0.1 s)만큼만 올리는데 collision_monitor 감속(0.4배)이 그 출력을 깎아 되먹임 고정점
-      # w = a/15 = 0.08 rad/s 에 갇혔다(run37 실측 0.07, 90 도 회전 22 s). 2.0 이면 0.133.
-      # 시동 충격은 평활기(2.0 rad/s^2)가 어차피 상한이라 더 커지지 않는다.
-      max_angular_accel: 2.0
+      rotate_to_heading_angular_vel: 0.35    # 손잡이 끝 0.22 m/s
+      max_angular_accel: 1.2                 # 제자리 회전 시작·정지 충격
       allow_reversing: false                 # 뒤에 사람. use_rotate_to_heading 과 동시 true 불가
 
       # 충돌 예측. 0.5 x 1.2 = 0.60 m, 정지거리 27.5 cm 의 2배.
@@ -2288,7 +2278,7 @@ planner_server:
       # (2026-08-06 확인). goal 에 정확히 못 닿을 때 이 반경 안의 대체 지점을
       # 허용한다는 뜻이라, 줄이면 "경로 없음"이 늘고 키우면 목표에서 먼 곳에
       # 도착한다. 두 planner 블록이 같은 값이어야 한다(A/B 전제).
-      tolerance: 0.05   # [2026-09-24] 활성 GridBased 와 같이 맞춤(계약 시험: 공유 키는 두 블록이 같아야 한다)
+      tolerance: 0.2
       allow_unknown: true
       max_iterations: 1000000
       max_on_approach_iterations: 1000
@@ -2490,13 +2480,7 @@ planner_server:
       #  GridBased 블록이라 자기 자신을 가리키는 문장이었다.)
       cost_penalty: 4.0
       cache_obstacle_heuristic: true
-      # [2026-09-24] 0.2 -> 0.05. Smac 은 정확한 목표(칸+방향 눈금)를 못 찾으면 tolerance 안의
-      # "가장 가까운" 노드로 끝내는데, 이 거리는 방향까지 포함한 Dubins 거리라 R 0.1 격자에서
-      # 90도 틀린 같은 칸(0.157 m)도 0.2 안에 든다. run36·37 에서 화장실 끝 방향이 0/90 도로
-      # 1초마다 번갈았고, 409호는 -90 도 끝점(0.14 m)이 얼려 -80 도로 "도착"했다(devlog 09-24).
-      # 0.05 면 22.5 도 한 눈금(0.039 m)만 통과 -> RPP 가 1초 안에 맞춘다. 대가: 정확한 목표를
-      # 못 그리면(목적지 위 사람) planner 실패 -> 복구 1회. 실패 로그가 잦으면 0.1 로 물린다.
-      tolerance: 0.05
+      tolerance: 0.2
       allow_unknown: true
       max_iterations: 1000000
       max_on_approach_iterations: 1000
