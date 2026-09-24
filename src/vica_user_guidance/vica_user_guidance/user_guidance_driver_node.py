@@ -10,6 +10,7 @@
 않는다.
 """
 
+import math
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
@@ -34,6 +35,7 @@ from .serial_link import SerialLink
 from .timebase import is_fresh_ns, sec_to_ns
 from .touch_frame import TouchFrameAccumulator, resolve_contact
 from .ultrasonic_frame import FrameAccumulator
+from .ultrasonic_fov import resolve_channel_fov
 from .ultrasonic_stats import (
     ConfigFrameAccumulator,
     StatFrameAccumulator,
@@ -81,6 +83,8 @@ class UserGuidanceDriverNode(Node):
             "ultrasonic_frame_ids", ["usonic_front_left", "usonic_front_right"]
         )
         self.declare_parameter("ultrasonic_fov_rad", 0.524)   # 지향각 레벨 1(30도)
+        # 채널별 칠하는 폭. 0 이하 칸은 ultrasonic_fov_rad 를 쓴다(기본 = 전부 공통값).
+        self.declare_parameter("ultrasonic_fov_rad_per_channel", [-1.0] * protocol.US_CHANNELS)
         self.declare_parameter("ultrasonic_min_range_m", 0.02)
         self.declare_parameter("ultrasonic_max_range_m", 0.30)
         # 순차 발사라 채널마다 측정 시점이 다르다. 프레임 수신 시각에서 이만큼
@@ -378,6 +382,11 @@ class UserGuidanceDriverNode(Node):
             )
 
         self.us_fov = float(self.get_parameter("ultrasonic_fov_rad").value)
+        self.us_fov_ch = resolve_channel_fov(
+            self.us_fov,
+            [float(v) for v in self.get_parameter("ultrasonic_fov_rad_per_channel").value],
+            protocol.US_CHANNELS,
+        )
         self.us_min_range = float(self.get_parameter("ultrasonic_min_range_m").value)
         self.us_max_range = float(self.get_parameter("ultrasonic_max_range_m").value)
         self.us_delay_ns = [ms * 1_000_000 for ms in delays]
@@ -409,7 +418,8 @@ class UserGuidanceDriverNode(Node):
 
         self.get_logger().info(
             f"Ultrasonic Range publishing: {topics} "
-            f"(TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
+            f"(칠하는 폭 도 {[round(math.degrees(v)) for v in self.us_fov_ch]}, "
+            f"TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
             f", 기준 프레임 {self.us_tf_target})"
         )
 
@@ -530,7 +540,7 @@ class UserGuidanceDriverNode(Node):
             msg.header.stamp = stamp
             msg.header.frame_id = self.us_frame_ids[ch]
             msg.radiation_type = Range.ULTRASOUND
-            msg.field_of_view = self.us_fov
+            msg.field_of_view = self.us_fov_ch[ch]
             msg.min_range = self.us_min_range
             msg.max_range = self.us_max_range
             if mm == protocol.US_CLEAR_MM or mm / 1000.0 > self.us_max_range:

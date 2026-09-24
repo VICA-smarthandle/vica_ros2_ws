@@ -162,6 +162,11 @@ user_guidance_driver_node:
     # 밀착(부풀림 소멸), 0.29m 실물 정상 감지·감속 확인. 사용자 체감 "주행 중
     # 멈춤 좋아짐" — 확정. (bag: usonic_stutter01 vs usonic_fovnarrow02)
     ultrasonic_fov_rad: 0.524    # 마킹 폭 30도 (물리 빔은 50도 유지) — A/B 확정
+    # [2026-09-24] 채널별 칠하는 폭(순서 = ultrasonic_topics). 0 이하 = 위 공통값.
+    # 바퀴 옆 두 개(1번 왼쪽·4번 오른쪽)만 60°(1.047) — 펌웨어 US_ANGLE_LEVEL_CH 로 물리 빔도
+    # 레벨 4(60°)로 넓혔고, 사용자 결정으로 칠하는 폭도 맞췄다. 정지 시험 근거는 펌웨어 주석.
+    # 되돌리기: 전부 -1.0 (펌웨어 US_ANGLE_LEVEL_CH 도 3 으로).
+    ultrasonic_fov_rad_per_channel: [1.047, -1.0, -1.0, 1.047, -1.0, -1.0, -1.0, -1.0]
     ultrasonic_min_range_m: 0.02
     ultrasonic_max_range_m: 1.50
     # 라운드 발사라 채널별 측정 시점이 다르다. 8채널 프레임은 라운드 D 를 읽은 직후

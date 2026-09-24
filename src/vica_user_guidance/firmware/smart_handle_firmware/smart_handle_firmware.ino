@@ -194,6 +194,12 @@ bool arriveTailPending = false;
                             // (max_range 1.5m·레이어 분리)은 무변경.
                             // ROS fov 0.873 과 일치시킬 것.
                             // (레벨: 1=30°/0.524, 2=40°/0.698, 3=50°/0.873, 4=60°/1.047)
+// ── 2026-09-24 채널별 부팅 지향각 (정지 시험 결과) ──────────────────────────
+// 바퀴 옆 두 개(ch0 왼쪽·ch3 오른쪽)만 레벨 4(60°). 측면은 지도에 들어가는 센서가 한쪽에
+// 하나뿐이라 넓혔다. 정지 시험: 빈 곳 바닥 헛값 0, 박스 30/60/100 cm 에서 50°와 차이
+// ≤0.6 cm·놓침 0, 빔 가장자리 꼬깔콘 27~40 % → 약 100 %, 가장자리 필통은 60°에서만 잡힘.
+// 나머지는 US_ANGLE_LEVEL(50°) 그대로. 드라이버 ultrasonic_fov_rad_per_channel 과 짝.
+const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 4, 3, 3, 4, 3, 3, 3, 3 };
 #define US_GAP_MS     5     // 채널 사이 간격. 앞 채널 잔향이 다음 측정에 남지 않게
 #define US_REG_DIST   0x02
 #define US_REG_CMD    0x10
@@ -225,7 +231,7 @@ enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US
 // ── 2026-09-24 레지스터 시험 명령 (하향 1바이트, 정지 시험 전용) ─────────────
 // 젯슨 드라이버는 이 값을 보내지 않는다(상태코드 0~7·진동 0x10/0x11 만). 벤치 스크립트
 // (firmware/usonic_register_bench.py)가 드라이버를 끈 상태에서 보낸다. 워치독은 건드리지 않는다.
-//   0x30        부팅 기본값으로 되돌림(지향각 US_ANGLE_LEVEL 전 채널, 노이즈 US_NOISE_DEFAULT 전 채널)
+//   0x30        부팅 기본값으로 되돌림(지향각 US_ANGLE_LEVEL_CH, 노이즈 US_NOISE_DEFAULT 전 채널)
 //   0x31~0x35   노이즈 저감 레벨(레지스터 0x06) 1~5 를 8채널 모두에
 //   0x41~0x44   지향각 레벨(0x07) 1~4 를 바퀴 옆 두 채널(ch0 왼쪽·ch3 오른쪽)에만
 // 적용은 다음 라운드 트리거 직전(센서가 쉬는 때)에 하고, 곧바로 두 레지스터를 되읽어
@@ -370,7 +376,7 @@ uint16_t      usBuf[US_N][3];            // 3점 중앙값용 최근 유효 샘�
 uint8_t       usBufN[US_N]  = { 0 };
 uint8_t       usStat[US_N][US_STAT_KINDS] = { { 0 } };   // 통계 프레임용(창마다 0)
 uint8_t       usStatSeq    = 0;
-uint8_t       usAngleLv[US_N];            // 채널별 지향각 레벨(부팅 때 US_ANGLE_LEVEL)
+uint8_t       usAngleLv[US_N];            // 채널별 지향각 레벨(부팅 때 US_ANGLE_LEVEL_CH)
 uint8_t       usNoiseLv[US_N];            // 채널별 노이즈 저감 레벨(부팅 때 US_NOISE_DEFAULT)
 bool          usCfgPending = false;       // 다음 트리거 직전에 쓰고 되읽을 것
 uint8_t       usCfgSeq     = 0;
@@ -768,10 +774,10 @@ void setup() {
   // 없어, 기본값(레벨 4·60°)으로 돌아가면 높이 91.3mm 수평 장착에서 16cm 앞부터
   // 바닥이 장애물로 찍힌다(§3.1). 냉기동 직후 센서 안정화(≤1s) 대비 3회 재시도.
   for (uint8_t i = 0; i < US_N; i++) {
-    usAngleLv[i] = US_ANGLE_LEVEL;
+    usAngleLv[i] = US_ANGLE_LEVEL_CH[i];
     usNoiseLv[i] = US_NOISE_DEFAULT;
     uint8_t tries = 3;
-    while (tries-- && !usWrite8(US_ADDR7[i], 0x07, US_ANGLE_LEVEL)) delay(100);
+    while (tries-- && !usWrite8(US_ADDR7[i], 0x07, US_ANGLE_LEVEL_CH[i])) delay(100);
   }
   usCfgPending = true;   // 첫 라운드 직전에 노이즈 레벨까지 쓰고 되읽어 AA 59 로 알린다
   usPhaseAt = millis();
@@ -791,7 +797,7 @@ void loop() {
       hapticStart(1, HAPTIC_LONG_ON_MS, 0);
     } else if (b == US_CMD_RESET) {
       for (uint8_t ch = 0; ch < US_N; ch++) {
-        usAngleLv[ch] = US_ANGLE_LEVEL;
+        usAngleLv[ch] = US_ANGLE_LEVEL_CH[ch];
         usNoiseLv[ch] = US_NOISE_DEFAULT;
       }
       usCfgPending = true;

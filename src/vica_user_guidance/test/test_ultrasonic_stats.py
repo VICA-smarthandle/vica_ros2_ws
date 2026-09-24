@@ -119,3 +119,32 @@ def test_firmware_bench_defines_match_protocol():
     assert f"#define US_CMD_NOISE_BASE     0x{protocol.US_CMD_NOISE_BASE:02X}" in src
     assert f"#define US_CMD_SIDE_ANGLE_BASE 0x{protocol.US_CMD_SIDE_ANGLE_BASE:02X}" in src
     assert f"#define US_NOISE_DEFAULT      {protocol.US_NOISE_DEFAULT}" in src
+
+
+# ── 채널별 칠하는 폭 (2026-09-24) ─────────────────────────────────────
+import pytest  # noqa: E402
+import yaml  # noqa: E402
+
+from vica_user_guidance.ultrasonic_fov import resolve_channel_fov  # noqa: E402
+
+CFG = Path(__file__).resolve().parents[1] / "config" / "user_guidance.yaml"
+
+
+def test_resolve_channel_fov():
+    assert resolve_channel_fov(0.524, [1.047, -1, 0, 1.047, -1, -1, -1, -1], 8) == [
+        1.047, 0.524, 0.524, 1.047, 0.524, 0.524, 0.524, 0.524]
+    with pytest.raises(ValueError):
+        resolve_channel_fov(0.524, [1.0] * 7, 8)
+
+
+def test_side_fov_matches_firmware_side_angle_level():
+    """칠하는 폭 60°(1.047) 채널 = 펌웨어 부팅 지향각 레벨 4 채널."""
+    p = yaml.safe_load(CFG.read_text(encoding="utf-8"))["user_guidance_driver_node"]["ros__parameters"]
+    fov = resolve_channel_fov(p["ultrasonic_fov_rad"], p["ultrasonic_fov_rad_per_channel"], 8)
+    src = INO.read_text(encoding="utf-8")
+    line = next(ln for ln in src.splitlines() if ln.startswith("const uint8_t US_ANGLE_LEVEL_CH"))
+    levels = [int(x) for x in line.split("{")[1].split("}")[0].split(",")]
+    level_to_rad = {1: 0.524, 2: 0.698, 3: 0.873, 4: 1.047}
+    for ch in range(8):
+        if levels[ch] == 4:
+            assert fov[ch] == pytest.approx(level_to_rad[4])
