@@ -1523,7 +1523,7 @@ local_costmap:
       # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
       range_sensor_front_left:   # 2번 앞 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 run43: costmap 마크가 스스로 안 지워져 RPP 정지 10 s → collision_monitor 로 이전(us_*)
+        enabled: True
         topics: ["/ultrasonic/front_left"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1531,7 +1531,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 run43: costmap 마크가 스스로 안 지워져 RPP 정지 10 s → collision_monitor 로 이전(us_*)
+        enabled: True
         topics: ["/ultrasonic/front_right"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1539,7 +1539,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 run43: costmap 마크가 스스로 안 지워져 RPP 정지 10 s → collision_monitor 로 이전(us_*)
+        enabled: True
         topics: ["/ultrasonic/left_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1547,7 +1547,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_right_wheel:   # 4번 오른쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 run43: costmap 마크가 스스로 안 지워져 RPP 정지 10 s → collision_monitor 로 이전(us_*)
+        enabled: True
         topics: ["/ultrasonic/right_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1555,7 +1555,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_right_rear_wheel:   # 5번 오른쪽 뒷바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 run43: 유턴 때 뒤 사용자 다리(0.35~0.64 m)를 찍어 정지(4/9회)
+        enabled: False   # 2026-09-24 run43: 유턴 때 뒤 사용자 다리(0.35~0.64 m)를 찍어 정지(4/9회). run44 원복 뒤에도 off 유지
         topics: ["/ultrasonic/right_rear_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1579,7 +1579,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_left_rear_wheel:   # 8번 왼쪽 뒷바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 run43: 유턴 때 뒤 사용자 다리(0.35~0.64 m)를 찍어 정지(4/9회)
+        enabled: False   # 2026-09-24 run43: 유턴 때 뒤 사용자 다리(0.35~0.64 m)를 찍어 정지(4/9회). run44 원복 뒤에도 off 유지
         topics: ["/ultrasonic/left_rear_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -2721,48 +2721,10 @@ collision_monitor:
       polygon_pub_topic: "polygon_slowdown"
       enabled: True
 
-    # [2026-09-24 run43→44] 초음파를 costmap 대신 여기로 옮긴다(사용자 결정).
-    # costmap(RangeSensorLayer) 마크는 같은 센서가 그 칸을 다시 비춰야만 지워져,
-    # 로봇이 서면 영원히 남았다 → RPP collision ahead 정지 → failure_tolerance
-    # 10 s 뒤 ClearLocalCostmap → 즉시 출발(run43 완전정지 9회 전부 이 모양).
-    # collision_monitor 는 기억이 없다 — 보이는 동안만 감속/정지, 안 보이면 즉시 해제.
-    # 대가: 초음파만 보는 물체(낮은 물체·유리)는 피해 가지 못하고 감속/정지만 한다.
-    #
-    # 동작 범위: 두 폴리곤이 로봇 앞(x 0.206~0.946)에만 있어 실제로 발동하는 것은
-    # 앞 두 개다(센서 x 0.151 → 거리 0.055~0.295 m 정지, ~0.795 m 감속).
-    # 바퀴 옆 두 개는 폴리곤 밖이라 지금은 반응하지 않는다(옆 폴리곤을 만들 때 쓰려고 연결만).
-    # 후방 2개·뒷바퀴 옆 2개는 뒤에 선 사용자를 찍으므로 넣지 않는다 — Humble 폴리곤은
-    # 진행 방향을 가리지 않는다.
-    #
-    # Humble 1.1.20 Range 소스 동작(src/range.cpp 확인): range 가 [min,max] 밖이면
-    # 버리고, 안이면 fov(메시지 0.524=30°) 호 위에 obstacles_angle 간격 점을 찍는다.
-    # 에코 없음(=max 1.5 m)도 점이 되지만 x 1.65 m 라 폴리곤 밖이다. stamp 가
-    # source_timeout(1.0 s)보다 오래되면 그 소스를 무시한다(드라이버 지연 0.11~0.42 s
-    # + 채널 주기 0.45 s ≈ 최대 0.9 s). 점은 base_shift_correction 으로 odom 보정.
-    observation_sources: ["scan", "us_front_left", "us_front_right", "us_left_wheel", "us_right_wheel"]
+    observation_sources: ["scan"]
     scan:
       type: "scan"
       topic: "/scan"
-      enabled: True
-    us_front_left:
-      type: "range"
-      topic: "/ultrasonic/front_left"
-      obstacles_angle: 0.05   # 약 3°, 30° 호에 점 11개(기본 1° 면 31개)
-      enabled: True
-    us_front_right:
-      type: "range"
-      topic: "/ultrasonic/front_right"
-      obstacles_angle: 0.05
-      enabled: True
-    us_left_wheel:
-      type: "range"
-      topic: "/ultrasonic/left_wheel"
-      obstacles_angle: 0.05
-      enabled: True
-    us_right_wheel:
-      type: "range"
-      topic: "/ultrasonic/right_wheel"
-      obstacles_angle: 0.05
       enabled: True
 
 # ===== 금지구역 마스크 서버 두 개 (2026-08-31) =====
