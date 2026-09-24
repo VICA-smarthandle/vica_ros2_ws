@@ -14,6 +14,7 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, String
@@ -552,11 +553,22 @@ def main(args=None) -> None:
     """Run the VICA Smart Handle guidance driver."""
     rclpy.init(args=args)
     node = UserGuidanceDriverNode()
+    # 2026-09-24 run37: 단일 스레드 spin 에서는 시리얼 uplink_loop(20 Hz)·send·diag 와
+    # /tf 수신(≈135 msg/s)이 한 줄에서 처리돼 TF 버퍼가 뒤처졌고, 초음파 TF 게이트
+    # (`_range_tf_ok`, odom→usonic_* 를 프레임 시각으로 조회)가 31분 내내 실패해
+    # Range 를 한 건도 못 냈다(보드는 2.4 Hz 로 정상, 재기동 8분에 보류 1,133개).
+    # tf2_ros.TransformListener 는 /tf 구독을 ReentrantCallbackGroup 에 두므로,
+    # 실행기를 2스레드로 바꾸면 TF 수신만 병렬이 되고 나머지(기본 그룹, 상호배제)는
+    # 전과 같이 한 번에 하나씩 돈다 — "시리얼 읽기는 uplink_loop 한 곳" 불변식 유지.
+    # num_threads 를 비우면 코어 수만큼 스레드가 생긴다(09-21 pose_bootstrap 사고).
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.remove_node(node)
         try:
             node.shutdown_to_neutral()
         except Exception:
