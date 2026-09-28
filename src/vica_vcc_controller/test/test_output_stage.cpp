@@ -87,3 +87,19 @@ TEST(OutputStage, ResetStartsFromMeasuredTwist)
   o.reset({-0.2, 0.0});   // 후진 없음
   EXPECT_NEAR(o.last().v, 0.0, 1e-9);
 }
+
+TEST(OutputStage, CurvatureKeptByReducingSpeedAtTurnLimit)
+{
+  // 최종 리뷰 M6: |v·κ| > max_w 면 w 만 자르지 않고 v 를 max_w/|κ| 로 낮춰 곡률을 지킨다.
+  OutputStage o;
+  for (int i = 0; i < 60; ++i) {o.apply(Desired{{0.5, 0.0}}, o.last().v, 0.1);}
+  Desired d{{0.5, 0.0}};
+  d.curvature = 2.0;
+  Twist2D c;
+  for (int i = 0; i < 10; ++i) {
+    c = o.apply(d, o.last().v, 0.1);
+    EXPECT_LE(c.v, 0.25 + 1e-9) << i;
+  }
+  EXPECT_NEAR(c.w, 0.5, 1e-9);
+  EXPECT_NEAR(c.w, c.v * 2.0, 1e-9);
+}

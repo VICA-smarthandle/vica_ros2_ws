@@ -17,6 +17,11 @@ Twist2D OutputStage::apply(const Desired & d, double measured_v, double dt)
     v = std::max(v, last_.v - p_.max_decel * dt);
   }
 
+  // 곡률이 주어졌는데 w 상한에 걸리면 w 만 자르지 않고 v 를 낮춰 곡률(달리는 호)을 지킨다(M6).
+  if (!std::isnan(d.curvature) && std::abs(v * d.curvature) > p_.max_w) {
+    v = p_.max_w / std::abs(d.curvature);
+  }
+
   double w_target = std::isnan(d.curvature) ? d.cmd.w : v * d.curvature;
   w_target = std::clamp(w_target, -p_.max_w, p_.max_w);
   const double w = std::clamp(

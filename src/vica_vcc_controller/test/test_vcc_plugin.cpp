@@ -105,12 +105,12 @@ TEST_F(VccPluginTest, ResetGapResetsOnlyAfterLongPause)
 {
   // Review Focus 3 / 최종 리뷰 I3: 호출이 reset_gap(1.5 s) 넘게 끊기면 새 실행으로 보고 초기화한다.
   // 초기화는 실측 속도에서 이어 가므로, 실측을 0.5 로 주면 초기화 여부가 명령에 드러난다.
+  double t = 100.0;   // 가짜 시계 — 제어기보다 오래 살아야 한다(먼저 선언)
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node4");
   auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap4");
   costmap->on_configure(rclcpp_lifecycle::State());
   auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
-  double t = 100.0;
   ctrl->setTimeSourceForTest([&t]() {return t;});
   ctrl->configure(node, "FollowPath", tf, costmap);
   ctrl->activate();
@@ -149,4 +149,40 @@ TEST_F(VccPluginTest, ResetGapResetsOnlyAfterLongPause)
   t += 2.0;   // 2 s 간격: 초기화 -> 실측 0.5 에서 이어 간다
   const double v4 = ctrl->computeVelocityCommands(pose, cruise, nullptr).twist.linear.x;
   EXPECT_GE(v4, 0.45);
+  ctrl->deactivate();
+  ctrl->cleanup();
+}
+
+TEST_F(VccPluginTest, DeactivateClearsPlan)
+{
+  // 설계서 6.2 ⑥ / 최종 리뷰 M5: deactivate 는 경로 창·마지막 goal 까지 지운다.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node5");
+  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap5");
+  costmap->on_configure(rclcpp_lifecycle::State());
+  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  ctrl->configure(node, "FollowPath", tf, costmap);
+  ctrl->activate();
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "map";
+  for (int i = 0; i <= 20; ++i) {
+    geometry_msgs::msg::PoseStamped ps;
+    ps.header.frame_id = "map";
+    ps.pose.position.x = 1.0 + 0.05 * i;
+    ps.pose.position.y = 2.5;
+    ps.pose.orientation.w = 1.0;
+    plan.poses.push_back(ps);
+  }
+  ctrl->setPlan(plan);
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.frame_id = "map";
+  pose.pose.position.x = 1.0;
+  pose.pose.position.y = 2.5;
+  pose.pose.orientation.w = 1.0;
+  EXPECT_NO_THROW(ctrl->computeVelocityCommands(pose, geometry_msgs::msg::Twist(), nullptr));
+  ctrl->deactivate();
+  ctrl->activate();
+  EXPECT_THROW(
+    ctrl->computeVelocityCommands(pose, geometry_msgs::msg::Twist(), nullptr),
+    nav2_core::PlannerException);
 }

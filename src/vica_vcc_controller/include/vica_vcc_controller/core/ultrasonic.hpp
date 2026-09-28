@@ -23,6 +23,11 @@ public:
   void push(const RangeReading & r);
   // 최근 count 개가 모두 max_age 안·유효 범위·서로 tol 안이면 최신 값.
   std::optional<RangeReading> confirmed(double now, double max_age, int count, double tol) const;
+  // 최신 측정이 max_age 안인가(/vcc/state us_fresh, 설계서 10절).
+  bool fresh(double now, double max_age) const
+  {
+    return !hist_.empty() && now - hist_.back().recv_time <= max_age;
+  }
 
 private:
   std::deque<RangeReading> hist_;

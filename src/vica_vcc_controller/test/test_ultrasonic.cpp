@@ -6,7 +6,7 @@ using namespace vica_vcc_controller::core;
 
 namespace
 {
-RangeReading r(double range, double t) {return {range, 0.02, 1.5, 1.047, t};}
+RangeReading r(double range, double t) {return {range, 0.02, 1.5, 1.047, t, {}};}
 }
 
 TEST(Ultrasonic, TwoConsistentFreshReadingsAreConfirmed)
@@ -110,4 +110,13 @@ TEST(Ultrasonic, ArcPointsUseStoredSensorPose)
     EXPECT_NEAR(p.x, 2.0, 1e-9);
     EXPECT_NEAR(p.y, 2.0, 1e-9);
   }
+}
+
+TEST(Ultrasonic, FreshMeansLatestReadingWithinMaxAge)
+{
+  UltrasonicChannel ch;
+  EXPECT_FALSE(ch.fresh(10.0, 1.0));
+  ch.push(r(1.5, 10.0));      // 에코 없음이어도 받은 것은 받은 것
+  EXPECT_TRUE(ch.fresh(10.9, 1.0));
+  EXPECT_FALSE(ch.fresh(11.1, 1.0));
 }

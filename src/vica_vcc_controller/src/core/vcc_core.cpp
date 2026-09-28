@@ -42,6 +42,7 @@ void VccCore::reset(const Twist2D & measured)
   align_.reset();
   sm_.reset();
   turn_ = TurnPlan{};
+  turn_dir_ = 0;
   stopped_since_ = -1.0;
 }
 
@@ -119,12 +120,17 @@ CoreOutput VccCore::step(const CoreInputs & in)
   if (s0 == State::Turn || (need && (s0 == State::Track || s0 == State::Hold))) {
     const bool pivot_first = s0 == State::Turn ? turn_.mode == TurnMode::Pivot :
       (stationary && std::abs(heading) <= p_.state.turn_enter_angle);
-    turn_ = planTurn(heading, v, pivot_first, in.clearance, p_.turn);
+    // Turn 중 재계획은 들어갈 때 고른 방향을 지킨다(반지름·방식만 바뀐다). ±170° 근처에서 방향이
+    // 주기마다 뒤집히며 w 가 0 근처를 떠는 일을 막는다(최종 리뷰 M2).
+    turn_ = planTurn(heading, v, pivot_first, in.clearance, p_.turn, s0 == State::Turn ? turn_dir_ : 0);
     si.turn_blocked = turn_.mode == TurnMode::Blocked;
   }
 
   const State s = sm_.update(si);
-  if (s == State::Align && s0 != State::Align) {align_.reset();}
+  // 도착 정렬 횟수는 reset·onNewGoal 에서만 지운다. 같은 goal 안에서 Align 에 다시 들어와도 이어 센다(M3).
+  // 유턴 방향은 Turn 에 들어갈 때 잠그고 나가면 푼다(M2).
+  if (s == State::Turn && s0 != State::Turn) {turn_dir_ = turn_.direction;}
+  if (s != State::Turn) {turn_dir_ = 0;}
 
   Desired d;
   switch (s) {

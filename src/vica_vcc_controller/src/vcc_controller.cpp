@@ -194,6 +194,9 @@ void VccController::deactivate()
   state_pub_->on_deactivate();
   lane_pub_->on_deactivate();
   core_.reset();
+  // 설계서 6.2 ⑥: 모든 내부 상태를 지운다 — 경로 창과 마지막 goal 도(최종 리뷰 M5).
+  path_window_.setPlan({});
+  last_goal_x_ = last_goal_y_ = 1e9;
 }
 
 void VccController::setPlan(const nav_msgs::msg::Path & path)
@@ -299,7 +302,9 @@ void VccController::fillUltrasonic(double now)
 {
   std::vector<core::Point2D> pts;
   std::lock_guard<std::mutex> lock(us_mutex_);
+  us_fresh_ = 0;
   for (auto & ch : us_channels_) {
+    if (ch.fresh(now, us_max_age_)) {++us_fresh_;}
     const auto r = ch.confirmed(now, us_max_age_, us_confirm_count_, us_confirm_tol_);
     if (!r) {continue;}
     // 받은 순간의 센서 자세로 놓는다(지금 TF 로 다시 옮기지 않는다).
@@ -362,10 +367,11 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
     std_msgs::msg::String s;
     char buf[256];
     std::snprintf(buf, sizeof(buf),
-      "state=%s reason=%s offset=%.2f target=%.2f blocked=%d turn=%d align=%d fail=%d v=%.3f w=%.3f",
+      "state=%s reason=%s offset=%.2f target=%.2f blocked=%d turn=%d align=%d fail=%d v=%.3f w=%.3f "
+      "us_fresh=%d",
       core::stateName(out.state), out.reason, out.offset, out.target, out.lanes_blocked ? 1 : 0,
       static_cast<int>(out.turn_mode), out.align_attempts, static_cast<int>(out.failure),
-      out.cmd.v, out.cmd.w);
+      out.cmd.v, out.cmd.w, us_fresh_);
     s.data = buf;
     state_pub_->publish(s);
     nav_msgs::msg::Path lp;

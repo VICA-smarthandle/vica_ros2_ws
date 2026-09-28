@@ -30,7 +30,9 @@ struct TurnParams
 // 로봇 좌표계에서 run_in 만큼 직진한 뒤 dir 쪽으로 반지름 radius(0 = 제자리) 호를 angle 만큼.
 double simulateTurnClearance(
   double angle, double radius, int dir, double run_in, const ClearanceFn & f, double sample_angle);
+// only_dir != 0 이면 그 방향으로만 계획한다(Turn 중 방향 고정, 최종 리뷰 M2).
 TurnPlan planTurn(
-  double heading_error, double v_now, bool pivot_first, const ClearanceFn & f, const TurnParams & p);
+  double heading_error, double v_now, bool pivot_first, const ClearanceFn & f, const TurnParams & p,
+  int only_dir = 0);
 Twist2D turnCommand(const TurnPlan & t, const TurnParams & p);
 }  // namespace vica_vcc_controller::core

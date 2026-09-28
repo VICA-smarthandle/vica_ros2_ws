@@ -307,3 +307,46 @@ TEST(VccCore, BlockedAlignSweepHoldsWithoutRotating)
     EXPECT_EQ(out.failure, Failure::Blocked) << i;
   }
 }
+
+TEST(VccCore, TurnDirectionIsLockedWhileTurning)
+{
+  // 최종 리뷰 M2: 조준점이 ±170° 사이를 오가도 Turn 중 방향은 들어갈 때 고른 쪽으로 고정.
+  auto back = [](double yoff) {
+      Path p;
+      for (double s = 0.0; s <= 0.1; s += 0.05) {p.push_back({s, 0.0, 0.0});}
+      for (double s = 0.05; s <= 2.0; s += 0.05) {p.push_back({0.1 - s, yoff, M_PI});}
+      return p;
+    };
+  VccCore c; c.configure(params());
+  World w;
+  CoreOutput out = c.step(inputs(back(0.1), w, 1.0, 0.3));
+  ASSERT_EQ(out.state, State::Turn);
+  ASSERT_GT(out.cmd.w, 0.0);
+  for (int i = 1; i <= 3; ++i) {
+    out = c.step(inputs(back(i % 2 ? -0.1 : 0.1), w, 1.0 + 0.1 * i, 0.3, out.cmd.w));
+    EXPECT_EQ(out.state, State::Turn) << i;
+    EXPECT_GT(out.cmd.w, 0.0) << i;
+  }
+}
+
+TEST(VccCore, AlignAttemptsSurvivePushOffAndReturn)
+{
+  // 최종 리뷰 M3: 같은 goal 안에서 Align -> Track(밀림) -> Align 이어도 도착 횟수는 이어 센다.
+  VccCore c; c.configure(params());
+  World w;
+  auto at = [&](double now, double dist, double yaw) {
+      CoreInputs in = inputs(line(0.0, 0.0, dist), w, now, 0.0);
+      in.goal = {dist, 0.0, yaw};
+      return c.step(in);
+    };
+  CoreOutput out = at(1.0, 0.1, 0.3);
+  ASSERT_EQ(out.state, State::Align);
+  out = at(1.1, 0.1, -0.3);   // 넘침 -> 끊고 멈춤 확인
+  for (double t = 1.2; t < 1.55; t += 0.1) {out = at(t, 0.1, -0.3);}
+  ASSERT_EQ(out.align_attempts, 2);
+  out = at(1.6, 0.5, -0.3);   // 끝점 밖으로 밀림
+  ASSERT_EQ(out.state, State::Track);
+  out = at(1.7, 0.1, -0.3);
+  ASSERT_EQ(out.state, State::Align);
+  EXPECT_EQ(out.align_attempts, 2);
+}

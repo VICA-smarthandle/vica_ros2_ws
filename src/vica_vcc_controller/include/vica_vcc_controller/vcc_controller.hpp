@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -71,7 +72,8 @@ private:
   std::string plan_frame_;
   double transform_tolerance_{0.2};
   double base_speed_{0.5};
-  double speed_cap_{0.5};
+  // setSpeedLimit(구독 스레드)이 쓰고 computeVelocityCommands(액션 스레드)가 읽는다(최종 리뷰 M1).
+  std::atomic<double> speed_cap_{0.5};
   double clearance_window_{5.0};
   double reset_gap_{1.5};
   double last_compute_{-1.0};
@@ -87,6 +89,7 @@ private:
   int us_confirm_count_{2};
   double us_confirm_tol_{0.15};
   int us_arc_points_{7};
+  int us_fresh_{0};   // 나이 us_max_age 안 측정이 있는 채널 수(설계서 10절: 초음파가 전부 오래되면 표시)
 
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>> state_pub_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>> lane_pub_;

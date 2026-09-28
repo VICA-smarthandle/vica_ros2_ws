@@ -20,12 +20,18 @@ double simulateTurnClearance(
 }
 
 TurnPlan planTurn(
-  double heading, double v_now, bool pivot_first, const ClearanceFn & f, const TurnParams & p)
+  double heading, double v_now, bool pivot_first, const ClearanceFn & f, const TurnParams & p,
+  int only_dir)
 {
   const int pref = heading >= 0.0 ? 1 : -1;
   const double a = std::abs(heading);
   std::vector<std::pair<int, double>> dirs{{pref, a}};
-  if (a >= p.both_sides_angle) {dirs.push_back({-pref, 2.0 * M_PI - a});}
+  if (only_dir != 0) {
+    // 고정 방향: 반대쪽이면 남은 각은 2π - |θ| 다.
+    dirs = {{only_dir, only_dir == pref ? a : 2.0 * M_PI - a}};
+  } else if (a >= p.both_sides_angle) {
+    dirs.push_back({-pref, 2.0 * M_PI - a});
+  }
 
   std::vector<double> order;
   if (pivot_first) {order.push_back(0.0);}

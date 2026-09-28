@@ -81,6 +81,7 @@ private:
   AlignPlanner align_;
   StateMachine sm_;
   TurnPlan turn_;
+  int turn_dir_{0};              // Turn 에 들어갈 때 고른 방향(나가면 0, 최종 리뷰 M2)
   double stopped_since_{-1.0};
 };
 }  // namespace vica_vcc_controller::core

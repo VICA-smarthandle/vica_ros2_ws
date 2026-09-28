@@ -85,3 +85,13 @@ TEST(TurnPlanner, ArcCommandKeepsRadius)
   EXPECT_NEAR(c.v, 0.45 * 0.2, 1e-9);
   EXPECT_NEAR(c.w, -0.45, 1e-9);
 }
+
+TEST(TurnPlanner, OnlyDirForcesDirection)
+{
+  // 최종 리뷰 M2: Turn 중에는 들어갈 때 고른 방향으로만 다시 계획한다.
+  const TurnPlan t = planTurn(-175.0 * M_PI / 180.0, 0.0, false, open(), TurnParams{}, 1);
+  EXPECT_NE(t.mode, TurnMode::Blocked);
+  EXPECT_EQ(t.direction, 1);
+  const TurnPlan u = planTurn(-100.0 * M_PI / 180.0, 0.0, false, open(), TurnParams{}, 1);
+  EXPECT_EQ(u.direction, 1);   // 반대쪽이라도 고정 방향(남은 각 260°)
+}
