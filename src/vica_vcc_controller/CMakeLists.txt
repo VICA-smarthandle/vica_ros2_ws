@@ -17,6 +17,7 @@ add_library(vcc_core STATIC
   src/core/ultrasonic.cpp
   src/core/lanes.cpp
   src/core/turn_planner.cpp
+  src/core/align_planner.cpp
 )
 target_include_directories(vcc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -52,6 +53,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_turn_planner test/test_turn_planner.cpp)
   target_link_libraries(test_turn_planner vcc_core)
+
+  ament_add_gtest(test_align_planner test/test_align_planner.cpp)
+  target_link_libraries(test_align_planner vcc_core)
 endif()
 
 ament_package()
