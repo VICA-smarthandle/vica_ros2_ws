@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
+#include <chrono>
 #include <memory>
+#include <string>
+#include <thread>
+#include <unistd.h>
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 // NO_SPEED_LIMIT 는 costmap_2d_ros.hpp 가 전이 include 하지 않는다(Humble 실측) — 직접 포함한다.
@@ -13,18 +17,66 @@
 class VccPluginTest : public ::testing::Test
 {
 protected:
-  static void SetUpTestSuite() {rclcpp::init(0, nullptr);}
-  static void TearDownTestSuite() {rclcpp::shutdown();}
+  // 병렬 부하 멈춤의 실제 자리(gdb): 시험마다 마지막 노드가 사라져 Fast DDS 참가자가 지워질 때,
+  // 같은 도메인의 다른 프로세스(병렬 시험·로봇 스택)를 원격 참가자로 떼어 내다 FlowController
+  // 송신 스레드와 서로 잠근다(PDP::disable ↔ RTPSMessageGroup::send). 그래서
+  //  ① 프로세스마다 로봇(7)과 다른 도메인(30~99, pid 기준)에 두어 원격 참가자를 없애고
+  //  ② 모음 전체 동안 붙잡이 노드 하나를 살려 참가자를 시험마다 지우지 않는다.
+  static void SetUpTestSuite()
+  {
+    rclcpp::InitOptions opts;
+    opts.set_domain_id(30 + static_cast<size_t>(::getpid()) % 70);
+    rclcpp::init(0, nullptr, opts);
+    anchor_ = std::make_shared<rclcpp::Node>("vcc_test_anchor");
+  }
+  static void TearDownTestSuite()
+  {
+    anchor_.reset();
+    rclcpp::shutdown();
+  }
+  static inline rclcpp::Node::SharedPtr anchor_;
+
+  // 노드·TF·costmap(configure 까지)·제어기를 만든다. 제어기 configure/activate 는 시험 몫이다.
+  void make(const std::string & suffix)
+  {
+    node_ = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node" + suffix);
+    tf_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+    costmap_ = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap" + suffix);
+    costmap_->on_configure(rclcpp_lifecycle::State());
+    ctrl_ = std::make_shared<vica_vcc_controller::VccController>();
+  }
+
+  // costmap 수명을 제대로 끝낸다. on_configure 가 띄운 실행기 스레드가 spin 에 들어가기 전에
+  // cancel 되면 그 cancel 이 사라져 join 이 끝나지 않을 수 있으니(Humble) 돌기 시작할 틈을 준 뒤,
+  // configure 된 상태에서 갈 수 있는 전이(cleanup → shutdown)만 밟고 제어기 → costmap → 노드 순으로
+  // 놓는다. costmap 은 activate 하지 않으므로 deactivate 는 부르지 않는다.
+  void TearDown() override
+  {
+    if (costmap_) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      costmap_->on_cleanup(rclcpp_lifecycle::State());
+      costmap_->on_shutdown(rclcpp_lifecycle::State());
+    }
+    ctrl_.reset();
+    costmap_.reset();
+    tf_.reset();
+    node_.reset();
+  }
+
+  rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
+  std::shared_ptr<tf2_ros::Buffer> tf_;
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_;
+  std::shared_ptr<vica_vcc_controller::VccController> ctrl_;
+  double t_{100.0};   // 가짜 시계 — 제어기보다 오래 살아야 하므로 고정 장치가 쥔다
 };
 
 TEST_F(VccPluginTest, ConfigureDeclaresParametersAndLifecycleWorks)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node");
-  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap");
-  costmap->on_configure(rclcpp_lifecycle::State());
-
-  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  make("");
+  auto & node = node_;
+  auto & tf = tf_;
+  auto & costmap = costmap_;
+  auto & ctrl = ctrl_;
   ctrl->configure(node, "FollowPath", tf, costmap);
   ctrl->activate();
 
@@ -43,11 +95,11 @@ TEST_F(VccPluginTest, ConfigureDeclaresParametersAndLifecycleWorks)
 
 TEST_F(VccPluginTest, EmptyPlanThrowsPlannerException)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node2");
-  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap2");
-  costmap->on_configure(rclcpp_lifecycle::State());
-  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  make("2");
+  auto & node = node_;
+  auto & tf = tf_;
+  auto & costmap = costmap_;
+  auto & ctrl = ctrl_;
   ctrl->configure(node, "FollowPath", tf, costmap);
   ctrl->activate();
 
@@ -61,10 +113,10 @@ TEST_F(VccPluginTest, EmptyPlanThrowsPlannerException)
 
 TEST_F(VccPluginTest, StraightPlanProducesForwardCommand)
 {
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node3");
-  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap3");
-  costmap->on_configure(rclcpp_lifecycle::State());
+  make("3");
+  auto & node = node_;
+  auto & tf = tf_;
+  auto & costmap = costmap_;
 
   // map -> base_link : (2.5, 2.5) 에 놓는다(기본 costmap 원점 0,0)
   geometry_msgs::msg::TransformStamped t;
@@ -75,7 +127,7 @@ TEST_F(VccPluginTest, StraightPlanProducesForwardCommand)
   t.transform.rotation.w = 1.0;
   tf->setTransform(t, "test", true);
 
-  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  auto & ctrl = ctrl_;
   ctrl->configure(node, "FollowPath", tf, costmap);
   ctrl->activate();
 
@@ -105,12 +157,12 @@ TEST_F(VccPluginTest, ResetGapResetsOnlyAfterLongPause)
 {
   // Review Focus 3 / 최종 리뷰 I3: 호출이 reset_gap(1.5 s) 넘게 끊기면 새 실행으로 보고 초기화한다.
   // 초기화는 실측 속도에서 이어 가므로, 실측을 0.5 로 주면 초기화 여부가 명령에 드러난다.
-  double t = 100.0;   // 가짜 시계 — 제어기보다 오래 살아야 한다(먼저 선언)
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node4");
-  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap4");
-  costmap->on_configure(rclcpp_lifecycle::State());
-  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  make("4");
+  double & t = t_;   // 가짜 시계(고정 장치 소유 — 제어기보다 오래 산다)
+  auto & node = node_;
+  auto & tf = tf_;
+  auto & costmap = costmap_;
+  auto & ctrl = ctrl_;
   ctrl->setTimeSourceForTest([&t]() {return t;});
   ctrl->configure(node, "FollowPath", tf, costmap);
   ctrl->activate();
@@ -156,11 +208,11 @@ TEST_F(VccPluginTest, ResetGapResetsOnlyAfterLongPause)
 TEST_F(VccPluginTest, DeactivateClearsPlan)
 {
   // 설계서 6.2 ⑥ / 최종 리뷰 M5: deactivate 는 경로 창·마지막 goal 까지 지운다.
-  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node5");
-  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
-  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap5");
-  costmap->on_configure(rclcpp_lifecycle::State());
-  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  make("5");
+  auto & node = node_;
+  auto & tf = tf_;
+  auto & costmap = costmap_;
+  auto & ctrl = ctrl_;
   ctrl->configure(node, "FollowPath", tf, costmap);
   ctrl->activate();
   nav_msgs::msg::Path plan;

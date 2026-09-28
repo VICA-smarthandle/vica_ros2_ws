@@ -65,6 +65,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_vcc_plugin test/test_vcc_plugin.cpp)
   target_link_libraries(test_vcc_plugin vica_vcc_controller)
   ament_target_dependencies(test_vcc_plugin rclcpp rclcpp_lifecycle nav2_costmap_2d nav2_core tf2_ros)
+  # 멈추면 빨리 실패로 끝낸다(병렬 부하에서 costmap 소멸 멈춤을 겪었다).
+  set_tests_properties(test_vcc_plugin PROPERTIES TIMEOUT 120)
 
   add_executable(bench_vcc_core test/bench_vcc_core.cpp)
   target_link_libraries(bench_vcc_core vcc_core)
