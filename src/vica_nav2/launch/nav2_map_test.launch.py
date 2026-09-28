@@ -131,6 +131,13 @@ def generate_launch_description():
                 name="route_server",
                 output="screen",
                 parameters=[configured_params, {"graph_filepath": graph}],
+                # 2026-09-28: route_server 는 레일 경로를 상대 이름 `plan` 으로 게시해
+                # planner_server 의 /plan(당근·마무리 경로)과 한 토픽에 섞였다
+                # (libroute_server_core.so 문자열 확인). 레일만 따로 읽는 방향 안내
+                # (turn_guide_node 레일 예고)를 위해 이름만 옮긴다. BT·컨트롤러는 경로를
+                # 토픽이 아니라 액션 결과({path}, setPlan)로 받으므로 주행은 그대로다.
+                # RViz·bag 에서 레일을 보려면 /rail_plan 을 따로 추가한다.
+                remappings=[("plan", "/rail_plan")],
                 respawn=False,
             ),
             # 전용 lifecycle_manager. nav2_bringup 의 lifecycle_nodes 목록에

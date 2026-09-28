@@ -275,3 +275,29 @@ def test_touch_state_is_initialised_before_any_enable_branch():
     setup_body = text.split("def _setup_touch(self)")[1].split("def ")[0]
     assert "self.touch_contact" not in setup_body
     assert "self.touch_last_frame_ns" not in setup_body
+
+
+def test_rail_forecast_defaults_off_in_code():
+    """`ros2 run` 으로 띄우면(YAML 없이) 레일 예고는 꺼져 있어야 한다.
+
+    켜는 곳은 config 한 곳뿐이다. 코드 기본값이 켜져 있으면 되돌리기(yaml false)를
+    잊은 채 다른 실행 경로로 띄웠을 때 예고가 몰래 살아난다.
+    """
+    source = read(NODE_DIR / "turn_guide_node.py")
+    assert 'declare_parameter("enable_rail_forecast", False)' in source
+
+
+def test_rail_forecast_lookahead_matches_controller():
+    """예고가 쓰는 조준거리 규칙이 실제 컨트롤러(FollowPath)와 같아야 한다.
+
+    예고는 '몸이 돌기 시작하는 곳 = 코너 시작 - 조준거리' 로 시점을 잡는다. 컨트롤러
+    값만 바꾸고 여기를 안 바꾸면 "2초 전" 이 조용히 틀어진다(오프라인 계산에서 이 보정이
+    없을 때 0.3초 전이었다).
+    """
+    guide = load_config()["turn_guide_node"]["ros__parameters"]
+    nav = yaml.safe_load(read(
+        PKG_ROOT.parent / "vica_nav2" / "config" / "nav2_params.yaml"))
+    follow = nav["controller_server"]["ros__parameters"]["FollowPath"]
+    assert guide["controller_lookahead_time_sec"] == follow["lookahead_time"]
+    assert guide["controller_lookahead_min_m"] == follow["min_lookahead_dist"]
+    assert guide["controller_lookahead_max_m"] == follow["max_lookahead_dist"]

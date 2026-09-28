@@ -334,8 +334,10 @@ class RailTurnArbiter:
             self._active = _Active()
             return RailCue(DIRECTION_NONE, PHASE_IDLE, nan, nan, self._seq, True, "stale")
 
-        on_rail = (rail_fresh and pose is not None
-                   and pose.offtrack_m <= self.max_offtrack_m)
+        # 켜진 신호를 붙잡을 때는 레일이 잠깐 끊겨도(BT 가 목적지 2 m 안에서 레일을 버림)
+        # 마지막 레일로 코너 끝을 잰다. 새 예고만 신선한 레일을 요구한다.
+        near_rail = pose is not None and pose.offtrack_m <= self.max_offtrack_m
+        on_rail = rail_fresh and near_rail
         a = self._active
 
         # ── 실제 회전(사실) ──
@@ -354,7 +356,7 @@ class RailTurnArbiter:
 
         # ── 켜진 신호 붙잡기(② 코너 끝까지 · 도는 중) ──
         if a.phase != PHASE_IDLE:
-            corner = self._find(corners, a.corner_xy) if on_rail else None
+            corner = self._find(corners, a.corner_xy) if near_rail else None
             in_corner = corner is not None and pose.s <= corner.end_s + self.pass_margin_m
             sign = 1 if a.direction == DIRECTION_LEFT else -1
             turning = (not math.isnan(decision.turn_angle_deg)

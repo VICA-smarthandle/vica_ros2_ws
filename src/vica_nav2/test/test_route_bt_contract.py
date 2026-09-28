@@ -300,3 +300,15 @@ def test_route_graph_passes_through_registered_destinations():
         if dist > DEST_TO_NODE_M:
             far.append((d.get('name'), round(dist, 2)))
     assert not far, f'레일에서 {DEST_TO_NODE_M} m 넘게 떨어진 목적지: {far}'
+
+
+def test_route_server_publishes_rail_on_its_own_topic():
+    """route_server 의 레일 게시는 /rail_plan 으로 옮겨져 있어야 한다(2026-09-28).
+
+    옮기지 않으면 planner_server 의 /plan 과 섞여 방향 안내 레일 예고가 당근·마무리
+    경로를 레일로 오인한다. 주행(BT·컨트롤러)은 토픽이 아니라 액션 결과를 쓰므로 무관.
+    """
+    text = (_pkg_dir() / "launch" / "nav2_map_test.launch.py").read_text(encoding="utf-8")
+    block = text[text.index('executable="route_server"'):]
+    block = block[:block.index("respawn")]
+    assert 'remappings=[("plan", "/rail_plan")]' in block

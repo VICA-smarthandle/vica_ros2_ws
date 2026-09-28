@@ -30,6 +30,42 @@ turn_guide_node:
     publish_rate_hz: 20.0
     cue_valid_sec: 2.0           # valid_until 표시용 (판정에는 쓰지 않는다)
 
+    # ── 레일 예고 (2026-09-28) ─────────────────────────────────────────────
+    # Route Server 레일(/rail_plan)에서 45° 이상 꺾이는 코너를 몸이 돌기 약 2초 전에
+    # 미리 알린다. 위의 yaw 사후 판정(20°)은 그대로 돈다 — 레일 밖(장애물 회피·
+    # 목적지 2 m 안)의 변화는 지금처럼 돈 뒤에 알린다(사용자 결정 B안).
+    # 핸들·펌웨어는 바뀌지 않는다. 예고도 같은 코드 1/2(왼쪽/오른쪽)로 나가고, 예고한
+    # 회전을 실제로 돌면 신호가 끊기지 않고 이어진다.
+    #
+    # 되돌리기: enable_rail_forecast 를 false 로. 레일 구독·TF 조회를 아예 안 만들어
+    # 이 변경 전과 완전히 같다.
+    #
+    # 09-02 에 롤백한 /plan 예고와 다른 점: /plan 은 매초 새로 계산돼 예고 방향이
+    # 57~73 % 어긋났다. 레일은 고정 그래프라 같은 목적지면 같은 선이다.
+    # 오프라인 계산(scripts/vica_rail_turn_offline.py, 모든 목적지 쌍, 0.4 m/s):
+    #   0903_d  예고 10 전부 실제 회전으로 이어짐 · 반대 방향 0 · 같은 회전 두 번 0
+    #   0630    예고 33 · 반대 방향 0 · 같은 회전 두 번 0 (지금 방식은 10)
+    # [미검증] 실주행 0회. 장애물·사람 상황은 계산에 없다.
+    enable_rail_forecast: true
+    rail_topic: /rail_plan       # route_server 의 plan 을 launch 에서 이 이름으로 옮겼다
+    rail_timeout_sec: 2.5        # BT 가 1 Hz 로 보낸다. 끊기면 새 예고만 멈춘다
+    map_frame: map
+    base_frame: base_footprint
+
+    rail_corner_threshold_deg: 45.0   # 사용자 결정. 0903_d 복도 ±18° 지그재그는 빠진다
+    rail_lead_time_sec: 2.0           # 사용자 결정. '몸이 돌기 시작하기' 전 시간
+    rail_max_offtrack_m: 0.8          # BT NearRailGate 와 같은 값 — 이 밖은 레일 모드가 아니다
+    rail_handoff_m: 2.0               # BT handoff_dist_to_goal — 목적지 2 m 안 코너는 예고 안 함
+    rail_merge_gap_m: 1.2             # 같은 방향 꺾임이 이 안에 이어지면 한 코너(두 번 알림 방지)
+    rail_goal_change_m: 0.5           # 레일 끝이 이만큼 옮겨지면 새 목적지로 보고 기억을 비운다
+
+    # 컨트롤러가 코너를 얼마나 일찍 돌기 시작하나 = 조준거리 clamp(v x time, min, max).
+    # nav2_params.yaml FollowPath(VCC)의 lookahead_time·min/max_lookahead_dist 와 같은
+    # 값이어야 한다. 빼면 "2초 전"이 실제로는 0.3초 전이 된다(오프라인 계산).
+    controller_lookahead_time_sec: 2.5
+    controller_lookahead_min_m: 0.6
+    controller_lookahead_max_m: 1.2
+
 user_guidance_driver_node:
   ros__parameters:
     # udev 규칙(udev/99-vica-smart-handle.rules)이 부여하는 고정 이름이다.
