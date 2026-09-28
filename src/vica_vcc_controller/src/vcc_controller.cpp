@@ -108,6 +108,7 @@ void VccController::configure(
   p.lane.persist_cycles = dp("switch_persist_cycles", 3);
   p.lane.lane_rate = dp("lane_rate", 0.10);
   p.lane.return_clear_time = dp("return_clear_time", 1.0);
+  p.resync_offset = dp("lane_resync_threshold", 0.15);   // run48 F2: 2주기 연속일 때만 d 재동기
   p.state.turn_enter_angle = dp("turn_enter_angle", 1.047);
   p.state.turn_exit_angle = dp("turn_exit_angle", 0.436);
   p.state.pivot_start_angle = dp("pivot_start_angle", 0.611);

@@ -402,6 +402,7 @@ controller_server:
       switch_persist_cycles: 3
       lane_rate: 0.10                    # 손잡이 0.115 m/s 탈락선 아래(backlog §11)
       return_clear_time: 1.0
+      lane_resync_threshold: 0.15        # run48: 첫 구간 연장선 옆 오차가 2주기 연속 넘으면 d 재동기(가짜 되튐 75회)
       turn_enter_angle: 1.047            # 60도 (요구 2)
       turn_exit_angle: 0.436             # 25도
       pivot_start_angle: 0.611           # 35도 (정지 출발)

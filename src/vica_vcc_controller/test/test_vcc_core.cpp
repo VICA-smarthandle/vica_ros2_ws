@@ -378,3 +378,70 @@ TEST(VccCore, AcceleratesWhileReturningToRailAfterUturn)
   EXPECT_GT(t_fast, 0.0);
   EXPECT_LE(t_fast, 2.0);
 }
+
+TEST(VccCore, FarFirstPointOnLineThroughRobotDoesNotResync)
+{
+  // run48 F2: 경로 첫 점이 로봇 0.2~0.74 m 앞이고 그 점의 방향이 앞 구간과 달라(코너 노드) 옆 오차를
+  // 잘못 쟀다. 옆 오차는 첫 구간(p0->p1)을 뒤로 늘인 직선까지의 수직 거리다. 로봇을 지나는 30° 직선이면 0.
+  VccCore c; c.configure(params());
+  World w;
+  const double a = 30.0 * M_PI / 180.0;
+  Path p;
+  for (double s = 0.6; s <= 3.0 + 1e-9; s += 0.05) {p.push_back({s * std::cos(a), s * std::sin(a), a});}
+  p.front().yaw = 0.0;   // 앞 구간 방향이 남은 첫 점
+  for (int i = 0; i < 3; ++i) {
+    const CoreOutput out = c.step(inputs(p, w, 1.0 + 0.1 * i, 0.3));
+    EXPECT_NEAR(out.offset, 0.0, 0.02) << i;
+  }
+}
+
+TEST(VccCore, OneCycleLateralGlitchDoesNotResync)
+{
+  // run48 F2: 가짜 되튐 75회 중 64 % 가 새 경로 뒤 0.25 s 안. 한 주기만 튄 오차로는 d 를 옮기지 않는다.
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out;
+  for (int i = 0; i < 3; ++i, t += 0.1) {out = c.step(inputs(line(0.0, 0.0), w, t, 0.3));}
+  out = c.step(inputs(line(-0.4, 0.0), w, t, 0.3));
+  t += 0.1;
+  EXPECT_NEAR(out.offset, 0.0, 0.02);
+  for (int i = 0; i < 3; ++i, t += 0.1) {
+    out = c.step(inputs(line(0.0, 0.0), w, t, 0.3));
+    EXPECT_NEAR(out.offset, 0.0, 0.02) << i;
+  }
+}
+
+TEST(VccCore, PersistentLateralErrorResyncsOnSecondCycle)
+{
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out;
+  for (int i = 0; i < 3; ++i, t += 0.1) {out = c.step(inputs(line(0.0, 0.0), w, t, 0.3));}
+  out = c.step(inputs(line(-0.4, 0.0), w, t, 0.3));
+  EXPECT_NEAR(out.offset, 0.0, 0.02);   // 1주기: 아직
+  out = c.step(inputs(line(-0.4, 0.0), w, t + 0.1, 0.3));
+  EXPECT_NEAR(out.offset, 0.4, 0.011);  // 2주기 연속: 다시 맞춘다
+}
+
+TEST(VccCore, TurnExitKeepsNearestLaneAsTarget)
+{
+  // run48 F2: 유턴을 마치고 레일 왼쪽 0.4 m 에 나오면 목표 차선도 그 자리(0.4)로 둔다. 목표가 0 이면
+  // 나오자마자 레일로 되튄다. 레일 복귀는 보통 규칙(return_clear_time)이 맡는다.
+  VccCore c; c.configure(params());
+  World w;
+  Path back;
+  for (double s = 0.0; s <= 0.1; s += 0.05) {back.push_back({s, 0.0, 0.0});}
+  for (double s = 0.05; s <= 2.0; s += 0.05) {back.push_back({0.1 - s, 0.0, M_PI});}
+  CoreOutput out = c.step(inputs(back, w, 1.0, 0.3));
+  ASSERT_EQ(out.state, State::Turn);
+  bool exited = false;
+  for (int i = 1; i <= 10 && !exited; ++i) {
+    out = c.step(inputs(line(-0.4, 0.0), w, 1.0 + 0.1 * i, 0.4));
+    exited = out.state == State::Track;
+  }
+  ASSERT_TRUE(exited);
+  EXPECT_NEAR(out.target, 0.4, 1e-9);
+  EXPECT_NEAR(out.offset, 0.4, 0.011);
+}

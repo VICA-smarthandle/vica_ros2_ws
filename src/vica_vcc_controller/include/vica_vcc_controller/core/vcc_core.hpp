@@ -24,7 +24,9 @@ struct CoreParams
   double stop_margin{0.05};
   double stationary_speed{0.05};
   double stationary_time{0.5};
-  double resync_offset{0.15};    // 실제 옆 위치와 d 가 이만큼 어긋나면 d 를 다시 맞춘다(최종 리뷰 I4)
+  // 실제 옆 위치와 d 가 이만큼, 2주기 연속 어긋나면 d 를 다시 맞춘다(최종 리뷰 I4, run48 F2).
+  // ROS 파라미터 lane_resync_threshold.
+  double resync_offset{0.15};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -83,5 +85,7 @@ private:
   TurnPlan turn_;
   int turn_dir_{0};              // Turn 에 들어갈 때 고른 방향(나가면 0, 최종 리뷰 M2)
   double stopped_since_{-1.0};
+  int resync_count_{0};          // 옆 오차가 문턱을 넘은 연속 주기 수
+  bool resync_primed_{false};    // reset 뒤 첫 경로를 받았는가(첫 주기는 바로 맞춘다)
 };
 }  // namespace vica_vcc_controller::core

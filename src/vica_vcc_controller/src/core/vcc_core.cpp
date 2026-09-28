@@ -25,6 +25,22 @@ bool motionCollides(
   return false;
 }
 
+namespace
+{
+// 로봇(원점)에서 경로 첫 구간(p0->p1)을 뒤로 늘인 직선까지의 옆 거리(왼쪽 +). 첫 점이 로봇보다
+// 0.2~0.74 m 앞이고 그 점의 방향이 앞 구간 것(코너 노드)이어도 흔들리지 않는다(run48 F2).
+double lateralError(const Path & path)
+{
+  const Pose2D & p0 = path.front();
+  double a = p0.yaw;
+  for (size_t i = 1; i < path.size(); ++i) {
+    const double dx = path[i].x - p0.x, dy = path[i].y - p0.y;
+    if (std::hypot(dx, dy) > 1e-6) {a = std::atan2(dy, dx); break;}
+  }
+  return p0.x * std::sin(a) - p0.y * std::cos(a);
+}
+}  // namespace
+
 void VccCore::configure(const CoreParams & p)
 {
   p_ = p;
@@ -44,6 +60,8 @@ void VccCore::reset(const Twist2D & measured)
   turn_ = TurnPlan{};
   turn_dir_ = 0;
   stopped_since_ = -1.0;
+  resync_count_ = 0;
+  resync_primed_ = false;
 }
 
 void VccCore::onNewGoal()
@@ -65,13 +83,19 @@ CoreOutput VccCore::step(const CoreInputs & in)
   }
   const bool stationary = stopped_since_ >= 0.0 && in.now - stopped_since_ >= p_.stationary_time;
 
-  // 차선 d 를 실제 옆 위치에 다시 맞춘다: 경로 첫 점의 접선 기준 로봇의 옆 거리(왼쪽 +).
+  // 차선 d 를 실제 옆 위치에 다시 맞춘다: 첫 구간 연장선 기준 로봇의 옆 거리(왼쪽 +).
   // reset 뒤 0, 유턴 뒤 약 2R, 레일<->당근 경로 교체 뒤 어긋난 d 를 그대로 두면 차선 검사가 로봇이
-  // 아닌 곳을 본다(최종 리뷰 I4).
+  // 아닌 곳을 본다(최종 리뷰 I4). 한 주기만 튄 값으로는 옮기지 않는다 — 2주기 연속일 때만(run48 F2:
+  // 가짜 되튐 75회, 64 % 가 새 경로 뒤 0.25 s 안). reset 뒤 첫 경로는 비교할 과거가 없어 바로 맞춘다.
   if (!in.path.empty()) {
-    const Pose2D & p0 = in.path.front();
-    const double e = p0.x * std::sin(p0.yaw) - p0.y * std::cos(p0.yaw);
-    if (std::abs(e - lanes_.offset()) > p_.resync_offset) {lanes_.syncOffset(e);}
+    const double e = lateralError(in.path);
+    if (std::abs(e - lanes_.offset()) <= p_.resync_offset) {
+      resync_count_ = 0;
+    } else if (!resync_primed_ || ++resync_count_ >= 2) {
+      lanes_.syncOffset(e);
+      resync_count_ = 0;
+    }
+    resync_primed_ = true;
   }
 
   // 차선. 옮김 속도 후보는 차선 제한 전 목표 속도부터(run48 F1).
@@ -132,6 +156,14 @@ CoreOutput VccCore::step(const CoreInputs & in)
   // 유턴 방향은 Turn 에 들어갈 때 잠그고 나가면 푼다(M2).
   if (s == State::Turn && s0 != State::Turn) {turn_dir_ = turn_.direction;}
   if (s != State::Turn) {turn_dir_ = 0;}
+  // 유턴을 마치면 d 를 지금 옆 위치로 바로 맞추고 목표도 가장 가까운 차선에 둔다. 목표가 레일에
+  // 남아 있으면 나오자마자 되튄다. 레일 복귀는 보통 규칙(return_clear_time)이 맡는다(run48 F2).
+  if (s0 == State::Turn && s == State::Track && !in.path.empty()) {
+    const double e = lateralError(in.path);
+    lanes_.syncOffset(e);
+    lanes_.setTargetNearest(e);
+    resync_count_ = 0;
+  }
 
   Desired d;
   switch (s) {

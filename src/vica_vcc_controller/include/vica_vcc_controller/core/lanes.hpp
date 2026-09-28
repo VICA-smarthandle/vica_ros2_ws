@@ -47,6 +47,12 @@ public:
   double offset() const {return offset_;}
   // 실제 옆 위치로 d 를 다시 맞춘다(유턴 뒤·경로 교체 뒤). 목표는 그대로 — 복귀 규칙이 되돌린다.
   void syncOffset(double d) {offset_ = std::clamp(d, -p_.max_offset, p_.max_offset);}
+  // 목표를 d 에 가장 가까운 차선으로 둔다(유턴을 마치고 나온 자리, run48 F2). 레일 복귀는 보통 규칙이 맡는다.
+  void setTargetNearest(double d)
+  {
+    target_ = std::clamp(std::round(d / p_.step) * p_.step, -p_.max_offset, p_.max_offset);
+    pending_count_ = 0;
+  }
   double target() const {return target_;}
   bool blocked() const {return blocked_;}
   double currentClearance() const {return current_clearance_;}
