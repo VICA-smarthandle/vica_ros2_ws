@@ -15,14 +15,20 @@ void VccCore::configure(const CoreParams & p)
   reset();
 }
 
-void VccCore::reset()
+void VccCore::reset(const Twist2D & measured)
 {
   lanes_.reset();
-  output_.reset();
+  output_.reset(measured);
   align_.reset();
   sm_.reset();
   turn_ = TurnPlan{};
   stopped_since_ = -1.0;
+}
+
+void VccCore::onNewGoal()
+{
+  align_.reset();
+  if (sm_.state() == State::Align || sm_.state() == State::Hold) {sm_.reset();}
 }
 
 CoreOutput VccCore::step(const CoreInputs & in)

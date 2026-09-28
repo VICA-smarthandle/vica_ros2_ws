@@ -71,3 +71,19 @@ TEST(OutputStage, ArcRadiusIsKept)
   for (int i = 0; i < 10; ++i) {o.apply(d, o.last().v, 0.1);}
   EXPECT_NEAR(o.last().v, std::abs(o.last().w) * 0.2, 1e-9);
 }
+
+TEST(OutputStage, ResetStartsFromMeasuredTwist)
+{
+  // 최종 리뷰 I3: reset 뒤 0 에서 다시 램프하지 않고 실제 속도에서 이어 간다.
+  OutputStage o;
+  o.reset({0.4, 0.1});
+  EXPECT_NEAR(o.last().v, 0.4, 1e-9);
+  EXPECT_NEAR(o.last().w, 0.1, 1e-9);
+  const Twist2D c = o.apply(Desired{{0.5, 0.0}}, 0.4, 0.1);
+  EXPECT_NEAR(c.v, 0.4 + 0.0143, 1e-9);
+  o.reset({0.9, -2.0});   // 한계 밖 실측은 한계로 자른다
+  EXPECT_NEAR(o.last().v, 0.5, 1e-9);
+  EXPECT_NEAR(o.last().w, -0.5, 1e-9);
+  o.reset({-0.2, 0.0});   // 후진 없음
+  EXPECT_NEAR(o.last().v, 0.0, 1e-9);
+}

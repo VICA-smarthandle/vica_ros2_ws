@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -40,6 +41,8 @@ public:
     const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & velocity,
     nav2_core::GoalChecker * goal_checker) override;
   void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
+  // 시험용: 시계를 바꿔 끼운다(reset_gap 판정을 실제로 기다리지 않고 확인한다).
+  void setTimeSourceForTest(std::function<double()> f) {time_source_ = std::move(f);}
 
 private:
   core::Path windowPlan(const geometry_msgs::msg::PoseStamped & pose, core::Pose2D & goal_robot);
@@ -59,6 +62,7 @@ private:
   rclcpp::Clock::SharedPtr clock_;
   // Humble Clock::now() 는 const 가 아니다. steadyNow() 는 const 로 두고 여기만 mutable.
   mutable rclcpp::Clock steady_{RCL_STEADY_TIME};
+  std::function<double()> time_source_;
 
   core::CoreParams params_;
   core::VccCore core_;
@@ -69,7 +73,7 @@ private:
   double base_speed_{0.5};
   double speed_cap_{0.5};
   double clearance_window_{5.0};
-  double reset_gap_{0.5};
+  double reset_gap_{1.5};
   double last_compute_{-1.0};
   double last_goal_x_{1e9}, last_goal_y_{1e9};
   bool publish_state_{true};

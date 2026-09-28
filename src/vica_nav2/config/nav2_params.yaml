@@ -415,7 +415,7 @@ controller_server:
       align_max_attempts: 3
       min_state_time: 0.5
       clearance_window: 5.0              # 1.5 m 앞 + 몸 0.62 m 를 덮는다(local costmap 6 m 안)
-      reset_gap: 0.5
+      reset_gap: 1.5                     # 호출이 이보다 길게 끊기면 새 실행으로 보고 초기화. BT 복구 Wait 1 s·CPU 멈칫보다 길게
       ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right",
                           "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
       us_max_age: 1.0

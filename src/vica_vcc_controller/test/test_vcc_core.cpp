@@ -199,3 +199,57 @@ TEST(VccCore, BlockedUturnInNarrowCorridorStaysInHoldWithoutCreeping)
   }
   EXPECT_NEAR(X, 0.0, 1e-9);
 }
+
+TEST(VccCore, NewGoalKeepsSpeedAndLane)
+{
+  // 최종 리뷰 I3: 레일 BT 당근 모드가 경로 끝을 ~1 Hz 로 옮겨 새 goal 판정이 반복된다.
+  // 새 goal 은 도착 정렬만 초기화하고 속도(출력단)·차선은 이어 간다.
+  VccCore a; a.configure(params());
+  VccCore b; b.configure(params());
+  World w;
+  w.box(1.2, 1.3, -0.05, 0.05);   // 레일 위 기둥 -> 차선이 옮겨 간다
+  double v = 0.5;
+  CoreOutput oa, ob;
+  for (int i = 0; i < 8; ++i) {
+    oa = a.step(inputs(line(0.0, 0.0), w, 0.1 * i, v));
+    ob = b.step(inputs(line(0.0, 0.0), w, 0.1 * i, v));
+    v = oa.cmd.v;
+  }
+  ASSERT_GT(std::abs(oa.target), 0.05);
+  b.onNewGoal();
+  oa = a.step(inputs(line(0.0, 0.0), w, 0.8, v));
+  ob = b.step(inputs(line(0.0, 0.0), w, 0.8, v));
+  EXPECT_NEAR(ob.offset, oa.offset, 1e-9);
+  EXPECT_NEAR(ob.target, oa.target, 1e-9);
+  EXPECT_NEAR(ob.cmd.v, oa.cmd.v, 1e-9);
+  EXPECT_EQ(ob.state, oa.state);
+}
+
+TEST(VccCore, NewGoalWhileCruisingKeepsHalfSpeed)
+{
+  VccCore c; c.configure(params());
+  World w;
+  double v = 0.0;
+  CoreOutput out;
+  for (int i = 0; i < 40; ++i) {out = c.step(inputs(line(0.0, 0.0), w, 0.1 * i, v)); v = out.cmd.v;}
+  ASSERT_NEAR(v, 0.5, 1e-6);
+  c.onNewGoal();
+  out = c.step(inputs(line(0.0, 0.0), w, 4.0, v));
+  EXPECT_GE(out.cmd.v, 0.45);
+}
+
+TEST(VccCore, NewGoalLeavesHoldAndResetsAlign)
+{
+  VccCore c; c.configure(params());
+  World w;
+  CoreInputs in = inputs(line(0.0, 0.0, 0.1), w, 1.0, 0.0);
+  in.goal = {0.1, 0.0, M_PI / 2};
+  CoreOutput out = c.step(in);
+  ASSERT_EQ(out.state, State::Align);
+  ASSERT_EQ(out.align_attempts, 1);
+  c.onNewGoal();
+  in = inputs(line(0.0, 0.0), w, 1.1, 0.0);
+  out = c.step(in);
+  EXPECT_EQ(out.state, State::Track);
+  EXPECT_EQ(out.align_attempts, 0);
+}

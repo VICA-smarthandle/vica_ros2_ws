@@ -100,3 +100,53 @@ TEST_F(VccPluginTest, StraightPlanProducesForwardCommand)
   EXPECT_LE(cmd.twist.linear.x, 0.25);
   EXPECT_NEAR(cmd.twist.angular.z, 0.0, 1e-3);
 }
+
+TEST_F(VccPluginTest, ResetGapResetsOnlyAfterLongPause)
+{
+  // Review Focus 3 / 최종 리뷰 I3: 호출이 reset_gap(1.5 s) 넘게 끊기면 새 실행으로 보고 초기화한다.
+  // 초기화는 실측 속도에서 이어 가므로, 실측을 0.5 로 주면 초기화 여부가 명령에 드러난다.
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("vcc_test_node4");
+  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  auto costmap = std::make_shared<nav2_costmap_2d::Costmap2DROS>("vcc_test_costmap4");
+  costmap->on_configure(rclcpp_lifecycle::State());
+  auto ctrl = std::make_shared<vica_vcc_controller::VccController>();
+  double t = 100.0;
+  ctrl->setTimeSourceForTest([&t]() {return t;});
+  ctrl->configure(node, "FollowPath", tf, costmap);
+  ctrl->activate();
+  double gap = 0.0;
+  ASSERT_TRUE(node->get_parameter("FollowPath.reset_gap", gap));
+  EXPECT_NEAR(gap, 1.5, 1e-9);
+
+  nav_msgs::msg::Path plan;
+  plan.header.frame_id = "map";
+  for (int i = 0; i <= 60; ++i) {
+    geometry_msgs::msg::PoseStamped ps;
+    ps.header.frame_id = "map";
+    ps.pose.position.x = 1.0 + 0.05 * i;
+    ps.pose.position.y = 2.5;
+    ps.pose.orientation.w = 1.0;
+    plan.poses.push_back(ps);
+  }
+  ctrl->setPlan(plan);
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.frame_id = "map";
+  pose.pose.position.x = 1.0;
+  pose.pose.position.y = 2.5;
+  pose.pose.orientation.w = 1.0;
+  geometry_msgs::msg::Twist still, cruise;
+  cruise.linear.x = 0.5;
+
+  ctrl->computeVelocityCommands(pose, still, nullptr);   // 0.05
+  t += 0.1;
+  const double v1 = ctrl->computeVelocityCommands(pose, still, nullptr).twist.linear.x;   // 0.10
+  t += 0.1;   // 0.1 s 간격: 초기화 없음 -> 직전 명령에서 이어 간다
+  const double v2 = ctrl->computeVelocityCommands(pose, cruise, nullptr).twist.linear.x;
+  EXPECT_NEAR(v2, v1 + 0.05, 1e-6);
+  t += 1.0;   // 1.0 s 간격(BT Wait 1 s): 아직 초기화하지 않는다
+  const double v3 = ctrl->computeVelocityCommands(pose, cruise, nullptr).twist.linear.x;
+  EXPECT_LT(v3, 0.3);
+  t += 2.0;   // 2 s 간격: 초기화 -> 실측 0.5 에서 이어 간다
+  const double v4 = ctrl->computeVelocityCommands(pose, cruise, nullptr).twist.linear.x;
+  EXPECT_GE(v4, 0.45);
+}

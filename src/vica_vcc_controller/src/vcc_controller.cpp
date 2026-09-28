@@ -47,7 +47,7 @@ core::Pose2D toPose2D(const geometry_msgs::msg::Pose & p)
 
 double VccController::steadyNow() const
 {
-  return steady_.now().seconds();
+  return time_source_ ? time_source_() : steady_.now().seconds();
 }
 
 void VccController::configure(
@@ -122,7 +122,7 @@ void VccController::configure(
   p.align.settle = dp("align_settle", 0.3);
   p.align.max_attempts = dp("align_max_attempts", 3);
   clearance_window_ = dp("clearance_window", 5.0);
-  reset_gap_ = dp("reset_gap", 0.5);
+  reset_gap_ = dp("reset_gap", 1.5);   // BT 복구 Wait 1 s·CPU 멈칫보다 길게
   us_max_age_ = dp("us_max_age", 1.0);
   us_confirm_count_ = dp("us_confirm_count", 2);
   us_confirm_tol_ = dp("us_confirm_tol", 0.15);
@@ -203,9 +203,10 @@ void VccController::setPlan(const nav_msgs::msg::Path & path)
   path_window_.setPlan(std::move(plan));
   plan_frame_ = path.header.frame_id;
   if (path.poses.empty()) {return;}
-  // 새 goal: 경로 끝점이 0.5 m 넘게 옮겨지면 상황·차선·도착 횟수를 초기화한다(설계서 6.2 ⑤).
+  // 새 goal: 경로 끝점이 0.5 m 넘게 옮겨지면 도착 횟수(와 Align·Hold 상황)를 초기화한다(설계서 6.2 ⑤).
+  // 차선·출력단은 이어 간다 — 레일 BT 당근 모드가 끝점을 ~1 Hz 로 옮긴다(최종 리뷰 I3).
   const auto & e = path.poses.back().pose.position;
-  if (std::hypot(e.x - last_goal_x_, e.y - last_goal_y_) > 0.5) {core_.reset();}
+  if (std::hypot(e.x - last_goal_x_, e.y - last_goal_y_) > 0.5) {core_.onNewGoal();}
   last_goal_x_ = e.x;
   last_goal_y_ = e.y;
 }
@@ -314,7 +315,10 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
   const double now = steadyNow();
   // 호출이 reset_gap 넘게 끊겼다 = 새 FollowPath 실행(BT 재시도 포함). 상황을 처음부터(Review Focus 3).
   const double dt = last_compute_ < 0.0 ? 0.1 : std::clamp(now - last_compute_, 0.02, 0.2);
-  if (last_compute_ >= 0.0 && now - last_compute_ > reset_gap_) {core_.reset();}
+  // 초기화해도 출력단은 실측 속도에서 이어 간다(0 으로 떨어뜨리지 않는다).
+  if (last_compute_ >= 0.0 && now - last_compute_ > reset_gap_) {
+    core_.reset({velocity.linear.x, velocity.angular.z});
+  }
   last_compute_ = now;
 
   // 도착 허용오차와 정지 기준은 goal checker(StoppedGoalChecker)가 정본이다. VCC 는 매 주기 받아 쓴다.

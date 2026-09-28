@@ -60,7 +60,11 @@ class VccCore
 {
 public:
   void configure(const CoreParams & p);
-  void reset();
+  // 모든 내부 상태를 지운다. 출력단은 실측 속도에서 이어 간다.
+  void reset(const Twist2D & measured = {});
+  // 새 goal(경로 끝점이 0.5 m 넘게 이동): 도착 정렬만 초기화하고, Align·Hold 면 상황도 되돌린다.
+  // 차선·출력단은 이어 간다 — 레일 BT 당근 모드가 끝점을 ~1 Hz 로 옮긴다(최종 리뷰 I3).
+  void onNewGoal();
   CoreOutput step(const CoreInputs & in);
 
 private:

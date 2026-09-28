@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include "vica_vcc_controller/core/types.hpp"
 
@@ -28,7 +29,11 @@ class OutputStage
 {
 public:
   explicit OutputStage(OutputParams p = {}) : p_(p) {}
-  void reset() {last_ = {};}
+  // 실측 속도에서 이어 간다(0 으로 떨어뜨렸다 다시 램프하지 않는다, 최종 리뷰 I3).
+  void reset(const Twist2D & measured = {})
+  {
+    last_ = {std::clamp(measured.v, 0.0, p_.max_v), std::clamp(measured.w, -p_.max_w, p_.max_w)};
+  }
   Twist2D apply(const Desired & d, double measured_v, double dt);
   const Twist2D & last() const {return last_;}
 
