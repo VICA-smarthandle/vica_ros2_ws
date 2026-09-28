@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_vcc_controller</name>
+  <version>0.1.0</version>
+  <description>
+    VCC(VICA Customized Controller) — Nav2 FollowPath 컨트롤러 플러그인.
+    레일 추종(RPP 식 조준) + 차선 13개 고르기(비켜 가기) + 상황 4개(주행/유턴/도착 정렬/대기).
+    ROS 노드가 아니라 controller_server 가 여는 공유 라이브러리다.
+    설계: VICA-smarthandle docs/superpowers/specs/2026-09-24-vcc-controller-design.md
+  </description>
+  <maintainer email="mjw41177@gmail.com">ji_w</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>pluginlib</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav2_util</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <nav2_core plugin="${prefix}/vcc_plugins.xml"/>
+  </export>
+</package>
