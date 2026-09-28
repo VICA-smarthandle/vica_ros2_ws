@@ -14,6 +14,7 @@ add_library(vcc_core STATIC
   src/core/pure_pursuit.cpp
   src/core/speed_profile.cpp
   src/core/output_stage.cpp
+  src/core/ultrasonic.cpp
 )
 target_include_directories(vcc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -40,6 +41,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_output_stage test/test_output_stage.cpp)
   target_link_libraries(test_output_stage vcc_core)
+
+  ament_add_gtest(test_ultrasonic test/test_ultrasonic.cpp)
+  target_link_libraries(test_ultrasonic vcc_core)
 endif()
 
 ament_package()
