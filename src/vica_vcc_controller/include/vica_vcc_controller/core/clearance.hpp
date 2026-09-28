@@ -21,6 +21,8 @@ public:
   double resolution() const {return res_;}
   double originX() const {return ox_;}
   double originY() const {return oy_;}
+  int width() const {return w_;}
+  int height() const {return h_;}
 
 private:
   size_t idx(int x, int y) const {return static_cast<size_t>(y) * w_ + x;}

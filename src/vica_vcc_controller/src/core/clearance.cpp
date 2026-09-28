@@ -98,11 +98,18 @@ double ClearanceField::clearance(const Pose2D & pose) const
   grid_.worldToCell(minx, miny, ix0, iy0);
   grid_.worldToCell(maxx, maxy, ix1, iy1);
   const double res = grid_.resolution();
-  for (int ix = ix0; ix <= ix1; ++ix) {
-    for (int iy = iy0; iy <= iy1; ++iy) {
-      if (!grid_.lethalCell(ix, iy)) {continue;}
-      const Point2D c{grid_.originX() + (ix + 0.5) * res, grid_.originY() + (iy + 0.5) * res};
-      if (pointInPolygon(c, poly)) {return -1.0;}
+  const int gw = grid_.width(), gh = grid_.height();
+  // 몸 상자가 창 밖으로 나가면(먼 자세·창 경계 자세) 자르지 않은 범위로 돌면 안 된다.
+  // 상자가 창과 아예 안 겹치면 안쪽-칸 검사를 건너뛰고, 걸쳐 있으면 창 안으로 자른다.
+  if (!(ix1 < 0 || iy1 < 0 || ix0 >= gw || iy0 >= gh)) {
+    ix0 = std::max(ix0, 0); iy0 = std::max(iy0, 0);
+    ix1 = std::min(ix1, gw - 1); iy1 = std::min(iy1, gh - 1);
+    for (int ix = ix0; ix <= ix1; ++ix) {
+      for (int iy = iy0; iy <= iy1; ++iy) {
+        if (!grid_.lethalCell(ix, iy)) {continue;}
+        const Point2D c{grid_.originX() + (ix + 0.5) * res, grid_.originY() + (iy + 0.5) * res};
+        if (pointInPolygon(c, poly)) {return -1.0;}
+      }
     }
   }
 

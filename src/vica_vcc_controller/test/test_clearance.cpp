@@ -73,3 +73,19 @@ TEST(Clearance, UltrasonicPointsCountAsObstacles)
   f.setPoints({{0.0, 0.0}});
   EXPECT_LT(f.clearance({0, 0, 0}), 0.0);
 }
+
+TEST(Clearance, PoseFarOutsideWindowIsFreeAndCheap)
+{
+  // 몸 상자가 창과 아예 안 겹치면(먼 자세) 안쪽-칸 검사를 건너뛴다.
+  // 윤곽 표본도 창 밖이라 kFarDistance 로 처리되어 비싸지 않게 "멀다"로 나온다.
+  ClearanceField f = makeField();
+  f.grid().markLethal(50, 50);   // 창 어딘가에 LETHAL 이 있어도 무관
+  f.grid().compute();
+  EXPECT_GT(f.clearance({1000.0, -1000.0, 0.3}), 5.0);
+
+  // 몸 상자가 창 경계에 걸쳐 있어도(오른쪽 앞 모서리가 창 밖) 자르기 뒤에도
+  // 창 안에 남은 LETHAL 은 그대로 잡힌다 — 자르기가 안쪽 접촉을 놓치지 않는다.
+  ClearanceField f2 = makeField();
+  markRectangle(f2, 2.3, 2.45, -0.05, 0.05);
+  EXPECT_LT(f2.clearance({2.4, 0.0, 0.0}), 0.0);
+}
