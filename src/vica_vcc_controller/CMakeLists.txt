@@ -11,6 +11,7 @@ find_package(ament_cmake REQUIRED)
 add_library(vcc_core STATIC
   src/core/geometry.cpp
   src/core/clearance.cpp
+  src/core/pure_pursuit.cpp
 )
 target_include_directories(vcc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -28,6 +29,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_clearance test/test_clearance.cpp)
   target_link_libraries(test_clearance vcc_core)
+
+  ament_add_gtest(test_pure_pursuit test/test_pure_pursuit.cpp)
+  target_link_libraries(test_pure_pursuit vcc_core)
 endif()
 
 ament_package()
