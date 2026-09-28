@@ -66,9 +66,9 @@ if(BUILD_TESTING)
   target_link_libraries(test_vcc_plugin vica_vcc_controller)
   ament_target_dependencies(test_vcc_plugin rclcpp rclcpp_lifecycle nav2_costmap_2d nav2_core tf2_ros)
 
-  # add_executable(bench_vcc_core test/bench_vcc_core.cpp)
-  # target_link_libraries(bench_vcc_core vcc_core)
-  # install(TARGETS bench_vcc_core RUNTIME DESTINATION lib/${PROJECT_NAME})
+  add_executable(bench_vcc_core test/bench_vcc_core.cpp)
+  target_link_libraries(bench_vcc_core vcc_core)
+  install(TARGETS bench_vcc_core RUNTIME DESTINATION lib/${PROJECT_NAME})
 endif()
 
 ament_export_include_directories(include)
