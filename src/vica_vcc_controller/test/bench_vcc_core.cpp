@@ -26,19 +26,25 @@ int main()
 
   std::vector<double> ms;
   double v = 0.4;
+  double y = 0.0;   // 레일에서 로봇의 옆 위치. 로봇은 자기 차선을 따라간다고 본다.
   for (int i = 0; i < 1000; ++i) {
     const auto t0 = std::chrono::steady_clock::now();
-    // 매 주기 거리장을 새로 만든다(실제 플러그인과 같은 일)
+    // 매 주기 거리장을 새로 만든다(실제 플러그인과 같은 일). 로봇 좌표계라 세상은 -y 만큼 옮겨 놓는다
+    // (로봇이 서 있기만 하면 d 재동기(I4)가 d 를 계속 0 으로 되돌려 계산이 싸게 나온다).
+    const int sh = static_cast<int>(std::lround(-y / 0.05));
     field.grid().reset(-2.5, -2.5, 0.05, 100, 100);
-    for (int ix = 0; ix < 100; ++ix) {field.grid().markLethal(ix, 20); field.grid().markLethal(ix, 80);}
-    for (int iy = 48; iy < 52; ++iy) {field.grid().markLethal(74 + (i % 5), iy);}   // 움직이는 기둥
+    for (int ix = 0; ix < 100; ++ix) {field.grid().markLethal(ix, 20 + sh); field.grid().markLethal(ix, 80 + sh);}
+    for (int iy = 48; iy < 52; ++iy) {field.grid().markLethal(74 + (i % 5), iy + sh);}   // 움직이는 기둥
     field.grid().compute();
+    Path rail = path;
+    for (auto & q : rail) {q.y = -y;}
     CoreInputs in;
-    in.now = 0.1 * i; in.dt = 0.1; in.path = path; in.goal = {10, 0, 0};
+    in.now = 0.1 * i; in.dt = 0.1; in.path = rail; in.goal = {10, -y, 0};
     in.measured = {v, 0.0}; in.speed_cap = 0.5;
     in.clearance = [&field](const Pose2D & q) {return field.clearance(q);};
     const CoreOutput out = core.step(in);
     v = out.cmd.v;
+    y = out.offset;
     const auto t1 = std::chrono::steady_clock::now();
     ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
   }
