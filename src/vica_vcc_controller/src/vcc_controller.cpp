@@ -129,6 +129,12 @@ void VccController::configure(
   us_confirm_count_ = dp("us_confirm_count", 2);
   us_confirm_tol_ = dp("us_confirm_tol", 0.15);
   us_arc_points_ = dp("us_arc_points", 7);
+  core::UltrasonicParams up;
+  up.max_age = us_max_age_;
+  up.confirm_count = us_confirm_count_;
+  up.confirm_tol = us_confirm_tol_;
+  up.near_confirm_range = dp("us_near_confirm_range", 0.40);   // run48 F4b: 가까운 값은 한 번에
+  up.memory_time = dp("us_memory_time", 1.5);                  // run48 F4c: 확인된 점 기억
   publish_state_ = dp("publish_state", true);
   const std::vector<std::string> topics = dp(
     "ultrasonic_topics", std::vector<std::string>{
@@ -142,7 +148,7 @@ void VccController::configure(
   field_.setFootprint(params_.footprint);
 
   global_frame_ = costmap_ros_->getGlobalFrameID();
-  us_channels_.assign(topics.size(), core::UltrasonicChannel());
+  us_channels_.assign(topics.size(), core::UltrasonicChannel(up));
   us_subs_.clear();
   for (size_t i = 0; i < topics.size(); ++i) {
     us_subs_.push_back(node->create_subscription<sensor_msgs::msg::Range>(
@@ -307,10 +313,10 @@ void VccController::fillUltrasonic(double now)
   us_fresh_ = 0;
   for (auto & ch : us_channels_) {
     if (ch.fresh(now, us_max_age_)) {++us_fresh_;}
-    const auto r = ch.confirmed(now, us_max_age_, us_confirm_count_, us_confirm_tol_);
-    if (!r) {continue;}
-    // 받은 순간의 센서 자세로 놓는다(지금 TF 로 다시 옮기지 않는다).
-    for (const auto & q : core::readingToArcPoints(*r, us_arc_points_)) {pts.push_back(q);}
+    // 지금 확인된 값 ∪ 기억(run48 F4c). 받은 순간의 센서 자세로 놓는다(지금 TF 로 다시 옮기지 않는다).
+    for (const auto & r : ch.obstacles(now)) {
+      for (const auto & q : core::readingToArcPoints(r, us_arc_points_)) {pts.push_back(q);}
+    }
   }
   field_.setPoints(std::move(pts));
 }

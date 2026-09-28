@@ -168,3 +168,96 @@ TEST(Ultrasonic, SideChannelNewestFarFromPreviousArcIsRejected)
   ch.push(side(0.40, 10.42, 0.0));
   EXPECT_FALSE(ch.confirmed(10.45, 1.0, 2, 0.15).has_value());
 }
+
+// ── run48 F4: 노란 콘 충돌 — front_left 가 콘을 4번 봤지만 코드가 전부 버렸다 ──
+
+TEST(Ultrasonic, ContactReadingIsObstacleAtMinRange)
+{
+  // F4a: min_range(0.02) 이하 값(0.01)은 무효가 아니라 맞닿은 물체다 — min_range 에 둔다.
+  UltrasonicChannel ch;
+  ch.push(r(0.01, 10.0));
+  const auto obs = ch.obstacles(10.05);
+  ASSERT_EQ(obs.size(), 1u);
+  EXPECT_NEAR(obs[0].range, 0.02, 1e-9);
+  const auto pts = readingToArcPoints(obs[0], 3);
+  EXPECT_NEAR(pts[1].x, 0.02, 1e-9);
+}
+
+TEST(Ultrasonic, NearReadingIsConfirmedBySingleReading)
+{
+  // F4b: 0.40 m 안은 한 번에 인정한다(두 번째 프레임 0.42 s 를 기다리면 늦다).
+  // 대가: 가까운 헛 반사 한 번도 장애물로 본다(보고서에 기록).
+  UltrasonicChannel ch;
+  ch.push(r(1.5, 10.0));
+  ch.push(r(0.30, 10.42));
+  const auto obs = ch.obstacles(10.45);
+  ASSERT_EQ(obs.size(), 1u);
+  EXPECT_NEAR(obs[0].range, 0.30, 1e-9);
+}
+
+TEST(Ultrasonic, YellowConeSequenceKeepsObstacleInFront)
+{
+  // run48 재현: 콘(전역 x = 0.40)에 천천히 다가가며 0.37·0.33 확인 -> 먼 반사 1.18 -> 0.03·0.01·0.01.
+  // 먼 반사 하나가 확인을 깨고, 0.01 은 min_range 이하라 버려져 콘을 잊고 부딪혔다.
+  UltrasonicChannel ch;
+  struct S {double range, t, x;};
+  const std::vector<S> seq{{0.37, 10.0, 0.03}, {0.33, 10.42, 0.07}, {1.18, 10.84, 0.12},
+    {0.03, 11.26, 0.36}, {0.01, 11.68, 0.39}, {0.01, 12.10, 0.40}};
+  size_t k = 0;
+  for (double now = 10.40; now <= 12.50 + 1e-9; now += 0.1) {
+    while (k < seq.size() && seq[k].t <= now + 1e-9) {
+      ch.push(at(seq[k].range, seq[k].t, {seq[k].x, 0.0, 0.0}));
+      ++k;
+    }
+    if (now < 10.42) {continue;}   // 두 번째 값부터(0.33 확인)
+    const auto obs = ch.obstacles(now);
+    ASSERT_FALSE(obs.empty()) << now;
+    const Point2D c = toParent(obs.back().sensor, Point2D{obs.back().range, 0.0});
+    EXPECT_NEAR(c.x, 0.40, 0.03) << now;   // 콘 자리
+  }
+}
+
+TEST(Ultrasonic, SingleFarSpikeDoesNotEraseMemory)
+{
+  UltrasonicChannel ch;
+  ch.push(r(0.60, 10.0));
+  ch.push(r(0.60, 10.42));
+  ch.push(r(1.18, 10.84));   // 먼 반사 한 번
+  const auto obs = ch.obstacles(10.9);
+  ASSERT_EQ(obs.size(), 1u);
+  EXPECT_NEAR(obs[0].range, 0.60, 1e-9);
+}
+
+TEST(Ultrasonic, TwoConsecutiveClearReadingsEraseMemory)
+{
+  UltrasonicChannel ch;
+  ch.push(r(0.60, 10.0));
+  ch.push(r(0.60, 10.42));
+  ch.push(r(1.5, 10.84));    // 에코 없음
+  ch.push(r(1.5, 11.26));
+  EXPECT_TRUE(ch.obstacles(11.3).empty());
+  // 기억보다 멀리 본 유효값 둘(서로 어긋나 확인은 안 됨)도 지운다
+  UltrasonicChannel ch2;
+  ch2.push(r(0.60, 10.0));
+  ch2.push(r(0.60, 10.42));
+  ch2.push(r(1.00, 10.84));
+  ch2.push(r(1.30, 11.26));
+  EXPECT_TRUE(ch2.obstacles(11.3).empty());
+  // 사이에 가까운 값이 끼면 연속이 아니다
+  UltrasonicChannel ch3;
+  ch3.push(r(0.60, 10.0));
+  ch3.push(r(0.60, 10.42));
+  ch3.push(r(1.5, 10.84));
+  ch3.push(r(0.62, 11.26));
+  ch3.push(r(1.5, 11.68));
+  EXPECT_FALSE(ch3.obstacles(11.7).empty());
+}
+
+TEST(Ultrasonic, MemoryExpiresAfterMemoryTime)
+{
+  UltrasonicChannel ch;
+  ch.push(r(0.60, 10.0));
+  ch.push(r(0.60, 10.42));
+  EXPECT_FALSE(ch.obstacles(11.9).empty());   // 확인 나이 1.0 s 는 지났지만 기억 1.5 s 안
+  EXPECT_TRUE(ch.obstacles(11.95).empty());
+}

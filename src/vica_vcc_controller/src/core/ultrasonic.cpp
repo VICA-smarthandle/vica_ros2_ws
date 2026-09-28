@@ -6,14 +6,15 @@
 
 namespace vica_vcc_controller::core
 {
-void UltrasonicChannel::push(const RangeReading & r)
-{
-  hist_.push_back(r);
-  while (hist_.size() > 4) {hist_.pop_front();}
-}
-
 namespace
 {
+// 드라이버는 에코 없음을 max_range 로 발행한다(user_guidance_driver_node US_CLEAR_MM).
+bool noEcho(const RangeReading & r) {return r.range >= r.max_range - 1e-3;}
+// 장애물 값: min_range 이상(접촉은 push 에서 min_range 로 올렸다)이고 에코 없음이 아니다.
+bool isObstacle(const RangeReading & r)
+{
+  return std::isfinite(r.range) && r.range > 0.0 && r.range >= r.min_range - 1e-9 && !noEcho(r);
+}
 // 점 p 에서 측정 r 의 호(받은 순간 센서 자세 기준, 거리 range, 폭 fov)까지 가장 가까운 거리.
 // 방위가 호 안이면 반지름 차, 밖이면 가까운 끝점까지다.
 double distanceToArc(const RangeReading & r, const Point2D & p)
@@ -37,13 +38,19 @@ double distanceToArc(const RangeReading & r, const Point2D & p)
 std::optional<RangeReading> UltrasonicChannel::confirmed(
   double now, double max_age, int count, double tol) const
 {
+  // 가까운 값은 한 번에(run48 F4b). 대가: 가까운 헛 반사 한 번도 장애물로 본다.
+  if (!hist_.empty()) {
+    const RangeReading & last = hist_.back();
+    if (now - last.recv_time <= max_age && isObstacle(last) && last.range < p_.near_confirm_range) {
+      return last;
+    }
+  }
   if (count < 1 || static_cast<int>(hist_.size()) < count) {return std::nullopt;}
   const size_t first = hist_.size() - static_cast<size_t>(count);
   for (size_t i = first; i < hist_.size(); ++i) {
     const RangeReading & r = hist_[i];
     if (now - r.recv_time > max_age) {return std::nullopt;}
-    // 드라이버는 에코 없음을 max_range 로 발행한다(user_guidance_driver_node US_CLEAR_MM)
-    if (!(r.range > r.min_range && r.range < r.max_range - 1e-3)) {return std::nullopt;}
+    if (!isObstacle(r)) {return std::nullopt;}
   }
   // 연속한 두 측정마다, 새 측정의 호 중심점(전역 좌표)이 이전 측정의 호에서 tol 안이어야 한다.
   // 중심끼리 비교하면 옆 채널이 긴 벽을 지날 때 매번 벽의 다른 점을 보아 v > 0.36 m/s 에서
@@ -55,6 +62,45 @@ std::optional<RangeReading> UltrasonicChannel::confirmed(
     if (distanceToArc(hist_[i - 1], c) > tol) {return std::nullopt;}
   }
   return hist_.back();
+}
+
+void UltrasonicChannel::push(const RangeReading & in)
+{
+  RangeReading r = in;
+  if (r.range > 0.0 && r.range < r.min_range) {r.range = r.min_range;}   // 접촉(run48 F4a)
+  hist_.push_back(r);
+  while (hist_.size() > 4) {hist_.pop_front();}
+
+  // 확인되면 기억을 새 값으로 바꾼다.
+  if (confirmed(r.recv_time, p_.max_age, p_.confirm_count, p_.confirm_tol)) {
+    memory_ = r;
+    clear_count_ = 0;
+    return;
+  }
+  if (!memory_) {return;}
+  // 기억은 확인 안 된 값 하나로 지우지 않는다(run48: 먼 반사 1.18 m 하나로 콘을 잊었다). 지금 센서에서
+  // 기억한 점까지보다 tol 넘게 멀리 본 유효값(또는 에코 없음)이 2번 연속이어야 지운다.
+  const Point2D m = toParent(memory_->sensor, Point2D{memory_->range, 0.0});
+  const double d = std::hypot(m.x - r.sensor.x, m.y - r.sensor.y);
+  const bool beyond = noEcho(r) || (isObstacle(r) && r.range > d + p_.confirm_tol);
+  if (!beyond) {clear_count_ = 0; return;}
+  if (++clear_count_ >= 2) {
+    memory_.reset();
+    clear_count_ = 0;
+  }
+}
+
+std::vector<RangeReading> UltrasonicChannel::obstacles(double now) const
+{
+  std::vector<RangeReading> out;
+  const auto c = confirmed(now, p_.max_age, p_.confirm_count, p_.confirm_tol);
+  if (c) {out.push_back(*c);}
+  if (memory_ && now - memory_->recv_time <= p_.memory_time &&
+    (!c || c->recv_time != memory_->recv_time))
+  {
+    out.push_back(*memory_);
+  }
+  return out;
 }
 
 std::vector<Point2D> rangeToArcPoints(double range, double fov, int n)

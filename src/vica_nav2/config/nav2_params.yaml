@@ -423,6 +423,8 @@ controller_server:
       us_max_age: 1.0
       us_confirm_count: 2
       us_confirm_tol: 0.15
+      us_near_confirm_range: 0.40        # run48: 이보다 가까운 값은 한 번에 인정(콘 0.33 을 두 번째 프레임 기다리다 놓침)
+      us_memory_time: 1.5                # run48: 확인된 점을 1.5 s 기억 — 먼 반사 1.18 m 하나로 콘을 잊고 부딪혔다
       us_arc_points: 7
       publish_state: true
     # ══════════════════════════════════════════════════════════════════════
