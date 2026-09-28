@@ -139,16 +139,31 @@ void VccController::configure(
   core_.configure(params_);
   field_.setFootprint(params_.footprint);
 
+  global_frame_ = costmap_ros_->getGlobalFrameID();
   us_channels_.assign(topics.size(), core::UltrasonicChannel());
-  us_frames_.assign(topics.size(), "");
   us_subs_.clear();
   for (size_t i = 0; i < topics.size(); ++i) {
     us_subs_.push_back(node->create_subscription<sensor_msgs::msg::Range>(
         topics[i], rclcpp::SensorDataQoS(),
         [this, i](sensor_msgs::msg::Range::ConstSharedPtr m) {
+          // 받는 순간 센서 자세를 전역 좌표(odom)로 잡아 둔다. 최신 TF 를 쓴다(stamp 기준 조회는
+          // run44 에서 660회 무시를 낳았다). 제어 주기에 다시 옮기면 v·나이만큼 멀어 보인다(I1).
+          core::RangeReading r;
+          r.range = m->range;
+          r.min_range = m->min_range;
+          r.max_range = m->max_range;
+          r.fov = m->field_of_view;
+          r.recv_time = steadyNow();
+          if (m->header.frame_id.empty()) {return;}
+          try {
+            const auto t = tf_->lookupTransform(global_frame_, m->header.frame_id, tf2::TimePointZero);
+            r.sensor = {t.transform.translation.x, t.transform.translation.y,
+              tf2::getYaw(t.transform.rotation)};
+          } catch (tf2::TransformException &) {
+            return;
+          }
           std::lock_guard<std::mutex> lock(us_mutex_);
-          us_channels_[i].push({m->range, m->min_range, m->max_range, m->field_of_view, steadyNow()});
-          us_frames_[i] = m->header.frame_id;
+          us_channels_[i].push(r);
         }));
   }
 
@@ -282,23 +297,12 @@ void VccController::fillClearance(const geometry_msgs::msg::PoseStamped & pose)
 void VccController::fillUltrasonic(double now)
 {
   std::vector<core::Point2D> pts;
-  const std::string global = costmap_ros_->getGlobalFrameID();
   std::lock_guard<std::mutex> lock(us_mutex_);
-  for (size_t i = 0; i < us_channels_.size(); ++i) {
-    const auto r = us_channels_[i].confirmed(now, us_max_age_, us_confirm_count_, us_confirm_tol_);
-    if (!r || us_frames_[i].empty()) {continue;}
-    geometry_msgs::msg::TransformStamped t;
-    try {
-      // 최신 TF 를 쓴다(stamp 기준 조회는 run44 에서 660회 무시를 낳았다).
-      t = tf_->lookupTransform(global, us_frames_[i], tf2::TimePointZero);
-    } catch (tf2::TransformException &) {
-      continue;
-    }
-    const core::Pose2D sensor{t.transform.translation.x, t.transform.translation.y,
-      tf2::getYaw(t.transform.rotation)};
-    for (const auto & q : core::rangeToArcPoints(r->range, r->fov, us_arc_points_)) {
-      pts.push_back(core::toParent(sensor, q));
-    }
+  for (auto & ch : us_channels_) {
+    const auto r = ch.confirmed(now, us_max_age_, us_confirm_count_, us_confirm_tol_);
+    if (!r) {continue;}
+    // 받은 순간의 센서 자세로 놓는다(지금 TF 로 다시 옮기지 않는다).
+    for (const auto & q : core::readingToArcPoints(*r, us_arc_points_)) {pts.push_back(q);}
   }
   field_.setPoints(std::move(pts));
 }

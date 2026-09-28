@@ -77,7 +77,7 @@ private:
   // 초음파(구독 콜백 스레드와 제어 스레드가 공유)
   std::mutex us_mutex_;
   std::vector<core::UltrasonicChannel> us_channels_;
-  std::vector<std::string> us_frames_;
+  std::string global_frame_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr> us_subs_;
   double us_max_age_{1.0};
   int us_confirm_count_{2};
