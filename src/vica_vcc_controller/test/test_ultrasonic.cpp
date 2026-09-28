@@ -120,3 +120,51 @@ TEST(Ultrasonic, FreshMeansLatestReadingWithinMaxAge)
   EXPECT_TRUE(ch.fresh(10.9, 1.0));
   EXPECT_FALSE(ch.fresh(11.1, 1.0));
 }
+
+namespace
+{
+// 옆 채널: 센서가 +y(왼쪽)를 본다. fov 60°.
+RangeReading side(double range, double t, double x)
+{
+  RangeReading s = at(range, t, {x, 0.0, M_PI / 2});
+  s.fov = 60.0 * M_PI / 180.0;
+  return s;
+}
+}  // namespace
+
+TEST(Ultrasonic, SideChannelAlongFlatWallIsConfirmedAtCruise)
+{
+  // 0.8 m 옆 벽을 0.5 m/s 로 나란히 지난다. 0.42 s 사이 센서가 0.21 m 나아가 호 중심이 벽의 다른 점을
+  // 가리킨다(중심끼리 0.21 m). 새 중심은 이전 호 위(0.03 m 안)에 있으니 같은 면으로 인정한다.
+  UltrasonicChannel ch;
+  ch.push(side(0.80, 10.0, 0.0));
+  ch.push(side(0.80, 10.42, 0.21));
+  const auto c = ch.confirmed(10.45, 1.0, 2, 0.15);
+  ASSERT_TRUE(c.has_value());
+  EXPECT_NEAR(c->range, 0.80, 1e-9);
+}
+
+TEST(Ultrasonic, SideChannelAlongFlatWallIsConfirmedAtSlowSpeed)
+{
+  UltrasonicChannel ch;
+  ch.push(side(0.80, 10.0, 0.0));
+  ch.push(side(0.80, 10.42, 0.126));   // 0.3 m/s
+  EXPECT_TRUE(ch.confirmed(10.45, 1.0, 2, 0.15).has_value());
+}
+
+TEST(Ultrasonic, SideChannelSingleSpikeIsRejected)
+{
+  UltrasonicChannel ch;
+  ch.push(side(1.5, 10.0, 0.0));       // 에코 없음(max_range)
+  ch.push(side(0.40, 10.42, 0.21));    // 한 번 튄 값
+  EXPECT_FALSE(ch.confirmed(10.45, 1.0, 2, 0.15).has_value());
+}
+
+TEST(Ultrasonic, SideChannelNewestFarFromPreviousArcIsRejected)
+{
+  // 같은 방향에서 0.8 → 0.4: 새 중심이 이전 호에서 0.4 m 떨어져 있다.
+  UltrasonicChannel ch;
+  ch.push(side(0.80, 10.0, 0.0));
+  ch.push(side(0.40, 10.42, 0.0));
+  EXPECT_FALSE(ch.confirmed(10.45, 1.0, 2, 0.15).has_value());
+}
