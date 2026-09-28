@@ -20,6 +20,7 @@ add_library(vcc_core STATIC
   src/core/align_planner.cpp
   src/core/state_machine.cpp
   src/core/vcc_core.cpp
+  src/core/path_window.cpp
 )
 target_include_directories(vcc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -64,6 +65,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_vcc_core test/test_vcc_core.cpp)
   target_link_libraries(test_vcc_core vcc_core)
+
+  ament_add_gtest(test_path_window test/test_path_window.cpp)
+  target_link_libraries(test_path_window vcc_core)
 endif()
 
 ament_package()
