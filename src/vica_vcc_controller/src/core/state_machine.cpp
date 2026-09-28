@@ -89,7 +89,13 @@ State StateMachine::update(const StateInputs & in)
       break;
     case State::Hold:
       if (!held) {break;}
-      if (!in.lanes_blocked && !in.align_failed) {go(State::Track, in.now, "path_open");}
+      {
+        // 유턴이 필요한데 막힌 채로 Track 에 나가면 조준점이 뒤인데 앞으로 기어간다(최종 리뷰 I2).
+        const bool turn_stuck = !arrived && turnNeeded(in, p_) && in.turn_blocked;
+        if (!in.lanes_blocked && !in.align_failed && !turn_stuck) {
+          go(State::Track, in.now, "path_open");
+        }
+      }
       break;
   }
   return s_;

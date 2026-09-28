@@ -167,3 +167,35 @@ TEST(VccCore, SpeedCapFromSpeedLimitIsRespected)
   for (int i = 0; i < 30; ++i) {in.now = 1.0 + 0.1 * i; in.measured.v = v; out = c.step(in); v = out.cmd.v;}
   EXPECT_LE(out.cmd.v, 0.2 + 1e-9);
 }
+
+TEST(VccCore, BlockedUturnInNarrowCorridorStaysInHoldWithoutCreeping)
+{
+  // 최종 리뷰 I2: 0.80 m 통로에서 레일이 뒤로 — 유턴(제자리 1.25 m 필요) 불가.
+  // Hold <-> Track 을 오가며 앞으로 기어가면 안 되고, 멈춘 뒤 매 주기 Blocked 여야 한다.
+  VccCore c; c.configure(params());
+  World w;
+  w.box(-2.5, 2.5, 0.40, 0.45);
+  w.box(-2.5, 2.5, -0.45, -0.40);
+  double X = 0.0, Y = 0.0, TH = 0.0, v = 0.0, wz = 0.0;
+  for (int i = 0; i < 50; ++i) {
+    Path back;
+    for (double s = 0.0; s <= 2.0 + 1e-9; s += 0.05) {
+      const Point2D q = toChild({X, Y, TH}, Point2D{-s, 0.0});
+      back.push_back({q.x, q.y, normalizeAngle(M_PI - TH)});
+    }
+    CoreInputs in = inputs(back, w, 0.1 * i, v, wz);
+    const Point2D g = toChild({X, Y, TH}, Point2D{-2.0, 0.0});
+    in.goal = {g.x, g.y, normalizeAngle(M_PI - TH)};
+    const Pose2D R{X, Y, TH};
+    in.clearance = [&w, R](const Pose2D & q) {return w.f.clearance(toParent(R, q));};
+    const CoreOutput out = c.step(in);
+    const bool ok = out.failure == Failure::None;
+    v = ok ? out.cmd.v : 0.0;
+    wz = ok ? out.cmd.w : 0.0;
+    EXPECT_LE(v, 1e-9) << i;
+    EXPECT_EQ(out.state, State::Hold) << i;
+    EXPECT_EQ(out.failure, Failure::Blocked) << i;
+    X += v * std::cos(TH) * 0.1; Y += v * std::sin(TH) * 0.1; TH += wz * 0.1;
+  }
+  EXPECT_NEAR(X, 0.0, 1e-9);
+}

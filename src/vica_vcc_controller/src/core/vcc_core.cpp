@@ -94,6 +94,9 @@ CoreOutput VccCore::step(const CoreInputs & in)
         vdes = std::min(vdes, lanes_.speedCap());   // 차선을 옮기는 동안의 속도
         vdes = approachLimit(dist_end, vdes, sp);
         if (dist_end < in.xy_tol) {vdes = 0.0;}   // 도착 반경 안에서는 멈춘다(RPP 도 같은 자리에서 회전으로 넘어간다)
+        // 조준점이 유턴 문턱 밖(뒤쪽)이면 앞으로 가지 않는다. 최소 유지 시간 전이라도 같다 —
+        // 돌 수 있으면 곧 Turn 이 제자리에서 돌고, 막혔으면 선다(최종 리뷰 I2: 1.42 m 역주행).
+        if (need) {vdes = 0.0;}
         d.cmd = {vdes, 0.0};
         d.curvature = curvatureTo(carrot);
         break;

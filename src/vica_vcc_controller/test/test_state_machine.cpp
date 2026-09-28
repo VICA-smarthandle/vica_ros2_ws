@@ -152,3 +152,16 @@ TEST(StateMachine, BlockedTurnGoesToHold)
   in.heading_error = 90 * kDeg; in.path_heading_error = 180 * kDeg; in.turn_blocked = true;
   EXPECT_EQ(sm.update(in), State::Hold);
 }
+
+TEST(StateMachine, HoldStaysWhileTurnIsNeededButBlocked)
+{
+  // 최종 리뷰 I2: 유턴이 필요한데 막혔으면 차선이 열려 있어도 Track 으로 나가지 않는다.
+  StateMachine sm;
+  StateInputs in = base(1.0);
+  in.heading_error = 180 * kDeg; in.path_heading_error = 180 * kDeg; in.turn_blocked = true;
+  ASSERT_EQ(sm.update(in), State::Hold);
+  in.now = 2.0;
+  EXPECT_EQ(sm.update(in), State::Hold);
+  in.now = 3.0; in.turn_blocked = false;
+  EXPECT_EQ(sm.update(in), State::Track);   // 유턴이 열리면 나간다
+}
