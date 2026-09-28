@@ -40,9 +40,11 @@ struct World
   ClearanceFn fn() const {return [this](const Pose2D & p) {return f.clearance(p);};}
 };
 
-void run(LaneSelector & ls, const World & w, int cycles, double & now, double v = 0.4)
+// v = 실측 속도, v_des = 차선 제한 전 목표 속도(min(desired, speed_cap))
+void run(
+  LaneSelector & ls, const World & w, int cycles, double & now, double v = 0.4, double v_des = 0.5)
 {
-  for (int i = 0; i < cycles; ++i) {now += 0.1; ls.update(rail(), v, now, 0.1, w.fn());}
+  for (int i = 0; i < cycles; ++i) {now += 0.1; ls.update(rail(), v, v_des, now, 0.1, w.fn());}
 }
 }  // namespace
 
@@ -134,7 +136,7 @@ TEST(Lanes, NearlyEqualLanesDoNotFlipFlop)
     const double wobble = (i % 2 == 0) ? 0.01 : -0.01;
     ClearanceFn fn = [wobble](const Pose2D & p) {return 0.10 + wobble * (p.y > 0 ? 1 : -1);};
     now += 0.1;
-    ls.update(rail(), 0.4, now, 0.1, fn);
+    ls.update(rail(), 0.4, 0.5, now, 0.1, fn);
     if (ls.target() != last) {++switches; last = ls.target();}
   }
   EXPECT_LE(switches, 1);
@@ -179,4 +181,29 @@ TEST(Lanes, SyncOffsetClampsToMaxOffset)
   EXPECT_NEAR(ls.target(), 0.0, 1e-9);   // 목표는 그대로 — 복귀 규칙이 되돌린다
   ls.syncOffset(-0.9);
   EXPECT_NEAR(ls.offset(), -0.6, 1e-9);
+}
+
+TEST(Lanes, ShiftSpeedStartsFromDesiredNotMeasured)
+{
+  // run48 F1: 유턴 뒤 0.09 m/s 에서 옮김 속도 후보가 실측(0.1)부터 시작해 속도 상한이 0.1 에 묶였다
+  // (TRACK 의 31 %). 빈 복도라면 목표 속도로 옮겨도 20 cm 가 나오므로 상한이 없어야 한다.
+  World w;
+  LaneSelector ls;
+  ls.syncOffset(0.4);   // 유턴을 마치고 레일 왼쪽 0.4 m, 목표는 레일
+  double now = 0.0;
+  run(ls, w, 1, now, 0.1, 0.5);
+  ASSERT_GT(std::abs(ls.target() - ls.offset()), 0.01);   // 옮기는 중
+  EXPECT_GE(ls.speedCap(), 0.5);
+}
+
+TEST(Lanes, PoleOnRailAtLowMeasuredSpeedStillShiftsAtTwo)
+{
+  // 느리게 달리던 중(0.1)이라도 기둥을 20 cm 로 비키는 가장 빠른 옮김 속도(0.2)를 고른다.
+  World w;
+  w.box(1.5, 1.6, -0.05, 0.05);
+  LaneSelector ls;
+  double now = 0.0;
+  run(ls, w, 3, now, 0.1, 0.5);
+  EXPECT_NEAR(std::abs(ls.target()), 0.6, 1e-9);
+  EXPECT_NEAR(ls.speedCap(), 0.2, 1e-9);
 }

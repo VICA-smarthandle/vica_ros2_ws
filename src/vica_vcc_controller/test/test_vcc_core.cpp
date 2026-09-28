@@ -350,3 +350,31 @@ TEST(VccCore, AlignAttemptsSurvivePushOffAndReturn)
   ASSERT_EQ(out.state, State::Align);
   EXPECT_EQ(out.align_attempts, 2);
 }
+
+TEST(VccCore, AcceleratesWhileReturningToRailAfterUturn)
+{
+  // run48 F1: 유턴을 마치고 레일 왼쪽 0.4 m 에서 0.1 m/s. 빈 복도에서 레일로 돌아가는 동안에도
+  // 속도를 올려야 한다(옛 코드는 옮김 속도 = 실측 0.1 에 묶여 2~10 s 를 0.1 m/s 로 달렸다).
+  VccCore c; c.configure(params());
+  World w;
+  double X = 0.0, Y = 0.4, TH = 0.0, v = 0.1, wz = 0.0;
+  double t_fast = -1.0;
+  for (int i = 0; i < 20; ++i) {
+    Path rail;
+    for (double s = 0.0; s <= 3.0 + 1e-9; s += 0.05) {
+      const Point2D q = toChild({X, Y, TH}, Point2D{X + s, 0.0});
+      rail.push_back({q.x, q.y, normalizeAngle(-TH)});
+    }
+    CoreInputs in = inputs(rail, w, 0.1 * i, v, wz);
+    const Point2D g = toChild({X, Y, TH}, Point2D{X + 10.0, 0.0});
+    in.goal = {g.x, g.y, normalizeAngle(-TH)};
+    const CoreOutput out = c.step(in);
+    ASSERT_EQ(out.failure, Failure::None) << i;
+    v = out.cmd.v;
+    wz = out.cmd.w;
+    if (t_fast < 0.0 && v > 0.25) {t_fast = 0.1 * (i + 1);}
+    X += v * std::cos(TH) * 0.1; Y += v * std::sin(TH) * 0.1; TH += wz * 0.1;
+  }
+  EXPECT_GT(t_fast, 0.0);
+  EXPECT_LE(t_fast, 2.0);
+}

@@ -39,26 +39,35 @@ class LaneSelector
 public:
   explicit LaneSelector(LaneParams p = {}) : p_(p) {}
   void reset();
-  void update(const Path & path, double v, double now, double dt, const ClearanceFn & clearance);
+  // v = 실측 속도(옆 간격 진행), v_des = 차선 제한 전 목표 속도 min(desired, speed_cap).
+  // 옮김 속도 후보는 v_des 부터 고른다 — 실측에서 시작하면 느린 채 묶인다(run48 F1).
+  void update(
+    const Path & path, double v, double v_des, double now, double dt,
+    const ClearanceFn & clearance);
   double offset() const {return offset_;}
   // 실제 옆 위치로 d 를 다시 맞춘다(유턴 뒤·경로 교체 뒤). 목표는 그대로 — 복귀 규칙이 되돌린다.
   void syncOffset(double d) {offset_ = std::clamp(d, -p_.max_offset, p_.max_offset);}
   double target() const {return target_;}
   bool blocked() const {return blocked_;}
   double currentClearance() const {return current_clearance_;}
-  double speedCap() const {return std::abs(target_ - offset_) > 0.01 ? target_speed_ : 1e9;}
+  // 옮기는 중이고 고른 옮김 속도가 목표 속도보다 낮을 때만 묶는다(run48 F1).
+  double speedCap() const
+  {
+    return std::abs(target_ - offset_) > 0.01 && target_speed_ < v_des_ - 1e-9 ? target_speed_ : 1e9;
+  }
   const std::vector<LaneScore> & scores() const {return scores_;}
   Path lanePath(const Path & path, double v) const;
 
 private:
   Path candidatePath(const Path & path, double cand, double shift_speed) const;
   double minClearance(const Path & lane, const ClearanceFn & f) const;
-  LaneScore evaluate(const Path & path, double v, double cand, const ClearanceFn & f) const;
+  LaneScore evaluate(const Path & path, double v_des, double cand, const ClearanceFn & f) const;
 
   LaneParams p_;
   double offset_{0.0};
   double target_{0.0};
   double target_speed_{1e9};
+  double v_des_{1e9};
   double pending_{0.0};
   int pending_count_{0};
   double pending_since_{-1.0};

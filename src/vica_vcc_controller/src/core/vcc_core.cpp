@@ -74,8 +74,9 @@ CoreOutput VccCore::step(const CoreInputs & in)
     if (std::abs(e - lanes_.offset()) > p_.resync_offset) {lanes_.syncOffset(e);}
   }
 
-  // 차선
-  lanes_.update(in.path, v, in.now, in.dt, in.clearance);
+  // 차선. 옮김 속도 후보는 차선 제한 전 목표 속도부터(run48 F1).
+  const double v_des = std::min(p_.speed.desired, in.speed_cap);
+  lanes_.update(in.path, v, v_des, in.now, in.dt, in.clearance);
   const Path lane_path = lanes_.lanePath(in.path, v);
   const double L = lookaheadDistance(v, p_.lookahead);
   const Point2D carrot = carrotOnPath(lane_path, L);

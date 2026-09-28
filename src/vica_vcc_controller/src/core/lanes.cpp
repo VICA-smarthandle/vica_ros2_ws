@@ -14,7 +14,7 @@ bool same(double a, double b) {return std::abs(a - b) < 1e-6;}
 void LaneSelector::reset()
 {
   offset_ = target_ = pending_ = 0.0;
-  target_speed_ = 1e9;
+  target_speed_ = v_des_ = 1e9;
   pending_count_ = 0;
   pending_since_ = -1.0;
   blocked_ = false;
@@ -49,9 +49,11 @@ double LaneSelector::minClearance(const Path & lane, const ClearanceFn & f) cons
 }
 
 LaneScore LaneSelector::evaluate(
-  const Path & path, double v, double cand, const ClearanceFn & f) const
+  const Path & path, double v_des, double cand, const ClearanceFn & f) const
 {
-  const double v_ref = std::max(std::abs(v), p_.min_transition_speed);
+  // 첫 후보는 목표 속도다. 실측 속도에서 시작하면 옮기는 동안 그 속도에 묶여 가속하지 못한다
+  // (run48: 유턴 뒤 0.1 m/s 로 2~10 s, TRACK 의 31 %).
+  const double v_ref = std::max(v_des, p_.min_transition_speed);
   std::vector<double> speeds{v_ref};
   for (double sp : p_.shift_speeds) {
     if (sp < v_ref - 1e-9) {speeds.push_back(sp);}
@@ -72,12 +74,13 @@ LaneScore LaneSelector::evaluate(
 }
 
 void LaneSelector::update(
-  const Path & path, double v, double now, double dt, const ClearanceFn & f)
+  const Path & path, double v, double v_des, double now, double dt, const ClearanceFn & f)
 {
+  v_des_ = v_des;
   scores_.clear();
   const int n = static_cast<int>(std::round(p_.max_offset / p_.step));
   // 동점이면 먼저 나온 쪽 — 오른쪽(음수)부터 채점해 우측 통행을 고른다.
-  for (int i = -n; i <= n; ++i) {scores_.push_back(evaluate(path, v, i * p_.step, f));}
+  for (int i = -n; i <= n; ++i) {scores_.push_back(evaluate(path, v_des, i * p_.step, f));}
 
   const LaneScore * best = nullptr;
   const LaneScore * cur = nullptr;
