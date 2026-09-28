@@ -1,0 +1,5 @@
+<library path="vica_vcc_controller">
+  <class type="vica_vcc_controller::VccController" base_class_type="nav2_core::Controller">
+    <description>VCC — 레일 추종 + 차선 고르기 + 상황 4개 (VICA 자작)</description>
+  </class>
+</library>

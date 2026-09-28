@@ -6,6 +6,19 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
 # 순수 계산은 ROS 에 의존하지 않는다 — 시험이 노드·TF 없이 돈다(vica_nav2_bt_plugins 와 같은 모양).
 add_library(vcc_core STATIC
@@ -28,46 +41,37 @@ target_include_directories(vcc_core PUBLIC
 target_compile_features(vcc_core PUBLIC cxx_std_17)
 set_target_properties(vcc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-install(TARGETS vcc_core ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+# controller_server 가 pluginlib 로 여는 .so. 이름이 vcc_plugins.xml 의 library path 다.
+add_library(vica_vcc_controller SHARED src/vcc_controller.cpp)
+target_link_libraries(vica_vcc_controller vcc_core)
+ament_target_dependencies(vica_vcc_controller
+  rclcpp rclcpp_lifecycle pluginlib nav2_core nav2_costmap_2d nav2_util nav_msgs
+  geometry_msgs sensor_msgs std_msgs tf2 tf2_ros tf2_geometry_msgs)
+target_compile_definitions(vica_vcc_controller PRIVATE PLUGINLIB__DISABLE_BOOST_FUNCTIONS)
+pluginlib_export_plugin_description_file(nav2_core vcc_plugins.xml)
+
+install(TARGETS vcc_core vica_vcc_controller
+  ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
+install(FILES vcc_plugins.xml DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_geometry test/test_geometry.cpp)
-  target_link_libraries(test_geometry vcc_core)
+  foreach(t geometry clearance pure_pursuit speed_profile output_stage ultrasonic
+      lanes turn_planner align_planner state_machine vcc_core path_window)
+    ament_add_gtest(test_${t} test/test_${t}.cpp)
+    target_link_libraries(test_${t} vcc_core)
+  endforeach()
+  ament_add_gtest(test_vcc_plugin test/test_vcc_plugin.cpp)
+  target_link_libraries(test_vcc_plugin vica_vcc_controller)
+  ament_target_dependencies(test_vcc_plugin rclcpp rclcpp_lifecycle nav2_costmap_2d nav2_core tf2_ros)
 
-  ament_add_gtest(test_clearance test/test_clearance.cpp)
-  target_link_libraries(test_clearance vcc_core)
-
-  ament_add_gtest(test_pure_pursuit test/test_pure_pursuit.cpp)
-  target_link_libraries(test_pure_pursuit vcc_core)
-
-  ament_add_gtest(test_speed_profile test/test_speed_profile.cpp)
-  target_link_libraries(test_speed_profile vcc_core)
-
-  ament_add_gtest(test_output_stage test/test_output_stage.cpp)
-  target_link_libraries(test_output_stage vcc_core)
-
-  ament_add_gtest(test_ultrasonic test/test_ultrasonic.cpp)
-  target_link_libraries(test_ultrasonic vcc_core)
-
-  ament_add_gtest(test_lanes test/test_lanes.cpp)
-  target_link_libraries(test_lanes vcc_core)
-
-  ament_add_gtest(test_turn_planner test/test_turn_planner.cpp)
-  target_link_libraries(test_turn_planner vcc_core)
-
-  ament_add_gtest(test_align_planner test/test_align_planner.cpp)
-  target_link_libraries(test_align_planner vcc_core)
-
-  ament_add_gtest(test_state_machine test/test_state_machine.cpp)
-  target_link_libraries(test_state_machine vcc_core)
-
-  ament_add_gtest(test_vcc_core test/test_vcc_core.cpp)
-  target_link_libraries(test_vcc_core vcc_core)
-
-  ament_add_gtest(test_path_window test/test_path_window.cpp)
-  target_link_libraries(test_path_window vcc_core)
+  # add_executable(bench_vcc_core test/bench_vcc_core.cpp)
+  # target_link_libraries(bench_vcc_core vcc_core)
+  # install(TARGETS bench_vcc_core RUNTIME DESTINATION lib/${PROJECT_NAME})
 endif()
 
+ament_export_include_directories(include)
+ament_export_libraries(vica_vcc_controller)
+ament_export_dependencies(rclcpp rclcpp_lifecycle nav2_core nav2_costmap_2d nav2_util pluginlib)
 ament_package()
