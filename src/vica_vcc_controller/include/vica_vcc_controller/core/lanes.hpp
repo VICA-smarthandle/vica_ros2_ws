@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include "vica_vcc_controller/core/clearance.hpp"
@@ -40,6 +41,8 @@ public:
   void reset();
   void update(const Path & path, double v, double now, double dt, const ClearanceFn & clearance);
   double offset() const {return offset_;}
+  // 실제 옆 위치로 d 를 다시 맞춘다(유턴 뒤·경로 교체 뒤). 목표는 그대로 — 복귀 규칙이 되돌린다.
+  void syncOffset(double d) {offset_ = std::clamp(d, -p_.max_offset, p_.max_offset);}
   double target() const {return target_;}
   bool blocked() const {return blocked_;}
   double currentClearance() const {return current_clearance_;}

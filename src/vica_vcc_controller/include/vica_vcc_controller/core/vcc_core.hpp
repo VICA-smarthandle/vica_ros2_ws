@@ -24,6 +24,7 @@ struct CoreParams
   double stop_margin{0.05};
   double stationary_speed{0.05};
   double stationary_time{0.5};
+  double resync_offset{0.15};    // 실제 옆 위치와 d 가 이만큼 어긋나면 d 를 다시 맞춘다(최종 리뷰 I4)
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -55,6 +56,12 @@ struct CoreOutput
   const char * reason{""};
   Path lane_path;
 };
+
+// 이번 주기 명령 (v, w) 를 멈출 때까지 그대로 이어 간다고 보고, 그 호 위에서 몸통이 닿는지 본다
+// (RPP isCollisionImminent 와 같은 태도, 최종 리뷰 I4). 시간 = max(v/감속, |w|/각감속) + 지연.
+bool motionCollides(
+  const Twist2D & cmd, const ClearanceFn & f, double max_decel, double max_ang_accel,
+  double stop_latency);
 
 class VccCore
 {

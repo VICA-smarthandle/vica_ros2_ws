@@ -5,6 +5,26 @@
 
 namespace vica_vcc_controller::core
 {
+bool motionCollides(
+  const Twist2D & cmd, const ClearanceFn & f, double max_decel, double max_ang_accel,
+  double stop_latency)
+{
+  const double v = std::max(0.0, cmd.v), w = cmd.w;
+  if (v < 1e-6 && std::abs(w) < 1e-6) {return false;}
+  // 직진 v/감속, 제자리 |w|/각감속 — 둘 다 있으면 긴 쪽(보수적). 거리 0.05 m·각 0.05 rad 마다 본다.
+  const double t = std::max(v / max_decel, std::abs(w) / max_ang_accel) + stop_latency;
+  const int n = std::max(
+    1, static_cast<int>(std::ceil(std::max(v * t, std::abs(w) * t) / 0.05)));
+  for (int i = 1; i <= n; ++i) {
+    const double tau = t * i / n;
+    const double th = w * tau;
+    Pose2D p{v * tau, 0.0, th};
+    if (std::abs(w) > 1e-6) {p = {v / w * std::sin(th), v / w * (1.0 - std::cos(th)), th};}
+    if (f(p) < 0.0) {return true;}
+  }
+  return false;
+}
+
 void VccCore::configure(const CoreParams & p)
 {
   p_ = p;
@@ -43,6 +63,15 @@ CoreOutput VccCore::step(const CoreInputs & in)
     stopped_since_ = -1.0;
   }
   const bool stationary = stopped_since_ >= 0.0 && in.now - stopped_since_ >= p_.stationary_time;
+
+  // 차선 d 를 실제 옆 위치에 다시 맞춘다: 경로 첫 점의 접선 기준 로봇의 옆 거리(왼쪽 +).
+  // reset 뒤 0, 유턴 뒤 약 2R, 레일<->당근 경로 교체 뒤 어긋난 d 를 그대로 두면 차선 검사가 로봇이
+  // 아닌 곳을 본다(최종 리뷰 I4).
+  if (!in.path.empty()) {
+    const Pose2D & p0 = in.path.front();
+    const double e = p0.x * std::sin(p0.yaw) - p0.y * std::cos(p0.yaw);
+    if (std::abs(e - lanes_.offset()) > p_.resync_offset) {lanes_.syncOffset(e);}
+  }
 
   // 차선
   lanes_.update(in.path, v, in.now, in.dt, in.clearance);
@@ -121,7 +150,17 @@ CoreOutput VccCore::step(const CoreInputs & in)
   }
 
   out.cmd = output_.apply(d, v, in.dt);
-  out.state = s;
+
+  // 이번에 실제로 내보낼 (v, w) 의 호를 멈출 때까지 검사한다 — 움직이는 모든 상황(Track·Turn·Align).
+  // 위 차선 경로 검사는 Track 에서 그대로 둔다(최종 리뷰 I4).
+  if (!imminent && s != State::Hold &&
+    motionCollides(out.cmd, in.clearance, p_.output.max_decel, p_.output.max_ang_accel,
+    p_.stop_latency))
+  {
+    imminent = true;
+    sm_.forceHold(in.now, "motion_collision");
+  }
+  out.state = sm_.state();
   out.offset = lanes_.offset();
   out.target = lanes_.target();
   out.lanes_blocked = lanes_.blocked();
@@ -133,7 +172,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   if (imminent) {
     out.failure = Failure::CollisionAhead;
     out.cmd = {0.0, 0.0};
-    output_.reset();
+    output_.reset(in.measured);
   } else if (align_.phase() == AlignPhase::Failed) {
     out.failure = Failure::AlignFailed;
   } else if (s == State::Hold && std::abs(v) < p_.stationary_speed) {

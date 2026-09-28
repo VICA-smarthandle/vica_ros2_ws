@@ -170,3 +170,13 @@ TEST(Lanes, TieGoesRight)
   run(ls, w, 3, now);
   EXPECT_LT(ls.target(), 0.0);
 }
+
+TEST(Lanes, SyncOffsetClampsToMaxOffset)
+{
+  LaneSelector ls;
+  ls.syncOffset(0.4);
+  EXPECT_NEAR(ls.offset(), 0.4, 1e-9);
+  EXPECT_NEAR(ls.target(), 0.0, 1e-9);   // 목표는 그대로 — 복귀 규칙이 되돌린다
+  ls.syncOffset(-0.9);
+  EXPECT_NEAR(ls.offset(), -0.6, 1e-9);
+}

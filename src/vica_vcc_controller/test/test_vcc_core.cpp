@@ -253,3 +253,39 @@ TEST(VccCore, NewGoalLeavesHoldAndResetsAlign)
   EXPECT_EQ(out.state, State::Track);
   EXPECT_EQ(out.align_attempts, 0);
 }
+
+TEST(VccCore, MotionProjectionCatchesWallOnTurningArc)
+{
+  // 최종 리뷰 I4: 차선 경로(직선)로는 비어 있어도, 실제로 나가는 (v, w) 호 위 벽을 잡는다.
+  World w;
+  w.box(0.30, 0.40, 0.33, 0.40);
+  const ClearanceFn f = w.fn();
+  for (const auto & ps : pathPrefix(line(0.0, 0.0), 0.5)) {ASSERT_GE(f(ps), 0.0);}
+  EXPECT_TRUE(motionCollides({0.4, 0.5}, f, 1.25, 1.2, 0.3));
+  EXPECT_FALSE(motionCollides({0.4, 0.0}, f, 1.25, 1.2, 0.3));
+  EXPECT_FALSE(motionCollides({0.4, -0.5}, f, 1.25, 1.2, 0.3));
+  EXPECT_FALSE(motionCollides({0.0, 0.0}, f, 1.25, 1.2, 0.3));
+}
+
+TEST(VccCore, MotionProjectionCatchesRearSweepOfPureRotation)
+{
+  // 제자리 회전: 각 = |w|·(|w|/각가속 + 지연). 오른쪽 뒤 모서리(반지름 0.58)가 도는 쪽 벽을 쓸고 간다.
+  World w;
+  w.box(-0.75, -0.30, -0.40, -0.30);
+  const ClearanceFn f = w.fn();
+  ASSERT_GE(f({0.0, 0.0, 0.0}), 0.0);
+  EXPECT_TRUE(motionCollides({0.0, 0.35}, f, 1.25, 1.2, 0.3));
+  EXPECT_FALSE(motionCollides({0.0, -0.35}, f, 1.25, 1.2, 0.3));
+}
+
+TEST(VccCore, OffsetResyncsToRobotAfterUturnExit)
+{
+  // 최종 리뷰 I4: 유턴을 마치고 레일에서 0.4 m 왼쪽에 나왔다. 차선 d 가 실제 위치로 다시 맞춰지고
+  // 차선 경로가 로봇에서 시작해야 한다(d = 0 이면 차선 검사가 로봇이 아닌 레일 위를 본다).
+  VccCore c; c.configure(params());
+  World w;
+  const CoreOutput out = c.step(inputs(line(-0.4, 0.0), w, 1.0, 0.1));
+  EXPECT_NEAR(out.offset, 0.4, 0.011);
+  ASSERT_FALSE(out.lane_path.empty());
+  EXPECT_NEAR(out.lane_path.front().y, 0.0, 0.011);
+}

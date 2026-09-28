@@ -39,6 +39,8 @@ public:
   explicit StateMachine(StateParams p = {}) : p_(p) {}
   void reset();
   State update(const StateInputs & in);
+  // 안전 대기: 최소 유지 시간을 무시한다(명령 호 충돌 예측, 최종 리뷰 I4).
+  void forceHold(double now, const char * why) {go(State::Hold, now, why);}
   State state() const {return s_;}
   const char * reason() const {return reason_;}
 
