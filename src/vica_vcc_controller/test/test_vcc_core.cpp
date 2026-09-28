@@ -289,3 +289,21 @@ TEST(VccCore, OffsetResyncsToRobotAfterUturnExit)
   ASSERT_FALSE(out.lane_path.empty());
   EXPECT_NEAR(out.lane_path.front().y, 0.0, 0.011);
 }
+
+TEST(VccCore, BlockedAlignSweepHoldsWithoutRotating)
+{
+  // 최종 리뷰 I5: 150° 를 왼쪽으로 돌면 오른쪽 뒤 모서리(반지름 0.58)가 y = -0.58 까지 쓸고 간다.
+  // 그 안쪽 0.13 m 에 벽이 있으면 돌기 시작하지 않고 Hold, 멈춘 뒤 Blocked.
+  VccCore c; c.configure(params());
+  World w;
+  w.box(-0.60, 0.30, -0.55, -0.45);
+  ASSERT_GE(w.fn()({0.0, 0.0, 0.0}), 0.0);
+  for (int i = 0; i < 20; ++i) {
+    CoreInputs in = inputs(line(0.0, 0.0, 0.1), w, 1.0 + 0.1 * i, 0.0);
+    in.goal = {0.1, 0.0, 150.0 * M_PI / 180.0};
+    const CoreOutput out = c.step(in);
+    EXPECT_EQ(out.state, State::Hold) << i;
+    EXPECT_EQ(out.cmd.w, 0.0) << i;
+    EXPECT_EQ(out.failure, Failure::Blocked) << i;
+  }
+}

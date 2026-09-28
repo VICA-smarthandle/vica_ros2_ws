@@ -165,3 +165,20 @@ TEST(StateMachine, HoldStaysWhileTurnIsNeededButBlocked)
   in.now = 3.0; in.turn_blocked = false;
   EXPECT_EQ(sm.update(in), State::Track);   // 유턴이 열리면 나간다
 }
+
+TEST(StateMachine, BlockedAlignRotationGoesToHold)
+{
+  // 설계서 6.1 ③->④ "회전 원 막힘"(최종 리뷰 I5). 도착했는데 돌 자리가 없으면 돌기 시작하지 않는다.
+  StateMachine sm;
+  StateInputs in = base(1.0);
+  in.dist_to_end = 0.1; in.yaw_error_end = 150 * kDeg; in.align_blocked = true;
+  EXPECT_EQ(sm.update(in), State::Hold);   // Track -> Align 대신 Hold
+  in.now = 3.0;
+  EXPECT_EQ(sm.update(in), State::Hold);   // 막힌 동안 나가지 않는다
+  in.now = 3.1; in.align_blocked = false;
+  EXPECT_EQ(sm.update(in), State::Track);
+  in.now = 3.2;
+  EXPECT_EQ(sm.update(in), State::Align);
+  in.now = 3.25; in.align_blocked = true;
+  EXPECT_EQ(sm.update(in), State::Hold);   // 정렬 중 막히면 최소 유지 시간 없이 Hold
+}

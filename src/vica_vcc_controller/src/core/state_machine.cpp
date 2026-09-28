@@ -63,7 +63,12 @@ State StateMachine::update(const StateInputs & in)
   switch (s_) {
     case State::Track:
       if (in.lanes_blocked) {go(State::Hold, in.now, "lanes_blocked"); break;}
-      if (arrived && yaw_off) {go(State::Align, in.now, "arrived_yaw_off"); break;}
+      if (arrived && yaw_off) {
+        if (in.align_blocked) {go(State::Hold, in.now, "align_blocked");} else {
+          go(State::Align, in.now, "arrived_yaw_off");
+        }
+        break;
+      }
       if (!held) {break;}
       if (!arrived && turnNeeded(in, p_)) {
         if (in.turn_blocked) {go(State::Hold, in.now, "turn_blocked");} else {
@@ -74,6 +79,7 @@ State StateMachine::update(const StateInputs & in)
     case State::Turn:
       if (in.turn_blocked) {go(State::Hold, in.now, "turn_blocked"); break;}
       if (arrived) {
+        if (yaw_off && in.align_blocked) {go(State::Hold, in.now, "align_blocked"); break;}
         go(yaw_off ? State::Align : State::Track, in.now, "arrived_during_turn");
         break;
       }
@@ -82,6 +88,8 @@ State StateMachine::update(const StateInputs & in)
       break;
     case State::Align:
       if (in.align_failed) {go(State::Hold, in.now, "align_failed"); break;}
+      // 회전 원 막힘(설계서 6.1 ③->④) — 안전 전환이라 최소 유지 시간을 기다리지 않는다.
+      if (in.align_blocked) {go(State::Hold, in.now, "align_blocked"); break;}
       if (!held) {break;}
       if (in.dist_to_end > in.xy_tol + p_.align_exit_margin) {
         go(State::Track, in.now, "pushed_off_goal");
@@ -92,7 +100,8 @@ State StateMachine::update(const StateInputs & in)
       {
         // 유턴이 필요한데 막힌 채로 Track 에 나가면 조준점이 뒤인데 앞으로 기어간다(최종 리뷰 I2).
         const bool turn_stuck = !arrived && turnNeeded(in, p_) && in.turn_blocked;
-        if (!in.lanes_blocked && !in.align_failed && !turn_stuck) {
+        const bool align_stuck = arrived && yaw_off && in.align_blocked;
+        if (!in.lanes_blocked && !in.align_failed && !turn_stuck && !align_stuck) {
           go(State::Track, in.now, "path_open");
         }
       }

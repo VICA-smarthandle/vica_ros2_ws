@@ -29,6 +29,7 @@ struct StateInputs
   bool turn_blocked{false};
   bool collision_imminent{false};
   bool align_failed{false};
+  bool align_blocked{false};       // 도착 정렬 회전 원이 막힘(설계서 6.1 ③->④)
 };
 
 bool turnNeeded(const StateInputs & in, const StateParams & p);

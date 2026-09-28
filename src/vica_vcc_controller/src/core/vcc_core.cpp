@@ -105,8 +105,16 @@ CoreOutput VccCore::step(const CoreInputs & in)
   si.collision_imminent = imminent;
   si.align_failed = align_.phase() == AlignPhase::Failed;
 
-  // 유턴 계획은 필요할 때만(계산량 고정)
   const State s0 = sm_.state();
+  // 도착 정렬 회전 원: 남은 각만큼 제자리로 돌 때 몸이 쓸고 가는 자리(설계서 6.1 ③->④, 최종 리뷰 I5).
+  // yaw 가 허용오차 안이면 돌 일이 없으므로 보지 않는다(도착한 채 Blocked 를 던지지 않게).
+  if (std::abs(yaw_err) > in.yaw_tol && (s0 == State::Align || dist_end < in.xy_tol)) {
+    si.align_blocked = simulateTurnClearance(
+      std::abs(yaw_err), 0.0, yaw_err >= 0.0 ? 1 : -1, 0.0, in.clearance, p_.turn.sample_angle) <
+      p_.turn.clearance;
+  }
+
+  // 유턴 계획은 필요할 때만(계산량 고정)
   const bool need = turnNeeded(si, p_.state);
   if (s0 == State::Turn || (need && (s0 == State::Track || s0 == State::Hold))) {
     const bool pivot_first = s0 == State::Turn ? turn_.mode == TurnMode::Pivot :
