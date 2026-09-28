@@ -14,7 +14,9 @@ struct OutputParams
   double ramp_a1{0.5};        //   0 -> 0.25 를 0.5 s
   double accel{0.143};        //   0.25 -> 0.5 를 1.75 s, 코너 뒤 재가속도 같다
   double max_decel{1.25};     // velocity_smoother max_decel[0]. 제동은 완화하지 않는다
-  double resync_margin{0.05};
+  // 실측 + 이만큼 위로만 명령을 앞세운다. 모터 지연 0.45 s x 램프 0.5 m/s^2 ≈ 0.23 보다 작으면
+  // 매 주기 되감긴다(run48: 0.05 로 톱니, 0 -> 0.25 에 0.85 s). ROS 파라미터 resync_margin.
+  double resync_margin{0.15};
 };
 
 struct Desired

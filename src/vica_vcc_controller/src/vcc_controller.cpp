@@ -89,6 +89,7 @@ void VccController::configure(
   p.output.ramp_v1 = dp("start_ramp_speed", 0.25);
   p.output.ramp_a1 = dp("start_ramp_accel", 0.5);
   p.output.accel = dp("linear_accel", 0.143);
+  p.output.resync_margin = dp("resync_margin", 0.15);   // run48 F3: 모터 지연 0.45 s
   p.speed.min_speed = dp("min_speed", 0.12);
   p.speed.curve_min_radius = dp("curve_min_radius", 1.2);
   p.speed.curve_decel = dp("curve_decel", 0.3);

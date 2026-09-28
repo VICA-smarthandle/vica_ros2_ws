@@ -383,6 +383,7 @@ controller_server:
       start_ramp_speed: 0.25             # 요구 8: 절반까지 살짝(0.5 s)
       start_ramp_accel: 0.5
       linear_accel: 0.143                # 0.25 -> 0.5 를 1.75 s
+      resync_margin: 0.15                # run48: 0.05 는 모터 지연 0.45 s 에 매번 되감겨 톱니(0 -> 0.25 에 0.85 s)
       min_speed: 0.12                    # RPP regulated_linear_scaling_min_speed
       curve_min_radius: 1.2              # RPP regulated_linear_scaling_min_radius
       curve_decel: 0.3                   # 코너 미리 줄이기
