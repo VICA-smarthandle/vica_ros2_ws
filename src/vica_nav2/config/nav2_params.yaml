@@ -360,6 +360,70 @@ controller_server:
     #                            내릴지 CPU 를 재고 정한다. 지금은 2개뿐이라 그대로.
     # ═══════════════════════════════════════════════════════════════════════
     # ══════════════════════════════════════════════════════════════════════
+    # [2026-09-24] 자작 컨트롤러 VCC (vica_vcc_controller). 설계서:
+    #   VICA-smarthandle docs/superpowers/specs/2026-09-24-vcc-controller-design.md
+    # 평소 = RPP 식 레일 조준, 장애물 = 차선 13개 중 옮기기(0.10 m/s), 유턴 = R 0.2 -> 0.1 -> 제자리,
+    # 도착 = 남은 각 한 번(모터 지연만큼 일찍 끊음, 최대 3회). 몸통 검사는 LETHAL 거리장 — inflation 과 무관.
+    # 초음파는 이 플러그인이 /ultrasonic/* 를 직접 읽는다(1 s 안·연속 2회 일치). local costmap range 층은 끔.
+    # [되돌리기] 이 블록 이름을 FollowPathVCC 로, FollowPathRPP 를 FollowPath 로. range 층 4개 enabled True.
+    # ══════════════════════════════════════════════════════════════════════
+    FollowPath:
+      plugin: "vica_vcc_controller::VccController"
+      # 경로 창(FeasiblePathHandler 개념, core/path_window). 가까운 점 찾기 범위 = 지금 RPP 와 같은 3.0.
+      max_robot_pose_search_dist: 3.0
+      reject_unit_path: false            # 1점 경로 거부. 켜면 run35 식 '1점 끝 방향 성공'이 '주행 불가'로 바뀐다(사용자 결정 대기)
+      desired_linear_vel: 0.5            # RPP 와 같은 물리 상한
+      lookahead_time: 2.5                # RPP 값 — run36 직진 최고
+      min_lookahead_dist: 0.6            # run39
+      max_lookahead_dist: 1.2            # run36: 레일 노드 1 m 를 건너뛴다
+      transform_tolerance: 0.2
+      max_angular_vel: 0.5               # smoother max_velocity[2] 와 같음
+      max_angular_accel: 1.2             # RPP 값
+      max_linear_decel: 1.25             # smoother max_decel[0] — 제동 완화 금지
+      start_ramp_speed: 0.25             # 요구 8: 절반까지 살짝(0.5 s)
+      start_ramp_accel: 0.5
+      linear_accel: 0.143                # 0.25 -> 0.5 를 1.75 s
+      min_speed: 0.12                    # RPP regulated_linear_scaling_min_speed
+      curve_min_radius: 1.2              # RPP regulated_linear_scaling_min_radius
+      curve_decel: 0.3                   # 코너 미리 줄이기
+      preview_dist: 1.5
+      slow_clearance: 0.35               # RPP cost_scaling_dist 와 같은 값, 직접 잰 거리
+      approach_velocity_scaling_dist: 0.6
+      min_approach_linear_velocity: 0.05
+      lane_max_offset: 0.6               # 요구 3
+      lane_step: 0.1
+      lane_shift_speeds: [0.3, 0.2, 0.1] # 차선 옮기는 동안 달릴 속도 후보 — 20 cm 가 나오는 가장 빠른 것
+      avoid_horizon: 1.5                 # 요구 1: 먼 사람 무시
+      target_clearance: 0.20             # 요구 4: 15~20 cm
+      w_clear: 10.0                      # 가중치 근거: vica_vcc_controller test_lanes 시나리오
+      w_rail: 1.0
+      w_change: 0.5
+      switch_margin: 0.05
+      switch_persist_cycles: 3
+      lane_rate: 0.10                    # 손잡이 0.115 m/s 탈락선 아래(backlog §11)
+      return_clear_time: 1.0
+      turn_enter_angle: 1.047            # 60도 (요구 2)
+      turn_exit_angle: 0.436             # 25도
+      pivot_start_angle: 0.611           # 35도 (정지 출발)
+      turn_radii: [0.2, 0.1]             # DWB 최소 ≈ 0.2, 0630 통로 1.3 m
+      turn_clearance: 0.05
+      turn_angular_vel: 0.45             # DWB U턴 실측 0.42~0.47
+      pivot_angular_vel: 0.35            # RPP rotate_to_heading_angular_vel
+      align_angular_vel: 0.35
+      motor_lag: 0.35                    # run41 지연 0.3~0.5 s [추정] — 매 정렬 실측으로 갱신
+      align_settle: 0.3
+      align_max_attempts: 3
+      min_state_time: 0.5
+      clearance_window: 5.0              # 1.5 m 앞 + 몸 0.62 m 를 덮는다(local costmap 6 m 안)
+      reset_gap: 0.5
+      ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right",
+                          "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
+      us_max_age: 1.0
+      us_confirm_count: 2
+      us_confirm_tol: 0.15
+      us_arc_points: 7
+      publish_state: true
+    # ══════════════════════════════════════════════════════════════════════
     # RPP (Regulated Pure Pursuit) — 2026-09-21. MPPI 는 FollowPathMPPI 로 보존.
     #
     # 왜 넘어왔나 (MPPI 열한 회차 뒤)
@@ -398,7 +462,8 @@ controller_server:
     # [되돌리기] FollowPathMPPI 를 FollowPath 로 이름만 바꾸면 된다. DWB 는
     #   FollowPathDWB 로 그대로 있다.
     # ══════════════════════════════════════════════════════════════════════
-    FollowPath:
+    # [2026-09-24] VCC 전환으로 보존. 되돌리기: 이 이름을 FollowPath 로, 아래 VCC 블록을 FollowPathVCC 로.
+    FollowPathRPP:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       # MPPI vx_max 와 같은 값 — A/B 가 성립하려면 물리 상한이 같아야 한다.
       desired_linear_vel: 0.5
@@ -1523,7 +1588,7 @@ local_costmap:
       # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
       range_sensor_front_left:   # 2번 앞 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
         topics: ["/ultrasonic/front_left"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1531,7 +1596,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
         topics: ["/ultrasonic/front_right"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1539,7 +1604,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
         topics: ["/ultrasonic/left_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1547,7 +1612,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_right_wheel:   # 4번 오른쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
+        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
         topics: ["/ultrasonic/right_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -45,6 +46,20 @@ def _controller_limits(params):
     """
     controller = params['controller_server']['ros__parameters']
     fp = controller['FollowPath']
+    if 'vcc' in fp['plugin'].lower():
+        # 2026-09-24 VCC 전환. VCC 는 자기 출력단에 한계를 갖는다(설계서 7절).
+        # 직진 가속은 출발 램프의 앞 구간(start_ramp_accel)이 가장 세다.
+        gc = controller['general_goal_checker']
+        return {
+            'plugin_family': 'vcc',
+            'max_vel_x': fp['desired_linear_vel'],
+            'min_vel_x': 0.0,   # 출력단이 v 를 [0, max] 로 자른다 — 후진 없음
+            'max_vel_theta': fp['max_angular_vel'],
+            'acc_lim_x': fp['start_ramp_accel'], 'decel_lim_x': -fp['max_linear_decel'],
+            'acc_lim_theta': fp['max_angular_accel'], 'decel_lim_theta': -fp['max_angular_accel'],
+            'xy_goal_tolerance': gc['xy_goal_tolerance'],
+            'trans_stopped_velocity': gc['trans_stopped_velocity'],
+        }
     if 'purepursuit' in fp['plugin'].lower().replace('_', ''):
         gc = controller['general_goal_checker']
         sm = params['velocity_smoother']['ros__parameters']
@@ -256,3 +271,30 @@ def test_stopping_distance_is_documented_against_padding():
         f'정지거리 {stopping_distance:.3f} m가 padding {padding} m 이하로'
         f' 계산됐다. 실측 지연이 줄었다면 driver_delay_sec를 갱신하라'
     )
+
+
+def test_vcc_limits_match_the_smoother():
+    """VCC 출력단 한계가 velocity_smoother 와 어긋나면 한쪽이 다른 쪽 계획을 깎는다.
+
+    회전 상한은 smoother 와 같고 좌우 대칭이어야 한다(손잡이 끝 0.62 m/s 문제, yaml 2567-2577).
+    직선 제동은 smoother max_decel 과 같아야 한다 — 제동은 완화하지 않는다(yaml 2606-2612).
+    """
+    params = _load_params()
+    fp = params['controller_server']['ros__parameters']['FollowPath']
+    if 'vcc' not in fp['plugin'].lower():
+        pytest.skip('VCC 가 활성 컨트롤러가 아니다')
+    sm = params['velocity_smoother']['ros__parameters']
+    assert fp['max_angular_vel'] <= sm['max_velocity'][2]
+    assert sm['min_velocity'][2] == -sm['max_velocity'][2]
+    assert fp['max_linear_decel'] == abs(sm['max_decel'][0])
+    assert fp['desired_linear_vel'] <= sm['max_velocity'][0]
+    # 차선 이동 속도는 손잡이 0.115 m/s 탈락선(backlog §11) 아래
+    assert fp['lane_rate'] < 0.115
+
+
+def test_rpp_is_preserved_for_one_line_rollback():
+    params = _load_params()
+    controller = params['controller_server']['ros__parameters']
+    assert 'FollowPathRPP' in controller
+    assert 'purepursuit' in controller['FollowPathRPP']['plugin'].lower().replace('_', '')
+    assert controller['controller_plugins'] == ['FollowPath']

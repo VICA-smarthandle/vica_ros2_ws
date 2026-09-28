@@ -15,6 +15,7 @@
   <!-- planner_server가 런타임에 로드하는 GridBased plugin. -->
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>vica_localization</exec_depend>
+  <exec_depend>vica_vcc_controller</exec_depend>
   <!-- pose_bootstrap_node. 앱에서 Nav2 초기 위치를 잡는다. -->
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
