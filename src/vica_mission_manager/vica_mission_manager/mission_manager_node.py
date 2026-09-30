@@ -37,7 +37,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
-from vica_interfaces.msg import PersonDetection
+from vica_interfaces.msg import PersonDetection, SmartHandleState
 from vica_interfaces.srv import (
     DeleteHome,
     GetHome,
@@ -54,12 +54,21 @@ from .home_storage import HomeStorage, build_home
 from .ledger import Ledger, LedgerStore, apply_goal_event, confirm_abort_name, state_fields
 from .map_meta import load_map_meta
 from .mission_logic import (
+    DIALOG_PAUSED_HANDLE,
+    GRIP_ENTER_WINDOW_SEC,
+    GRIP_HINT_PULSE_SEC,
+    GRIP_RATIO,
+    GRIP_RELEASE_GRACE_SEC,
+    GRIP_RESUME_WINDOW_SEC,
+    GRIP_WAIT_TIMEOUT_SEC,
+    HANDLE_LOST_GIVE_UP_SEC,
+    HANDLE_LOST_REPEAT_SEC,
     HANDLE_SIDE_MIN_YAW_RAD,
+    HANDLE_STATE_STALE_SEC,
     Haptic,
     MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_QUESTION,
     MSG_DEST_RETRY,
-    MSG_HANDLE_HINT,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
     PERSON_APPROACH_SPEED_PERCENT,
@@ -191,6 +200,18 @@ class MissionManagerNode(Node):
         # 도착 후 대화(arrival-dialog-flow). 기본 on (2026-08-30 사용자 결정) —
         # 도착 후 유형별 질문·대기·홈 복귀가 동작한다. 끄려면 :=false.
         self.declare_parameter("arrival_dialog", True)
+        # 손잡이 터치 × 진동 (2026-09-30). 뜻과 근거는 mission_logic 의 같은
+        # 이름 상수 주석(GRIP_* · HANDLE_*)에 있다. 정본 설계:
+        # docs/superpowers/specs/2026-09-28-touch-haptic-integration-final.md 5절.
+        self.declare_parameter("grip_enter_window_sec", GRIP_ENTER_WINDOW_SEC)
+        self.declare_parameter("grip_ratio", GRIP_RATIO)
+        self.declare_parameter("grip_wait_timeout_sec", GRIP_WAIT_TIMEOUT_SEC)
+        self.declare_parameter("grip_hint_pulse_sec", GRIP_HINT_PULSE_SEC)
+        self.declare_parameter("grip_release_grace_sec", GRIP_RELEASE_GRACE_SEC)
+        self.declare_parameter("grip_resume_window_sec", GRIP_RESUME_WINDOW_SEC)
+        self.declare_parameter("handle_lost_repeat_sec", HANDLE_LOST_REPEAT_SEC)
+        self.declare_parameter("handle_lost_give_up_sec", HANDLE_LOST_GIVE_UP_SEC)
+        self.declare_parameter("handle_state_stale_sec", HANDLE_STATE_STALE_SEC)
 
         dest_path = str(self.get_parameter("destinations_yaml").value)
         if not dest_path:
@@ -278,7 +299,17 @@ class MissionManagerNode(Node):
             auto_return_home=bool(self.get_parameter("auto_return_home").value),
             person_approach_speed_percent=float(
                 self.get_parameter("person_approach_speed_percent").value),
+            **{name: float(self.get_parameter(name).value) for name in (
+                "grip_enter_window_sec", "grip_ratio", "grip_wait_timeout_sec",
+                "grip_hint_pulse_sec", "grip_release_grace_sec",
+                "grip_resume_window_sec", "handle_lost_repeat_sec",
+                "handle_lost_give_up_sec", "handle_state_stale_sec")},
         )
+        self.get_logger().info(
+            "손잡이: 잡기 "
+            f"{self.logic.grip_enter_window_sec:.1f}s 중 {self.logic.grip_ratio:.0%} · "
+            f"대기 {self.logic.grip_wait_timeout_sec:.0f}s · "
+            f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지")
         if arrival_dialog:
             self.get_logger().info(
                 f"도착 후 대화: 켜짐 · 홈={'있음' if home else '없음(제자리 대기)'}")
@@ -398,6 +429,16 @@ class MissionManagerNode(Node):
             callback_group=self._main_group,
         )
 
+        # 손잡이 터치(2026-09-30). 드라이버가 2 Hz 주기 + 바뀐 순간 즉시 낸다.
+        # 사실만 적고 판정(잡기·놓침)은 _tick → logic.on_tick 이 한다.
+        self.create_subscription(
+            SmartHandleState, "/vica/smart_handle_state",
+            lambda msg: self.logic.on_handle_state(
+                msg.user_contact, msg.uplink_fresh, self._now()),
+            10,
+            callback_group=self._main_group,
+        )
+
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
         # 취소·앱 선점의 큐 청소(StopSpeech)는 tts_request 의 제어 메시지
         # "control:stop" 으로 보낸다 — 별도 토픽(tts_stop)은 뒤이어 시키는
@@ -406,9 +447,9 @@ class MissionManagerNode(Node):
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
         self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
-        # 손잡이 진동 요청 (2026-09-10). 진동 모터는 아직 미장착이라 지금은
-        # 받는 쪽이 없지만, 장착되면 그대로 동작하도록 미리 배선해 둔다 —
-        # user_guidance_driver_node 가 /vica/haptic_request 를 구독한다.
+        # 손잡이 진동 요청 (2026-09-10, 2026-09-30 확장). "long"(손잡이 찾기)·
+        # "tick"(잡음 확인)을 낸다. user_guidance_driver_node 가 구독해 바이트로
+        # 바꾼다. 도착·비상 진동은 여기서 내지 않는다 — 펌웨어가 상태 진입 때 낸다.
         self.pub_haptic = self.create_publisher(String, "/vica/haptic_request", 10)
         self.pub_state = self.create_publisher(RobotState, "/vica/robot_state", 10)
         self.pub_goal_event = self.create_publisher(String, "/vica_goal_event", 10)
@@ -613,10 +654,8 @@ class MissionManagerNode(Node):
         """
         if MSG_APPROACH_QUESTION in msg.data:
             self.logic.on_approach_question_spoken(self._now())
-        # 손잡이 힌트 재생이 끝난 시점에만 진동을 낸다(I-2) — 힌트와 같은
-        # 순간에 내면 1200ms 진동이 TTS 큐에서 밀린 멘트보다 먼저 끝난다.
-        if MSG_HANDLE_HINT in msg.data:
-            self._run_actions(self.logic.on_handle_hint_spoken(self._now()))
+        # 손잡이 힌트는 재생 완료를 기다리지 않는다 — 진동이 힌트와 같은 순간
+        # 시작해 잡을 때까지 이어진다(2026-09-30, 09-11 I-2 장치 폐기).
         # 온보딩·되묻기 재생이 끝난 시점부터 답 대기 15초를 센다(2026-09-11).
         # 로직이 사다리 중이 아니면 무시하므로 이중 방어다.
         if MSG_APPROACH_ONBOARDING in msg.data or MSG_DEST_RETRY in msg.data:
@@ -1356,7 +1395,11 @@ class MissionManagerNode(Node):
         distance = (
             self._nav_distance_remaining() if status == NavStatus.RUNNING else None
         )
-        actions = self.logic.on_tick(self._now(), status, distance)
+        # Nav2 준비 여부는 손 놓침 뒤 자동 재출발에만 쓴다 — 그때만 묻는다.
+        nav_ready = (self._nav2_ready()
+                     if self.logic.dialog_state == DIALOG_PAUSED_HANDLE else True)
+        dialog_before = self.logic.dialog_state
+        actions = self.logic.on_tick(self._now(), status, distance, nav_ready=nav_ready)
         # 대장(P1): 확인 대기(CONFIRMING)였다가 출발 없이 접혔으면(거절·시간초과·호출로 접음)
         # 그 목적지가 "하려다 만 곳"이다. 전이표는 ledger.confirm_abort_name (순수
         # 함수, 최종 리뷰 6절 M4) — 여기는 결과만 복사·저장한다.
@@ -1376,6 +1419,13 @@ class MissionManagerNode(Node):
             # 시작·종료). /vica/robot_state 1 Hz 의 최대 1초 지연을 즉시
             # 갱신으로 회수한다 — _on_wake_doa 와 같은 이유(2026-09-10 재검토).
             self._publish_robot_state()
+        elif dialog_before != self.logic.dialog_state:
+            # 손잡이 대화 단계(grip_wait·paused_handle)가 바뀌었다. 손 놓쳐 선
+            # 사용자가 곧바로 "왜 안 가요?"라고 물을 수 있어 1 Hz 를 기다리지 않는다.
+            self.get_logger().info(
+                f"손잡이: {dialog_before} → {self.logic.dialog_state} "
+                f"(활성={self.logic.handle_active})")
+            self._publish_robot_state()
 
     def _publish_robot_state(self) -> None:
         msg = RobotState()
@@ -1392,8 +1442,10 @@ class MissionManagerNode(Node):
         msg.is_moving = self.logic.state in (State.NAVIGATING, State.SEEKING)
         # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
         msg.is_paused = self.logic.state == State.PAUSED
+        # dialog_state 는 state.value 에 손잡이 두 단계(grip_wait·paused_handle)를
+        # 더한 것이다(2026-09-30, 설계 4.7). is_paused 의 뜻은 그대로다.
         fields = state_fields(
-            self._ledger, self.logic.state.value, self._robot_pose, self._pose_cov_xy,
+            self._ledger, self.logic.dialog_state, self._robot_pose, self._pose_cov_xy,
             self.destinations, now_epoch=time.time(),
             wait_minutes=self.logic.wait_minutes_requested(),
             wait_left_sec=self.logic.wait_left_sec(self._now()),

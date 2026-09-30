@@ -135,6 +135,13 @@ def generate_launch_description() -> LaunchDescription:
             # 예고한다(실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 —
             # 근거는 mission_logic.DEST_RETRY_RETURN_SEC 주석.
             DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
+            # 손잡이 터치 × 진동 (2026-09-30). 실기에서 조정할 두 값만 인자로 연다
+            # — 나머지(2초 중 80 %·반복 15 s·포기 180 s)는 노드 기본값이다.
+            # grip_release_grace_sec: 이만큼 계속 놓으면 선다. **고쳐 잡기 공백을
+            # bag 으로 잰 뒤 확정할 값**(설계 7절 4번) — 실측 전 활성 주행 금지.
+            DeclareLaunchArgument("grip_release_grace_sec", default_value="0.5"),
+            # grip_wait_timeout_sec: 손잡이 안내 뒤 이만큼 못 잡으면 비활성으로 온보딩.
+            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="15.0"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -196,6 +203,14 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "dest_retry_return_sec": ParameterValue(
                             LaunchConfiguration("dest_retry_return_sec"),
+                            value_type=float,
+                        ),
+                        "grip_release_grace_sec": ParameterValue(
+                            LaunchConfiguration("grip_release_grace_sec"),
+                            value_type=float,
+                        ),
+                        "grip_wait_timeout_sec": ParameterValue(
+                            LaunchConfiguration("grip_wait_timeout_sec"),
                             value_type=float,
                         ),
                     }

@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Optional, Sequence, Union
 
 from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
+from .grip_meter import GripMeter
 
 # 하드 긴급어: 즉시 goal 취소 + estopped 진입 (LLM 우회 경로).
 # "천천히/느리게/잠깐" 등 감속·유보 계열은 v2 (TODOS.md #6) — 여기서는 무시한다.
@@ -238,8 +239,9 @@ class Haptic:
     """손잡이 진동 요청. 노드가 패턴 이름을 그대로 /vica/haptic_request 에
     발행한다 — 이 모듈은 그 토픽도, 값을 해석하는 펌웨어도 모른다.
 
-    쓸 수 있는 패턴은 드라이버가 아는 두 개뿐이다("short"/"long", 2026-09-10
-    사용자 결정 — HAPTIC_PATTERN_HANDLE_HINT 참고).
+    쓸 수 있는 패턴은 드라이버가 아는 셋이다("short"/"long"/"tick",
+    user_guidance_driver_node.HAPTIC_PATTERNS). 미션은 "long"(손잡이 찾기)과
+    "tick"(잡음 확인)만 낸다 — 도착·비상 진동은 펌웨어가 상태 진입 때 스스로 낸다.
     """
 
     pattern: str
@@ -398,15 +400,55 @@ DEST_PROMPT_FALLBACK_SEC = 40.0
 # 예고한다(0). launch `dest_retry_return_sec` 로 늘릴 수 있다.
 DEST_RETRY_RETURN_SEC = 0.0
 
-# 손잡이 위치 안내 (사용자 승인 문구, 2026-09-10 사용자 결정). 회전 여부와
-# 무관하게 수락 직후·온보딩 직전에 항상 나간다 — 회전해서 손잡이를 내준
-# 경우도 시각장애인은 그 사실을 알 방법이 없다. 같은 순간 HAPTIC_PATTERN_
-# HANDLE_HINT 진동이 울려야 "진동이 나는 곳"이 거짓말이 되지 않는다.
-MSG_HANDLE_HINT = "손잡이는 지금 계신 쪽에 있습니다. 진동이 나는 곳을 잡아주세요."
-# 진동 드라이버가 아는 패턴은 "short"/"long" 둘뿐이다
-# (user_guidance_driver_node.HAPTIC_PATTERNS). 손잡이를 찾는 신호라 짧은
-# 진동은 지나치기 쉬워 "long" 을 쓴다.
+# ── 손잡이 터치 × 진동 (2026-09-30) ─────────────────────────────────────────
+# 정본: docs/superpowers/specs/2026-09-28-touch-haptic-integration-final.md.
+# 손잡이는 "쥐고 있는 동안만 로봇이 걷는 줄"이다. 수락 뒤 잡기 대기에서 잡으면
+# 활성 모드(손을 놓으면 선다), 못 잡으면 비활성 모드(놓아도 간다). 두 모드의
+# 주행 방식은 같다 — 다른 것은 "놓으면 서는가" 하나다(설계 D9).
+#
+# 손잡이 위치 안내 (사용자 문구 2026-09-28, D7). 회전 여부와 무관하게 수락 직후
+# 나간다 — 회전해서 손잡이를 내준 경우도 시각장애인은 그 사실을 알 방법이 없다.
+# 진동은 이 멘트와 **같은 순간** 시작해 잡을 때까지 GRIP_HINT_PULSE_SEC 마다
+# 이어진다. 그래서 "진동하고 있습니다"가 거짓말이 되지 않는다 — 09-11 의 "힌트
+# 재생이 끝난 뒤 진동"(I-2) 장치는 문구가 바뀌며 필요가 없어져 걷어냈다.
+MSG_HANDLE_HINT = "손잡이가 진동하고 있습니다. 잡아주세요."
+# 주행 중 손을 놓쳐 섰을 때(09-03 사용자 문구). 음성 저장소에 이 글자 그대로
+# 구운 음성(handle_grip_lost.wav)이 있다 — 구운 판은 문장 전체 대조라 **마침표를
+# 붙이면 안 쓰인다.** '정지'·'멈춰'가 없어 긴급어 자가 트리거도 없다.
+MSG_HANDLE_LOST = "안전을 위해 손잡이를 다시 잡아주세요"
+# 활성 주행 중 핸들 상향이 끊겼을 때. 음성 replies.HANDLE_UNAVAILABLE 과 같은 글자
+# (구운 음성 reply_handle_unavailable.wav 있음). 끊기면 다시 잡아도 알 길이 없어
+# 세우지 않고 비활성으로 계속 간다(설계 4.3 (라)).
+MSG_HANDLE_UNAVAILABLE = "손잡이 연결에 문제가 있어 일반 안내로 진행합니다."
+# 손잡이를 찾는 신호. 짧은 진동은 지나치기 쉬워 긴 진동을 쓴다.
 HAPTIC_PATTERN_HANDLE_HINT = "long"
+# "잡은 걸 알아챘다"(D5). 도착(짧게 ×3)과 횟수로 구별된다. 진행 중인 긴 진동을
+# 덮어써 곧바로 끊는 역할도 한다(펌웨어 hapticStart 는 새 명령이 이긴다).
+HAPTIC_PATTERN_GRIP_ACK = "tick"
+# 잡음 판정: 최근 2초 중 80 % 이상 접촉(D1). 비율은 시간으로 잰다(grip_meter).
+GRIP_ENTER_WINDOW_SEC = 2.0
+GRIP_RATIO = 0.8
+# 잡기 대기 상한. 넘으면 비활성으로 온보딩한다(D2). 청취 창 15초와 맞췄다.
+GRIP_WAIT_TIMEOUT_SEC = 15.0
+# 대기 중 긴 진동(1.2 s) 반복 간격 — 1.2 켜짐 + 0.8 쉼으로 "계속 떨리는" 느낌.
+GRIP_HINT_PULSE_SEC = 2.0
+# 이만큼 계속 놓으면 선다. 0.408 m/s 에서 약 0.2 m. **고쳐 잡기 공백 bag 실측으로
+# 확정할 값이다**(설계 7절 4번) — 실측 전 활성 주행 금지.
+GRIP_RELEASE_GRACE_SEC = 0.5
+# 선 뒤 다시 잡았다고 볼 창. 진입(2초)보다 짧게 — 이미 한 번 잡았던 사람이다.
+GRIP_RESUME_WINDOW_SEC = 1.0
+# 출발 순간 "쥐고 있나"를 볼 창. 잡기 대기를 거치지 않은 출발에 쓴다(4.3 (나)).
+GRIP_DEPART_WINDOW_SEC = 0.5
+# 놓침 안내 반복 간격과 포기 시한(실기 조정값).
+HANDLE_LOST_REPEAT_SEC = 15.0
+HANDLE_LOST_GIVE_UP_SEC = 180.0
+# 미션 쪽 신선도 시한. SmartHandleState 주기 2 Hz 의 두 배.
+HANDLE_STATE_STALE_SEC = 1.0
+# LLM 상황판(RobotState.dialog_state)에 내는 값(D10, 설계 4.7). 손 놓침으로 선
+# 것과 "잠깐"으로 선 것이 둘 다 paused 로 보이면 LLM 이 "다시 가자라고
+# 말하세요"라고 엉뚱하게 답한다. 음성 저장소 ledger_view.DIALOG_KO 가 번역한다.
+DIALOG_GRIP_WAIT = "grip_wait"
+DIALOG_PAUSED_HANDLE = "paused_handle"
 
 # 남은 거리를 알리는 지점(미터). 눈으로 확인할 수 없는 사용자가 도착을 미리
 # 준비할 수 있게 하려는 것이므로, 자주 말하기보다 접근 시점만 짚는다.
@@ -518,12 +560,10 @@ REAPPROACH_SUPPRESS_SEC = 60.0
 # 그대로다.
 #
 # [임시방편] 이 판정의 참뜻은 "사용자가 지금 손잡이를 잡고 있는가"이고,
-# 정답은 터치센서(SmartHandleState.user_contact)다. 그 센서는 지금 하드웨어
-# 결함으로 꺼져 있고(handle-touch-sensor-resume 메모리), 고장이 위험한
-# 쪽으로 난다 — 신호가 안 오면 규약상 항상 false, 즉 "아무도 안 잡았다"로
-# 읽힌다. 그래서 지금은 시간(+되감기)으로 어림한다. 터치센서가 살아나도 이
-# 상수는 지워지는 게 아니라 **덧대는** 조건이 된다 — 시간이 지나도 센서가
-# 여전히 접촉을 본다면 억제를 풀면 안 된다.
+# 정답은 터치센서(SmartHandleState.user_contact)다. 2026-09-30 부터 그 조건을
+# **덧댔다**(user_attached_guard_active) — 60초가 지나도 센서가 접촉을 보는
+# 동안은 억제를 풀지 않는다. 시계는 지우지 않는다: 센서 고장은 위험한 쪽으로
+# 난다(신호가 안 오면 규약상 false = "아무도 안 잡았다").
 USER_ATTACHED_SUPPRESS_SEC = 60.0
 # 근접 호출(2026-09-10 확장). 탐색 창(IDLE + _seek_deadline) 중 detection_gate 가
 # 거리 하나만으로 TOO_NEAR 거절한 결과(stable=true·approachable=false·
@@ -890,6 +930,15 @@ class MissionLogic:
         return_resume_sec: float = RETURN_RESUME_SEC,
         handle_side_min_yaw_rad: float = HANDLE_SIDE_MIN_YAW_RAD,
         dest_retry_return_sec: float = DEST_RETRY_RETURN_SEC,
+        grip_enter_window_sec: float = GRIP_ENTER_WINDOW_SEC,
+        grip_ratio: float = GRIP_RATIO,
+        grip_wait_timeout_sec: float = GRIP_WAIT_TIMEOUT_SEC,
+        grip_hint_pulse_sec: float = GRIP_HINT_PULSE_SEC,
+        grip_release_grace_sec: float = GRIP_RELEASE_GRACE_SEC,
+        grip_resume_window_sec: float = GRIP_RESUME_WINDOW_SEC,
+        handle_lost_repeat_sec: float = HANDLE_LOST_REPEAT_SEC,
+        handle_lost_give_up_sec: float = HANDLE_LOST_GIVE_UP_SEC,
+        handle_state_stale_sec: float = HANDLE_STATE_STALE_SEC,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -1009,12 +1058,34 @@ class MissionLogic:
         # 사람을 훑는다. _near_call_no_spin(회전 생략 여부)과는 뜻이 달라
         # 겹쳐 쓰지 않는다.
         self._never_approached: bool = False
-        # 손잡이 힌트(MSG_HANDLE_HINT) 재생이 끝나면 진동을 내야 하는가(I-2,
-        # 2026-09-11). `Haptic` 을 힌트와 같은 순간에 내면 1200ms 진동이 TTS
-        # 큐에서 밀린 멘트보다 먼저 끝나 "진동이 나는 곳"이 거짓말이 된다 —
-        # on_approach_question_spoken 과 같은 방식으로, 노드가 재생 완료를
-        # 알려줄 때(on_handle_hint_spoken)까지 여기 담아 둔다.
-        self._pending_handle_hint: bool = False
+
+        # ── 손잡이 터치 × 진동 (2026-09-30, 상수 절 주석 참고) ─────────────
+        self.grip_enter_window_sec = grip_enter_window_sec
+        self.grip_ratio = grip_ratio
+        self.grip_wait_timeout_sec = grip_wait_timeout_sec
+        self.grip_hint_pulse_sec = grip_hint_pulse_sec
+        self.grip_release_grace_sec = grip_release_grace_sec
+        self.grip_resume_window_sec = grip_resume_window_sec
+        self.handle_lost_repeat_sec = handle_lost_repeat_sec
+        self.handle_lost_give_up_sec = handle_lost_give_up_sec
+        # 접촉 사실은 노드가 /vica/smart_handle_state 로 넣어 준다(on_handle_state).
+        self._grip = GripMeter(stale_sec=handle_state_stale_sec)
+        # 지금 주행이 활성 모드(손을 놓으면 섬)인가. 출발 순간에 정한다.
+        self.handle_active: bool = False
+        # 이 사용자가 잡기 대기를 통과했는가. 온보딩 → 목적지 확인 → 출발까지
+        # 이어지는 한 사람의 안내 동안 유효하다(_decide_handle_mode). _to_idle 은
+        # 지우지 않는다 — 확인 시간초과처럼 IDLE 을 거쳐 다시 목적지를 말하는
+        # 사람도 같은 사람이다. 대신 60초 자물쇠(user_attached_guard_active)가
+        # 살아 있을 때만 믿는다 — 떠난 뒤 다른 사람이 부른 안내에 번지지 않게.
+        self._handle_engaged: bool = False
+        # 잡기 대기(IDLE 의 하위 단계). 시작 시각이 None 이 아니면 대기 중이다.
+        self._grip_wait_since: Optional[float] = None
+        self._grip_pulse_at: Optional[float] = None
+        # 지금의 PAUSED 가 손 놓침 때문인가. "잠깐"으로 선 PAUSED 는 쥐고 있어도
+        # 자동 출발하지 않는다 — 자동 재출발은 이 값이 True 일 때만이다(설계 4.3 (다)).
+        self._handle_pause: bool = False
+        self._handle_lost_since: Optional[float] = None
+        self._handle_lost_notice_at: Optional[float] = None
         # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
         self._estop_announced = False
 
@@ -1107,7 +1178,13 @@ class MissionLogic:
         self._forget_dest_prompt()
         if intent.intent != "navigate":
             # 질문/잡담 등은 LLM(reply)과 ros_tts_node 몫 — 여기선 관여하지 않는다.
+            # 잡기 대기 중의 "손잡이 어디 있어요?"도 여기로 온다 — 대기는 그대로 둔다.
             return []
+        if self._grip_wait_since is not None:
+            # 잡기 전에 목적지부터 말했다. 대기를 접고 평소처럼 처리한다 —
+            # 모드는 출발 순간에 정한다(_decide_handle_mode, 설계 4.3 (가)).
+            self._grip_wait_since = None
+            self._grip_pulse_at = None
 
         if self.state == State.ESTOPPED:
             return [Say(MSG_ESTOP_REJECT, priority="response")]
@@ -1164,6 +1241,7 @@ class MissionLogic:
         assert dest is not None  # check_gate 가 보장
         self.state = State.NAVIGATING
         self.active_destination = dest
+        self.handle_active = self._decide_handle_mode(now)
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._announced_milestones = set()
@@ -1272,6 +1350,8 @@ class MissionLogic:
             actions.append(CancelNav(self.active_destination))
         self._reset_arrival_dialog()
         self._to_idle()   # 보관 목적지·재시도 예약·확인 대기까지 전부 정리
+        # 앱 선점·전체 취소 뒤의 주행은 손잡이 사용자의 안내가 아니다.
+        self._handle_engaged = False
         # 끊긴 복귀 재개 사다리도 함께 청산한다(2026-09-10 사용자 결정) —
         # 앱 선점·취소는 사용자가 명시적으로 내린 지시라, 그 뒤 로봇이
         # 서 있는 것은 정당하다.
@@ -1352,7 +1432,23 @@ class MissionLogic:
         return actions, GateReason.OK
 
     def on_pause_request(self, now: float) -> tuple:
-        """일시정지. goal 을 취소하되 목적지는 보관해 재개할 수 있게 둔다."""
+        """일시정지("잠깐"·앱). goal 을 취소하되 목적지는 보관해 재개할 수 있게 둔다.
+
+        손 놓침으로 선 PAUSED 에서 "잠깐"이 오면 말로 재개하는 보통 일시정지로
+        바꾼다 — 이제 쥐고 있어도 자동으로 출발하지 않는다(설계 4.3 (다)).
+        """
+        if self.state == State.PAUSED and self._handle_pause:
+            self._clear_handle_pause()
+            return [Say(MSG_PAUSED, priority="response")], GateReason.OK
+        actions, reason = self._enter_paused(now)
+        if reason != GateReason.OK:
+            return [], reason
+        self._clear_handle_pause()
+        actions.append(Say(MSG_PAUSED, priority="response"))
+        return actions, GateReason.OK
+
+    def _enter_paused(self, now: float) -> tuple:
+        """goal 을 취소하고 목적지를 보관한다. 멘트는 부르는 쪽이 붙인다."""
         reason = check_pause_gate(
             self.state, self.estop_active, returning_home=self._returning_home
         )
@@ -1379,16 +1475,25 @@ class MissionLogic:
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
-        actions.append(Say(MSG_PAUSED, priority="response"))
         return actions, GateReason.OK
 
     def on_resume_request(self, nav_ready: bool, now: float) -> tuple:
-        """다시 출발. 보관한 목적지로 새 goal 을 만든다."""
+        """다시 출발. 보관한 목적지로 새 goal 을 만든다.
+
+        손 놓침으로 선 뒤의 재개는 두 길이다. 다시 잡아 자동으로(_handle_pause_tick)
+        오면 활성 그대로 간다. 안 잡은 채 "다시 가자"로 오면 비활성으로 간다 —
+        활성으로 두면 0.5초 만에 또 서는 반복이 된다(설계 4.3 (다)).
+        """
         reason = check_resume_gate(
             self.state, self.paused_destination, self.estop_active, nav_ready
         )
         if reason != GateReason.OK:
             return [], reason
+        if self._handle_pause:
+            if not self._holding(now, self.grip_resume_window_sec,
+                                 since=self._handle_lost_since):
+                self.handle_active = False
+            self._clear_handle_pause()
 
         destination = self.paused_destination
         assert destination is not None  # check_resume_gate 가 보장
@@ -1529,23 +1634,142 @@ class MissionLogic:
         self._response_deadline = now + self.approach_response_timeout_sec
         return []
 
-    def on_handle_hint_spoken(self, now: float) -> list:
-        """손잡이 위치 안내(MSG_HANDLE_HINT) 재생이 끝났다 — 이 순간 진동을
-        낸다(I-2, 2026-09-11).
+    # -- 손잡이 터치 × 진동 (2026-09-30) -----------------------------------------
 
-        `Haptic` 을 힌트와 같은 순간에 내면 HAPTIC_CMD_LONG 1200ms 가 TTS
-        큐에서 밀린 문구보다 먼저 끝나 "진동이 나는 곳을 잡아주세요"가
-        재생될 즈음엔 이미 멎어 있다. on_approach_question_spoken 과 같은
-        방식으로, 재생 시간은 TTS 만 알 수 있어 노드가 문구 대조로 이
-        시점을 알려준다 — 상태기계는 여기서도 ROS 를 모른다.
+    def on_handle_state(self, contact: bool, fresh: bool, now: float) -> None:
+        """/vica/smart_handle_state 한 건. 사실만 적고 판정은 on_tick 이 한다."""
+        self._grip.update(now, contact, fresh)
 
-        `_pending_handle_hint` 가 없으면(힌트를 낸 적이 없거나 이미
-        소비했으면) 아무 일도 하지 않는다 — 이중 발사 방지.
+    @property
+    def dialog_state(self) -> str:
+        """LLM 상황판에 내는 대화 단계(RobotState.dialog_state).
+
+        대부분 state.value 그대로다. 두 곳만 더 잘게 가른다(설계 4.7) — 잡기
+        대기(IDLE 의 하위 단계)와 손 놓침 PAUSED. is_paused 의 뜻은 그대로다.
         """
-        if not self._pending_handle_hint:
+        if self.state == State.IDLE and self._grip_wait_since is not None:
+            return DIALOG_GRIP_WAIT
+        if self.state == State.PAUSED and self._handle_pause:
+            return DIALOG_PAUSED_HANDLE
+        return self.state.value
+
+    def _holding(self, now: float, window: float, since: Optional[float] = None) -> bool:
+        return (self._grip.fresh(now)
+                and self._grip.ratio(now, window, since=since) >= self.grip_ratio)
+
+    def _decide_handle_mode(self, now: float) -> bool:
+        """음성으로 시작한 안내의 출발 순간 — 활성 모드인가(설계 4.3 (나)).
+
+        잡기 대기를 통과한 사람이면 활성이다. 출발 순간 잠깐 손을 뗐더라도
+        활성으로 두는 쪽이 안전하다 — 0.5초 뒤 서서 "다시 잡아주세요"라고
+        말할 뿐, 시각장애인을 두고 떠나지 않는다. 대기를 거치지 않았으면
+        출발 순간 쥐고 있는지만 본다. 센서가 끊겨 있으면 늘 비활성이다.
+        """
+        if not self._grip.fresh(now):
+            return False
+        if self._handle_engaged and self.user_attached_guard_active(now):
+            return True
+        return self._holding(now, GRIP_DEPART_WINDOW_SEC)
+
+    def _start_grip_wait(self, now: float) -> list:
+        """수락 뒤 손잡이를 내준 순간(회전 완료·실패·생략). 힌트 + 진동.
+
+        온보딩("어디로 가고 싶으신가요?")은 아직 말하지 않는다 — 잡거나
+        시간이 다 되면 _finish_grip_wait 가 말한다(D2). 센서가 없거나 끊겨
+        있으면 기다릴 수단이 없으니 곧장 비활성으로 온보딩한다 — touch_enabled
+        false 인 로봇에서는 09-11 흐름(힌트 → 진동 → 온보딩)과 같아진다.
+        """
+        self._handle_engaged = False
+        actions: list = [
+            Haptic(HAPTIC_PATTERN_HANDLE_HINT),
+            Say(MSG_HANDLE_HINT, priority="response"),
+        ]
+        if not self._grip.fresh(now):
+            actions.extend(self._finish_grip_wait(now, engaged=False))
+            return actions
+        self._grip_wait_since = now
+        self._grip_pulse_at = now
+        return actions
+
+    def _finish_grip_wait(self, now: float, engaged: bool) -> list:
+        self._grip_wait_since = None
+        self._grip_pulse_at = None
+        self._handle_engaged = engaged
+        actions: list = []
+        if engaged:
+            actions.append(Haptic(HAPTIC_PATTERN_GRIP_ACK))
+        # 온보딩 질문을 던지는 자리 — 빈손 되묻기 사다리를 켠다.
+        self._arm_dest_prompt(now)
+        actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
+                           expects_reply=True))
+        return actions
+
+    def _grip_wait_tick(self, now: float) -> list:
+        since = self._grip_wait_since
+        assert since is not None
+        if not self._grip.fresh(now):
+            # 대기 중 상향이 끊겼다 — 잡아도 알 길이 없다. 비활성으로 넘긴다.
+            return self._finish_grip_wait(now, engaged=False)
+        if self._holding(now, self.grip_enter_window_sec, since=since):
+            return self._finish_grip_wait(now, engaged=True)
+        if now - since >= self.grip_wait_timeout_sec:
+            return self._finish_grip_wait(now, engaged=False)
+        if (self._grip_pulse_at is not None
+                and now - self._grip_pulse_at >= self.grip_hint_pulse_sec):
+            self._grip_pulse_at = now
+            return [Haptic(HAPTIC_PATTERN_HANDLE_HINT)]
+        return []
+
+    def _handle_nav_tick(self, now: float) -> list:
+        """활성 주행 중 손 놓침·상향 두절을 본다. NAVIGATING·주행 중에만 부른다."""
+        if not self._grip.fresh(now):
+            # 두절은 놓침이 아니다 — 세우면 다시 잡아도 알 길이 없어 영원히
+            # 못 간다. 비활성으로 내리고 계속 간다(4.3 (라)). 손잡이 당김
+            # 감속(knob)은 CAN 경로라 그대로 살아 있다.
+            self.handle_active = False
+            return [Say(MSG_HANDLE_UNAVAILABLE, priority="response")]
+        if self._grip.released_for(now) < self.grip_release_grace_sec:
             return []
-        self._pending_handle_hint = False
-        return [Haptic(HAPTIC_PATTERN_HANDLE_HINT)]
+        actions, reason = self._enter_paused(now)
+        if reason != GateReason.OK:
+            return []
+        self._handle_pause = True
+        self._handle_lost_since = now
+        self._handle_lost_notice_at = now
+        actions.append(Haptic(HAPTIC_PATTERN_HANDLE_HINT))
+        actions.append(Say(MSG_HANDLE_LOST, priority="response"))
+        return actions
+
+    def _handle_pause_tick(self, now: float, nav_ready: bool) -> list:
+        """손 놓침으로 선 PAUSED. 다시 잡으면 출발, 오래 안 잡으면 끝낸다."""
+        lost_since = self._handle_lost_since
+        assert lost_since is not None
+        if not self._grip.fresh(now):
+            # 서 있는 중에 상향이 끊겼다. 다시 잡아도 알 길이 없으므로 말로
+            # 재개하는 보통 일시정지로 바꾼다. 움직이지는 않는다 — 손을 놓친
+            # 사람을 두고 떠나면 안 된다. 멘트는 기존 일시정지 문구다.
+            self.handle_active = False
+            self._clear_handle_pause()
+            return [Say(MSG_PAUSED, priority="response")]
+        if self._holding(now, self.grip_resume_window_sec, since=lost_since):
+            actions, reason = self.on_resume_request(nav_ready, now)
+            if reason != GateReason.OK:
+                return []   # Nav2 준비 전이면 다음 tick 에 다시 본다
+            return [Haptic(HAPTIC_PATTERN_GRIP_ACK)] + actions
+        if now - lost_since >= self.handle_lost_give_up_sec:
+            actions, _ = self.on_cancel_request(now)
+            return actions
+        if (self._handle_lost_notice_at is not None
+                and now - self._handle_lost_notice_at >= self.handle_lost_repeat_sec):
+            self._handle_lost_notice_at = now
+            return [Haptic(HAPTIC_PATTERN_HANDLE_HINT),
+                    Say(MSG_HANDLE_LOST, priority="response")]
+        return []
+
+    def _clear_handle_pause(self) -> None:
+        self._handle_pause = False
+        self._handle_lost_since = None
+        self._handle_lost_notice_at = None
 
     def _enter_awaiting_user(self, now: float) -> list:
         """질문을 던지고 AWAITING_USER 로 들어간다.
@@ -1640,23 +1864,13 @@ class MissionLogic:
                 # 손잡이가 뒤로 길게 나와 있어 이 거리의 180도 회전은 손잡이가
                 # 사람을 칠 수 있다(NEAR_CALL_NO_SPIN_M 근거 참고).
                 self._to_idle()
-                # 온보딩 질문을 던지는 자리 셋 중 하나 — 빈손 되묻기 사다리를
-                # 켠다(_pending_handle_hint 와 같은 자리·같은 이유: _to_idle()
-                # 이 지운다).
-                self._arm_dest_prompt(now)
                 # 회전을 껐어도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # State.TURNING 을 거치는 길과 같은 억제를 건다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
                 # 손잡이 위치 안내 (2026-09-10 사용자 결정): 회전이 없어도
-                # 사용자는 손잡이가 어디인지 모른다 — 온보딩보다 먼저. 진동은
-                # 여기서 내지 않는다 — 힌트 재생이 끝난 시점에 노드가
-                # on_handle_hint_spoken 을 불러야 낸다(I-2).
-                self._pending_handle_hint = True
-                return [
-                    Say(MSG_HANDLE_HINT, priority="response"),
-                    Say(MSG_APPROACH_ONBOARDING, priority="response",
-                        expects_reply=True),
-                ]
+                # 사용자는 손잡이가 어디인지 모른다 — 온보딩보다 먼저. 잡기
+                # 대기를 거쳐 온보딩한다(TURNING 완료와 같은 길).
+                return self._start_grip_wait(now)
             self.state = State.TURNING
             self.active_destination = None
             self._response_deadline = None
@@ -1887,10 +2101,15 @@ class MissionLogic:
     def user_attached_guard_active(self, now: float) -> bool:
         """접근 온보딩 직후 억제(`_user_attached_until`)가 지금 유효한가.
 
-        이유는 wake_guard_active 와 같다.
+        이유는 wake_guard_active 와 같다. 60초가 지나도 누가 손잡이를 쥐고 있는
+        동안은 억제를 유지한다(2026-09-30, 설계 4.4) — 시계는 "사용자가 손잡이를
+        잡고 있는가"의 어림이었고, 이제 그 답을 센서가 직접 준다. 시계를 지우지
+        않고 덧대는 이유: 센서가 끊기면 규약상 '놓음'으로 읽혀 억제가 풀리는
+        쪽으로 고장나므로, 시계가 바닥을 받친다.
         """
-        return (self._user_attached_until is not None
-                and now < self._user_attached_until)
+        if self._user_attached_until is None:
+            return False
+        return now < self._user_attached_until or self._grip.contact(now)
 
     def on_wake_doa(self, doa_deg: float, nav_ready: bool, now: float) -> list:
         """"비카야"가 온 방향으로 고개를 돌린다 (호출 접근 설계 §4).
@@ -1987,6 +2206,8 @@ class MissionLogic:
         if kind == "navigate" and next_dest is not None:
             self.state = State.NAVIGATING
             self.active_destination = next_dest
+            # 도착하며 활성 모드는 끝났다. 다음 목적지는 출발 순간 다시 정한다.
+            self.handle_active = self._decide_handle_mode(now)
             self._reset_arrival_dialog()
             return [SetNavSpeedLimit(NO_SPEED_LIMIT), Navigate(next_dest)]
 
@@ -2256,10 +2477,24 @@ class MissionLogic:
         now: float,
         nav_status: NavStatus,
         distance_remaining: Optional[float] = None,
+        nav_ready: bool = True,
     ) -> list:
-        """주기 처리. distance_remaining 은 Nav2 feedback 의 남은 거리(m)다."""
+        """주기 처리. distance_remaining 은 Nav2 feedback 의 남은 거리(m)다.
+
+        nav_ready 는 손 놓침 뒤 자동 재출발(_handle_pause_tick)의 재개 관문에만 쓴다.
+        """
         actions: list = []
         self._prune_suppressed(now)
+
+        # 활성 주행 중 손 놓침(설계 4.3 (다)). 주행 결과가 이번 tick 에 나왔으면
+        # 결과가 먼저다 — 도착한 순간 손을 뗀 것을 놓침으로 세우면 안 된다.
+        if (self.state == State.NAVIGATING and self.handle_active
+                and nav_status not in (NavStatus.SUCCEEDED, NavStatus.FAILED,
+                                       NavStatus.CANCELED)):
+            handle_actions = self._handle_nav_tick(now)
+            if self.state == State.PAUSED:
+                return handle_actions
+            actions.extend(handle_actions)
 
         if self.state == State.CONFIRMING:
             if self._confirm_deadline is not None and now >= self._confirm_deadline:
@@ -2285,6 +2520,9 @@ class MissionLogic:
                     else MSG_ARRIVED_FALLBACK.format(name=dest.name if dest else "목적지")
                 )
                 self._approach.reset()
+                # 도착하면 활성 모드는 끝이다(손을 떼도 된다). 도착 진동(짧게 ×3)은
+                # 펌웨어가 ARRIVED 상태 진입 때 스스로 낸다.
+                self.handle_active = False
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                 if self.arrival_dialog and not self._nav_from_app:
                     # 도착 멘트와 유형별 질문을 한 발화로 합쳐 낸다 — 따로 내면
@@ -2374,7 +2612,17 @@ class MissionLogic:
                 # spin 이 시작조차 안 됐다. 시계로 탈출한다.
                 self._to_idle()
 
+        elif self.state == State.PAUSED:
+            # 손 놓침으로 선 경우만 시계를 본다. "잠깐"으로 선 PAUSED 는 말로
+            # 재개할 때까지 그대로다(기존 동작).
+            if self._handle_pause:
+                actions.extend(self._handle_pause_tick(now, nav_ready))
+
         elif self.state == State.IDLE:
+            # 잡기 대기(설계 4.3 (가)). 대기 중에는 탐색 창·복귀 사다리·되묻기
+            # 사다리가 걸려 있지 않다(_to_idle 뒤에 열리고, 온보딩 전이다).
+            if self._grip_wait_since is not None:
+                actions.extend(self._grip_wait_tick(now))
             # 찾는 창이 닫혔다. 아무도 못 찾았으니 조용히 원래 자세로.
             # 되돌리지 않으면 오작동 한 번에 카메라가 벽만 보는 자세로 굳는다.
             if self._seek_deadline is not None and now >= self._seek_deadline:
@@ -2424,40 +2672,26 @@ class MissionLogic:
                 # 창이 열리고, 회전으로 사용자가 핸들 방향에 정렬됐으므로
                 # DOA 방향 관문도 자연히 유효해진다.
                 self._to_idle()
-                # 온보딩 질문을 던지는 자리 셋 중 하나 — 빈손 되묻기 사다리를 켠다.
-                self._arm_dest_prompt(now)
                 # 사용자가 손잡이를 받아든 시점이다 — 재청취 창이 만료된 뒤
                 # 다른 "비카야"가 이 사람을 새 호출로 오인하지 않도록 얼마간
                 # wake_doa 를 거절한다. _to_idle() 은 이 값을 지우지 않으므로
                 # 호출 순서는 상관없다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
-                # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 온보딩 질문이
-                # 완료를 대신한다.
-                # 손잡이 위치 안내 (2026-09-10 사용자 결정): 온보딩 앞에서
-                # 손잡이가 어디인지 말한다. 진동은 여기서 내지 않는다 —
-                # 힌트 재생이 끝난 시점에 노드가 on_handle_hint_spoken 을
-                # 불러야 낸다(I-2).
-                self._pending_handle_hint = True
-                actions.append(Say(MSG_HANDLE_HINT, priority="response"))
-                actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
-                                   expects_reply=True))
+                # 회전 완료 멘트는 2026-09-01 감량 — 바로 뒤 손잡이 안내가
+                # 완료를 대신한다. 손잡이 안내 + 진동으로 잡기 대기를 연다.
+                # 온보딩(빈손 되묻기 사다리 포함)은 잡거나 시간이 다 되면 나간다.
+                actions.extend(self._start_grip_wait(now))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
                 # 회전 실패에 "완료되었습니다"는 거짓말 - 생략한다. 다만 방금
                 # 수락한 사람을 침묵 속에 버려두지 않도록 온보딩은 한다.
                 # (핸들 방향은 어긋났을 수 있다 - 안내 실패는 아니다.)
                 self._to_idle()
-                # 온보딩 질문을 던지는 자리 셋 중 하나 — 빈손 되묻기 사다리를 켠다.
-                self._arm_dest_prompt(now)
                 # 회전이 실패해도 사용자는 이미 승낙하고 그 자리에 있다 —
                 # 위와 같은 억제를 건다.
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
-                # 회전이 실패해도 손잡이 안내는 그대로 나간다 — 사용자는 이미
-                # 승낙하고 서 있다(2026-09-10 사용자 결정). 진동은 위와 같은
-                # 이유로 여기서 내지 않는다(I-2).
-                self._pending_handle_hint = True
-                actions.append(Say(MSG_HANDLE_HINT, priority="response"))
-                actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
-                                   expects_reply=True))
+                # 회전이 실패해도 손잡이 안내·잡기 대기는 그대로다 — 사용자는
+                # 이미 승낙하고 서 있다(2026-09-10 사용자 결정).
+                actions.extend(self._start_grip_wait(now))
             elif (self._turn_deadline is not None
                   and now >= self._turn_deadline):
                 # spin 이 시작조차 안 됐다(노드 결함 등). 시계로 탈출한다.
@@ -2682,6 +2916,9 @@ class MissionLogic:
         self.state = State.RETURNING
         self._returning_home = is_home
         self.active_destination = destination
+        # 복귀는 사용자를 태우지 않는다 — 손잡이 안내는 여기서 끝이다.
+        self._handle_engaged = False
+        self.handle_active = False
         self.approach_goal_pose = None
         self._response_deadline = None
         self._announced_milestones = set()
@@ -2754,6 +2991,12 @@ class MissionLogic:
         self.approach_goal_pose = None
         self._response_deadline = None
         self._nav_from_app = False
+        # 손잡이 상태도 버린다 — 해제 뒤 자동 재개가 없으니 모드도 새로 정한다.
+        self._handle_engaged = False
+        self.handle_active = False
+        self._grip_wait_since = None
+        self._grip_pulse_at = None
+        self._clear_handle_pause()
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
@@ -2805,3 +3048,11 @@ class MissionLogic:
         # 다만 묵은 값을 들고 있을 이유도 없어 다른 접근 상태값들과 함께 비운다.
         self._near_call_no_spin = False
         self._never_approached = False
+        # 손잡이: 주행이 끝났으니 모드·놓침 정지·잡기 대기를 내린다. 잡기 대기를
+        # 여는 자리(_start_grip_wait)는 _to_idle() 뒤에 부르므로 지워지지 않는다.
+        # _handle_engaged 는 남긴다 — 확인 시간초과처럼 IDLE 을 거쳐 다시 목적지를
+        # 말하는 사람도 같은 사람이다(_decide_handle_mode 가 60초 자물쇠로 거른다).
+        self.handle_active = False
+        self._grip_wait_since = None
+        self._grip_pulse_at = None
+        self._clear_handle_pause()
