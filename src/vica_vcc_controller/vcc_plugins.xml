@@ -2,4 +2,7 @@
   <class type="vica_vcc_controller::VccController" base_class_type="nav2_core::Controller">
     <description>VCC — 레일 추종 + 차선 고르기 + 상황 4개 (VICA 자작)</description>
   </class>
+  <class type="vica_vcc_controller::LatchedGoalChecker" base_class_type="nav2_core::GoalChecker">
+    <description>도착 판정 — 끝점 xy 안에 한 번 들면 위치 도장, 이후 방향·정지만 본다(새 경로 reset 에도 유지)</description>
+  </class>
 </library>

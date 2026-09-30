@@ -107,15 +107,19 @@ TEST(StateMachine, ArrivalBeatsUturnAndCannotTurnAfterwards)
   EXPECT_EQ(sm.update(in), State::Align);   // Align -> Turn 금지
 }
 
-TEST(StateMachine, AlignExitNeedsMargin)
+TEST(StateMachine, AlignExitNeedsExitDistance)
 {
+  // run49: 0.35 에서 나오던 때는 정렬을 마친 채 0.25~0.35 띠에서 섰다. 이제 goal checker 도장이
+  // 풀리는 거리(0.5)와 같은 곳에서만 나온다.
   StateMachine sm;
   StateInputs in = base(1.0);
   in.dist_to_end = 0.1; in.yaw_error_end = 1.0;
   ASSERT_EQ(sm.update(in), State::Align);
-  in.now = 2.0; in.dist_to_end = 0.30;
-  EXPECT_EQ(sm.update(in), State::Align);   // 0.25 + 0.10 안
-  in.now = 2.1; in.dist_to_end = 0.36;
+  in.now = 2.0; in.dist_to_end = 0.36;
+  EXPECT_EQ(sm.update(in), State::Align);
+  in.now = 2.1; in.dist_to_end = 0.49;
+  EXPECT_EQ(sm.update(in), State::Align);
+  in.now = 2.2; in.dist_to_end = 0.51;
   EXPECT_EQ(sm.update(in), State::Track);
 }
 

@@ -344,7 +344,7 @@ TEST(VccCore, AlignAttemptsSurvivePushOffAndReturn)
   out = at(1.1, 0.1, -0.3);   // 넘침 -> 끊고 멈춤 확인
   for (double t = 1.2; t < 1.55; t += 0.1) {out = at(t, 0.1, -0.3);}
   ASSERT_EQ(out.align_attempts, 2);
-  out = at(1.6, 0.5, -0.3);   // 끝점 밖으로 밀림
+  out = at(1.6, 0.6, -0.3);   // 끝점 밖으로 밀림(align_exit_dist 0.5 너머)
   ASSERT_EQ(out.state, State::Track);
   out = at(1.7, 0.1, -0.3);
   ASSERT_EQ(out.state, State::Align);
@@ -444,4 +444,55 @@ TEST(VccCore, TurnExitKeepsNearestLaneAsTarget)
   ASSERT_TRUE(exited);
   EXPECT_NEAR(out.target, 0.4, 1e-9);
   EXPECT_NEAR(out.offset, 0.4, 0.011);
+}
+
+TEST(VccCore, StopsInsideTheGoalCheckerCircle)
+{
+  // 멈춤 반경은 checker 원(xy_tol)보다 arrive_margin 안쪽이다. 경계 0.14 에서는 아직 다가간다 —
+  // 그래야 checker 가 움직이는 동안 먼저 도장을 찍는다(run49 교착의 한 갈래).
+  VccCore c; c.configure(params());
+  World w;
+  CoreInputs in = inputs(line(0.0, 0.0, 0.14), w, 1.0, 0.1);
+  in.goal = {0.14, 0.0, 0.0};
+  in.xy_tol = 0.15;
+  CoreOutput out = c.step(in);
+  EXPECT_EQ(out.state, State::Track);
+  EXPECT_GT(out.cmd.v, 0.0);
+  in = inputs(line(0.0, 0.0, 0.11), w, 1.1, 0.05);
+  in.goal = {0.11, 0.0, 0.0};
+  in.xy_tol = 0.15;
+  out = c.step(in);
+  EXPECT_EQ(out.state, State::Track);
+  EXPECT_LT(out.cmd.v, 0.05);   // 0.12 안 — 목표 0, 출력단이 줄여 간다
+}
+
+TEST(VccCore, AlignFailureRearmsAfterRearmTime)
+{
+  // run49 409호: 정렬 3번을 다 쓰고 Failed 가 되자 같은 goal 을 BT 가 바로 다시 보내 17 s 동안
+  // Hold(예외 172회). 이제 align_rearm_time(3 s) 뒤 횟수를 지우고 다시 돈다.
+  CoreParams p = params();
+  p.align.max_attempts = 1;
+  VccCore c; c.configure(p);
+  World w;
+  auto at = [&](double now, double yaw) {
+      CoreInputs in = inputs(line(0.0, 0.0, 0.1), w, now, 0.0);
+      in.goal = {0.1, 0.0, yaw};
+      return c.step(in);
+    };
+  CoreOutput out = at(1.0, 0.5);
+  ASSERT_EQ(out.state, State::Align);
+  // 돌다가 반대쪽으로 넘침(-0.5) -> 끊고 멈춤 확인 -> 여전히 어긋나 횟수(1)를 다 써 Failed.
+  double t = 1.1;
+  for (; t < 3.0 && out.failure != Failure::AlignFailed; t += 0.1) {out = at(t, -0.5);}
+  ASSERT_EQ(out.failure, Failure::AlignFailed);
+  const double failed_at = t - 0.1;
+  for (; t < failed_at + 2.9; t += 0.1) {
+    out = at(t, -0.5);
+    ASSERT_EQ(out.failure, Failure::AlignFailed) << t;
+  }
+  for (; t < failed_at + 3.6; t += 0.1) {out = at(t, -0.5);}
+  EXPECT_NE(out.failure, Failure::AlignFailed);
+  EXPECT_EQ(out.state, State::Align);
+  EXPECT_EQ(out.align_attempts, 1);
+  EXPECT_LT(out.cmd.w, 0.0);   // 새 기회로 남은 쪽(-0.5)을 향해 돈다
 }

@@ -91,7 +91,7 @@ State StateMachine::update(const StateInputs & in)
       // 회전 원 막힘(설계서 6.1 ③->④) — 안전 전환이라 최소 유지 시간을 기다리지 않는다.
       if (in.align_blocked) {go(State::Hold, in.now, "align_blocked"); break;}
       if (!held) {break;}
-      if (in.dist_to_end > in.xy_tol + p_.align_exit_margin) {
+      if (in.dist_to_end > p_.align_exit_dist) {
         go(State::Track, in.now, "pushed_off_goal");
       }
       break;

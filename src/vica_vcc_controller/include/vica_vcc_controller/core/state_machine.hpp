@@ -11,7 +11,9 @@ struct StateParams
   double turn_enter_angle{1.047};   // 60도 (요구 2)
   double turn_exit_angle{0.436};    // 25도 (히스테리시스)
   double pivot_start_angle{0.611};  // 35도 (정지 출발, 사용자 확인)
-  double align_exit_margin{0.10};   // 도착 0.25 로 들어가고 0.35 로 나온다
+  // 도착 정렬(Align)에서 끝점과 이보다 멀어져야 Track 으로 돌아간다. goal checker 의 unlatch_distance 와
+  // 같은 값이다(run49: 0.25 로 들어가 0.35 로 나오던 띠에서 정렬을 마친 채 17~25 s 섰다).
+  double align_exit_dist{0.5};
   double min_state_time{0.5};
 };
 

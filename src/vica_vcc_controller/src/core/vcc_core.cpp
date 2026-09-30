@@ -62,11 +62,13 @@ void VccCore::reset(const Twist2D & measured)
   stopped_since_ = -1.0;
   resync_count_ = 0;
   resync_primed_ = false;
+  align_failed_since_ = -1.0;
 }
 
 void VccCore::onNewGoal()
 {
   align_.reset();
+  align_failed_since_ = -1.0;
   if (sm_.state() == State::Align || sm_.state() == State::Hold) {sm_.reset();}
 }
 
@@ -82,6 +84,21 @@ CoreOutput VccCore::step(const CoreInputs & in)
     stopped_since_ = -1.0;
   }
   const bool stationary = stopped_since_ >= 0.0 && in.now - stopped_since_ >= p_.stationary_time;
+
+  // 도착 정렬 재무장: Failed 로 align_rearm_time 이 지나면 횟수를 지우고 다시 돈다. 같은 goal 을
+  // BT 가 바로 다시 보내면 onNewGoal·reset 이 안 불려 영영 Hold 에 남았다(run49 409호 17 s).
+  if (align_.phase() == AlignPhase::Failed) {
+    if (align_failed_since_ < 0.0) {
+      align_failed_since_ = in.now;
+    } else if (in.now - align_failed_since_ >= p_.align_rearm_time - 1e-9) {
+      align_.reset();
+      align_failed_since_ = -1.0;
+    }
+  } else {
+    align_failed_since_ = -1.0;
+  }
+  // 도착으로 보고 서는 반경. checker 원보다 arrive_margin 안쪽(단 반경의 절반보다 작게는 안 한다).
+  const double stop_r = std::max(0.5 * in.xy_tol, in.xy_tol - p_.arrive_margin);
 
   // 차선 d 를 실제 옆 위치에 다시 맞춘다: 첫 구간 연장선 기준 로봇의 옆 거리(왼쪽 +).
   // reset 뒤 0, 유턴 뒤 약 2R, 레일<->당근 경로 교체 뒤 어긋난 d 를 그대로 두면 차선 검사가 로봇이
@@ -125,7 +142,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   si.path_heading_error = path_heading;
   si.dist_to_end = dist_end;
   si.yaw_error_end = yaw_err;
-  si.xy_tol = in.xy_tol;
+  si.xy_tol = stop_r;
   si.yaw_tol = in.yaw_tol;
   si.lanes_blocked = lanes_.blocked();
   si.collision_imminent = imminent;
@@ -134,7 +151,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   const State s0 = sm_.state();
   // 도착 정렬 회전 원: 남은 각만큼 제자리로 돌 때 몸이 쓸고 가는 자리(설계서 6.1 ③->④, 최종 리뷰 I5).
   // yaw 가 허용오차 안이면 돌 일이 없으므로 보지 않는다(도착한 채 Blocked 를 던지지 않게).
-  if (std::abs(yaw_err) > in.yaw_tol && (s0 == State::Align || dist_end < in.xy_tol)) {
+  if (std::abs(yaw_err) > in.yaw_tol && (s0 == State::Align || dist_end < stop_r)) {
     si.align_blocked = simulateTurnClearance(
       std::abs(yaw_err), 0.0, yaw_err >= 0.0 ? 1 : -1, 0.0, in.clearance, p_.turn.sample_angle) <
       p_.turn.clearance;
@@ -175,7 +192,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
         vdes = std::min(vdes, clearanceLimit(lanes_.currentClearance(), sp));
         vdes = std::min(vdes, lanes_.speedCap());   // 차선을 옮기는 동안의 속도
         vdes = approachLimit(dist_end, vdes, sp);
-        if (dist_end < in.xy_tol) {vdes = 0.0;}   // 도착 반경 안에서는 멈춘다(RPP 도 같은 자리에서 회전으로 넘어간다)
+        if (dist_end < stop_r) {vdes = 0.0;}   // 도착 반경 안에서는 멈춘다(RPP 도 같은 자리에서 회전으로 넘어간다)
         // 조준점이 유턴 문턱 밖(뒤쪽)이면 앞으로 가지 않는다. 최소 유지 시간 전이라도 같다 —
         // 돌 수 있으면 곧 Turn 이 제자리에서 돌고, 막혔으면 선다(최종 리뷰 I2: 1.42 m 역주행).
         if (need) {vdes = 0.0;}

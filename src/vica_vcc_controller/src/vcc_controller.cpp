@@ -114,6 +114,10 @@ void VccController::configure(
   p.state.turn_exit_angle = dp("turn_exit_angle", 0.436);
   p.state.pivot_start_angle = dp("pivot_start_angle", 0.611);
   p.state.min_state_time = dp("min_state_time", 0.5);
+  // 도착 교착 수리(2026-09-30, run49). align_exit_dist 는 goal checker unlatch_distance 와 같은 값.
+  p.state.align_exit_dist = dp("align_exit_dist", 0.5);
+  p.arrive_margin = dp("arrive_margin", 0.03);
+  p.align_rearm_time = dp("align_rearm_time", 3.0);
   p.turn.radii = dp("turn_radii", std::vector<double>{0.2, 0.1});
   p.turn.clearance = dp("turn_clearance", 0.05);
   p.turn.arc_w = dp("turn_angular_vel", 0.45);
@@ -334,8 +338,8 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
   }
   last_compute_ = now;
 
-  // 도착 허용오차와 정지 기준은 goal checker(StoppedGoalChecker)가 정본이다. VCC 는 매 주기 받아 쓴다.
-  // Humble StoppedGoalChecker::getTolerances 는 vel_tolerance.angular.z 에 rot_stopped_velocity 를 넣는다.
+  // 도착 허용오차와 정지 기준은 goal checker(LatchedGoalChecker·StoppedGoalChecker)가 정본이다. VCC 는
+  // 매 주기 받아 쓴다. 둘 다 getTolerances 의 vel_tolerance.angular.z 에 rot_stopped_velocity 를 넣는다.
   // (SimpleGoalChecker 는 그 칸을 음수 최솟값으로 채우므로 양수일 때만 쓴다.)
   double xy_tol = 0.25, yaw_tol = 0.25, rot_stopped = 0.05;
   if (goal_checker) {

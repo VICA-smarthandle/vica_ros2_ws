@@ -27,6 +27,14 @@ struct CoreParams
   // 실제 옆 위치와 d 가 이만큼, 2주기 연속 어긋나면 d 를 다시 맞춘다(최종 리뷰 I4, run48 F2).
   // ROS 파라미터 lane_resync_threshold.
   double resync_offset{0.15};
+  // 멈춤 반경 = xy_tol - arrive_margin. goal checker 원(xy_tol)보다 조금 안쪽에서 서야 checker 가
+  // 로봇이 움직이는 동안 먼저 도장을 찍는다. 같은 반경이면 경계에서 VCC 만 "도착" 으로 보고 선 채
+  // checker 는 영영 못 찍는 일이 남는다(run49 교착 2/8 의 한 갈래). ROS 파라미터 arrive_margin.
+  double arrive_margin{0.03};
+  // 도착 정렬이 횟수를 다 써서 Failed 가 된 뒤 이만큼 지나면 다시 3번 기회를 준다. 그동안
+  // PlannerException 을 던지므로 controller_server failure_tolerance(10 s)보다 짧아야 한다.
+  // run49: Failed 가 새 goal·1.5 s 끊김으로만 풀려 17 s 동안 예외 172회. ROS 파라미터 align_rearm_time.
+  double align_rearm_time{3.0};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -87,5 +95,6 @@ private:
   double stopped_since_{-1.0};
   int resync_count_{0};          // 옆 오차가 문턱을 넘은 연속 주기 수
   bool resync_primed_{false};    // reset 뒤 첫 경로를 받았는가(첫 주기는 바로 맞춘다)
+  double align_failed_since_{-1.0};   // 도착 정렬 Failed 가 시작된 시각(재무장용)
 };
 }  // namespace vica_vcc_controller::core

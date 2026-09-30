@@ -34,6 +34,7 @@ add_library(vcc_core STATIC
   src/core/state_machine.cpp
   src/core/vcc_core.cpp
   src/core/path_window.cpp
+  src/core/arrival_latch.cpp
 )
 target_include_directories(vcc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -42,7 +43,8 @@ target_compile_features(vcc_core PUBLIC cxx_std_17)
 set_target_properties(vcc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # controller_server 가 pluginlib 로 여는 .so. 이름이 vcc_plugins.xml 의 library path 다.
-add_library(vica_vcc_controller SHARED src/vcc_controller.cpp)
+# 도착 판정 플러그인(LatchedGoalChecker, 2026-09-30)도 같은 .so 에 둔다 — vcc_plugins.xml 한 곳에서 등록.
+add_library(vica_vcc_controller SHARED src/vcc_controller.cpp src/latched_goal_checker.cpp)
 target_link_libraries(vica_vcc_controller vcc_core)
 ament_target_dependencies(vica_vcc_controller
   rclcpp rclcpp_lifecycle pluginlib nav2_core nav2_costmap_2d nav2_util nav_msgs
@@ -58,7 +60,7 @@ install(FILES vcc_plugins.xml DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   foreach(t geometry clearance pure_pursuit speed_profile output_stage ultrasonic
-      lanes turn_planner align_planner state_machine vcc_core path_window)
+      lanes turn_planner align_planner state_machine vcc_core path_window arrival_latch)
     ament_add_gtest(test_${t} test/test_${t}.cpp)
     target_link_libraries(test_${t} vcc_core)
   endforeach()

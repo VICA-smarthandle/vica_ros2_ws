@@ -12,6 +12,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "tf2_ros/buffer.h"
+#include "tf2/utils.h"
+#include "vica_vcc_controller/latched_goal_checker.hpp"
 #include "vica_vcc_controller/vcc_controller.hpp"
 
 class VccPluginTest : public ::testing::Test
@@ -237,4 +239,35 @@ TEST_F(VccPluginTest, DeactivateClearsPlan)
   EXPECT_THROW(
     ctrl->computeVelocityCommands(pose, geometry_msgs::msg::Twist(), nullptr),
     nav2_core::PlannerException);
+}
+
+TEST_F(VccPluginTest, LatchedGoalCheckerReadsParamsAndKeepsLatchAcrossReset)
+{
+  make("_gc");
+  node_->declare_parameter("general_goal_checker.xy_goal_tolerance", 0.15);
+  node_->declare_parameter("general_goal_checker.unlatch_distance", 0.5);
+  vica_vcc_controller::LatchedGoalChecker gc;
+  gc.initialize(node_, "general_goal_checker", costmap_);
+
+  // VCC 가 읽는 칸: position.x = xy, orientation = yaw, angular.z = rot_stopped(양수).
+  geometry_msgs::msg::Pose pt;
+  geometry_msgs::msg::Twist vt;
+  ASSERT_TRUE(gc.getTolerances(pt, vt));
+  EXPECT_DOUBLE_EQ(pt.position.x, 0.15);
+  EXPECT_NEAR(tf2::getYaw(pt.orientation), 0.25, 1e-9);
+  EXPECT_DOUBLE_EQ(vt.linear.x, 0.03);
+  EXPECT_DOUBLE_EQ(vt.angular.z, 0.05);
+
+  geometry_msgs::msg::Pose goal, robot;
+  goal.orientation.w = 1.0;
+  robot = goal;
+  robot.position.x = 0.10;
+  robot.orientation.z = std::sin(0.3);   // 약 34° 어긋남
+  robot.orientation.w = std::cos(0.3);
+  geometry_msgs::msg::Twist still;
+  EXPECT_FALSE(gc.isGoalReached(robot, goal, still));   // 도장만 찍힌다
+  gc.reset();                                           // 새 경로(setPlannerPath)
+  robot.position.x = 0.30;                              // 정렬하는 동안 0.30 으로 밀림
+  robot.orientation = goal.orientation;
+  EXPECT_TRUE(gc.isGoalReached(robot, goal, still));
 }
