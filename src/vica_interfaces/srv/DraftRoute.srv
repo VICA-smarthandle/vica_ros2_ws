@@ -1,0 +1,28 @@
+# 레일 자동 초안. route_graph_node 가 처리한다(앱 레일 편집, 2026-09-30).
+#
+# 지도와 저장된 장소로 레일 스케치(노드와 선)를 만들어 돌려준다. 파일은 쓰지 않는다 —
+# 관리자가 앱에서 보고 고친 뒤 SaveRoute 로 저장한다. 계산에 수 초(0903_d 약 6.5 s)
+# 걸리므로 앱은 기본 5 s 보다 길게 기다린다.
+
+string map_id
+
+# "auto"(고리·나무 둘 다 만들어 오류가 적고 짧은 쪽) | "loop" | "tree"
+string shape
+---
+bool accepted
+
+# '' | bad_map_id | no_map | bad_map | no_destinations | build_failed | busy
+string reason
+string message
+
+# 실제로 만든 모양: "loop" | "tree"
+string shape
+
+# 스케치 {"nodes":[{"id":1,"x":..,"y":..}],"edges":[[1,2],...]}  map 좌표(m), 무방향
+string sketch_json
+
+# 로봇이 다듬은 모양(미리보기) {"nodes":[...],"edges":[[a,b,penalty],...]}
+string preview_json
+
+# 검사 결과 {"errors":[...],"warnings":[...],"places":[...],"summary":{...}}
+string checks_json

@@ -1,0 +1,36 @@
+# 레일 스케치 저장(+적용) 또는 미리보기. route_graph_node 가 처리한다(2026-09-30).
+#
+# 앱은 언제나 **스케치 전체**를 보낸다. 빠진 선 = 지운 선이라 삭제 전용 서비스가 없다
+# (SaveKeepout 과 같은 규약). 스케치는 무방향이고, 코너 호·1 m 노드·양방향·갈림길 벌점은
+# 로봇이 만든다. 규칙이 로봇 한 곳에만 있어야 앱 미리보기와 로봇이 달리는 모양이 같다.
+
+string map_id
+string sketch_json
+
+# true 면 다듬고 검사만 하고 파일은 쓰지 않는다(편집 중 미리보기).
+bool preview_only
+
+# true 면 저장 뒤 route_server 에 set_route_graph 를 걸어 곧바로 반영한다.
+# 주행 중이면(목적지가 살아 있으면) 저장만 하고 주행이 끝날 때 적용한다.
+bool apply_now
+
+# 앱이 편집을 시작할 때 받은 레일 판(GetRoute.version). 그 사이 다른 곳에서 저장했으면
+# conflict 로 거부한다. overwrite 가 true 면 덮어쓴다(팝업 F).
+string base_version
+bool overwrite
+---
+bool accepted
+
+# '' | bad_map_id | no_map | bad_map | bad_sketch | check_failed | conflict | io_error
+# | busy_driving(저장됨·적용 대기) | not_current_map(저장됨·주행 지도 아님)
+# | no_route_server | apply_timeout | apply_failed (셋 다 저장됨·적용 안 됨)
+string reason
+string message
+string preview_json
+string checks_json
+
+# 저장 뒤 레일 판. 다음 저장의 base_version 으로 쓴다.
+string version
+
+# route_server 에 지금 반영됐는가. false 면 앱은 '적용 대기'로 보인다.
+bool applied

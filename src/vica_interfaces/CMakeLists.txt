@@ -35,6 +35,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DeleteHome.srv"
   "srv/SaveKeepout.srv"
   "srv/GetKeepout.srv"
+  "srv/DraftRoute.srv"
+  "srv/SaveRoute.srv"
+  "srv/GetRoute.srv"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 

@@ -1,0 +1,22 @@
+# 레일 조회. route_graph_node 가 처리한다(2026-09-30).
+#
+# 앱이 편집 화면을 열 때 스케치와 판을 받고, 레일 칸 요약(노드·길이·갈림길, 장소별
+# 레일까지 거리)을 받는다. 레일은 레일 파일(<지도>_route.geojson) 그대로를 잰다.
+
+string map_id
+---
+bool found
+string reason
+string message
+
+# 편집 원본. 앱에서 저장한 적이 없으면 레일 파일에서 되돌린 스케치.
+string sketch_json
+
+# {"places":[{"name","distance","far"}],"summary":{...}}
+string checks_json
+
+# 레일 파일 판. SaveRoute.base_version 으로 돌려준다.
+string version
+
+# "applied" | "apply_pending"(저장됐지만 주행이 끝나길 기다림) | "none"(레일 없음)
+string status
