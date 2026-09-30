@@ -107,7 +107,8 @@ def test_bench_commands_do_not_collide_with_state_or_haptic_codes():
     cmds = {protocol.US_CMD_RESET}
     cmds |= {protocol.US_CMD_NOISE_BASE + i for i in range(1, 6)}
     cmds |= {protocol.US_CMD_SIDE_ANGLE_BASE + i for i in range(1, 5)}
-    used = set(protocol.STATE_NAMES) | {protocol.HAPTIC_CMD_SHORT, protocol.HAPTIC_CMD_LONG}
+    used = set(protocol.STATE_NAMES) | {
+        protocol.HAPTIC_CMD_SHORT, protocol.HAPTIC_CMD_LONG, protocol.HAPTIC_CMD_TICK}
     assert not (cmds & used)
     assert not (cmds & set(protocol.SENDABLE_STATE_CODES))
 

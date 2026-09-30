@@ -323,7 +323,7 @@ class UserGuidanceDriverNode(Node):
         msg.servo_ok = connected
         msg.left_led_ok = connected
         msg.right_led_ok = connected
-        msg.haptic_ok = False       # 진동 모터 미장착
+        msg.haptic_ok = False       # 떨림은 상향으로 관측하지 않는다
 
         msg.fault_code = self.link.fault_code
         msg.last_state_code = self.link.last_state_code
@@ -335,6 +335,7 @@ class UserGuidanceDriverNode(Node):
     HAPTIC_PATTERNS = {
         "short": protocol.HAPTIC_CMD_SHORT,
         "long": protocol.HAPTIC_CMD_LONG,
+        "tick": protocol.HAPTIC_CMD_TICK,
     }
 
     def cb_haptic_request(self, msg: String) -> None:

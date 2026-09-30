@@ -8,9 +8,9 @@ std_msgs/Header header
 
 bool connected             # 포트 open 성공 + 최근 write 예외 없음
 
-# 터치센서(D11, active-low, 2026-09-05). 그 순간 손잡이를 잡고 있는가.
+# 터치센서(ESP32 GPIO14 · 나노 시절 D11, active-low). 그 순간 손잡이를 잡고 있는가.
 #
-# **판정이 아니라 사실이다.** 모드 진입 3초와 손 놓음 0.5초는 mission_manager 가
+# **판정이 아니라 사실이다.** 잡기(2초 중 80 %)와 손 놓음(0.5초)은 mission_manager 가
 # 이 값을 보고 잰다. 여기서 재지 않는다.
 #
 # uplink_fresh 가 false 면 이 값은 **항상 false** 다. 마지막 값을 붙들고 있으면
@@ -27,7 +27,7 @@ bool uplink_fresh
 bool servo_ok              # 상향으로 관측하지 않는다 → connected와 동일값 [미검증]
 bool left_led_ok           # 동일 [미검증]
 bool right_led_ok          # 동일 [미검증]
-bool haptic_ok             # 진동 모터 미장착. 항상 false
+bool haptic_ok             # 떨림은 상향으로 관측하지 않는다. 항상 false
 
 uint8 FAULT_NONE=0
 uint8 FAULT_PORT_OPEN=1        # 포트 open 실패 (처음부터 미연결)

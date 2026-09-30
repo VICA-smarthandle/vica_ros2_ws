@@ -293,18 +293,23 @@ unsigned long touchSentAt  = 0;
 // MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). MCU GPIO 로 모터를
 // 직접 구동하지 않는다 — 전류 초과. 플라이백 다이오드가 드라이버 쪽에 있다.
 //
-// **수동 명령 전용이다.** 젯슨이 0x10/0x11 을 보내면 그 패턴대로 한 번 떨린다.
-// 상태코드(0~7)와 겹치지 않는 별도 바이트라 applyState() 를 거치지 않는다 —
-// LED·서보는 그대로다. 드라이버 노드는 이 바이트를 안 보내며 bench_test.py
-// --haptic 으로만 쏜다. ESTOP·ARRIVED 진입 시 자동으로 울리는 것(계획서 6.2절)은
-// 별도 결정 사항이라 아직 넣지 않았다. 넣게 되면 applyState() 의 해당 case 에서
-// hapticStart() 를 부르면 된다.
+// 울리는 길은 둘이다 (2026-09-30, docs/superpowers/specs/2026-09-28-touch-haptic-
+// integration-final.md 3절).
+//   * 젯슨 명령 — 0x10/0x11/0x12 바이트. 상태코드(0~7)와 겹치지 않는 별도 바이트라
+//     applyState() 를 거치지 않는다 — LED·서보는 그대로다. 미션이 손잡이 찾기·잡음
+//     확인·놓침에 쓴다(드라이버 노드가 /vica/haptic_request 를 바이트로 바꿔 보낸다).
+//   * 상태 진입 — ESTOP 은 길게 ×1, ARRIVED 는 짧게 ×3. applyState() 는 상태가
+//     **바뀔 때만** 돌므로 같은 코드가 10Hz 로 반복 와도 한 번만 떨린다(계획서 6.2절
+//     의 edge 트리거). 진동은 알림일 뿐 정지 보증이 아니다.
+// 새 명령은 진행 중인 패턴을 덮어쓴다 — 미션이 반복 진동 중에 0x12 를 보내면 긴
+// 진동이 곧바로 끊기고 짧은 확인이 한 번 온다. 따로 '멈춤' 명령이 필요 없다.
 //
 // 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
 // 멈춘다.
 #define HAPTIC_PIN             4   // 2026-09-22 ESP32U: 10→4. 시프터 없이 3.3V 로 게이트 구동
 #define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
-#define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (비상 패턴)
+#define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (손잡이 찾기·비상 패턴)
+#define HAPTIC_CMD_TICK       0x12   // 300ms x1 (잡음 확인, 2026-09-30)
 #define HAPTIC_SHORT_ON_MS    300   // 2026-09-04 150->300. 모터가 회전 올라올 시간(50~100ms)을 준다
 #define HAPTIC_SHORT_OFF_MS   150
 #define HAPTIC_SHORT_COUNT    3
@@ -711,6 +716,7 @@ void applyState(uint8_t state) {
       // 기울어진 채(또는 이동 중 임의 각도로) 멈춰 "이쪽으로 도세요"를
       // 계속 가리키게 된다. 아키텍처 12장의 "E-stop 시 서보 중립" 원칙에 맞춘다.
       servoMoveTo(SERVO_CENTER);
+      hapticStart(1, HAPTIC_LONG_ON_MS, 0);   // 2026-09-30: 비상정지 진입 = 길게 ×1
       break;
 
     case STATE_LINK_LOST:
@@ -726,6 +732,8 @@ void applyState(uint8_t state) {
       arriveTailPending = true;
       setBoth(OFF);
       servoMoveTo(SERVO_CENTER);
+      // 2026-09-30: 도착 = 짧게 ×3. 홈 복귀 도착에도 울린다 — 해롭지 않아 둔다.
+      hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
       break;
   }
 }
@@ -795,6 +803,8 @@ void loop() {
       hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
     } else if (b == HAPTIC_CMD_LONG) {
       hapticStart(1, HAPTIC_LONG_ON_MS, 0);
+    } else if (b == HAPTIC_CMD_TICK) {
+      hapticStart(1, HAPTIC_SHORT_ON_MS, 0);
     } else if (b == US_CMD_RESET) {
       for (uint8_t ch = 0; ch < US_N; ch++) {
         usAngleLv[ch] = US_ANGLE_LEVEL_CH[ch];
