@@ -102,12 +102,26 @@ def test_goal_is_reached_only_after_the_robot_slows_to_a_stop():
     goal_checker = controller['general_goal_checker']
     lim = _controller_limits(params)
 
-    assert goal_checker['plugin'] == (
-        'nav2_controller::StoppedGoalChecker'
+    # 둘 다 정지(trans·rot stopped)까지 확인한다. 2026-09-30 부터 LatchedGoalChecker(run49 도착 교착).
+    assert goal_checker['plugin'] in (
+        'nav2_controller::StoppedGoalChecker',
+        'vica_vcc_controller::LatchedGoalChecker',
     )
-    # stateful=False여야 감속 중 tolerance를 재이탈해도 속도 조건만으로
-    # 성공 처리되지 않고 매 주기 XY/yaw를 재검사한다.
-    assert goal_checker['stateful'] is False
+    if goal_checker['plugin'] == 'nav2_controller::StoppedGoalChecker':
+        # stateful=False여야 감속 중 tolerance를 재이탈해도 속도 조건만으로
+        # 성공 처리되지 않고 매 주기 XY/yaw를 재검사한다.
+        assert goal_checker['stateful'] is False
+    else:
+        # 도장은 0.15 안에서 찍고 0.5 밖에서 푼다. VCC 가 Align 에서 Track 으로 나오는 거리와
+        # 같아야 한다 — 다르면 그 사이 띠에서 VCC 는 정렬만 하고 checker 는 위치를 다시 요구하는
+        # run49 교착(0.25~0.35 띠)이 모양만 바꿔 돌아온다.
+        fp = controller['FollowPath']
+        assert goal_checker['unlatch_distance'] == fp['align_exit_dist']
+        assert goal_checker['xy_goal_tolerance'] < goal_checker['unlatch_distance']
+        # VCC 멈춤 반경(xy − arrive_margin)이 checker 원 안쪽이어야 checker 가 먼저 도장을 찍는다.
+        assert 0.0 < fp['arrive_margin'] < goal_checker['xy_goal_tolerance'] / 2
+        # 도착 정렬 재무장은 controller failure_tolerance 안에 일어나야 FollowPath 가 안 끊긴다.
+        assert fp['align_rearm_time'] < controller['failure_tolerance']
     assert goal_checker['trans_stopped_velocity'] == 0.03
     assert goal_checker['rot_stopped_velocity'] == 0.05
     # DWB 는 자체 도착 판정도 하므로 goal_checker 와 같은 값이어야 한다.

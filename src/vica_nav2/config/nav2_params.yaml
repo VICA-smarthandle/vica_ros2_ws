@@ -159,6 +159,8 @@ bt_navigator:
       # VICA 자작(vica_nav2_bt_plugins). 레일 경로가 점 1개이거나 로봇에서
       # 멀면 거른다. 2026-09-16 run1·3·5 'zero length' 사고의 직접 수리.
       - vica_is_route_path_usable_condition_bt_node
+      # VICA 자작. 목적지 경로 끝점 방향을 목적지 방향으로(2026-09-30, run49 409호 교착).
+      - vica_align_path_end_to_goal_action_bt_node
       - nav2_initial_pose_received_condition_bt_node
       - nav2_reinitialize_global_localization_service_bt_node
       - nav2_rate_controller_bt_node
@@ -280,11 +282,24 @@ controller_server:
       movement_time_allowance: 20.0
     # Goal checker parameters
     general_goal_checker:
-      # 감속 중 tolerance를 재이탈해도 속도 조건만으로 성공 처리되지 않도록
-      # 매 주기 XY/yaw를 재검사한다.
-      stateful: False
-      plugin: "nav2_controller::StoppedGoalChecker"
-      xy_goal_tolerance: 0.25
+      # 2026-09-30 LatchedGoalChecker (run49 도착 교착 2/8 수리, 사용자 결정 B안 + xy 0.15).
+      #
+      # 끝점 0.15 m 안에 한 번 들어오면 위치에 도장을 찍고, 그 뒤로는 방향(yaw)과 정지만 본다.
+      # 로봇이 끝점에서 0.5 m 넘게 멀어지거나 끝점이 0.5 m 넘게 옮겨질 때만 도장을 푼다.
+      #
+      # 기성 stateful: True 로는 안 된다. Humble controller_server 가 새 경로를 받을 때마다
+      # (setPlannerPath) goal_checker->reset() 을 불러 기억을 지우는데, 레일 BT 는 1 Hz 로 경로를
+      # 다시 준다. run49 는 정렬을 마친 채 0.25~0.35 m 띠에서 17~25 s 섰다.
+      #
+      # xy 를 0.25 -> 0.15 로 좁힌 것은 도장 뒤 위치를 다시 보지 않기 때문이다(사용자 결정).
+      # VCC 는 이 값을 getTolerances 로 읽어 0.15 − arrive_margin(0.03) = 0.12 에서 선다.
+      #
+      # **되돌리기**: plugin 을 "nav2_controller::StoppedGoalChecker" 로, stateful: False 를 다시
+      # 넣고, xy_goal_tolerance 를 0.25 로. unlatch_distance 는 지워도 되고 남겨도 무시된다.
+      # **실패 신호**: 도착 판정까지 3 s 넘는 회차가 절반을 넘거나, 끝점 0.15 안에 못 들어가 선다.
+      plugin: "vica_vcc_controller::LatchedGoalChecker"
+      xy_goal_tolerance: 0.15
+      unlatch_distance: 0.5              # = FollowPath.align_exit_dist
       # yaw_goal_tolerance 0.25 -> 0.15 (2026-08-25)
       #
       # 도착한 뒤 로봇이 바라보는 방향을 더 정확하게 맞추려는 것이다. 0.25 rad 는
@@ -293,7 +308,7 @@ controller_server:
       #
       # xy 는 건드리지 않는다. 한 번에 한 축만 움직인다.
       #
-      # 대가는 도착까지 걸리는 시간이다. stateful 이 False 라 매 주기 yaw 를
+      # 대가는 도착까지 걸리는 시간이다. (당시) stateful 이 False 라 매 주기 yaw 를
       # 다시 보고, StoppedGoalChecker 라 rot_stopped_velocity 0.05 아래로
       # 느려질 때까지 기다린다. 남은 0.10 rad 를 RotateToGoal 이 줄여 놓은
       # 회전 속도(max_vel_theta 0.4 / slowing_factor 5.0 = 약 0.08 rad/s)로
@@ -415,6 +430,10 @@ controller_server:
       motor_lag: 0.35                    # run41 지연 0.3~0.5 s [추정] — 매 정렬 실측으로 갱신
       align_settle: 0.3
       align_max_attempts: 3
+      # ── 도착 교착 수리 (2026-09-30, run49 교착 2/8) ─────────────────────
+      align_rearm_time: 3.0              # Failed 뒤 이만큼 지나면 3번 기회를 다시. run49 409호 17 s Hold. failure_tolerance(10 s)보다 짧게
+      align_exit_dist: 0.5               # = general_goal_checker.unlatch_distance. 0.35 에서 나오던 띠에서 정렬 뒤 섰다(run49)
+      arrive_margin: 0.03                # 멈춤 반경 = checker xy − 0.03 = 0.12. checker 가 움직이는 동안 먼저 도장을 찍게
       min_state_time: 0.5
       clearance_window: 5.0              # 1.5 m 앞 + 몸 0.62 m 를 덮는다(local costmap 6 m 안)
       reset_gap: 1.5                     # 호출이 이보다 길게 끊기면 새 실행으로 보고 초기화. BT 복구 Wait 1 s·CPU 멈칫보다 길게

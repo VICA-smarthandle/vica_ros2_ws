@@ -172,10 +172,51 @@ def test_route_bt_falls_back_to_freespace_when_route_unusable():
     # 6판(run11): 목적지 0.25 m 안에서 매초 새 경로를 그리면 lattice 고리를 쫓아 지나친다
     # (안내소 정렬 24·19 s). 닿았으면 마지막 경로를 유지해 RotateToGoal 로 제자리 정렬.
     assert near.get('name') == 'NearGoalKeepPath'
-    assert [c.tag for c in near] == ['GoalReached', 'ComputePathToPose'], (
+    assert [c.tag for c in near] == ['GoalReached', 'Sequence'], (
         '0.25 m 안이면 재계획을 멈추고(GoalReached), 아니면 목적지까지 자유주행')
     assert near[0].get('goal') == '{goal}'
-    assert near[1].get('goal') == '{goal}' and near[1].get('path') == '{path}'
+    _assert_goal_path_then_align_end(near[1])
+
+
+ALIGN_END = 'AlignPathEndToGoal'
+ALIGN_END_LIB = 'vica_align_path_end_to_goal_action_bt_node'
+
+
+def _assert_goal_path_then_align_end(seq):
+    """9판(run49): 목적지 경로 = ComputePathToPose(goal) 바로 뒤 AlignPathEndToGoal, 같은 {path} 에.
+
+    끝점 방향만 목적지 방향으로 바꾼다. 항상 SUCCESS 라 Sequence 가 planner 결과를 그대로 전한다.
+    Fallback 에 직접 두면 planner 성공 때 뒤 자식이 안 돌고, 실패 때만 돈다 — 그래서 Sequence 로 묶는다.
+    """
+    assert seq.tag == 'Sequence'
+    assert [c.tag for c in seq] == ['ComputePathToPose', ALIGN_END], [c.tag for c in seq]
+    plan, align = seq[0], seq[1]
+    assert plan.get('goal') == '{goal}' and plan.get('path') == '{path}'
+    assert align.get('goal') == '{goal}'
+    assert align.get('input_path') == '{path}' and align.get('output_path') == '{path}'
+    # goal checker 도장이 풀리는 거리와 같다 — 그 밖의 끝점은 목적지가 아니다(당근·중간 경로).
+    unlatch = _params()['controller_server']['ros__parameters']['general_goal_checker'].get(
+        'unlatch_distance', 0.5)
+    assert float(align.get('max_dist', '0')) == unlatch
+
+
+def test_align_end_is_only_after_goal_paths():
+    """당근(레일 앞 3 m)·복귀 경로의 끝은 목적지가 아니므로 방향을 바꾸지 않는다."""
+    root = _bt_root()
+    aligns = list(root.iter(ALIGN_END))
+    assert len(aligns) == 2, '목적지 경로는 NearGoalKeepPath 와 LastMile 두 곳뿐이다'
+    for rc in root.iter('Sequence'):
+        kids = list(rc)
+        for i, c in enumerate(kids):
+            if c.tag == ALIGN_END:
+                assert i > 0 and kids[i - 1].tag == 'ComputePathToPose' and \
+                    kids[i - 1].get('goal') == '{goal}'
+
+
+def test_align_end_plugin_is_registered_and_built():
+    names = _params()['bt_navigator']['ros__parameters']['plugin_lib_names']
+    assert ALIGN_END_LIB in names, (
+        f'{ALIGN_END_LIB} 가 plugin_lib_names 에 없으면 bt_navigator 가 XML 을 읽다 멈춘다')
 
 
 def test_route_bt_skips_last_mile_when_already_at_goal():
@@ -198,6 +239,9 @@ def test_route_bt_skips_last_mile_when_already_at_goal():
     assert not list(last.iter('ComputeRoute')), '2단계는 레일을 다시 보지 않는다'
     assert len(list(last.iter('ComputePathToPose'))) == 1
     assert len(list(last.iter('FollowPath'))) == 1
+    compute = [r for r in last.iter('RecoveryNode') if r.get('name') == 'ComputeLastMilePath']
+    assert len(compute) == 1
+    _assert_goal_path_then_align_end(compute[0][0])
     assert 'nav2_goal_reached_condition_bt_node' in _params()['bt_navigator']['ros__parameters']['plugin_lib_names']
 
 

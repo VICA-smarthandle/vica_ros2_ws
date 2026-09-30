@@ -155,9 +155,17 @@
                      제자리 회전을 못 그려 1 m 고리를 내고 DWB 가 그걸 쫓아 지나친다(run11
                      안내소 정렬 24·19 s, run10 입구 31 s). 마지막 경로의 끝이 목적지 자세라
                      DWB RotateToGoal 이 짧은 쪽으로 제자리에서 돈다. -->
+                <!-- 9판 (2026-09-30, run49): 목적지 경로를 그린 뒤 끝점 **방향만** 목적지 방향으로 맞춘다.
+                     run49 에서 목적지 0.25 m 언저리의 경로 2개가 끝점 방향 +27°·−90° 로 튀었고, 그중
+                     −90° 가 409호 도착 정렬 교착(17 s) 한가운데 있었다. controller 는 경로 끝점 자세로
+                     도착을 판정한다. 노드는 항상 SUCCESS 라 이 Fallback 의 흐름은 그대로다. -->
                 <Fallback name="NearGoalKeepPath">
                   <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
-                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                  <Sequence name="GoalPathAlignedEnd">
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                    <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                        output_path="{path}"/>
+                  </Sequence>
                 </Fallback>
               </Fallback>
               <ClearEntireCostmap name="ClearGlobalCostmap-Rail"
@@ -177,7 +185,12 @@
           <PipelineSequence name="LastMileWithReplanning">
             <RateController hz="1.0">
               <RecoveryNode number_of_retries="1" name="ComputeLastMilePath">
-                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <!-- 9판: 1단계 NearGoalKeepPath 와 같은 끝점 방향 맞춤. -->
+                <Sequence name="LastMilePathAlignedEnd">
+                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                  <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                      output_path="{path}"/>
+                </Sequence>
                 <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"
                                     service_name="global_costmap/clear_entirely_global_costmap"/>
               </RecoveryNode>
