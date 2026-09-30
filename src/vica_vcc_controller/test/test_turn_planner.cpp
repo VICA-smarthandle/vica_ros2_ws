@@ -95,3 +95,20 @@ TEST(TurnPlanner, OnlyDirForcesDirection)
   const TurnPlan u = planTurn(-100.0 * M_PI / 180.0, 0.0, false, open(), TurnParams{}, 1);
   EXPECT_EQ(u.direction, 1);   // 반대쪽이라도 고정 방향(남은 각 260°)
 }
+
+TEST(TurnPlanner, WiderRadiiListPicksTheWidestThatFits)
+{
+  // 2026-09-30 run50: U턴 5회 전부 R 0.20(목록 최대). 목록을 [0.4, 0.3, 0.2, 0.1] 로 넓히면
+  // 앞에서부터 들어가는 첫 반지름을 쓴다 — 트인 곳은 0.4, 좁아질수록 자동으로 작아진다.
+  TurnParams p;
+  p.radii = {0.4, 0.3, 0.2, 0.1};
+  EXPECT_NEAR(planTurn(M_PI * 0.95, 0.0, false, open(), p).radius, 0.4, 1e-9);
+  const auto [lo3, hi3] = sweptLateralExtent(kPadded, 0.3, M_PI * 0.95, 190);
+  const TurnPlan t3 = planTurn(M_PI * 0.95, 0.0, false, corridor(lo3 - 0.06, hi3 + 0.06), p);
+  EXPECT_EQ(t3.mode, TurnMode::Arc);
+  EXPECT_NEAR(t3.radius, 0.3, 1e-9);
+  const auto [lo2, hi2] = sweptLateralExtent(kPadded, 0.2, M_PI * 0.95, 190);
+  const TurnPlan t2 = planTurn(M_PI * 0.95, 0.0, false, corridor(lo2 - 0.06, hi2 + 0.06), p);
+  EXPECT_EQ(t2.mode, TurnMode::Arc);
+  EXPECT_NEAR(t2.radius, 0.2, 1e-9);
+}

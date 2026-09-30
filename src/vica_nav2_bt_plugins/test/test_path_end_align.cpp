@@ -69,3 +69,12 @@ TEST(PathEndAlign, NanGoalIsLeftAlone)
   EXPECT_FALSE(alignPathEndToGoal(
     p, pose(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0), 0.5));
 }
+
+TEST(PathEndAlign, SubDegreeDifferenceIsLeftAlone)
+{
+  // run50: planner 사원수의 끝자리 차이만으로 "고쳤다" 로그가 화장실에서 3~4번씩 나왔다.
+  auto p = path(1.0, -M_PI / 2 + 0.5 * M_PI / 180.0);   // 0.5° 차이
+  EXPECT_FALSE(alignPathEndToGoal(p, pose(1.0, 0.0, -M_PI / 2), 0.5));
+  auto q = path(1.0, -M_PI / 2 + 2.0 * M_PI / 180.0);   // 2° 차이
+  EXPECT_TRUE(alignPathEndToGoal(q, pose(1.0, 0.0, -M_PI / 2), 0.5));
+}

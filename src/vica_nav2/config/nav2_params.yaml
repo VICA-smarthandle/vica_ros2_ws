@@ -422,7 +422,10 @@ controller_server:
       turn_enter_angle: 1.047            # 60도 (요구 2)
       turn_exit_angle: 0.436             # 25도
       pivot_start_angle: 0.611           # 35도 (정지 출발)
-      turn_radii: [0.2, 0.1]             # DWB 최소 ≈ 0.2, 0630 통로 1.3 m
+      # 앞에서부터 들어가는 첫 반지름을 쓴다(몸이 쓸고 가는 자리를 매 주기 검사). 2026-09-30 run50:
+      # [0.2, 0.1] 이던 때 U턴 5회 전부 R 0.2 — 사용자 "U턴이 너무 작다". 필요 폭 R 0.4 = 1.53 m,
+      # 0.3 = 1.35, 0.2 = 1.19(padded footprint 스윕 계산, 2026-08-29). 되돌리기: [0.2, 0.1].
+      turn_radii: [0.4, 0.3, 0.2, 0.1]
       turn_clearance: 0.05
       turn_angular_vel: 0.45             # DWB U턴 실측 0.42~0.47
       pivot_angular_vel: 0.35            # RPP rotate_to_heading_angular_vel
