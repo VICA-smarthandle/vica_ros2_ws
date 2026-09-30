@@ -2188,9 +2188,18 @@ route_server:
     #
     # [미시험] CostmapScorer 를 넣으면 막힌 선의 점수를 올려 우회시킬 수 있다.
     # costmap 구독이 필요해 1단계에서는 넣지 않는다.
-    edge_cost_functions: ["DistanceScorer"]
+    edge_cost_functions: ["DistanceScorer", "PenaltyScorer"]
     DistanceScorer:
       plugin: "nav2_route::DistanceScorer"
+    # 갈림길 호 엣지 벌점(2026-09-30, 설계서 docs/superpowers/specs/2026-09-28-app-route-editor-design.md 1부).
+    # 레일 GeoJSON 엣지의 metadata.penalty 를 weight(기본 1.0)배 해 비용에 더한다
+    # (humble penalty_scorer.cpp). 생성기·앱 레일 가공이 Y 갈림길 호 엣지에만 0.1 을 단다.
+    # 막는 것: 갈림길 옆을 직진할 때 '가장 가까운 노드'가 호 위 노드가 되어 경로가 곁가지 쪽으로
+    # V자로 내려갔다 오는 것(run40~46 직진 6회 중 4회, 시뮬 6.7 % -> 0 %). 곁가지로 꺾는 경로는
+    # 모든 후보가 같은 호를 지나 순위가 그대로다. 되돌리기: 이 목록에서 "PenaltyScorer" 를 뺀다.
+    # plugin 줄을 빼면 configure FATAL(09-16 실측, 위 DistanceScorer 와 같다).
+    PenaltyScorer:
+      plugin: "nav2_route::PenaltyScorer"
 
     max_planning_time: 2.0
 

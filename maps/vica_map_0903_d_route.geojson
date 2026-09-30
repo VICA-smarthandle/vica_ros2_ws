@@ -3093,7 +3093,10 @@
       "properties": {
         "id": 1099,
         "startid": 6,
-        "endid": 52
+        "endid": 52,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3116,7 +3119,10 @@
       "properties": {
         "id": 1100,
         "startid": 52,
-        "endid": 6
+        "endid": 6,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3139,7 +3145,10 @@
       "properties": {
         "id": 1101,
         "startid": 52,
-        "endid": 53
+        "endid": 53,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3162,7 +3171,10 @@
       "properties": {
         "id": 1102,
         "startid": 53,
-        "endid": 52
+        "endid": 52,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3185,7 +3197,10 @@
       "properties": {
         "id": 1103,
         "startid": 53,
-        "endid": 54
+        "endid": 54,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3208,7 +3223,10 @@
       "properties": {
         "id": 1104,
         "startid": 54,
-        "endid": 53
+        "endid": 53,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3231,7 +3249,10 @@
       "properties": {
         "id": 1105,
         "startid": 54,
-        "endid": 55
+        "endid": 55,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3254,7 +3275,10 @@
       "properties": {
         "id": 1106,
         "startid": 55,
-        "endid": 54
+        "endid": 54,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3277,7 +3301,10 @@
       "properties": {
         "id": 1107,
         "startid": 55,
-        "endid": 45
+        "endid": 45,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3300,7 +3327,10 @@
       "properties": {
         "id": 1108,
         "startid": 45,
-        "endid": 55
+        "endid": 55,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3323,7 +3353,10 @@
       "properties": {
         "id": 1109,
         "startid": 8,
-        "endid": 56
+        "endid": 56,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3346,7 +3379,10 @@
       "properties": {
         "id": 1110,
         "startid": 56,
-        "endid": 8
+        "endid": 8,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3369,7 +3405,10 @@
       "properties": {
         "id": 1111,
         "startid": 56,
-        "endid": 57
+        "endid": 57,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3392,7 +3431,10 @@
       "properties": {
         "id": 1112,
         "startid": 57,
-        "endid": 56
+        "endid": 56,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3415,7 +3457,10 @@
       "properties": {
         "id": 1113,
         "startid": 57,
-        "endid": 58
+        "endid": 58,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3438,7 +3483,10 @@
       "properties": {
         "id": 1114,
         "startid": 58,
-        "endid": 57
+        "endid": 57,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3461,7 +3509,10 @@
       "properties": {
         "id": 1115,
         "startid": 58,
-        "endid": 59
+        "endid": 59,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3484,7 +3535,10 @@
       "properties": {
         "id": 1116,
         "startid": 59,
-        "endid": 58
+        "endid": 58,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3507,7 +3561,10 @@
       "properties": {
         "id": 1117,
         "startid": 59,
-        "endid": 45
+        "endid": 45,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",
@@ -3530,7 +3587,10 @@
       "properties": {
         "id": 1118,
         "startid": 45,
-        "endid": 59
+        "endid": 59,
+        "metadata": {
+          "penalty": 0.1
+        }
       },
       "geometry": {
         "type": "MultiLineString",

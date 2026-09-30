@@ -25,6 +25,10 @@ ROUTE_BT = 'vica_navigate_to_pose_route.xml'
 GUARD = 'IsRoutePathUsable'
 GUARD_LIB = 'vica_is_route_path_usable_condition_bt_node'
 MAP = 'vica_map_0630'
+# 레일 파일 시험을 받는 지도. 2026-09-30 전에는 0630 하나만 봐서 0903_d 레일은 시험이 0 이었다.
+RAIL_MAPS = ('vica_map_0630', 'vica_map_0903_d')
+RING_MAPS = ('vica_map_0630',)   # 고리형. 0903_d 는 나무형이라 끝 노드 이웃이 1개다
+JUNCTION_PENALTY = 0.1     # scripts/vica_route_graph.py 의 JUNCTION_PENALTY 와 같아야 한다
 MAX_EDGE_M = 1.00          # scripts/vica_route_graph.py 의 MAX_EDGE_M 과 같아야 한다
 EDGE_SLACK_M = 0.10        # 사이 점이 벽을 피해 옮겨질 때의 여유
 DEST_TO_NODE_M = 0.60      # 목적지는 이 안에 노드가 있어야 레일이 '지나간다'
@@ -50,17 +54,22 @@ def _params():
         (_pkg_dir() / 'config' / 'nav2_params.yaml').read_text(encoding='utf-8'))
 
 
-def _graph():
-    p = _ws_maps() / f'{MAP}_route.geojson'
+def _graph(map_name=MAP, with_penalty=False):
+    p = _ws_maps() / f'{map_name}_route.geojson'
     if not p.is_file():
-        pytest.skip(f'레일 파일이 없다: {p} — scripts/vica_route_graph.py {MAP}')
+        pytest.skip(f'레일 파일이 없다: {p} — scripts/vica_route_graph.py {map_name}')
     g = json.loads(p.read_text(encoding='utf-8'))
-    nodes, edges = {}, []
+    nodes, edges, penalty = {}, [], {}
     for f in g['features']:
         if f['geometry']['type'] == 'Point':
             nodes[f['properties']['id']] = tuple(f['geometry']['coordinates'])
         else:
-            edges.append((f['properties']['startid'], f['properties']['endid']))
+            a, b = f['properties']['startid'], f['properties']['endid']
+            edges.append((a, b))
+            meta = f['properties'].get('metadata') or {}
+            penalty[(a, b)] = float(meta.get('penalty', 0.0))
+    if with_penalty:
+        return nodes, edges, penalty
     return nodes, edges
 
 
@@ -281,41 +290,55 @@ def test_guard_plugin_library_is_built():
 
 # ── 레일 파일 ──────────────────────────────────────────────────────────────
 
-def test_route_graph_edges_are_short():
+def _adjacency(edges):
+    adj = {}
+    for a, b in edges:
+        adj.setdefault(a, set()).add(b)
+    return adj
+
+
+def _turn_deg(a, b, c):
+    v1 = (b[0] - a[0], b[1] - a[1]); v2 = (c[0] - b[0], c[1] - b[1])
+    return abs(math.degrees(math.atan2(v1[0]*v2[1] - v1[1]*v2[0], v1[0]*v2[0] + v1[1]*v2[1])))
+
+
+@pytest.mark.parametrize('map_name', RAIL_MAPS)
+def test_route_graph_edges_are_short(map_name):
     """모든 엣지 <= 1 m. 6.71 m 엣지가 run5 를 세웠다."""
-    nodes, edges = _graph()
+    nodes, edges = _graph(map_name)
     long = [(a, b, round(math.dist(nodes[a], nodes[b]), 2)) for a, b in edges
             if math.dist(nodes[a], nodes[b]) > MAX_EDGE_M + EDGE_SLACK_M]
     assert not long, f'{MAX_EDGE_M} m 를 넘는 엣지: {long}'
 
 
-def test_route_graph_corners_are_rounded():
+@pytest.mark.parametrize('map_name', RAIL_MAPS)
+def test_route_graph_corners_are_rounded(map_name):
     """run8: smooth_corners 를 끄니 코너가 뾰족해 DWB 가 지나쳤다 되돌아왔다(w ±0.29).
     생성기가 15~120° 코너를 호로 바꾼다. 30~120° 로 한 번에 꺾이는 노드가 남으면 안 된다.
-    120° 초과는 목적지 스퍼의 되돌림이라 예외."""
-    nodes, edges = _graph()
-    ids = sorted(nodes); n = len(ids); sharp = []
-    for i, k in enumerate(ids):
-        a, b, c = nodes[ids[i - 1]], nodes[k], nodes[ids[(i + 1) % n]]
-        v1 = (b[0] - a[0], b[1] - a[1]); v2 = (c[0] - b[0], c[1] - b[1])
-        ang = abs(math.degrees(math.atan2(v1[0]*v2[1] - v1[1]*v2[0], v1[0]*v2[0] + v1[1]*v2[1])))
+    120° 초과는 목적지 스퍼의 되돌림이라 예외.
+
+    이웃이 둘인 노드만 본다 — 실제로 이어진 앞뒤 노드의 각이다(2026-09-30). 전에는 id 순서를
+    고리 순서로 가정해 나무형(0903_d)에서 엉뚱한 세 점을 쟀다. 갈림길(이웃 3+)은 Y 호가 맡는다."""
+    nodes, edges = _graph(map_name)
+    sharp = []
+    for k, nb in _adjacency(edges).items():
+        if len(nb) != 2:
+            continue
+        a, c = sorted(nb)
+        ang = _turn_deg(nodes[a], nodes[k], nodes[c])
         if 30 <= ang <= 120:
             sharp.append((k, round(ang)))
     assert not sharp, f'뾰족한 코너가 남았다 (노드, 각도): {sharp}'
 
 
-def test_route_graph_is_a_bidirectional_ring():
-    """엣지는 방향이 있다. 양쪽으로 다니려면 쌍이어야 하고, 고리는 끊기면 안 된다."""
-    nodes, edges = _graph()
+@pytest.mark.parametrize('map_name', RAIL_MAPS)
+def test_route_graph_is_bidirectional_and_connected(map_name):
+    """엣지는 방향이 있다. 양쪽으로 다니려면 쌍이어야 하고, 섬이 있으면 안 된다."""
+    nodes, edges = _graph(map_name)
     es = set(edges)
     missing = [(a, b) for a, b in edges if (b, a) not in es]
     assert not missing, f'되돌아오는 엣지가 없다: {missing[:5]}'
-
-    adj = {}
-    for a, b in edges:
-        adj.setdefault(a, set()).add(b)
-    assert all(len(adj.get(n, ())) >= 2 for n in nodes), '이웃이 2개 미만인 노드가 있다'
-
+    adj = _adjacency(edges)
     seen, stack = set(), [next(iter(nodes))]
     while stack:
         n = stack.pop()
@@ -323,36 +346,142 @@ def test_route_graph_is_a_bidirectional_ring():
             continue
         seen.add(n)
         stack.extend(adj.get(n, ()))
-    assert seen == set(nodes), '고리가 끊겨 섬이 있다'
+    assert seen == set(nodes), '레일이 끊겨 섬이 있다'
 
 
-def test_route_graph_passes_through_registered_destinations():
+@pytest.mark.parametrize('map_name', RING_MAPS)
+def test_route_graph_ring_has_no_dead_end(map_name):
+    """고리형은 모든 노드의 이웃이 2개 이상이다."""
+    nodes, edges = _graph(map_name)
+    adj = _adjacency(edges)
+    assert all(len(adj.get(n, ())) >= 2 for n in nodes), '이웃이 2개 미만인 노드가 있다'
+
+
+@pytest.mark.parametrize('map_name', RAIL_MAPS)
+def test_route_graph_passes_through_registered_destinations(map_name):
     """레일은 미션 매니저가 실제로 쓰는 목적지를 지나가야 한다.
 
     2026-09-16 1판은 저장소의 locations.json 을 읽어 안내소가 1.03 m 빗나갔다.
+    나무형은 등뼈에서 2 m(BT handoff) 안 목적지에 곁가지를 내지 않으므로 그 거리를 쓴다.
     """
-    doc = Path.home() / 'vica_data' / 'destinations' / MAP / 'destinations.yaml'
+    if map_name == 'vica_map_0903_d':
+        pytest.xfail('0903_d 레일은 09-17 에 깔아 그 뒤 장소(학과사무실, 레일에서 10.3 m)가 빠져 있다. '
+                     '재생성은 벌점과 다른 회차에서(설계서 1.6-4)')
+    doc = Path.home() / 'vica_data' / 'destinations' / map_name / 'destinations.yaml'
     if not doc.is_file():
         pytest.skip(f'이 기기엔 목적지 파일이 없다: {doc}')
-    nodes, _ = _graph()
+    nodes, _ = _graph(map_name)
+    limit = DEST_TO_NODE_M if map_name in RING_MAPS else 2.0
     far = []
     for d in (yaml.safe_load(doc.read_text(encoding='utf-8')) or {}).get('destinations', []):
         po = d.get('pose') or {}
         if po.get('x') is None:
             continue
         dist = min(math.dist((po['x'], po['y']), xy) for xy in nodes.values())
-        if dist > DEST_TO_NODE_M:
+        if dist > limit:
             far.append((d.get('name'), round(dist, 2)))
-    assert not far, f'레일에서 {DEST_TO_NODE_M} m 넘게 떨어진 목적지: {far}'
+    assert not far, f'레일에서 {limit} m 넘게 떨어진 목적지: {far}'
 
 
-def test_route_server_publishes_rail_on_its_own_topic():
-    """route_server 의 레일 게시는 /rail_plan 으로 옮겨져 있어야 한다(2026-09-28).
+# ── 갈림길 벌점 (2026-09-30, 설계서 2026-09-28-app-route-editor-design.md 1부) ──
 
-    옮기지 않으면 planner_server 의 /plan 과 섞여 방향 안내 레일 예고가 당근·마무리
-    경로를 레일로 오인한다. 주행(BT·컨트롤러)은 토픽이 아니라 액션 결과를 쓰므로 무관.
-    """
-    text = (_pkg_dir() / "launch" / "nav2_map_test.launch.py").read_text(encoding="utf-8")
-    block = text[text.index('executable="route_server"'):]
-    block = block[:block.index("respawn")]
-    assert 'remappings=[("plan", "/rail_plan")]' in block
+def test_route_server_uses_penalty_scorer():
+    rs = _params()['route_server']['ros__parameters']
+    assert 'PenaltyScorer' in rs['edge_cost_functions']
+    assert rs['PenaltyScorer']['plugin'] == 'nav2_route::PenaltyScorer'
+
+
+def _route_like_server(nodes, adj, cost, start_xy, goal_xy):
+    """humble route_server 흉내: 최근접 노드 출발·도착 + 첫 노드 지나쳤으면 잘라냄
+    (goal_intent_extractor.cpp, dot>0 · 0.10 m) + 다익스트라(거리+벌점)."""
+    import heapq
+    s = min(nodes, key=lambda n: math.dist(nodes[n], start_xy))
+    t = min(nodes, key=lambda n: math.dist(nodes[n], goal_xy))
+    dist, prev, q = {s: 0.0}, {}, [(0.0, s)]
+    while q:
+        c, u = heapq.heappop(q)
+        if u == t:
+            break
+        if c > dist[u]:
+            continue
+        for v in adj.get(u, ()):
+            nc = c + cost(u, v)
+            if nc < dist.get(v, 1e18):
+                dist[v], prev[v] = nc, u
+                heapq.heappush(q, (nc, v))
+    if t not in dist:
+        return None
+    path = [t]
+    while path[-1] != s:
+        path.append(prev[path[-1]])
+    path.reverse()
+    if len(path) > 1:
+        a, b = nodes[path[0]], nodes[path[1]]
+        vr = (b[0] - a[0], b[1] - a[1]); vp = (start_xy[0] - a[0], start_xy[1] - a[1])
+        nr, np_ = math.hypot(*vr), math.hypot(*vp)
+        if np_ > 0.10 and nr > 0 and (vr[0]*vp[0] + vr[1]*vp[1]) / (nr * np_) > 1e-4:
+            path = path[1:]
+    return path
+
+
+@pytest.mark.parametrize('map_name', RAIL_MAPS)
+def test_route_graph_junction_has_no_detour(map_name):
+    """갈림길 옆을 직진할 때 경로가 곁가지 호로 V자로 내려갔다 오면 안 된다.
+
+    run40~46: 0903_d 갈림길 직진 6회 중 4회 V자. 호 첫 노드가 큰길에서 0.05 m 라 '가장
+    가까운 노드'가 호 위였다. 갈림길(이웃 3+) 옆 곧게 이어진 두 엣지 위를 5 cm·좌우 ±0.15 m
+    로 훑어 모든 끝 노드로 경로를 낸다. 경로가 큰길 직선에서 0.3 m 넘게 벗어났다가 0.1 m
+    안으로 **돌아오면** V자다. 곁가지로 가는 경로는 벗어난 채 돌아오지 않으므로 걸리지 않는다.
+    판정은 모양으로만 한다 — 벌점 표시가 없는 옛 레일(벌점 전)에서 이 시험이 실패해야 한다."""
+    nodes, edges, penalty = _graph(map_name, with_penalty=True)
+    adj = _adjacency(edges)
+    weight = float(_params()['route_server']['ros__parameters']
+                   .get('PenaltyScorer', {}).get('weight', 1.0))
+    cost = lambda u, v: math.dist(nodes[u], nodes[v]) + weight * penalty.get((u, v), 0.0)  # noqa: E731
+    ends = [n for n, nb in adj.items() if len(nb) == 1]
+
+    def off_line(xy, A, C):
+        dx, dy = C[0] - A[0], C[1] - A[1]
+        return abs(dx * (xy[1] - A[1]) - dy * (xy[0] - A[0])) / math.hypot(dx, dy)
+
+    bad = []
+    for j, nb in adj.items():
+        if len(nb) < 3:
+            continue
+        pairs = [(a, c) for a in nb for c in nb if a < c
+                 and _turn_deg(nodes[a], nodes[j], nodes[c]) < 15]
+        for a, c in pairs:
+            A, C = nodes[a], nodes[c]
+            for p, q in ((a, j), (j, c)):
+                P, Q = nodes[p], nodes[q]
+                L = math.dist(P, Q)
+                ux, uy = (Q[0] - P[0]) / L, (Q[1] - P[1]) / L
+                for i in range(int(L / 0.05) + 1):
+                    for off in (-0.15, 0.0, 0.15):
+                        x = P[0] + ux * i * 0.05 - uy * off
+                        y = P[1] + uy * i * 0.05 + ux * off
+                        for e in ends:
+                            path = _route_like_server(nodes, adj, cost, (x, y), nodes[e])
+                            if not path:
+                                continue
+                            d = [off_line(nodes[n], A, C) for n in path[:15]]
+                            left = next((k for k, v in enumerate(d) if v > 0.3), None)
+                            if left is not None and any(v < 0.1 for v in d[left:]):
+                                bad.append((j, round(x, 2), round(y, 2), e))
+    assert not bad, f'직진인데 갈림길 호로 돌아간 자리 {len(bad)}곳 (갈림길, x, y, 목적 끝): {bad[:5]}'
+
+
+@pytest.mark.parametrize('map_name', RAIL_MAPS)
+def test_route_graph_penalty_only_on_junction_arcs(map_name):
+    """벌점은 갈림길 호에만. 갈림길이 있으면 벌점 엣지가 있어야 하고, 벌점 값은 생성기와 같다.
+    갈림길 없는 고리형(0630)에는 벌점이 하나도 없어야 한다 — 코너 수로 좌/우 선택이 흔들린다."""
+    nodes, edges, penalty = _graph(map_name, with_penalty=True)
+    adj = _adjacency(edges)
+    junctions = [n for n, nb in adj.items() if len(nb) >= 3]
+    values = {v for v in penalty.values() if v > 0}
+    if not junctions:
+        assert not values, '갈림길이 없는데 벌점 엣지가 있다'
+        return
+    assert values == {JUNCTION_PENALTY}
+    for (a, b), v in penalty.items():
+        assert penalty.get((b, a)) == v, f'벌점이 한 방향에만 있다: {(a, b)}'
