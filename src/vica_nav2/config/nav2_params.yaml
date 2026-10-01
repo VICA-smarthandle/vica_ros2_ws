@@ -2028,7 +2028,22 @@ global_costmap:
       # 파라미터로 넘을 수 있는 크기가 아니다.
       #
       # nvblox_layer 블록은 남겨 둔다. plugins 에 없으면 로드되지 않아 무해하다.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # 2026-10-01 VCC: 인플레이션을 벽(지도)·새 물체(라이다)로 나눈다. 층은 위에서부터 한 장에 겹쳐지고,
+      # InflationLayer 는 "자기 차례에 이미 찍힌 LETHAL" 주위를 칠하며 덧칠은 max(old, new) 다(Humble
+      # inflation_layer.cpp). 그래서
+      #   static_layer -> inflation_layer(0.55, 지도 벽만 보임) -> obstacle_layer -> obstacle_inflation_layer(0.35)
+      # 이면 벽은 0.55, 지도에 없던 물체(사람·의자·콘)는 0.35 띠만 받는다.
+      # 근거: run55 긴 복도에서 사람(복도 3.15 m 가운데) 앞 계획기 경로가 0.55 띠를 피해 옆으로 0.57~1.33 m
+      # 벌어져 VCC 가 90° 가까이 틀었다 되돌아왔다(비틀거림). 0.35 면 필요한 비킴 ≈ 0.83 -> 0.63 m(계산).
+      # 벽 0.55 는 "벽 근처 회전 때 이용자 안전"(08-02 사용자 판정)이라 그대로 둔다. 사람과의 실제 간격은
+      # VCC(LETHAL 직접 거리, target_clearance 0.20)와 collision_monitor 가 지킨다. local 은 VCC 가 비용을
+      # 읽지 않으므로 바꾸지 않는다. 되돌리기: obstacle_inflation_layer 를 빼고 순서를 원래대로.
+      plugins: ["static_layer", "inflation_layer", "obstacle_layer", "obstacle_inflation_layer"]
+
+      obstacle_inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.5          # inflation_layer 와 같게 — 띠 두께만 다르게
+        inflation_radius: 0.35            # 지도에 없던 물체용. 내접 0.277 보다 커야 몸 기준 '못 들어감' 바깥에 비용이 남는다
 
       # ===== KZ-5: 관리자가 앱에서 그린 금지구역 (2026-08-31) =====
       #

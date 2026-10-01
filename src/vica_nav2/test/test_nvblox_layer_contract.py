@@ -287,13 +287,20 @@ def test_inflation_layer_runs_after_nvblox(costmap):
     plugins 순서가 곧 적용 순서다. inflation이 nvblox보다 앞이면 nvblox가 찍은
     장애물에는 비용 경사가 생기지 않아, 경로가 그 장애물에 그대로 붙는다.
     """
-    plugins = _costmap(costmap)['plugins']
+    cm = _costmap(costmap)
+    plugins = cm['plugins']
+    # 2026-10-01: global 은 인플레이션을 벽용(inflation_layer)·새 물체용(obstacle_inflation_layer)
+    # 둘로 나눴다(test_footprint_contract 의 분리 시험). 이름이 아니라 부품 종류로 본다 —
+    # 마지막 층이 InflationLayer 여야 어느 계층이 찍은 장애물에도 비용 경사가 붙는다.
+    inflations = [n for n in plugins
+                  if cm.get(n, {}).get('plugin') == 'nav2_costmap_2d::InflationLayer']
+    assert inflations, f'{costmap} 에 InflationLayer 가 없다: {plugins}'
     if 'nvblox_layer' in plugins:
-        assert plugins.index('inflation_layer') > plugins.index('nvblox_layer'), (
+        assert plugins.index(inflations[-1]) > plugins.index('nvblox_layer'), (
             f'{costmap} plugins 순서가 잘못됐다: {plugins}'
         )
     # nvblox가 없어도 inflation은 항상 마지막이어야 한다. 다른 어떤 계층이 찍은
-    # 장애물이든 비용 경사는 inflation_layer가 붙인다.
-    assert plugins[-1] == 'inflation_layer', (
-        f'{costmap} plugins 마지막이 inflation_layer가 아니다: {plugins}'
+    # 장애물이든 비용 경사는 마지막 InflationLayer 가 붙인다.
+    assert plugins[-1] == inflations[-1], (
+        f'{costmap} plugins 마지막이 InflationLayer 가 아니다: {plugins}'
     )

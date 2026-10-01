@@ -447,3 +447,24 @@ def test_urdf_axle_offset_matches_this_contract():
         f'URDF axle_offset_x {found.group(1)} 와 이 시험의 {AXLE_OFFSET_X} 가 다르다.'
         ' 한쪽만 고치면 footprint 가 차체와 어긋난다'
     )
+
+
+def test_global_costmap_inflates_walls_and_new_obstacles_separately():
+    """2026-10-01: global 인플레이션을 벽(지도)·새 물체(라이다)로 나눈다.
+
+    InflationLayer 는 자기 차례에 이미 찍힌 LETHAL 주위만 칠하고 덧칠은 max 다. 그래서 순서가 곧 역할이다.
+    벽용(inflation_layer)은 static_layer 바로 뒤·obstacle_layer 앞에 있어야 지도 벽만 0.55 로 칠하고,
+    물체용(obstacle_inflation_layer)은 obstacle_layer 뒤에서 더 얇게 칠한다. 순서가 바뀌면 사람에게도 0.55 가
+    붙어(run55 복도 0.57~1.33 m 우회·비틀거림) 이 분리가 사라진다.
+    """
+    gc = _load_params()['global_costmap']['global_costmap']['ros__parameters']
+    plugins = gc['plugins']
+    assert plugins.index('static_layer') < plugins.index('inflation_layer') < \
+        plugins.index('obstacle_layer') < plugins.index('obstacle_inflation_layer'), plugins
+    wall = gc['inflation_layer']
+    obst = gc['obstacle_inflation_layer']
+    assert obst['plugin'] == wall['plugin'] == 'nav2_costmap_2d::InflationLayer'
+    assert obst['cost_scaling_factor'] == wall['cost_scaling_factor']
+    inscribed = 0.227 + gc['footprint_padding']   # 반폭 + padding
+    assert inscribed < obst['inflation_radius'] < wall['inflation_radius'], (
+        '물체용 띠는 몸 기준 못 들어가는 거리(내접)보다 커야 하고, 벽용보다 얇아야 한다')
