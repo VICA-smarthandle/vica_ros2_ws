@@ -400,7 +400,11 @@ controller_server:
       linear_accel: 0.143                # 0.25 -> 0.5 를 1.75 s
       resync_margin: 0.15                # run48: 0.05 는 모터 지연 0.45 s 에 매번 되감겨 톱니(0 -> 0.25 에 0.85 s)
       min_speed: 0.12                    # RPP regulated_linear_scaling_min_speed
-      curve_min_radius: 1.2              # RPP regulated_linear_scaling_min_radius
+      # 앞 1.5 m 경로를 20 cm 간격 세 점으로 읽은 반경이 이보다 작으면 v = 최고속도 × 반경 / 이 값.
+      # 2026-10-01 1.2 -> 0.8: run50 코너 6곳에서 레일을 반경 0.35~0.7 m 로 읽어 0.14~0.30 까지
+      # 줄였지만, 실제로 돈 반경은 0.9~1.7 m(조준점이 꺾임을 깎음)였다 — 필요 이상 감속.
+      # 사용자 "줄이는 게 심함, 0.6 은 너무 확" -> 0.8. 되돌리기 1.2.
+      curve_min_radius: 0.8
       curve_decel: 0.3                   # 코너 미리 줄이기
       preview_dist: 1.5
       slow_clearance: 0.35               # RPP cost_scaling_dist 와 같은 값, 직접 잰 거리
