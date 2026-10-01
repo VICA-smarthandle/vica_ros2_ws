@@ -48,7 +48,9 @@
 // 오른쪽 줄이 흘렀다(사용자 육안). 코드의 뜻(A=왼쪽·B=오른쪽)은 그대로 두고 핀만 맞바꿨다.
 #define LED_A_PIN        17   // 시프터 A4 → LED 왼쪽 줄   (나노 D8 자리)
 #define LED_B_PIN        18   // 시프터 A2 → LED 오른쪽 줄 (나노 D9 자리)
-#define SHIFTER_OE_PIN   16   // 시프터 OE, HIGH = 출력 켜짐
+// 2026-10-01 보드 재제작: OE 16→4, 진동 4→16 으로 맞바꿨다(사용자 배선). GPIO4 는
+// 스트래핑 핀이 아니라 부팅에 영향이 없다.
+#define SHIFTER_OE_PIN    4   // 시프터 OE, HIGH = 출력 켜짐
 // I2C 는 ESP32 기본(SDA21/SCL22)과 **반대로** 꽂혀 있다. 2026-09-22 스캔 실측:
 // SDA21/SCL22 → 응답 없음, SDA22/SCL21 → 0x68 응답. 배선표의 "22 lv1 / 21 lv2" 는
 // 시프터 채널 이름일 뿐이라 어느 쪽이 SDA 인지 말해 주지 않는다 — 스캔이 정본이다.
@@ -289,7 +291,7 @@ unsigned long touchLastLow = 0;      // 마지막으로 LOW(터치)를 본 시�
 bool          touchSeenLow = false;  // 부팅 후 LOW 를 한 번이라도 봤나
 unsigned long touchSentAt  = 0;
 
-// ── 진동모터 (ESP32 GPIO4 · 나노 시절 D10, 2026-09-04) ──────────────────────
+// ── 진동모터 (ESP32 GPIO16 · 09-22~09-30 GPIO4 · 나노 시절 D10) ──────────────────────
 // MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). MCU GPIO 로 모터를
 // 직접 구동하지 않는다 — 전류 초과. 플라이백 다이오드가 드라이버 쪽에 있다.
 //
@@ -306,7 +308,7 @@ unsigned long touchSentAt  = 0;
 //
 // 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
 // 멈춘다.
-#define HAPTIC_PIN             4   // 2026-09-22 ESP32U: 10→4. 시프터 없이 3.3V 로 게이트 구동
+#define HAPTIC_PIN            16   // 2026-10-01 보드 재제작: 4→16. L9110 IA(IB=GND), 시프터 없이 3.3V
 #define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
 #define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (손잡이 찾기·비상 패턴)
 #define HAPTIC_CMD_TICK       0x12   // 300ms x1 (잡음 확인, 2026-09-30)
@@ -739,6 +741,11 @@ void applyState(uint8_t state) {
 }
 
 void setup() {
+  // 진동 핀부터 LOW 로 잡는다. L9110 입력은 비어 있으면 모듈이 HIGH 로 끌어올려
+  // 부팅 동안 모터가 돈다(2026-09-30 실측) — 가장 먼저 눌러 둔다.
+  pinMode(HAPTIC_PIN, OUTPUT);
+  digitalWrite(HAPTIC_PIN, LOW);
+
   Serial.begin(115200);
 
   // 레벨시프터부터 켠다. 이 줄이 없으면 아래 서보·LED 신호가 시프터에서 끊겨
