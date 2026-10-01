@@ -426,7 +426,12 @@ controller_server:
       # [0.2, 0.1] 이던 때 U턴 5회 전부 R 0.2 — 사용자 "U턴이 너무 작다". 필요 폭 R 0.4 = 1.53 m,
       # 0.3 = 1.35, 0.2 = 1.19(padded footprint 스윕 계산, 2026-08-29). 되돌리기: [0.2, 0.1].
       turn_radii: [0.4, 0.3, 0.2, 0.1]
-      turn_clearance: 0.05
+      # U턴 호를 돌기 전에 끝까지 미리 돌려 보고, 도는 동안 몸 윤곽(padding 0.05 포함)이 막힌 칸에
+      # 가장 가까워지는 순간의 거리가 이 값 이상인 첫 반지름(turn_radii 앞에서부터)을 고른다.
+      # 2026-10-01 0.05 -> 0.15(실제 차체-벽 최소 간격 ≈ 0.10 -> 0.20 m). run51 사용자: 복도 R 0.4 는
+      # 좋지만 화장실 통로는 "느리고 불안, 0.3 이어야" + 그 순간 collision ahead 2회. 5 cm 만 남아도
+      # 큰 호를 고른 것으로 본다(bag 유실로 미확인). 되돌리기 0.05.
+      turn_clearance: 0.15
       turn_angular_vel: 0.45             # DWB U턴 실측 0.42~0.47
       pivot_angular_vel: 0.35            # RPP rotate_to_heading_angular_vel
       align_angular_vel: 0.35
