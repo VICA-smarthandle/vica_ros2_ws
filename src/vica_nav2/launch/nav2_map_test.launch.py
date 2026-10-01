@@ -18,6 +18,29 @@ from launch_ros.actions import Node, SetRemap
 from nav2_common.launch import RewrittenYaml
 
 
+def select_bt_expression(route_bt, active_bt):
+    """use_route:=true **이고 레일 파일이 있을 때만** 레일 트리를 고른다.
+
+    플래그 하나로 트리까지 함께 바뀌게 한다. 따로 두면 레일을 켜고 트리를
+    안 바꾸는 실수가 난다 — 그때 로봇은 아무 말 없이 종전대로 달린다.
+
+    2026-10-01: 파일 존재도 함께 본다. 터미네이터 nav2 칸이 use_route:=true 를
+    기본으로 붙이게 됐는데, 레일 파일이 없는 지도에서 레일 트리를 고르면
+    route_server 가 없어 ComputeRoute 노드를 만들 수 없다. 공식 BtActionNode 는
+    그때 예외를 던진다(humble bt_action_node.hpp 101~108행 "action server not
+    available") — 목적지마다 트리 생성이 실패해 주행이 안 된다. 파일 경로 규칙은
+    route_actions 와 같다(route_graph 를 비우면 map 에서 <이름>_route.geojson).
+    """
+    return PythonExpression([
+        "'", route_bt, "' if ('", LaunchConfiguration("use_route"),
+        "'.lower() in ('true', '1') and __import__('os').path.isfile(('",
+        LaunchConfiguration("route_graph"),
+        "'.strip()) or __import__('os').path.splitext('",
+        LaunchConfiguration("map"),
+        "')[0] + '_route.geojson')) else '", active_bt, "'",
+    ])
+
+
 def generate_launch_description():
     nav2_bringup_dir = get_package_share_directory("nav2_bringup")
     vica_nav2_dir = get_package_share_directory("vica_nav2")
@@ -60,12 +83,7 @@ def generate_launch_description():
         "behavior_trees",
         "vica_navigate_to_pose_route.xml",
     )
-    # 플래그 하나로 트리까지 함께 바뀌게 한다. 따로 두면 레일을 켜고 트리를
-    # 안 바꾸는 실수가 난다 — 그때 로봇은 아무 말 없이 종전대로 달린다.
-    selected_bt = PythonExpression([
-        "'", route_bt, "' if '", LaunchConfiguration("use_route"),
-        "'.lower() in ('true', '1') else '", active_bt, "'",
-    ])
+    selected_bt = select_bt_expression(route_bt, active_bt)
     wheel_ekf_launch = os.path.join(
         vica_localization_dir,
         "launch",

@@ -249,3 +249,34 @@ def test_no_unscoped_cmd_vel_remap_hijacks_the_controller(
     for src in pairs:
         if src.endswith(':cmd_vel'):
             assert ':' in src, f'{src}는 노드 지정 remap이어야 한다'
+
+
+# ── 레일 트리 선택 (2026-10-01) ─────────────────────────────────────────────
+
+@pytest.mark.parametrize('use_route, has_file, explicit, expect_route', [
+    ('true', True, False, True),
+    ('true', False, False, False),   # 레일 파일 없는 지도 — 서버가 없으니 레일 트리 금지
+    ('false', True, False, False),
+    ('true', True, True, True),      # route_graph 를 직접 준 경우
+    ('True', True, False, True),
+])
+def test_route_tree_only_when_flag_and_rail_file(
+        tmp_path, use_route, has_file, explicit, expect_route):
+    """use_route:=true 가 터미네이터 기본(2026-10-01)이 됐다. 레일 파일이 없는 지도에서
+    레일 트리를 고르면 공식 BtActionNode 가 'action server not available' 예외를 던져
+    목적지마다 트리 생성이 실패한다. 파일이 있을 때만 레일 트리여야 한다."""
+    module = _load_launch_module()
+    map_yaml = tmp_path / 'vica_map_x.yaml'
+    map_yaml.write_text('image: vica_map_x.pgm\n', encoding='utf-8')
+    rail = tmp_path / ('custom.geojson' if explicit else 'vica_map_x_route.geojson')
+    if has_file:
+        rail.write_text('{}', encoding='utf-8')
+    context = LaunchContext()
+    context.launch_configurations.update({
+        'use_route': use_route,
+        'map': str(map_yaml),
+        'route_graph': str(rail) if explicit else '',
+    })
+    chosen = perform_substitutions(
+        context, [module.select_bt_expression('/x/route.xml', '/x/no_backup.xml')])
+    assert chosen == ('/x/route.xml' if expect_route else '/x/no_backup.xml')
