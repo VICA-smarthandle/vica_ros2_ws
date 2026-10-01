@@ -109,6 +109,10 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert 0.6 <= float(near_gate.get('max_dist_from_path', '0')) <= 1.0, (
         '0.6 m 미만이면 정상 주행(0.5 m 밖 13 %)까지 걸어 당근 모드가 되고(run19), 1.0 m 넘으면 호 U턴 끝(1.3~1.4 m)에서 옆 선에 붙는 지그재그가 돌아온다(run18)')
     assert float(near_gate.get('max_dist_from_path')) < float(seqs[0][1].get('max_dist_from_path')), '안쪽 문은 바깥 거름망보다 좁아야 한다'
+    # 10판(10-01): 안쪽 문은 문턱 두 개 — 나갈 때 0.8, 돌아올 때 그보다 안쪽. 같으면 경계에서 1 Hz 로 경로가 번갈아 간다.
+    rejoin = float(near_gate.get('rejoin_dist_from_path', '-1'))
+    assert 0.0 < rejoin < float(near_gate.get('max_dist_from_path')), (
+        'rejoin_dist_from_path 는 0 보다 크고 max_dist_from_path 보다 작아야 한다(run52~54 경로 교대 2.9~6.9회/분)')
     assert rail_direct[2].get('path') == '{path}' and rail_direct[2].get('goal') == '{goal}'
     valids = list(seqs[0].iter('IsPathValid'))
     assert len(valids) == 2 and all(v.get('path') == trunc.get('output_path') for v in valids), (

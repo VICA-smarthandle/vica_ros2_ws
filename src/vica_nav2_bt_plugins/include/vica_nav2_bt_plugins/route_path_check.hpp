@@ -1,6 +1,7 @@
 // 레일 경로를 controller 에 넘겨도 되는지 판정한다. ROS 노드·TF 없이 쓸 수 있다.
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -35,5 +36,37 @@ RoutePathVerdict checkRoutePath(
   double goal_x = std::numeric_limits<double>::quiet_NaN(),
   double goal_y = std::numeric_limits<double>::quiet_NaN(),
   double handoff = 0.0);
+
+// 레일 거리 문턱 두 개(히스테리시스). 2026-10-01 run52~54: 로봇이 레일에서 0.75~0.9 m 에 있으면
+// 안쪽 문(0.8 m)이 1 Hz 로 열렸다 닫혔다 해 레일 경로와 자유주행 경로가 번갈아 controller 에 갔다
+// (robot far from path 25~32회, VCC 차선 d 0 <-> 0.6 점프 2.9~6.9회/분, 코너 급정지 1회).
+// 한 번 max_dist 밖으로 나가면 rejoin_dist 안으로 들어와야 다시 통과시킨다.
+class RailDistanceGate
+{
+public:
+  // 이번 판정에 쓸 거리 문턱. rejoin_dist 가 0 이하이거나 max_dist 이상이면 문턱 하나(종전 동작).
+  double threshold(double max_dist, double rejoin_dist) const
+  {
+    return (far_ && rejoin_dist > 0.0 && rejoin_dist < max_dist) ? rejoin_dist : max_dist;
+  }
+  // 판정 뒤 상태 갱신. 목적지가 0.5 m 넘게 바뀌면 새 주행으로 보고 처음부터.
+  void update(double dist_to_path, double threshold, double goal_x, double goal_y)
+  {
+    if (std::isfinite(goal_x) && std::isfinite(goal_y)) {
+      if (!std::isfinite(goal_x_) || std::hypot(goal_x - goal_x_, goal_y - goal_y_) > 0.5) {
+        far_ = false;
+      }
+      goal_x_ = goal_x;
+      goal_y_ = goal_y;
+    }
+    if (std::isfinite(dist_to_path)) {far_ = dist_to_path > threshold;}
+  }
+  bool far() const {return far_;}
+
+private:
+  bool far_{false};
+  double goal_x_{std::numeric_limits<double>::quiet_NaN()};
+  double goal_y_{std::numeric_limits<double>::quiet_NaN()};
+};
 
 }  // namespace vica_nav2_bt_plugins

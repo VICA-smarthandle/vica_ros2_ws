@@ -56,17 +56,21 @@ BT::NodeStatus IsRoutePathUsableCondition::tick()
   }
 
   const double nan = std::numeric_limits<double>::quiet_NaN();
+  double rejoin = -1.0;
+  getInput("rejoin_dist_from_path", rejoin);
+  const double gx = has_goal ? goal.pose.position.x : nan, gy = has_goal ? goal.pose.position.y : nan;
+  const double thr = gate_.threshold(max_dist, rejoin);
   const auto v = checkRoutePath(
     path, robot.pose.position.x, robot.pose.position.y,
-    static_cast<std::size_t>(std::max(min_poses, 1)), max_dist,
-    has_goal ? goal.pose.position.x : nan, has_goal ? goal.pose.position.y : nan, handoff);
+    static_cast<std::size_t>(std::max(min_poses, 1)), thr, gx, gy, handoff);
+  gate_.update(v.dist_to_path, thr, gx, gy);
 
   if (!v.usable) {
     // 1 Hz 로 다시 물으므로 매 틱 찍히면 로그가 넘친다. 2초에 한 번만.
     RCLCPP_INFO_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 2000,
-      "[IsRoutePathUsable] 레일 경로를 못 쓴다 -> 자유주행: %s (점 %zu개, 경로까지 %.2f m, 목적지까지 %.2f m)",
-      v.reason.c_str(), v.poses, v.dist_to_path, v.dist_to_goal);
+      "[IsRoutePathUsable] 레일 경로를 못 쓴다 -> 자유주행: %s (점 %zu개, 경로까지 %.2f m, 목적지까지 %.2f m, 거리 문턱 %.2f m)",
+      v.reason.c_str(), v.poses, v.dist_to_path, v.dist_to_goal, thr);
     return BT::NodeStatus::FAILURE;
   }
   return BT::NodeStatus::SUCCESS;

@@ -106,3 +106,40 @@ TEST(RoutePathCheck, NearGoalHandsOffToFreespace)
   // handoff 0 이면 끈다
   EXPECT_TRUE(checkRoutePath(p, 1.5, 0.1, 2, 1.5, 3.0, 0.0, 0.0).usable);
 }
+
+using vica_nav2_bt_plugins::RailDistanceGate;
+
+TEST(RailDistanceGate, OneThresholdUntilLeavingThenRejoinThreshold)
+{
+  // run52~54: 0.75~0.9 m 에서 문턱 하나(0.8)면 1 Hz 로 레일·자유주행이 번갈아 갔다.
+  RailDistanceGate g;
+  EXPECT_DOUBLE_EQ(g.threshold(0.8, 0.5), 0.8);
+  g.update(0.75, g.threshold(0.8, 0.5), 10.0, 0.0);   // 안쪽 — 그대로
+  EXPECT_FALSE(g.far());
+  g.update(0.85, g.threshold(0.8, 0.5), 10.0, 0.0);   // 0.8 밖으로 나감
+  EXPECT_TRUE(g.far());
+  EXPECT_DOUBLE_EQ(g.threshold(0.8, 0.5), 0.5);
+  g.update(0.75, g.threshold(0.8, 0.5), 10.0, 0.0);   // 0.75 는 아직 0.5 밖 — 계속 밖
+  EXPECT_TRUE(g.far());
+  g.update(0.45, g.threshold(0.8, 0.5), 10.0, 0.0);   // 0.5 안 — 돌아옴
+  EXPECT_FALSE(g.far());
+  EXPECT_DOUBLE_EQ(g.threshold(0.8, 0.5), 0.8);
+}
+
+TEST(RailDistanceGate, DisabledWhenRejoinNotSetOrNotSmaller)
+{
+  RailDistanceGate g;
+  g.update(1.0, 0.8, 10.0, 0.0);
+  ASSERT_TRUE(g.far());
+  EXPECT_DOUBLE_EQ(g.threshold(0.8, -1.0), 0.8);
+  EXPECT_DOUBLE_EQ(g.threshold(0.8, 0.9), 0.8);
+}
+
+TEST(RailDistanceGate, NewGoalStartsFresh)
+{
+  RailDistanceGate g;
+  g.update(1.0, 0.8, 10.0, 0.0);
+  ASSERT_TRUE(g.far());
+  g.update(std::numeric_limits<double>::infinity(), 0.5, 20.0, 5.0);   // 다른 목적지, 거리 모름
+  EXPECT_FALSE(g.far());
+}

@@ -94,8 +94,12 @@
                       <!-- 8판-2 (run19): 문턱 0.5→0.8 m. 0.5 는 정상 주행의 13 %(run16·18 실측)까지 걸어 잠가
                            당근 모드가 81 % 가 됐고 코너가 다시 당근식(붙어 감·펄스)이 됐다. 레일선 0.8 m 밖은
                            3~6 %, 1.0 m 밖은 0~4 % 로 전부 U턴 뒤 복귀 구간이다. -->
+                      <!-- 10판 (2026-10-01, run52~54): 문턱 두 개. 0.8 m 밖으로 나가면 0.5 m 안으로 들어와야 레일 직접으로
+                           돌아온다. 0.75~0.9 m 에 머물면 1 Hz 로 레일·복귀 당근 경로가 번갈아 가 VCC 차선 d 가 0 <-> 0.6 으로
+                           뛰었다(2.9~6.9회/분, 짧은 정지·코너 급정지 1회). 0.5 는 8판-1 의 단일 문턱 값이다 — 그때는 정상 주행의
+                           13 % 를 막았지만, 이제는 한 번 0.8 밖으로 나간 뒤에만 쓰인다. 끄려면 rejoin_dist_from_path 를 지운다. -->
                       <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
-                                         max_dist_from_path="0.8" handoff_dist_to_goal="2.0"
+                                         max_dist_from_path="0.8" rejoin_dist_from_path="0.5" handoff_dist_to_goal="2.0"
                                          global_frame="map" robot_base_frame="base_footprint"
                                          transform_tolerance="0.2" name="NearRailGate"/>
                       <IsPathValid path="{rail_ahead}"/>
