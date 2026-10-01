@@ -155,10 +155,31 @@ def test_velocity_smoother_arrival_softening_stays_within_goal_tolerance():
     max_decel_x = abs(smoother['max_decel'][0])
 
     stop_time = max_vel_x / max_decel_x
-    stop_distance = max_vel_x ** 2 / (2.0 * max_decel_x)
-
-    assert stop_distance < lim['xy_goal_tolerance']
     assert stop_time < progress_checker['movement_time_allowance']
+
+    if lim['plugin_family'] != 'vcc':
+        # DWB·MPPI·RPP: 최고 속도에서 바로 완만히 서도 허용오차 안이어야 한다(옛 기준 그대로).
+        stop_distance = max_vel_x ** 2 / (2.0 * max_decel_x)
+        assert stop_distance < lim['xy_goal_tolerance']
+        return
+
+    # 2026-10-01 VCC: VCC 는 최고 속도에서 바로 서지 않는다. 끝점 approach_velocity_scaling_dist
+    # 안에서 목표 속도를 거리에 비례해 줄이고(approachLimit), 멈춤 반경(xy − arrive_margin) 안에서
+    # 0 을 낸다. 그래서 재야 할 것은 "멈춤 반경에 닿는 순간의 속도에서, 지연까지 더한 정지거리가
+    # 허용오차 안" 이다. 최고 속도 상향(0.5 -> 0.7 검토) 때 옛 식은 0.10 -> 0.20 m 로 깨지지만,
+    # 실제 도착 정지는 짧게 늘 뿐이다. 기준(허용오차 안에서 선다)은 그대로다.
+    fp = controller['FollowPath']
+    gc = controller['general_goal_checker']
+    stop_r = gc['xy_goal_tolerance'] - fp['arrive_margin']
+    v_at = max(
+        fp['desired_linear_vel'] * stop_r / fp['approach_velocity_scaling_dist'],
+        fp['min_approach_linear_velocity'])
+    decel = min(max_decel_x, fp['max_linear_decel'])
+    latency = 0.3   # VCC stop_latency 기본값(backlog D2: CAN·드라이버 지연 300 ms)
+    vcc_stop = v_at ** 2 / (2.0 * decel) + v_at * latency
+    assert vcc_stop < lim['xy_goal_tolerance'], (
+        f'멈춤 반경 {stop_r:.2f} m 에서 {v_at:.3f} m/s 로 들어오면 {vcc_stop:.3f} m 더 간다 — '
+        f'허용오차 {lim["xy_goal_tolerance"]} 를 넘는다')
 
 
 def test_velocity_smoother_timeout_does_not_widen_safety_detection_gap():
