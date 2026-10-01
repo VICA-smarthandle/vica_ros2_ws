@@ -21,7 +21,7 @@ double simulateTurnClearance(
 
 TurnPlan planTurn(
   double heading, double v_now, bool pivot_first, const ClearanceFn & f, const TurnParams & p,
-  int only_dir)
+  int only_dir, const TurnPlan * keep)
 {
   const int pref = heading >= 0.0 ? 1 : -1;
   const double a = std::abs(heading);
@@ -31,6 +31,18 @@ TurnPlan planTurn(
     dirs = {{only_dir, only_dir == pref ? a : 2.0 * M_PI - a}};
   } else if (a >= p.both_sides_angle) {
     dirs.push_back({-pref, 2.0 * M_PI - a});
+  }
+
+  // 도는 중이면 지금 반지름부터, 더 낮은 기준(keep_clearance)으로 본다 — 통과하면 바꾸지 않는다.
+  if (keep && keep->mode != TurnMode::Blocked) {
+    const int dir = only_dir != 0 ? only_dir : keep->direction;
+    const double ang = dir == pref ? a : 2.0 * M_PI - a;
+    const double R = keep->mode == TurnMode::Arc ? keep->radius : 0.0;
+    const double w = R > 0.0 ? p.arc_w : p.pivot_w;
+    const double v_turn = w * R;
+    const double run_in = std::max(0.0, v_now * v_now - v_turn * v_turn) / (2.0 * p.run_in_decel);
+    const double c = simulateTurnClearance(ang, R, dir, run_in, f, p.sample_angle);
+    if (c >= keepClearance(p)) {return {keep->mode, R, dir, c};}
   }
 
   std::vector<double> order;

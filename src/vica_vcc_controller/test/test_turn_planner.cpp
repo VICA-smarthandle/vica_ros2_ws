@@ -112,3 +112,44 @@ TEST(TurnPlanner, WiderRadiiListPicksTheWidestThatFits)
   EXPECT_EQ(t2.mode, TurnMode::Arc);
   EXPECT_NEAR(t2.radius, 0.2, 1e-9);
 }
+
+TEST(TurnPlanner, KeepsCurrentRadiusWhileAboveKeepClearance)
+{
+  // 2026-10-01 run53: 매 주기 처음 기준(0.30)으로 다시 고르면 벽에 다가가며 호가 탈락해 제자리로 떨어졌다.
+  // 도는 중에는 지금 반지름을 낮은 기준(0.15)으로 먼저 본다.
+  TurnParams p;
+  p.radii = {0.4, 0.3, 0.2, 0.1};
+  p.clearance = 0.30;
+  p.keep_clearance = 0.15;
+  const auto [lo4, hi4] = sweptLateralExtent(kPadded, 0.4, M_PI * 0.95, 190);
+  const ClearanceFn f = corridor(lo4 - 0.20, hi4 + 0.20);   // R 0.4 여유 ≈ 0.20: 고를 땐 탈락, 유지는 통과
+  const TurnPlan fresh = planTurn(M_PI * 0.95, 0.0, false, f, p, 1);
+  EXPECT_LT(fresh.radius, 0.4 - 1e-9);
+  TurnPlan cur{TurnMode::Arc, 0.4, 1, 0.0};
+  const TurnPlan kept = planTurn(M_PI * 0.95, 0.0, false, f, p, 1, &cur);
+  EXPECT_EQ(kept.mode, TurnMode::Arc);
+  EXPECT_NEAR(kept.radius, 0.4, 1e-9);
+  EXPECT_GE(kept.min_clearance, 0.15);
+}
+
+TEST(TurnPlanner, DropsRadiusWhenBelowKeepClearance)
+{
+  TurnParams p;
+  p.radii = {0.4, 0.3, 0.2, 0.1};
+  p.clearance = 0.30;
+  p.keep_clearance = 0.15;
+  const auto [lo4, hi4] = sweptLateralExtent(kPadded, 0.4, M_PI * 0.95, 190);
+  const ClearanceFn f = corridor(lo4 - 0.08, hi4 + 0.08);   // R 0.4 여유 ≈ 0.08 < 0.15
+  TurnPlan cur{TurnMode::Arc, 0.4, 1, 0.0};
+  const TurnPlan t = planTurn(M_PI * 0.95, 0.0, false, f, p, 1, &cur);
+  EXPECT_LT(t.radius, 0.4 - 1e-9);   // 처음 기준(0.30)으로 다시 찾는다
+}
+
+TEST(TurnPlanner, KeepClearanceDefaultsToSelectClearance)
+{
+  TurnParams p;
+  p.clearance = 0.30;
+  EXPECT_DOUBLE_EQ(keepClearance(p), 0.30);
+  p.keep_clearance = 0.15;
+  EXPECT_DOUBLE_EQ(keepClearance(p), 0.15);
+}

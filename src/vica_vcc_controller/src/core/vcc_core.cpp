@@ -154,7 +154,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   if (std::abs(yaw_err) > in.yaw_tol && (s0 == State::Align || dist_end < stop_r)) {
     si.align_blocked = simulateTurnClearance(
       std::abs(yaw_err), 0.0, yaw_err >= 0.0 ? 1 : -1, 0.0, in.clearance, p_.turn.sample_angle) <
-      p_.turn.clearance;
+      keepClearance(p_.turn);   // 도착 정렬은 제자리 회전 — 유턴 선택 기준(0.30)이 아닌 유지 기준
   }
 
   // 유턴 계획은 필요할 때만(계산량 고정)
@@ -164,7 +164,9 @@ CoreOutput VccCore::step(const CoreInputs & in)
       (stationary && std::abs(heading) <= p_.state.turn_enter_angle);
     // Turn 중 재계획은 들어갈 때 고른 방향을 지킨다(반지름·방식만 바뀐다). ±170° 근처에서 방향이
     // 주기마다 뒤집히며 w 가 0 근처를 떠는 일을 막는다(최종 리뷰 M2).
-    turn_ = planTurn(heading, v, pivot_first, in.clearance, p_.turn, s0 == State::Turn ? turn_dir_ : 0);
+    turn_ = planTurn(
+      heading, v, pivot_first, in.clearance, p_.turn, s0 == State::Turn ? turn_dir_ : 0,
+      s0 == State::Turn ? &turn_ : nullptr);
     si.turn_blocked = turn_.mode == TurnMode::Blocked;
   }
 

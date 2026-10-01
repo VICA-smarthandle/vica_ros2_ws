@@ -120,6 +120,7 @@ void VccController::configure(
   p.align_rearm_time = dp("align_rearm_time", 3.0);
   p.turn.radii = dp("turn_radii", std::vector<double>{0.2, 0.1});
   p.turn.clearance = dp("turn_clearance", 0.05);
+  p.turn.keep_clearance = dp("turn_keep_clearance", -1.0);   // 10-01: 도는 중 유지 기준(0 이하 = turn_clearance)
   p.turn.arc_w = dp("turn_angular_vel", 0.45);
   p.turn.pivot_w = dp("pivot_angular_vel", 0.35);
   p.align.w_max = dp("align_angular_vel", 0.35);
