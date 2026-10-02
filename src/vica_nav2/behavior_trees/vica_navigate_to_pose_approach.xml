@@ -1,0 +1,70 @@
+<!--
+  사람 접근 전용 트리. 2026-10-02 신설.
+
+  ── 왜 따로 두나 ─────────────────────────────────────────────────────────
+  사람 접근은 YOLO 로 찾은 사람 앞(1.1 m)까지 가는 길이다. 사람은 레일 위가 아니라
+  방 가운데 아무 데나 서 있고, 접근 중에는 손잡이를 잡은 사람이 뒤에 없다.
+  레일 트리로 보내면 레일을 먼저 따라가므로 바로 앞 사람에게도 레일을 빙 돌아간다.
+  run60(시연 지도, 2026-10-02): 사람은 시작 지점 정남쪽 2.6 m 였는데 레일 남쪽 변이
+  끊겨 있어 경로가 북동->동->남->서 8.5 m 로 돌았고, 레일 경로와 복귀 당근이 번갈아
+  와서 87 s·1889° 맴돈 뒤 사용자가 취소했다. 2차는 같은 우회로 6 m 를 돌아 20.8 s.
+
+  Mission Manager 가 접근 goal(id "approach:<track>")일 때만 NavigateToPose.Goal 의
+  behavior_tree 에 이 파일을 넣는다(파라미터 approach_bt_xml). 목적지·홈 복귀는 지금처럼
+  기본 트리(레일)를 쓴다.
+
+  ── 무엇이 같은가 ─────────────────────────────────────────────────────────
+  레일 트리의 "목적지까지 자유주행" 갈래(NearGoalKeepPath)와 마무리·복구를 그대로 옮겼다.
+    * ComputePathToPose(GridBased = Lattice) : 금지구역(keepout)·인플레이션 그대로
+    * AlignPathEndToGoal(9판)               : 경로 끝 방향을 사람을 마주 보는 goal 방향으로
+    * GoalReached 문지기                     : 0.25 m 안에서는 다시 안 그린다(lattice 고리, run10·11)
+    * FollowPath(FollowPath = VCC)           : 회피·몸 충돌 검사·도착 정렬 그대로
+    * 복구 20회 x (costmap 비우기, Wait 1 s) : 로봇을 움직이는 복구(Spin·BackUp) 없음
+  빠진 것은 레일(ComputeRoute·IsRoutePathUsable·당근)뿐이다.
+
+  ── 주의 ────────────────────────────────────────────────────────────────
+  Humble bt_navigator 는 실행 중인 goal 과 다른 트리 파일을 쓰는 goal 의 선점을 거절한다
+  (navigate_to_pose.cpp onPreempt). Mission Manager 는 트리가 바뀔 때 앞 goal 을 먼저
+  취소하고 끝난 것을 확인한 뒤 보낸다(mission_manager_node._start_nav).
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="20" name="ApproachRecovery">
+      <PipelineSequence name="ApproachWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputeApproachPath">
+            <Fallback name="NearGoalKeepPath">
+              <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+              <Sequence name="ApproachPathAlignedEnd">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                    output_path="{path}"/>
+              </Sequence>
+            </Fallback>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Approach"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowApproach">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Approach"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+
+      <!-- 복구는 레일 트리·no_backup.xml 과 같다. -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Wait wait_duration="1"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

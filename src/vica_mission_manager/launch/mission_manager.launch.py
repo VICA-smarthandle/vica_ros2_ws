@@ -90,6 +90,9 @@ def generate_launch_description() -> LaunchDescription:
                 "approach_speed_limit_percents",
                 default_value="[80.0, 60.0]",
             ),
+            # 사람 접근 goal 에만 쓰는 레일 없는 트리(2026-10-02 run60). "auto" 는 vica_nav2 의
+            # behavior_trees/vica_navigate_to_pose_approach.xml, 빈 문자열은 끔(접근도 레일).
+            DeclareLaunchArgument("approach_bt_xml", default_value="auto"),
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
             DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
@@ -171,6 +174,8 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("approach_speed_limit_percents"),
                             value_type=List[float],
                         ),
+                        "approach_bt_xml": ParameterValue(
+                            LaunchConfiguration("approach_bt_xml"), value_type=str),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),
                         "auto_return_home": ParameterValue(

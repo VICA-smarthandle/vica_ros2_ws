@@ -18,6 +18,9 @@
   <depend>vica_interfaces</depend>
   <depend>nav2_simple_commander</depend>
   <exec_depend>python3-yaml</exec_depend>
+  <!-- 사람 접근 트리 파일(vica_nav2/behavior_trees)을 approach_bt_xml:=auto 로 찾는다. -->
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>vica_nav2</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>python3-pytest</test_depend>

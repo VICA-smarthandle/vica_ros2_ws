@@ -612,6 +612,21 @@ TRACK_ID_NONE = 0
 # 구분하고 어느 사람을 향한 goal 이었는지 남기려는 것이다.
 APPROACH_DESTINATION_PREFIX = "approach:"
 APPROACH_DESTINATION_NAME = "접근 대상"
+# 사람 접근 전용 Nav2 행동 트리 파일 이름(vica_nav2/behavior_trees). 2026-10-02 run60.
+APPROACH_BT_FILE = "vica_navigate_to_pose_approach.xml"
+
+
+def nav_behavior_tree(destination_id: str, approach_bt: str) -> str:
+    """이 goal 에 쓸 Nav2 행동 트리 파일. 빈 문자열은 bt_navigator 의 기본 트리(레일)다.
+
+    사람 접근 goal 만 approach_bt 를 쓴다(2026-10-02, run60). 사람은 레일 위가 아니라
+    방 가운데 서 있어, 레일 트리로 보내면 바로 앞 사람에게도 레일을 빙 돌아간다(사람이
+    정남쪽 2.6 m 인데 8.5 m 우회 + 87 s 맴돌기). 목적지·홈 복귀는 그대로 레일 트리다.
+    approach_bt 가 비어 있으면 종전처럼 모든 goal 이 기본 트리를 쓴다.
+    """
+    if approach_bt and destination_id.startswith(APPROACH_DESTINATION_PREFIX):
+        return approach_bt
+    return ""
 
 # 접근 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이다. SEEKING
 # 이 빠지면 회전 중 음성 목적지 요청이 그대로 통과해 Navigate 가 나가고,

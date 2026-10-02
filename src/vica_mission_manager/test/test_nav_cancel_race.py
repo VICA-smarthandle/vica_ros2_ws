@@ -41,14 +41,19 @@ class _FakeLogger:
 
 
 class _FakeNavigator:
-    def __init__(self, accept=True):
+    def __init__(self, accept=True, task_done=True):
         self.accept = accept
         self.canceled = 0
         self.goals_sent = 0
         self.spins_sent = 0
+        self.trees = []           # goToPose 가 받은 behavior_tree 순서
+        self.task_done = task_done
+        self.calls = []           # 'cancel' / 'goal' 순서
 
-    def goToPose(self, goal):  # noqa: N802 - nav2_simple_commander 이름
+    def goToPose(self, goal, behavior_tree=''):  # noqa: N802 - nav2_simple_commander 이름
         self.goals_sent += 1
+        self.trees.append(behavior_tree)
+        self.calls.append('goal')
         return self.accept
 
     def spin(self, spin_dist):
@@ -57,6 +62,11 @@ class _FakeNavigator:
 
     def cancelTask(self):  # noqa: N802
         self.canceled += 1
+        self.calls.append('cancel')
+        self.task_done = True     # 취소 응답 뒤 task 가 끝난다
+
+    def isTaskComplete(self):  # noqa: N802
+        return self.task_done
 
 
 class _FakeClock:
@@ -76,6 +86,8 @@ def _bare_node(gen=5, accept=True):
     node._nav_active = True
     node._nav_gen = gen
     node.navigator = _FakeNavigator(accept=accept)
+    node._approach_bt = ""       # 사람 접근 트리 끔 — 종전 동작
+    node._task_bt = ""
     logger = _FakeLogger()
     node.get_logger = lambda: logger  # 클래스 메서드를 인스턴스 속성으로 가린다
     node.get_clock = lambda: _FakeClock()
@@ -156,6 +168,72 @@ class TestGenerationBump:
         node = _bare_node(gen=5, accept=True)
         node._start_spin(SpinInPlace(yaw_rad=1.57))
         assert node._nav_gen == 6
+
+
+APPROACH_BT = "/share/vica_nav2/behavior_trees/vica_navigate_to_pose_approach.xml"
+
+
+def _approach_dest():
+    return Destination(id="approach:7", name="접근 대상", pose=Pose2D(1.0, 0.5, 30.0))
+
+
+class TestBehaviorTreeSwitch:
+    """사람 접근 goal 만 레일 없는 트리로 보낸다(2026-10-02 run60).
+
+    Humble bt_navigator 는 실행 중 goal 과 다른 트리 파일의 선점을 거절하므로,
+    트리가 바뀔 때 앞 task 가 돌고 있으면 먼저 취소하고 끝난 뒤 보낸다.
+    """
+
+    def test_approach_goal_sends_the_approach_tree(self):
+        node = _bare_node()
+        node._approach_bt = APPROACH_BT
+        node._start_nav(Navigate(destination=_approach_dest()))
+        assert node.navigator.trees == [APPROACH_BT]
+        assert node._task_bt == APPROACH_BT
+
+    def test_destination_goal_keeps_the_default_tree(self):
+        node = _bare_node()
+        node._approach_bt = APPROACH_BT
+        node._start_nav(Navigate(destination=_dest()))
+        assert node.navigator.trees == [""]
+
+    def test_switch_cancels_a_running_task_first(self):
+        """레일 goal 이 아직 도는 중 접근 goal — 취소가 보내기보다 먼저다."""
+        node = _bare_node()
+        node._approach_bt = APPROACH_BT
+        node.navigator.task_done = False
+        node._start_nav(Navigate(destination=_approach_dest()))
+        assert node.navigator.calls == ["cancel", "goal"]
+
+    def test_switch_back_after_a_finished_task_does_not_cancel(self):
+        node = _bare_node()
+        node._approach_bt = APPROACH_BT
+        node._task_bt = APPROACH_BT          # 접근을 마쳤다(task 끝남)
+        node._start_nav(Navigate(destination=_dest()))
+        assert node.navigator.calls == ["goal"]
+        assert node._task_bt == ""
+
+    def test_same_tree_preempts_without_cancel(self):
+        """접근 중 사람이 움직여 접근 goal 을 다시 보낼 때는 Nav2 선점을 그대로 쓴다."""
+        node = _bare_node()
+        node._approach_bt = APPROACH_BT
+        node._task_bt = APPROACH_BT
+        node.navigator.task_done = False
+        node._start_nav(Navigate(destination=_approach_dest()))
+        assert node.navigator.calls == ["goal"]
+
+    def test_rejected_goal_keeps_the_old_tree(self):
+        node = _bare_node(accept=False)
+        node._approach_bt = APPROACH_BT
+
+        class _FakeLogic:
+            def on_tick(self, now, status):
+                return []
+
+        node.logic = _FakeLogic()
+        node._now = lambda: 0.0
+        node._start_nav(Navigate(destination=_approach_dest()))
+        assert node._task_bt == ""
 
 
 class TestIdleCancelSync:

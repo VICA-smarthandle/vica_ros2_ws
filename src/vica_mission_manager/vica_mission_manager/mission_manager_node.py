@@ -74,6 +74,7 @@ from .mission_logic import (
     PERSON_APPROACH_SPEED_PERCENT,
     RETURN_RESUME_SEC,
     DEST_RETRY_RETURN_SEC,
+    APPROACH_BT_FILE,
     ApproachRequest,
     CancelNav,
     Destination,
@@ -91,8 +92,13 @@ from .mission_logic import (
     _REJECT_MESSAGES,
     check_gate,
     doa_to_spin_yaw,
+    nav_behavior_tree,
     yaw_deg_to_quaternion,
 )
+
+#: 트리가 바뀌는 goal 을 보내기 전, 앞 task 의 취소가 끝나기를 기다리는 상한(초).
+#: _nav_lock_timeout_sec(2.0) 과 같은 크기 — 콜백을 오래 붙잡지 않는다.
+BT_SWITCH_WAIT_SEC = 2.0
 
 #: 홈에 붙이는 고정 id.
 #:
@@ -136,6 +142,11 @@ class MissionManagerNode(Node):
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
         self.declare_parameter("approach_turn_yaw_deg", 180.0)
+        # 사람 접근 goal 에만 쓰는 Nav2 행동 트리(레일 없는 자유주행). 2026-10-02 run60.
+        #   "auto" : vica_nav2 share 의 behavior_trees/vica_navigate_to_pose_approach.xml
+        #   ""     : 끔 — 접근도 기본 트리(레일)를 쓴다(종전 동작)
+        #   경로   : 그 파일. 없으면 경고를 남기고 끔과 같게 동작한다.
+        self.declare_parameter("approach_bt_xml", "auto")
         # 마이크 각도 증가 방향. +1 반시계 / -1 시계 — 장비 실측값이다
         # (호출 접근 설계 §5). 틀리면 로봇이 호출 방향의 정반대로 돈다.
         self.declare_parameter("wake_doa_sign", 1.0)
@@ -349,6 +360,12 @@ class MissionManagerNode(Node):
         # 콜백에서 무한히 기다리면 고치려던 문제가 그대로 돌아오므로 시한을 둔다.
         self._nav_lock_timeout_sec = 2.0
         self._nav_active = False  # goToPose 수락 후 완료 전까지 True
+        # 사람 접근 전용 트리 파일(빈 문자열 = 끔). _task_bt 는 마지막으로 수락된
+        # NavigateToPose 가 쓴 트리다("" = 기본 트리). 트리가 바뀌는 goal 은 Humble
+        # bt_navigator 가 선점을 거절하므로 _start_nav 가 앞 task 를 먼저 끝낸다.
+        self._approach_bt = self._resolve_approach_bt(
+            str(self.get_parameter("approach_bt_xml").value).strip())
+        self._task_bt = ""
         # 주행 번호표. goToPose/spin 이 수락될 때마다 1 오른다. 취소 스레드는
         # 자기가 받은 번호와 지금 번호가 다르면 취소를 건너뛴다 — 번호가
         # 달라졌다는 것은 그 사이 새 goal 이 나갔다는 뜻이고(앱 전권화의
@@ -1496,6 +1513,50 @@ class MissionManagerNode(Node):
         else:
             self.get_logger().info(f"Nav2 접근 속도 제한: 최대속도의 {percent:.1f}%")
 
+    def _resolve_approach_bt(self, value: str) -> str:
+        """approach_bt_xml 파라미터를 실제 파일 경로로 바꾼다. 못 쓰면 "" (끔)."""
+        if not value:
+            self.get_logger().info("사람 접근 트리: 끔 — 접근도 기본 트리(레일)를 쓴다")
+            return ""
+        if value == "auto":
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                value = str(Path(get_package_share_directory("vica_nav2"))
+                            / "behavior_trees" / APPROACH_BT_FILE)
+            except Exception as exc:  # noqa: BLE001 - 패키지가 없어도 노드는 뜬다
+                self.get_logger().warn(
+                    f"사람 접근 트리를 못 찾아 끔 — 접근도 레일 트리를 쓴다: {exc}")
+                return ""
+        if not Path(value).is_file():
+            self.get_logger().warn(
+                f"사람 접근 트리 파일이 없어 끔 — 접근도 레일 트리를 쓴다: {value}")
+            return ""
+        self.get_logger().info(f"사람 접근 트리(레일 없이 자유주행): {value}")
+        return value
+
+    def _finish_task_for_bt_switch(self) -> None:
+        """트리가 바뀌는 goal 을 보내기 전에 앞 task 를 끝낸다. _nav_lock 안에서 부른다.
+
+        Humble bt_navigator 는 실행 중인 goal 과 다른 트리 파일을 쓰는 goal 의 선점을
+        거절하고 옛 goal 을 계속 따라간다(navigate_to_pose.cpp onPreempt). 그대로 보내면
+        새 goal 이 수락 직후 종료돼 FAILED 로 읽힌다. 그래서 앞 task 가 아직 돌고 있으면
+        취소하고, 끝났다는 응답을 BT_SWITCH_WAIT_SEC 까지 기다린다. 트리는 접근을
+        시작하거나 끝낼 때만 바뀌므로 드물게만 기다린다.
+        """
+        try:
+            if self.navigator.isTaskComplete():
+                return
+            self.get_logger().info("트리가 바뀌는 goal — 앞 task 를 먼저 취소한다")
+            self.navigator.cancelTask()
+            deadline = time.monotonic() + BT_SWITCH_WAIT_SEC
+            while not self.navigator.isTaskComplete():   # 한 번에 0.1 s 씩 돈다
+                if time.monotonic() > deadline:
+                    self.get_logger().warn(
+                        f"앞 task 가 {BT_SWITCH_WAIT_SEC:.1f}초 안에 안 끝났다 — 그대로 보낸다")
+                    return
+        except Exception as exc:  # noqa: BLE001 - 보내기 자체는 막지 않는다
+            self.get_logger().warn(f"트리 전환 전 취소 실패: {exc}")
+
     def _start_nav(self, action: Navigate) -> None:
         dest = action.destination
         goal = PoseStamped()
@@ -1521,13 +1582,18 @@ class MissionManagerNode(Node):
             )
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
             return
+        # 사람 접근 goal 만 레일 없는 트리를 쓴다(빈 문자열 = 기본 트리).
+        bt = nav_behavior_tree(dest.id, self._approach_bt)
         try:
-            accepted = self.navigator.goToPose(goal)
+            if bt != self._task_bt:
+                self._finish_task_for_bt_switch()
+            accepted = self.navigator.goToPose(goal, behavior_tree=bt)
             self._nav_active = bool(accepted)
             if accepted:
                 # 번호표를 올린다. 거부됐으면 올리지 않는다 — 옛 goal 이
                 # 그대로 잡혀 있으므로, 대기 중인 취소가 그것을 마저 지워야 한다.
                 self._nav_gen += 1
+                self._task_bt = bt
         finally:
             self._nav_lock.release()
         if accepted:
@@ -1535,7 +1601,7 @@ class MissionManagerNode(Node):
             self._publish_goal_event("goal_accepted", dest)
             self.get_logger().info(
                 f"NavigateToPose 전송: {dest.id} ({dest.pose.x:.2f}, {dest.pose.y:.2f}, "
-                f"{dest.pose.yaw_deg:.1f}deg)"
+                f"{dest.pose.yaw_deg:.1f}deg) 트리={'접근(자유주행)' if bt else '기본'}"
             )
         else:
             self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
