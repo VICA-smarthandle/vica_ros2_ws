@@ -1,7 +1,0 @@
-image: vica_map_0829_2.pgm
-mode: trinary
-resolution: 0.05
-origin: [-7.72, -11.5, 0]
-negate: 0
-occupied_thresh: 0.65
-free_thresh: 0.25
