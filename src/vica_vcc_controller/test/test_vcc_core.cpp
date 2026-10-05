@@ -496,3 +496,112 @@ TEST(VccCore, AlignFailureRearmsAfterRearmTime)
   EXPECT_EQ(out.align_attempts, 1);
   EXPECT_LT(out.cmd.w, 0.0);   // 새 기회로 남은 쪽(-0.5)을 향해 돈다
 }
+
+// ── 2026-10-05 해결안 C: 유턴(Turn)의 끝을 정한다 ──────────────────────────────────────────
+namespace
+{
+// 로봇 좌표계에서 rel 방향으로 곧게 뻗은 3 m 경로(경로가 매 주기 로봇 위치에서 다시 그려지는 상황).
+Path aimPath(double rel)
+{
+  Path p;
+  for (double s = 0.0; s <= 3.0 + 1e-9; s += 0.05) {p.push_back({s * std::cos(rel), s * std::sin(rel), rel});}
+  return p;
+}
+
+CoreParams paramsC(bool lock, double cap, double persist)
+{
+  CoreParams p = params();
+  p.turn_lock_target = lock;
+  p.turn_max_rotation = cap;
+  p.turn_enter_persist = persist;
+  return p;
+}
+
+struct Sim
+{
+  VccCore c;
+  World w;
+  double th{0.0}, v{0.3}, wz{0.0}, t{1.0};
+  double rot_in_first_turn{0.0};
+  bool left_first_turn{false};
+  bool seen_turn{false};
+  CoreOutput step(double rel_aim)
+  {
+    CoreInputs in = inputs(aimPath(rel_aim), w, t, v, wz);
+    in.robot_yaw = th;
+    const CoreOutput out = c.step(in);
+    v = out.cmd.v; wz = out.cmd.w;
+    if (out.state == State::Turn) {seen_turn = true;}
+    if (seen_turn && !left_first_turn) {
+      if (out.state == State::Turn) {rot_in_first_turn += std::abs(wz) * 0.1;} else {left_first_turn = true;}
+    }
+    th = normalizeAngle(th + wz * 0.1);
+    t += 0.1;
+    return out;
+  }
+};
+}  // namespace
+
+// run60 사람 접근(73 s·5바퀴)·run63 시작→창구(28 s·687°) 의 꼬리 잡기: 조준점이 늘 로봇 왼쪽 100° 에
+// 있으면(경로가 매 주기 로봇 자리에서 다시 그려져 로봇과 함께 돈다) 예전 Turn 은 끝나지 않는다.
+TEST(VccCoreTurnEnd, OldTurnChasesItsTailForever)
+{
+  Sim s; s.c.configure(paramsC(false, 0.0, 0.0));
+  for (int i = 0; i < 200; ++i) {s.step(100.0 * M_PI / 180.0);}
+  EXPECT_FALSE(s.left_first_turn);
+  EXPECT_GT(s.rot_in_first_turn, 2.0 * M_PI);   // 20 s 동안 한 바퀴 넘게
+}
+
+TEST(VccCoreTurnEnd, LockedTargetEndsTheTurnAtTheEntryAim)
+{
+  Sim s; s.c.configure(paramsC(true, 0.0, 0.0));
+  for (int i = 0; i < 200 && !s.left_first_turn; ++i) {s.step(100.0 * M_PI / 180.0);}
+  ASSERT_TRUE(s.left_first_turn);
+  // 들어갈 때 조준 100°, 끝 문턱 25° -> 약 75° 돌고 끝(지연·최소 유지 0.5 s 로 조금 더).
+  EXPECT_GT(s.rot_in_first_turn, 60.0 * M_PI / 180.0);
+  EXPECT_LT(s.rot_in_first_turn, 120.0 * M_PI / 180.0);
+}
+
+TEST(VccCoreTurnEnd, RotationCapHoldsAndReportsOverrun)
+{
+  Sim s; s.c.configure(paramsC(false, 2.0 * M_PI, 0.0));
+  bool held = false;
+  for (int i = 0; i < 250 && !held; ++i) {
+    const CoreOutput out = s.step(100.0 * M_PI / 180.0);
+    held = out.state == State::Hold && std::string(out.reason) == "turn_overrun";
+  }
+  EXPECT_TRUE(held);
+  EXPECT_LT(s.rot_in_first_turn, 2.0 * M_PI + 0.3);
+}
+
+// 경로가 정말 바뀌면(지도 기준 조준 방향이 90° 넘게, 0.5 s 넘게) 다시 고른다 — 방향도 가까운 쪽으로.
+TEST(VccCoreTurnEnd, RetargetsOnlyWhenTheNewAimPersists)
+{
+  Sim s; s.c.configure(paramsC(true, 0.0, 0.0));
+  const double north = 150.0 * M_PI / 180.0, south_east = -60.0 * M_PI / 180.0;   // 둘은 150° 떨어져 있다
+  CoreOutput out;
+  for (int i = 0; i < 5; ++i) {out = s.step(normalizeAngle(north - s.th));}
+  ASSERT_EQ(out.state, State::Turn);
+  ASSERT_GT(out.cmd.w, 0.0);                       // 왼쪽으로 150° 를 향해
+  // 0.3 s 만 다른 곳(-60°)을 가리켰다 돌아오면 방향을 안 바꾼다
+  for (int i = 0; i < 3; ++i) {out = s.step(normalizeAngle(south_east - s.th)); EXPECT_GT(out.cmd.w, 0.0) << i;}
+  for (int i = 0; i < 3; ++i) {out = s.step(normalizeAngle(north - s.th));}
+  EXPECT_GT(out.cmd.w, 0.0);
+  // 계속 -60° 를 가리키면 0.5 s 뒤 다시 고른다 — 지금 방향(약 +30°)에서 -60° 는 오른쪽이 가깝다
+  bool flipped = false;
+  for (int i = 0; i < 12; ++i) {out = s.step(normalizeAngle(south_east - s.th)); if (out.cmd.w < 0.0) {flipped = true;}}
+  EXPECT_TRUE(flipped);
+}
+
+// 진입 지속: 경로가 바뀌는 한 주기만 튄 조준각으로는 Turn 에 안 들어간다.
+TEST(VccCoreTurnEnd, EntryNeedsPersistentHeadingError)
+{
+  Sim s; s.c.configure(paramsC(true, 0.0, 0.3));
+  CoreOutput out = s.step(0.0);
+  out = s.step(170.0 * M_PI / 180.0);             // 한 주기 뒤쪽
+  EXPECT_NE(out.state, State::Turn);
+  out = s.step(0.0);
+  EXPECT_NE(out.state, State::Turn);
+  for (int i = 0; i < 6; ++i) {out = s.step(normalizeAngle(170.0 * M_PI / 180.0));}
+  EXPECT_EQ(out.state, State::Turn);              // 0.3 s 넘게 이어지면 들어간다
+}

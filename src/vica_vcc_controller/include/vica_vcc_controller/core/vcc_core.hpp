@@ -35,6 +35,20 @@ struct CoreParams
   // PlannerException 을 던지므로 controller_server failure_tolerance(10 s)보다 짧아야 한다.
   // run49: Failed 가 새 goal·1.5 s 끊김으로만 풀려 17 s 동안 예외 172회. ROS 파라미터 align_rearm_time.
   double align_rearm_time{3.0};
+  // ── 유턴(Turn) 끝 정하기 (2026-10-05 해결안 C) ─────────────────────────────────────────
+  // run60 사람 접근 73 s·5바퀴, run63 시작→창구 28 s·687°: Turn 은 방향을 잠그고 "조준각 < 25°" 에서 끝나는데
+  // 경로가 1초마다 로봇 위치에서 다시 그려지거나 레일↔당근으로 바뀌어 조준점이 로봇과 함께 돌았다(꼬리 잡기).
+  // 아래 넷 모두 기본값은 예전 동작(끔)이고 nav2_params.yaml 에서 켠다.
+  // 조준각이 진입 문턱을 넘은 채 이만큼(s) 이어져야 Turn 에 들어간다. 경로가 바뀌는 순간 튄 각으로 S 자를 막는다.
+  double turn_enter_persist{0.0};
+  // Turn 에 들어갈 때 조준 방향을 지도 기준(robot_yaw + 조준각)으로 붙들고, 끝 판정을 그 방향으로 한다.
+  bool turn_lock_target{false};
+  // 새 경로의 조준 방향이 붙든 방향과 이보다 많이(rad), turn_retarget_persist(s) 이어 달라지면 다시 고른다
+  // (방향도 가까운 쪽으로 새로). 장애물·경로가 정말 바뀐 경우.
+  double turn_retarget_angle{M_PI / 2.0};
+  double turn_retarget_persist{0.5};
+  // 한 Turn 에서 돈 누적 각(rad)이 이보다 크면 Hold 로 멈추고 다시 판단한다. 0 이하 = 끔.
+  double turn_max_rotation{0.0};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -51,6 +65,7 @@ struct CoreInputs
   double rot_stopped{0.05};      // goal checker rot_stopped_velocity
   double speed_cap{0.5};
   ClearanceFn clearance;         // 로봇 좌표계 자세 -> 여유
+  double robot_yaw{0.0};         // 경로(plan) 좌표계에서 로봇 방향. Turn 목표 붙들기·누적 회전에 쓴다
 };
 
 struct CoreOutput
@@ -64,6 +79,7 @@ struct CoreOutput
   int align_attempts{0};
   Failure failure{Failure::None};
   const char * reason{""};
+  double turn_rotated{0.0};     // 이번 Turn 에서 돈 누적 각(rad), 진단용
   Path lane_path;
 };
 
@@ -96,5 +112,11 @@ private:
   int resync_count_{0};          // 옆 오차가 문턱을 넘은 연속 주기 수
   bool resync_primed_{false};    // reset 뒤 첫 경로를 받았는가(첫 주기는 바로 맞춘다)
   double align_failed_since_{-1.0};   // 도착 정렬 Failed 가 시작된 시각(재무장용)
+  double need_since_{-1.0};      // 조준각이 Turn 진입 문턱을 넘기 시작한 시각(C 진입 지속)
+  double turn_target_{0.0};      // Turn 에서 붙든 지도 기준 목표 방향
+  double turn_rot_{0.0};         // 이번 Turn 에서 돈 누적 각
+  double last_yaw_{0.0};
+  bool have_last_yaw_{false};
+  double retarget_since_{-1.0};
 };
 }  // namespace vica_vcc_controller::core

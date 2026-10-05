@@ -70,7 +70,7 @@ State StateMachine::update(const StateInputs & in)
         break;
       }
       if (!held) {break;}
-      if (!arrived && turnNeeded(in, p_)) {
+      if (!arrived && in.turn_ready && turnNeeded(in, p_)) {
         if (in.turn_blocked) {go(State::Hold, in.now, "turn_blocked");} else {
           go(State::Turn, in.now, "heading_error");
         }

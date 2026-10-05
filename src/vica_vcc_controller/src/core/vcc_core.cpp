@@ -63,6 +63,10 @@ void VccCore::reset(const Twist2D & measured)
   resync_count_ = 0;
   resync_primed_ = false;
   align_failed_since_ = -1.0;
+  need_since_ = -1.0;
+  turn_rot_ = 0.0;
+  have_last_yaw_ = false;
+  retarget_since_ = -1.0;
 }
 
 void VccCore::onNewGoal()
@@ -157,23 +161,74 @@ CoreOutput VccCore::step(const CoreInputs & in)
       keepClearance(p_.turn);   // 도착 정렬은 제자리 회전 — 유턴 선택 기준(0.30)이 아닌 유지 기준
   }
 
-  // 유턴 계획은 필요할 때만(계산량 고정)
+  // 유턴 계획은 필요할 때만(계산량 고정). need 는 지금 경로의 조준각으로 본다.
   const bool need = turnNeeded(si, p_.state);
+
+  // ── 해결안 C (2026-10-05) ── Turn 의 끝을 정한다. 설정이 꺼져 있으면 예전과 같다.
+  // 누적 회전: Turn 동안 로봇 방향 변화를 더한다.
+  if (have_last_yaw_ && s0 == State::Turn) {
+    turn_rot_ += std::abs(normalizeAngle(in.robot_yaw - last_yaw_));
+  }
+  last_yaw_ = in.robot_yaw;
+  have_last_yaw_ = true;
+  // 목표 붙들기: Turn 중에는 들어갈 때의 지도 기준 조준 방향으로 끝을 본다. 새 경로가 그보다
+  // turn_retarget_angle 넘게, turn_retarget_persist 동안 다른 곳을 가리키면 그때만 다시 고른다.
+  double turn_heading = heading;
+  bool retarget = false;
+  if (s0 == State::Turn && p_.turn_lock_target) {
+    const double aim_world = in.robot_yaw + heading;
+    if (std::abs(normalizeAngle(aim_world - turn_target_)) > p_.turn_retarget_angle) {
+      if (retarget_since_ < 0.0) {retarget_since_ = in.now;}
+      if (in.now - retarget_since_ >= p_.turn_retarget_persist - 1e-9) {
+        turn_target_ = aim_world;
+        retarget = true;
+        retarget_since_ = -1.0;
+      }
+    } else {
+      retarget_since_ = -1.0;
+    }
+    turn_heading = normalizeAngle(turn_target_ - in.robot_yaw);
+    si.heading_error = turn_heading;
+  }
+  // 진입 지속: 조준각이 문턱을 넘은 채 turn_enter_persist 이어져야 Turn 에 들어간다.
+  if (!need) {
+    need_since_ = -1.0;
+  } else if (s0 != State::Turn && need_since_ < 0.0) {
+    need_since_ = in.now;
+  }
+  si.turn_ready = p_.turn_enter_persist <= 0.0 ||
+    (need_since_ >= 0.0 && in.now - need_since_ >= p_.turn_enter_persist - 1e-9);
+
   if (s0 == State::Turn || (need && (s0 == State::Track || s0 == State::Hold))) {
     const bool pivot_first = s0 == State::Turn ? turn_.mode == TurnMode::Pivot :
       (stationary && std::abs(heading) <= p_.state.turn_enter_angle);
     // Turn 중 재계획은 들어갈 때 고른 방향을 지킨다(반지름·방식만 바뀐다). ±170° 근처에서 방향이
-    // 주기마다 뒤집히며 w 가 0 근처를 떠는 일을 막는다(최종 리뷰 M2).
+    // 주기마다 뒤집히며 w 가 0 근처를 떠는 일을 막는다(최종 리뷰 M2). 다시 고를 때만 방향도 새로.
+    const bool locked = s0 == State::Turn && !retarget;
     turn_ = planTurn(
-      heading, v, pivot_first, in.clearance, p_.turn, s0 == State::Turn ? turn_dir_ : 0,
-      s0 == State::Turn ? &turn_ : nullptr);
+      s0 == State::Turn ? turn_heading : heading, v, pivot_first, in.clearance, p_.turn,
+      locked ? turn_dir_ : 0, locked ? &turn_ : nullptr);
+    if (s0 == State::Turn && retarget) {turn_dir_ = turn_.direction;}
     si.turn_blocked = turn_.mode == TurnMode::Blocked;
   }
+  const bool overrun = p_.turn_max_rotation > 0.0 && s0 == State::Turn &&
+    turn_rot_ > p_.turn_max_rotation;
 
-  const State s = sm_.update(si);
+  State s = sm_.update(si);
+  // 누적 상한: 한 Turn 에서 너무 많이 돌면 멈추고 다시 판단한다(다음 Turn 은 방향을 새로 고른다).
+  if (overrun && s == State::Turn) {
+    sm_.forceHold(in.now, "turn_overrun");
+    s = State::Hold;
+  }
   // 도착 정렬 횟수는 reset·onNewGoal 에서만 지운다. 같은 goal 안에서 Align 에 다시 들어와도 이어 센다(M3).
   // 유턴 방향은 Turn 에 들어갈 때 잠그고 나가면 푼다(M2).
-  if (s == State::Turn && s0 != State::Turn) {turn_dir_ = turn_.direction;}
+  if (s == State::Turn && s0 != State::Turn) {
+    turn_dir_ = turn_.direction;
+    turn_target_ = in.robot_yaw + heading;
+    turn_rot_ = 0.0;
+    retarget_since_ = -1.0;
+    need_since_ = -1.0;
+  }
   if (s != State::Turn) {turn_dir_ = 0;}
   // 유턴을 마치면 d 를 지금 옆 위치로 바로 맞추고 목표도 가장 가까운 차선에 둔다. 목표가 레일에
   // 남아 있으면 나오자마자 되튄다. 레일 복귀는 보통 규칙(return_clear_time)이 맡는다(run48 F2).
@@ -233,6 +288,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   out.turn_mode = turn_.mode;
   out.align_attempts = align_.attempts();
   out.reason = sm_.reason();
+  out.turn_rotated = out.state == State::Turn ? turn_rot_ : 0.0;
   out.lane_path = lane_path;
 
   if (imminent) {

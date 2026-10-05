@@ -47,6 +47,7 @@ public:
 
 private:
   core::Path windowPlan(const geometry_msgs::msg::PoseStamped & pose, core::Pose2D & goal_robot);
+  double plan_robot_yaw_{0.0};   // windowPlan 이 채운다: 경로 좌표계에서 로봇 방향
   bool transformPose(
     const std::string & frame, const geometry_msgs::msg::PoseStamped & in,
     geometry_msgs::msg::PoseStamped & out) const;
