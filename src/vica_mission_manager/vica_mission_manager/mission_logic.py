@@ -954,6 +954,7 @@ class MissionLogic:
         handle_lost_repeat_sec: float = HANDLE_LOST_REPEAT_SEC,
         handle_lost_give_up_sec: float = HANDLE_LOST_GIVE_UP_SEC,
         handle_state_stale_sec: float = HANDLE_STATE_STALE_SEC,
+        grip_assume_held: bool = False,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -1083,6 +1084,12 @@ class MissionLogic:
         self.grip_resume_window_sec = grip_resume_window_sec
         self.handle_lost_repeat_sec = handle_lost_repeat_sec
         self.handle_lost_give_up_sec = handle_lost_give_up_sec
+        # [시연 스위치 2026-10-05] 터치 모듈이 고장 나(손을 안 대도 "잡음"을 낸다) OUT 선을
+        # 빼고 시연한다. 켜면 ① 잡기 대기가 시간을 다 채우면 "잡았다"로 처리해
+        # 확인 진동(tick)과 온보딩으로 넘어가고, ② 출발 때 활성 모드(손 놓침 정지)를
+        # 쓰지 않는다 — 선이 빠져 늘 "놓음"이라 켜 두면 출발 0.5 s 만에 선다.
+        # 터치 모듈을 고치면 launch 의 grip_assume_held 를 false 로 되돌린다.
+        self.grip_assume_held = grip_assume_held
         # 접촉 사실은 노드가 /vica/smart_handle_state 로 넣어 준다(on_handle_state).
         self._grip = GripMeter(stale_sec=handle_state_stale_sec)
         # 지금 주행이 활성 모드(손을 놓으면 섬)인가. 출발 순간에 정한다.
@@ -1680,6 +1687,8 @@ class MissionLogic:
         말할 뿐, 시각장애인을 두고 떠나지 않는다. 대기를 거치지 않았으면
         출발 순간 쥐고 있는지만 본다. 센서가 끊겨 있으면 늘 비활성이다.
         """
+        if self.grip_assume_held:
+            return False   # 시연 스위치: 터치로 세우지 않는다(위 __init__ 주석)
         if not self._grip.fresh(now):
             return False
         if self._handle_engaged and self.user_attached_guard_active(now):
@@ -1728,7 +1737,8 @@ class MissionLogic:
         if self._holding(now, self.grip_enter_window_sec, since=since):
             return self._finish_grip_wait(now, engaged=True)
         if now - since >= self.grip_wait_timeout_sec:
-            return self._finish_grip_wait(now, engaged=False)
+            # 시연 스위치가 켜져 있으면 못 잡았어도 잡은 것으로 넘어간다.
+            return self._finish_grip_wait(now, engaged=self.grip_assume_held)
         if (self._grip_pulse_at is not None
                 and now - self._grip_pulse_at >= self.grip_hint_pulse_sec):
             self._grip_pulse_at = now

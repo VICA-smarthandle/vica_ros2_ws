@@ -217,6 +217,9 @@ class MissionManagerNode(Node):
         self.declare_parameter("grip_enter_window_sec", GRIP_ENTER_WINDOW_SEC)
         self.declare_parameter("grip_ratio", GRIP_RATIO)
         self.declare_parameter("grip_wait_timeout_sec", GRIP_WAIT_TIMEOUT_SEC)
+        # 시연 스위치(2026-10-05): 잡기 대기 시간이 다 되면 잡은 것으로 넘어가고
+        # 손 놓침 정지를 쓰지 않는다. 터치 모듈 고장 중 시연용.
+        self.declare_parameter("grip_assume_held", False)
         self.declare_parameter("grip_hint_pulse_sec", GRIP_HINT_PULSE_SEC)
         self.declare_parameter("grip_release_grace_sec", GRIP_RELEASE_GRACE_SEC)
         self.declare_parameter("grip_resume_window_sec", GRIP_RESUME_WINDOW_SEC)
@@ -315,12 +318,17 @@ class MissionManagerNode(Node):
                 "grip_hint_pulse_sec", "grip_release_grace_sec",
                 "grip_resume_window_sec", "handle_lost_repeat_sec",
                 "handle_lost_give_up_sec", "handle_state_stale_sec")},
+            grip_assume_held=bool(self.get_parameter("grip_assume_held").value),
         )
         self.get_logger().info(
             "손잡이: 잡기 "
             f"{self.logic.grip_enter_window_sec:.1f}s 중 {self.logic.grip_ratio:.0%} · "
             f"대기 {self.logic.grip_wait_timeout_sec:.0f}s · "
             f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지")
+        if self.logic.grip_assume_held:
+            self.get_logger().warn(
+                f"손잡이 시연 스위치 켜짐: 대기 {self.logic.grip_wait_timeout_sec:.0f}s 뒤 "
+                "잡은 것으로 넘어가고 손 놓침 정지를 쓰지 않는다(grip_assume_held)")
         if arrival_dialog:
             self.get_logger().info(
                 f"도착 후 대화: 켜짐 · 홈={'있음' if home else '없음(제자리 대기)'}")

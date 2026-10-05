@@ -144,7 +144,13 @@ def generate_launch_description() -> LaunchDescription:
             # bag 으로 잰 뒤 확정할 값**(설계 7절 4번) — 실측 전 활성 주행 금지.
             DeclareLaunchArgument("grip_release_grace_sec", default_value="0.5"),
             # grip_wait_timeout_sec: 손잡이 안내 뒤 이만큼 못 잡으면 비활성으로 온보딩.
-            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="15.0"),
+            # [시연 2026-10-06] 15.0 → 5.0. 터치 모듈 고장(손 안 대도 "잡음") 중 시연을
+            # 위해 진동 안내를 5초만 하고 넘어간다. 모듈을 고치면 15.0 으로 되돌린다.
+            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="5.0"),
+            # grip_assume_held: 켜면 대기 시간이 다 되면 잡은 것으로 넘어가고(확인 진동 +
+            # 온보딩), 주행 중 손 놓침 정지를 쓰지 않는다. [시연 2026-10-06] true —
+            # 터치 OUT 선을 빼고 시연한다. 모듈을 고치면 false 로 되돌린다.
+            DeclareLaunchArgument("grip_assume_held", default_value="true"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -217,6 +223,10 @@ def generate_launch_description() -> LaunchDescription:
                         "grip_wait_timeout_sec": ParameterValue(
                             LaunchConfiguration("grip_wait_timeout_sec"),
                             value_type=float,
+                        ),
+                        "grip_assume_held": ParameterValue(
+                            LaunchConfiguration("grip_assume_held"),
+                            value_type=bool,
                         ),
                     }
                 ],
