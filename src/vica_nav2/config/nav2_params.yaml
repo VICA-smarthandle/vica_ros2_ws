@@ -485,8 +485,12 @@ controller_server:
       min_state_time: 0.5
       clearance_window: 5.0              # 1.5 m 앞 + 몸 0.62 m 를 덮는다(local costmap 6 m 안)
       reset_gap: 1.5                     # 호출이 이보다 길게 끊기면 새 실행으로 보고 초기화. BT 복구 Wait 1 s·CPU 멈칫보다 길게
-      ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right",
-                          "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
+      # 2026-10-05 run66 시험(사용자 결정): VCC 만 초음파를 받지 않는다. run65 에서 초음파 호가 차선 옮김을
+      # 20.2/분(run58 6.1)으로 늘려 멈칫이 4.7배였다 — 그때 호 151개 중 102개는 라이다로 빈 곳. 아무도 안 내는
+      # 토픽 하나를 둔다(빈 목록 [] 은 rcl yaml 이 타입을 못 정해 위험). 핸들 드라이버·LED·서보·진동은 그대로.
+      # 되돌리기: 아래 원래 네 토픽으로.
+      #   ["/ultrasonic/front_left", "/ultrasonic/front_right", "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
+      ultrasonic_topics: ["/ultrasonic/vcc_off"]
       us_max_age: 1.0
       us_confirm_count: 2
       us_confirm_tol: 0.15
