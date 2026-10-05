@@ -118,6 +118,12 @@ void VccController::configure(
   p.state.align_exit_dist = dp("align_exit_dist", 0.5);
   p.arrive_margin = dp("arrive_margin", 0.03);
   p.align_rearm_time = dp("align_rearm_time", 3.0);
+  // 2026-10-05 해결안 C: 유턴 끝 정하기. 기본값은 예전 동작(끔) — nav2_params.yaml 에서 켠다.
+  p.turn_enter_persist = dp("turn_enter_persist", 0.0);
+  p.turn_lock_target = dp("turn_lock_target", false);
+  p.turn_retarget_angle = dp("turn_retarget_angle", M_PI / 2.0);
+  p.turn_retarget_persist = dp("turn_retarget_persist", 0.5);
+  p.turn_max_rotation = dp("turn_max_rotation", 0.0);
   p.turn.radii = dp("turn_radii", std::vector<double>{0.2, 0.1});
   p.turn.clearance = dp("turn_clearance", 0.05);
   p.turn.keep_clearance = dp("turn_keep_clearance", -1.0);   // 10-01: 도는 중 유지 기준(0 이하 = turn_clearance)
@@ -266,6 +272,7 @@ core::Path VccController::windowPlan(
     throw nav2_core::PlannerException("Unable to transform robot pose into global plan's frame");
   }
   const core::Pose2D robot = toPose2D(robot_pose.pose);
+  plan_robot_yaw_ = robot.yaw;   // Turn 목표 붙들기(C)는 경로 좌표계 방향으로 본다
   const double max_extent =
     std::max(costmap_->getSizeInMetersX(), costmap_->getSizeInMetersY()) / 2.0;
 
@@ -369,6 +376,7 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
   in.yaw_tol = yaw_tol;
   in.rot_stopped = rot_stopped;
   in.speed_cap = speed_cap_;
+  in.robot_yaw = plan_robot_yaw_;
   const core::Pose2D robot = toPose2D(pose.pose);   // costmap 전역 좌표계
   in.clearance = [this, robot](const core::Pose2D & p) {
       return field_.clearance(core::toParent(robot, p));
@@ -381,10 +389,10 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
     char buf[256];
     std::snprintf(buf, sizeof(buf),
       "state=%s reason=%s offset=%.2f target=%.2f blocked=%d turn=%d align=%d fail=%d v=%.3f w=%.3f "
-      "us_fresh=%d",
+      "us_fresh=%d rot=%.0f",
       core::stateName(out.state), out.reason, out.offset, out.target, out.lanes_blocked ? 1 : 0,
       static_cast<int>(out.turn_mode), out.align_attempts, static_cast<int>(out.failure),
-      out.cmd.v, out.cmd.w, us_fresh_);
+      out.cmd.v, out.cmd.w, us_fresh_, out.turn_rotated * 180.0 / M_PI);
     s.data = buf;
     state_pub_->publish(s);
     nav_msgs::msg::Path lp;

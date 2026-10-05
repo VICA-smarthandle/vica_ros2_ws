@@ -32,6 +32,8 @@ struct StateInputs
   bool collision_imminent{false};
   bool align_failed{false};
   bool align_blocked{false};       // 도착 정렬 회전 원이 막힘(설계서 6.1 ③->④)
+  // 유턴 진입 지속 조건(2026-10-05 C): 조준각이 문턱을 넘은 채 이어진 시간이 충분한가. 기본 true = 즉시.
+  bool turn_ready{true};
 };
 
 bool turnNeeded(const StateInputs & in, const StateParams & p);
