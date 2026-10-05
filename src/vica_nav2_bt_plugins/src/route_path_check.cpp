@@ -1,10 +1,24 @@
 #include "vica_nav2_bt_plugins/route_path_check.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace vica_nav2_bt_plugins
 {
+namespace
+{
+// 점 (px,py) 에서 선분 a->b 까지 거리. back > 0 이면 a 앞쪽(b 반대쪽)으로 back 만큼 늘린 선분.
+double segmentDistance(double px, double py, double ax, double ay, double bx, double by, double back)
+{
+  const double dx = bx - ax, dy = by - ay;
+  const double len = std::hypot(dx, dy);
+  if (len < 1e-9) {return std::hypot(px - ax, py - ay);}
+  const double ux = dx / len, uy = dy / len;
+  const double s = std::clamp((px - ax) * ux + (py - ay) * uy, -back, len);
+  return std::hypot(px - (ax + s * ux), py - (ay + s * uy));
+}
+}  // namespace
 
 RoutePathVerdict checkRoutePath(
   const nav_msgs::msg::Path & path, double robot_x, double robot_y,
@@ -14,6 +28,7 @@ RoutePathVerdict checkRoutePath(
   RoutePathVerdict v;
   v.poses = path.poses.size();
   v.dist_to_path = std::numeric_limits<double>::infinity();
+  v.dist_to_points = std::numeric_limits<double>::infinity();
   v.dist_to_goal = (std::isfinite(goal_x) && std::isfinite(goal_y)) ?
     std::hypot(goal_x - robot_x, goal_y - robot_y) : std::numeric_limits<double>::infinity();
 
@@ -27,9 +42,29 @@ RoutePathVerdict checkRoutePath(
       return v;
     }
     const double d = std::hypot(ps.pose.position.x - robot_x, ps.pose.position.y - robot_y);
-    if (d < v.dist_to_path) {
-      v.dist_to_path = d;
+    if (d < v.dist_to_points) {
+      v.dist_to_points = d;
     }
+  }
+  // 레일 선까지 옆 거리. 점 하나뿐이면 점까지 거리 그대로.
+  v.dist_to_path = v.dist_to_points;
+  const auto & poses = path.poses;
+  for (std::size_t i = 1; i < poses.size(); ++i) {
+    v.dist_to_path = std::min(
+      v.dist_to_path, segmentDistance(
+        robot_x, robot_y, poses[i - 1].pose.position.x, poses[i - 1].pose.position.y,
+        poses[i].pose.position.x, poses[i].pose.position.y, 0.0));
+  }
+  // 첫 구간 방향은 0.2 m 넘게 떨어진 첫 점으로 잡는다(경로 점 간격 0.05 m 의 잔떨림 회피, VCC lateralError 와 같다).
+  if (poses.size() >= 2) {
+    const auto & p0 = poses.front().pose.position;
+    std::size_t k = 1;
+    while (k + 1 < poses.size() &&
+      std::hypot(poses[k].pose.position.x - p0.x, poses[k].pose.position.y - p0.y) < 0.2) {++k;}
+    v.dist_to_path = std::min(
+      v.dist_to_path, segmentDistance(
+        robot_x, robot_y, p0.x, p0.y, poses[k].pose.position.x, poses[k].pose.position.y,
+        kPrunedEdgeExtend));
   }
 
   // 2026-09-16 실주행: route_server 가 마지막 엣지에서 출발 노드를 잘라내면
