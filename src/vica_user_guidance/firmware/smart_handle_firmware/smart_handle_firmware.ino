@@ -22,44 +22,49 @@
 // 상향에 8채널 프레임(AA 57, 20B)을 추가했다. 옛 2채널 프레임(AA 55)은 호환용으로 함께
 // 보낸다. 젯슨 파서·설정·URDF·costmap 레이어가 같은 커밋에서 8채널로 바뀐다.
 //
+// ── 2026-10-05 보드 복귀: ESP32U → Arduino Nano (ATmega328P, FT232RL USB) ──
+// ESP32 보드가 레벨시프터·GPIO 손상으로 고장 나 다시 나노로 돌아왔다(09-22 이전과 같은
+// 나노, serial B003UMKG). 5V 보드라 레벨시프터가 통째로 빠진다. 핀맵 정본은 하드웨어
+// 인수인계 문서 "로봇 제어보드 인수인계: 핀맵과 제어"(2026-10-05) 2장이다:
+//   D2 터치 · D7 진동(L9110 A-IA) · D9 서보 · D10 LED B · D12 LED A · A4/A5 I2C
+// 시나리오·상태코드·프레임은 그대로다. 바뀐 것은 핀, 서보 라이브러리(<Servo.h>),
+// I2C 호출(Wire.begin()·setWireTimeout) 세 가지다.
+// 빌드: arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
+//
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
 //        LED 표시는 모터 정지를 보장하지 않는다. 정지 권한은 Safety 계층에 있다.
 
-// ESP32 에는 AVR 의 <Servo.h> 가 없다(architectures 에 esp32 미포함). ESP32Servo 는
-// attach/write/read 가 같고 기본 펄스폭도 544~2400us 로 같아 각도→펄스 변환이 나노와
-// 동일하다(ESP32Servo README "Useful Defaults"). 내부는 LEDC 하드웨어 PWM 이다.
-#include <ESP32Servo.h>
+// 서보는 Adafruit_TiCoServo(2026-10-05). 표준 <Servo.h> 는 펄스 끝을 Timer1 인터럽트로
+// 내는데, 시계(millis)·시리얼·I2C 인터럽트가 그 순간과 겹치면 펄스가 몇 us 길어져
+// 대기 중에도 가끔 '틱' 했다(10-05 실물: LED 시간 창을 넣은 뒤에도 작게 남음).
+// TiCoServo 는 Timer1 하드웨어 PWM(OC1A = D9)이 펄스를 직접 만들어 인터럽트와 무관하다.
+// 나노에서는 D9·D10 만 쓸 수 있다(라이브러리 known_16bit_timers.h). attach/write 는
+// Servo.h 와 같고, write 값이 544 미만이면 각도로 읽는다.
+// 이것으로도 대기 중 틱이 남으면 원인은 전원·서보 자체 쪽이다 — 메모리 handle-servo-signal-policy.
+#include <Adafruit_TiCoServo.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 
 // ══════════════════════════════════════════
-#define NUM_LEDS_A  31   // 2026-09-22 30→31. 실물에서 끝 1개가 안 켜져 사용자가 +1 요청
-#define NUM_LEDS_B  31
+#define NUM_LEDS_A  21   // 2026-10-05 나노 복귀: 줄당 21개(사용자 실측). 20 으로 두면 끝 1개가 안 바뀐다
+#define NUM_LEDS_B  21
 // ══════════════════════════════════════════
 
-// ── ESP32U 핀 (2026-09-22 배선표) ────────────────────────────────────────
-// 서보·LED 는 5V 부품이라 3.3V GPIO → 5V 레벨시프터(TXS/TXB 계열)를 거친다.
-// 시프터는 OE 가 HIGH 일 때만 출력이 살아난다(LOW = 전 채널 Hi-Z, TI 데이터시트).
-// 나노 시절엔 5V 보드라 이 핀이 없었다 — setup() 맨 앞에서 HIGH 로 올린다.
-// GPIO16·17 은 WROVER(PSRAM) 모듈에서만 예약이고 WROOM-32U 에서는 자유 핀이다.
-// 부팅 스트래핑 핀(0·2·5·12·15)은 하나도 쓰지 않는다.
-#define SERVO_PIN        19   // 시프터 A1 → 서보 신호     (나노 D7 자리)
-// LED 좌우는 2026-09-22 실물로 잡았다: 처음 A=18/B=17 로 올렸더니 서보는 왼쪽인데
-// 오른쪽 줄이 흘렀다(사용자 육안). 코드의 뜻(A=왼쪽·B=오른쪽)은 그대로 두고 핀만 맞바꿨다.
-#define LED_A_PIN        17   // 시프터 A4 → LED 왼쪽 줄   (나노 D8 자리)
-#define LED_B_PIN        18   // 시프터 A2 → LED 오른쪽 줄 (나노 D9 자리)
-// 2026-10-01 보드 재제작: OE 16→4, 진동 4→16 으로 맞바꿨다(사용자 배선). GPIO4 는
-// 스트래핑 핀이 아니라 부팅에 영향이 없다.
-#define SHIFTER_OE_PIN    4   // 시프터 OE, HIGH = 출력 켜짐
-// I2C 는 ESP32 기본(SDA21/SCL22)과 **반대로** 꽂혀 있다. 2026-09-22 스캔 실측:
-// SDA21/SCL22 → 응답 없음, SDA22/SCL21 → 0x68 응답. 배선표의 "22 lv1 / 21 lv2" 는
-// 시프터 채널 이름일 뿐이라 어느 쪽이 SDA 인지 말해 주지 않는다 — 스캔이 정본이다.
-#define I2C_SDA_PIN      22   // I2C 시프터 lv1 → 센서 SDA
-#define I2C_SCL_PIN      21   // I2C 시프터 lv2 → 센서 SCL
+// ── 나노 핀 (2026-10-05 하드웨어 인수인계 문서 2장) ─────────────────────────
+// 5V 보드라 서보·LED·터치·I2C 를 시프터 없이 직접 잇는다.
+// D10 은 Servo 라이브러리(Timer1) 때문에 analogWrite 가 꺼지지만, 네오픽셀은 디지털
+// 비트 신호라 상관없다(인수인계 문서). D0/D1 은 USB 시리얼, D13 은 보드 LED 라 비워 둔다.
+#define SERVO_PIN         9   // 서보 SG90 신호(주황선)
+// 좌우: 코드의 뜻은 A=왼쪽·B=오른쪽이다. 2026-10-05 실물 확인 — "왼쪽"(코드 1)에서 서보는
+// 왼쪽인데 물결이 D12 줄(오른쪽)로 흘렀다. 그래서 핀만 맞바꿨다: D10 = 왼쪽 줄, D12 = 오른쪽 줄.
+// (인수인계 문서의 "A=D12·B=D10" 은 작업자 시험 펌웨어의 이름이고 좌우와 무관하다.)
+#define LED_A_PIN        10   // 네오픽셀 왼쪽 줄 데이터 (330~470Ω 직렬)
+#define LED_B_PIN        12   // 네오픽셀 오른쪽 줄 데이터
+// I2C 는 나노 고정 핀 A4(SDA)·A5(SCL). Wire.begin() 이 알아서 잡는다. 풀업 3.3kΩ 은 버스에 하나.
 // 서보 펄스폭. 나노 Servo.h 기본값과 같은 값을 명시해 각도 해석이 바뀌지 않게 한다.
 #define SERVO_US_MIN    544
 #define SERVO_US_MAX   2400
-#define SERVO_HZ         50
+#define SERVO_HZ         50   // 참고값: Servo.h 는 50Hz 고정(ESP32 시절 setPeriodHertz 용)
 #define BLINK_MS    300
 #define WAVE_MS     30
 #define LINE_LEN    25
@@ -100,7 +105,7 @@
 // ── 워치독: 이 시간 동안 신호 없으면 통신두절로 판단 ──
 #define WATCHDOG_TIMEOUT_MS  1500
 
-Servo myServo;
+Adafruit_TiCoServo myServo;
 Adafruit_NeoPixel ledA(NUM_LEDS_A, LED_A_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel ledB(NUM_LEDS_B, LED_B_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -279,7 +284,7 @@ enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US
 // HIGH 가 끼어들어도 200ms 안에 다음 LOW 가 오면 끊기지 않는다. 채터링을
 // 필터링하는 게 아니라 무시하는 구조다. 이것도 판정이 아니라 신호 정리다 —
 // 사람 손의 3초·0.5초와는 자릿수가 다르다.
-#define TOUCH_PIN        14   // 2026-09-22 ESP32U: 11→14. 내부 풀업 있음(약 45kΩ)
+#define TOUCH_PIN         2   // 2026-10-05 나노: LTK-01 OUT. 평소 HIGH·누르면 LOW, 내부 풀업
 #define TOUCH_FRAME_H1   0xAA
 #define TOUCH_FRAME_H2   0x56
 #define TOUCH_FLAG_ON    0x01
@@ -308,7 +313,7 @@ unsigned long touchSentAt  = 0;
 //
 // 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
 // 멈춘다.
-#define HAPTIC_PIN            16   // 2026-10-01 보드 재제작: 4→16. L9110 IA(IB=GND), 시프터 없이 3.3V
+#define HAPTIC_PIN             7   // 2026-10-05 나노: L9110 A-IA(A-IB=GND, 10kΩ 풀다운). 켜기/끄기만
 #define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
 #define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (손잡이 찾기·비상 패턴)
 #define HAPTIC_CMD_TICK       0x12   // 300ms x1 (잡음 확인, 2026-09-30)
@@ -619,13 +624,42 @@ void usTask(unsigned long now) {
   }
 }
 
+// ── LED 갱신 시간 창 (2026-10-05) ──────────────────────────────────────────
+// show() 는 LED 1개당 약 30us 동안 인터럽트를 끈다(줄당 21개 ≈ 0.63ms). 표준 Servo.h 는
+// 서보 펄스를 Timer1 인터럽트로 끝내므로, 그 순간 show() 가 돌고 있으면 펄스가 길어져
+// 서보가 움찔한다. TiCoServo(하드웨어 PWM)로 바꾼 뒤에는 꼭 필요하진 않지만, 기다림이
+// 길어야 약 4ms 라 해가 없고 Servo.h 로 되돌릴 때를 대비해 남겨 둔다. 그래서 서보 펄스가 이미 끝나고 다음 펄스가 시작되기 전 구간에서만
+// show() 한다. Timer1 은 0.5us 단위로 0→40000(20ms) 을 센다(Servo.h·TiCoServo 둘 다 프리스케일 8):
+//   5200 (2.6ms)  = 가장 긴 펄스 2400us 가 끝난 뒤
+//   37600(18.8ms) = 0.6ms 짜리 show() 가 다음 주기 시작(40000) 전에 끝나는 마지막 지점
+// 창은 20ms 중 약 16ms 라 기다림은 길어야 약 4ms — 30ms 주기 물결엔 보이지 않는다.
+// 작업자 touch_test(2026-10-05) 에서 실물 검증된 방식이다. 이것으로도 서보가 움찔하면
+// TiCoServo(하드웨어 PWM, D9 그대로) 로 바꾼다 — 메모리 handle-servo-signal-policy.
+#define LED_SAFE_TCNT_MIN   5200
+#define LED_SAFE_TCNT_MAX  37600
+#define LED_SAFE_WAIT_US   25000   // 서보가 안 붙어 Timer1 이 멈춰 있을 때의 안전 탈출
+
+void ledShowSafe(Adafruit_NeoPixel &strip) {
+  if (myServo.attached()) {
+    unsigned long t0 = micros();
+    for (;;) {
+      noInterrupts();            // 16비트 TCNT1 을 한 번에 읽는다(Servo ISR 이 0 으로 되돌리므로)
+      uint16_t c = TCNT1;
+      interrupts();
+      if (c >= LED_SAFE_TCNT_MIN && c <= LED_SAFE_TCNT_MAX) break;
+      if (micros() - t0 > LED_SAFE_WAIT_US) break;
+    }
+  }
+  strip.show();
+}
+
 void setA(uint32_t color) {
   for (int i = 0; i < NUM_LEDS_A; i++) ledA.setPixelColor(i, color);
-  ledA.show();
+  ledShowSafe(ledA);
 }
 void setB(uint32_t color) {
   for (int i = 0; i < NUM_LEDS_B; i++) ledB.setPixelColor(i, color);
-  ledB.show();
+  ledShowSafe(ledB);
 }
 void setBoth(uint32_t color) { setA(color); setB(color); }
 
@@ -634,7 +668,7 @@ void drawLine(Adafruit_NeoPixel &strip, int numLeds, int pos) {
     int dist = pos - (numLeds - 1 - i);
     strip.setPixelColor(i, (dist >= 0 && dist < LINE_LEN) ? ORANGE : OFF);
   }
-  strip.show();
+  ledShowSafe(strip);
 }
 
 void servoMoveTo(int target) { servoTarget = target; }
@@ -748,15 +782,7 @@ void setup() {
 
   Serial.begin(115200);
 
-  // 레벨시프터부터 켠다. 이 줄이 없으면 아래 서보·LED 신호가 시프터에서 끊겨
-  // 부팅 대기 표시(SKY)도, 서보 중립도 실물에 닿지 않는다.
-  pinMode(SHIFTER_OE_PIN, OUTPUT);
-  digitalWrite(SHIFTER_OE_PIN, HIGH);
-
-  // ESP32Servo: 타이머 1개를 이 라이브러리에 배정하고(ESP32Servo 예제 관례),
-  // 50Hz·544~2400us 로 붙인다 — 나노 Servo.h 와 같은 조건이라 각도 값은 그대로다.
-  ESP32PWM::allocateTimer(0);
-  myServo.setPeriodHertz(SERVO_HZ);
+  // Servo.h 는 50Hz 고정이다. 펄스폭만 544~2400us 로 명시한다.
   myServo.attach(SERVO_PIN, SERVO_US_MIN, SERVO_US_MAX);
   myServo.write(SERVO_CENTER);
 
@@ -777,13 +803,13 @@ void setup() {
 
   // ── 초음파 I2C ──
   // 케이블이 길어 데이터시트 상한(100kHz)의 절반으로 시작한다(§4.2-4).
-  // 센서는 5V 급전이라 SDA/SCL 은 I2C 레벨시프터(양방향)를 거쳐 GPIO22/21 에 온다.
-  // 타임아웃: 나노의 setWireTimeout(us) 은 AVR 전용이라 ESP32 에선 setTimeOut(ms) 을
-  // 쓴다(arduino-esp32 I2C API). 25ms 뒤 트랜잭션이 실패로 끝나 loop() 가 계속 돈다 —
-  // 없으면(기본 50ms) 락업 한 번에 서보 스텝 14ms 가 몇 번 밀린다.
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  // 센서·나노 모두 5V 라 시프터 없이 A4/A5 에 바로 물린다(A22 통신 레벨 = VCC).
+  // 타임아웃: setWireTimeout(us, true) — 25ms 넘게 멈추면 트랜잭션을 끝내고 TWI 하드웨어를
+  // 리셋해 loop() 가 계속 돈다. 없으면 SDA 락업 한 번에 서보·LED·워치독이 같이 멎는다.
+  // AVR Wire 는 WIRE_HAS_TIMEOUT 를 정의하지 않으므로 #if 로 감싸지 말고 바로 부른다.
+  Wire.begin();
   Wire.setClock(50000);
-  Wire.setTimeOut(25);
+  Wire.setWireTimeout(25000, true);
 
   // 지향각 레벨 1을 전원 인가 시마다 굽는다. 레지스터 휘발 여부가 데이터시트에
   // 없어, 기본값(레벨 4·60°)으로 돌아가면 높이 91.3mm 수평 장착에서 16cm 앞부터
