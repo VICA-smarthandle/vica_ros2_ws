@@ -101,6 +101,9 @@ def generate_launch_description() -> LaunchDescription:
             # 끄려면 auto_return_home:=false. 켜면 사람이 부르지 않아도 로봇이
             # 홈까지 달리므로, 통행이 잦은 곳에서는 끄는 편이 안전하다.
             DeclareLaunchArgument("auto_return_home", default_value="true"),
+            # 접근 질문·온보딩 짧은 원고 (2026-10-05 인수인계 "로컬 LLM 정비" 1번).
+            # 기본 false = 지금 긴 문구. 로컬 LLM 실행 명령에서만 :=true 로 켠다.
+            DeclareLaunchArgument("short_approach_ments", default_value="false"),
             # 마이크 각도 증가 방향(+1 반시계 / -1 시계, 호출 접근 설계 §5).
             # 실측값 +1.0 확정(2026-09-10, 컨트롤러가 사용자와 2회 걷기 측정) —
             # 로봇을 마주 보고 사용자 기준 오른쪽으로 이동 -> 마이크 각도 0°에서
@@ -180,6 +183,10 @@ def generate_launch_description() -> LaunchDescription:
                         "current_building": LaunchConfiguration("current_building"),
                         "auto_return_home": ParameterValue(
                             LaunchConfiguration("auto_return_home"),
+                            value_type=bool,
+                        ),
+                        "short_approach_ments": ParameterValue(
+                            LaunchConfiguration("short_approach_ments"),
                             value_type=bool,
                         ),
                         "wake_doa_sign": ParameterValue(
