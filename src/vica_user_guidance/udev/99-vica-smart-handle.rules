@@ -1,26 +1,21 @@
-# VICA Smart Handle — ESP32U (ESP32-WROOM-32U + CP2102 USB-UART) 고정 장치 이름
+# VICA Smart Handle — 아두이노 나노(FTDI FT232RL USB-UART) 고정 장치 이름
 #
 # /dev/ttyUSB* 의 번호는 USB 재열거 순서에 따라 바뀐다. 다른 USB-시리얼 장치를
 # 먼저 꽂으면 스마트핸들이 ttyUSB1이 되어 config 기본값이 어긋난다.
 # SYMLINK 로 /dev/vica_smart_handle 을 고정 부여한다.
 #
-# [2026-09-22 보드 교체] 아두이노 나노(FTDI 0403:6001, serial B003UMKG)에서 ESP32U 로
-# 바꿨다. ESP32U 의 USB 칩은 CP2102(10c4:ea60)인데 **라이다(RPLIDAR A2M8)의 USB
-# 어댑터도 같은 CP2102 이고 serial 도 둘 다 "0001"** 이라 USB 속성만으로는 두 장치를
-# 구분할 수 없다(idVendor/idProduct/serial/product/bcdDevice 전부 동일, 실측).
-# 그래서 **라이다가 꽂힌 물리 USB 포트 경로(ID_PATH)** 를 기준으로 가른다:
-#   라이다  = platform-3610000.usb-usb-0:2.3:1.0 (젯슨 내부 허브 아래, 항상 이 자리)
-#   핸들    = 그 자리가 아닌 CP2102
-# 라이다 케이블을 다른 포트로 옮기면 이 규칙도 함께 고친다.
-#   확인: udevadm info -q property -n /dev/ttyUSB0 | grep ID_PATH
+# [2026-10-05 보드 복귀] ESP32U(CP2102) 에서 다시 아두이노 나노로 돌아왔다. 09-22 이전과
+# 같은 나노다(FTDI 0403:6001, serial B003UMKG — 실측). FT232RL 은 칩마다 serial 이
+# 달라 라이다(CP2102, serial "0001")와 USB 속성만으로 갈린다 — ESP32 시절처럼 물리
+# 포트 경로(ID_PATH)로 가를 필요가 없다. 나노를 바꾸면 serial 을 새로 적는다.
+#   확인: udevadm info -a -n /dev/ttyUSB1 | grep 'ATTRS{serial}'
 #
-# rplidar.rules(패키지 동봉) 는 CP2102 전부에 /dev/rplidar 를 붙이므로 핸들에도 같은
-# 링크가 걸린다. 두 장치가 한 링크를 다투면 link_priority 가 높은 쪽이 이긴다 —
-# 라이다에 10 을 줘서 /dev/rplidar 가 항상 라이다를 가리키게 한다.
+# rplidar.rules(패키지 동봉) 는 CP2102 전부에 /dev/rplidar 를 붙인다. 지금 CP2102 는
+# 라이다 하나뿐이지만, ESP32 보드를 다시 꽂으면 그 보드도 같은 링크를 다투므로 라이다
+# 자리에 link_priority 10 을 주는 줄은 남겨 둔다.
 #
 # ID_MM_DEVICE_IGNORE — ModemManager 가 시리얼 포트를 모뎀으로 오인해 AT 명령을
-# 탐침하면 DTR 토글로 보드가 리셋되고 수신 바이트가 오염된다. ESP32 도 DTR/RTS 로
-# 리셋되는 회로라 나노 때와 같은 이유로 차단한다.
+# 탐침하면 DTR 토글로 나노가 리셋되고 수신 바이트가 오염된다. 그래서 차단한다.
 #
 # 설치:
 #   sudo cp udev/99-vica-smart-handle.rules /etc/udev/rules.d/
@@ -30,5 +25,5 @@
 # 라이다: 자기 링크(/dev/rplidar)를 우선 차지한다
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.3:1.0", OPTIONS+="link_priority=10"
 
-# 스마트핸들: 라이다 자리가 아닌 CP2102
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_PATH}!="platform-3610000.usb-usb-0:2.3:1.0", SYMLINK+="vica_smart_handle", MODE="0660", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
+# 스마트핸들: 아두이노 나노(FT232RL)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="B003UMKG", SYMLINK+="vica_smart_handle", MODE="0660", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
