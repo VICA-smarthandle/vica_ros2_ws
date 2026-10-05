@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <limits>
 
 #include "nav_msgs/msg/path.hpp"
@@ -47,7 +48,8 @@ TEST(RoutePathCheck, TwoPosesNearRobotIsUsable)
   auto p = line(0.0, 1.0, 0.0, 2);
   auto v = checkRoutePath(p, 0.1, 0.2, 2, 1.5);
   EXPECT_TRUE(v.usable);
-  EXPECT_NEAR(v.dist_to_path, 0.2236, 1e-3);
+  EXPECT_NEAR(v.dist_to_path, 0.2, 1e-9);      // 선분까지 옆 거리
+  EXPECT_NEAR(v.dist_to_points, 0.2236, 1e-3);  // 가장 가까운 점(0,0)까지
 }
 
 // 경로는 가장 가까운 '노드'에서 시작한다. 로봇이 레일에서 멀면 DWB 지역 창(3 m)
@@ -57,8 +59,50 @@ TEST(RoutePathCheck, RobotFarFromPathIsUnusable)
   auto p = line(5.0, 8.0, 0.0, 61);
   auto v = checkRoutePath(p, 0.0, 0.0, 2, 1.5);
   EXPECT_FALSE(v.usable);
-  EXPECT_NEAR(v.dist_to_path, 5.0, 1e-9);
+  // 로봇은 레일 연장선 위 5 m 뒤다. 첫 구간을 뒤로 늘리는 것은 지워진 엣지 길이(1.2 m)까지뿐.
+  EXPECT_NEAR(v.dist_to_path, 5.0 - vica_nav2_bt_plugins::kPrunedEdgeExtend, 1e-9);
+  EXPECT_NEAR(v.dist_to_points, 5.0, 1e-9);
   EXPECT_NE(v.reason.find("far"), std::string::npos);
+}
+
+// 2026-10-02 run61 시작→홈 6.8 s 재현(축만 돌림): 유턴 호로 레일 옆 0.72 m 에 있는데 route_server 가
+// 로봇이 지나친 첫 노드를 지워 경로가 0.8 m 앞 노드에서 시작했다. 점까지 1.08 m 라 0.8 문턱에 걸려
+// 지름길로 바뀌었고 로봇은 반대로 77° 돌았다(S자). 레일 선까지 옆 거리로 재면 레일을 계속 쓴다.
+TEST(RoutePathCheck, PrunedStartNodeIsMeasuredSideways)
+{
+  auto p = line(0.8, 3.8, 0.0, 61);
+  auto v = checkRoutePath(p, 0.0, -0.72, 2, 0.8);
+  EXPECT_TRUE(v.usable);
+  EXPECT_NEAR(v.dist_to_path, 0.72, 1e-9);
+  EXPECT_NEAR(v.dist_to_points, std::hypot(0.8, 0.72), 1e-9);
+}
+
+// 경로 점이 성겨도(노드 두 개) 그 사이 옆에 있으면 옆 거리다.
+TEST(RoutePathCheck, SidewaysFromTheMiddleOfASegment)
+{
+  auto p = line(0.0, 2.0, 0.0, 2);
+  auto v = checkRoutePath(p, 1.0, 0.3, 2, 0.8);
+  EXPECT_TRUE(v.usable);
+  EXPECT_NEAR(v.dist_to_path, 0.3, 1e-9);
+}
+
+// 진짜로 레일에서 멀면(옆 1.0 m) 예전처럼 못 쓴다 — 문턱은 그대로다.
+TEST(RoutePathCheck, TrulyFarSidewaysIsStillUnusable)
+{
+  auto p = line(0.8, 3.8, 0.0, 61);
+  auto v = checkRoutePath(p, 1.5, 1.0, 2, 0.8);
+  EXPECT_FALSE(v.usable);
+  EXPECT_NEAR(v.dist_to_path, 1.0, 1e-9);
+}
+
+// 첫 구간 방향은 0.2 m 넘게 떨어진 점으로 잡는다. 처음 몇 점이 옆으로 흔들려도 늘린 선이 휘지 않는다.
+TEST(RoutePathCheck, FirstSegmentDirectionIgnoresTinyJitter)
+{
+  auto p = line(1.0, 4.0, 0.0, 61);
+  p.poses[1].pose.position.y = 0.03;   // 0.05 m 간격 잔떨림
+  auto v = checkRoutePath(p, 0.0, -0.5, 2, 0.8);
+  EXPECT_TRUE(v.usable);
+  EXPECT_NEAR(v.dist_to_path, 0.5, 1e-9);
 }
 
 // 레일 옆 30 cm 로 벗어나 달리는 중 — 흔한 상태. 써야 한다.

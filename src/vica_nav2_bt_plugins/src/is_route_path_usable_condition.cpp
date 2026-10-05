@@ -69,8 +69,8 @@ BT::NodeStatus IsRoutePathUsableCondition::tick()
     // 1 Hz 로 다시 물으므로 매 틱 찍히면 로그가 넘친다. 2초에 한 번만.
     RCLCPP_INFO_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 2000,
-      "[IsRoutePathUsable] 레일 경로를 못 쓴다 -> 자유주행: %s (점 %zu개, 경로까지 %.2f m, 목적지까지 %.2f m, 거리 문턱 %.2f m)",
-      v.reason.c_str(), v.poses, v.dist_to_path, v.dist_to_goal, thr);
+      "[IsRoutePathUsable] 레일 경로를 못 쓴다 -> 자유주행: %s (점 %zu개, 레일 선까지 %.2f m(가까운 점까지 %.2f), 목적지까지 %.2f m, 거리 문턱 %.2f m)",
+      v.reason.c_str(), v.poses, v.dist_to_path, v.dist_to_points, v.dist_to_goal, thr);
     return BT::NodeStatus::FAILURE;
   }
   return BT::NodeStatus::SUCCESS;

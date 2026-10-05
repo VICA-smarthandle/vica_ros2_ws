@@ -15,16 +15,28 @@ struct RoutePathVerdict
 {
   bool usable{false};
   std::size_t poses{0};
-  double dist_to_path{0.0};   // 로봇에서 경로의 가장 가까운 점까지(m). 점이 없으면 inf
+  // 로봇에서 레일 '선'까지 옆 거리(m). 점이 없으면 inf. 2026-10-05: 점까지가 아니라 선분까지,
+  // 그리고 첫 구간은 뒤로 kPrunedEdgeExtend 만큼 늘려 잰다 — 아래 checkRoutePath 주석.
+  double dist_to_path{0.0};
+  double dist_to_points{0.0}; // 예전 방식(가장 가까운 점까지). 로그 비교용
   double dist_to_goal{0.0};   // 로봇에서 목적지까지(m). 목적지를 안 주면 inf
   std::string reason;         // 사람이 읽는 이유 (usable 이면 비어 있다)
 };
+
+// route_server 가 지운 출발 노드 자리까지 덮는 길이(m). 레일 노드 간격은 1.0 m 이하다
+// (생성기 1.0, 앱 레일 0.12~0.98). 무한히 늘리면 레일 연장선 위 멀리 뒤에 선 로봇도 '가깝다'가 된다.
+constexpr double kPrunedEdgeExtend = 1.2;
 
 // path       route_server 가 내놓은 촘촘한 경로
 // robot_x/y  경로와 같은 frame 의 로봇 위치
 // min_poses  점이 이보다 적으면 못 쓴다. 2 = "선이 하나는 있어야 한다"
 // max_dist   로봇이 경로에서 이보다 멀면 못 쓴다. controller 의 지역 창(3 m)보다
-//            작아야 한다 — 멀면 controller 가 "0 poses" 로 실패한다
+//            작아야 한다 — 멀면 controller 가 "0 poses" 로 실패한다.
+//            거리는 레일 선까지 옆 거리다. route_server 는 로봇이 첫 노드를 지나쳤으면(dot>0)
+//            옆으로 얼마나 떨어졌든(max_prune_dist_from_edge 8 m) 그 노드를 지운다. 그러면 남은
+//            '점'까지 거리는 옆 거리에 앞뒤 간격이 더해져 튄다(2026-10-02 run61 시작→홈: 옆 0.72 m 인데
+//            1.01 m 로 재 0.8 m 문턱을 넘어 지름길로 바뀌고 반대로 77° 회전. 문턱 닫힘 14번 전부 이 착시).
+//            그래서 선분까지 재고, 첫 구간은 지워진 엣지 자리까지 뒤로 늘려 잰다.
 // goal_x/y   목적지. NaN 이면 아래 인계 판정을 건너뛴다
 // handoff    로봇이 목적지에서 이 거리 안이면 레일을 버리고 자유주행으로 넘긴다.
 //            레일 경로는 노드에서 끝나고 끝 방향이 마지막 엣지 방향이라, 목적지
