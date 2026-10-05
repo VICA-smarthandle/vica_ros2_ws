@@ -1365,8 +1365,8 @@ class TestApproachVoiceHooks:
         logic.on_approach_answer(True, 6.0)          # 수락 -> TURNING
         assert logic.state == State.TURNING
 
-    def test_question_is_the_recorded_long_greeting(self):
-        assert MSG_APPROACH_QUESTION.startswith("안녕하세요? 저는 시각장애인")
+    def test_question_is_the_recorded_short_greeting(self):
+        assert MSG_APPROACH_QUESTION.startswith("안녕하세요? 시각장애인")
         assert MSG_APPROACH_QUESTION.endswith("안내를 받으시겠어요?")
 
     def test_accept_speaks_turn_notice(self):

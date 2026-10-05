@@ -361,22 +361,14 @@ MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # 글자까지 일치해야 사전 녹음이 재생된다 — 바꾸려면 양쪽을 함께 고치고
 # 재녹음한다(voice scripts/make_cue_wavs.py). 수락 멘트가 회전 예고인 이유:
 # 시각장애인에게 예고 없는 움직임 금지(2026-08-25 결정).
-MSG_APPROACH_QUESTION = (
-    "안녕하세요? 저는 시각장애인 안내로봇 비카입니다! "
-    "저와 함께 목적지까지 동행해보시는건 어떠세요? 안내를 받으시겠어요?"
-)
+# 접근 질문·온보딩은 2026-10-05 짧은 원고로 통일했다(사용자 결정). 옛 긴 원고
+# ("저와 함께 목적지까지 동행해보시는건 어떠세요?" 등)는 길어서 대답이 늦고, 같은
+# 날 잠깐 둔 설정값 short_approach_ments 로 LLM 종류별로 가르던 것도 걷어냈다 —
+# 이 멘트는 LLM 이 아니라 미션이 말하므로 OpenAI·로컬 모두 같은 녹음이 나간다.
+MSG_APPROACH_QUESTION = "안녕하세요? 시각장애인 안내로봇 비카입니다. 안내를 받으시겠어요?"
 MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
-MSG_APPROACH_ONBOARDING = (
-    "안녕하세요? 반갑습니다! 저에게 말을 거실 때는 '비카야'라고 불러주세요. "
-    "자, 이제 어디로 가고 싶으신가요?"
-)
-# 짧은 원고 (2026-10-05 인수인계 "로컬 LLM 정비" 1번). short_approach_ments 를 켠
-# 실행(로컬 LLM 명령)에서만 쓴다 — 기본은 위 긴 문구 그대로다. 이 멘트는 LLM 이
-# 아니라 미션이 말하므로 LLM 종류로 자동으로 갈리지 않아 설정값으로 고른다.
-# 사전 녹음은 voice scripts/bake_one_cv.py 로 따로 굽는다(글자까지 같아야 녹음 재생).
-MSG_APPROACH_QUESTION_SHORT = "안녕하세요? 시각장애인 안내로봇 비카입니다. 안내를 받으시겠어요?"
-MSG_APPROACH_ONBOARDING_SHORT = "저에게 말을 거실 때는 '비카야'라고 불러주세요. 어디로 가고 싶으신가요?"
+MSG_APPROACH_ONBOARDING = "저에게 말을 거실 때는 '비카야'라고 불러주세요. 어디로 가고 싶으신가요?"
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
 MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
 
@@ -417,6 +409,8 @@ DEST_RETRY_RETURN_SEC = 0.0
 # 진동은 이 멘트와 **같은 순간** 시작해 잡을 때까지 GRIP_HINT_PULSE_SEC 마다
 # 이어진다. 그래서 "진동하고 있습니다"가 거짓말이 되지 않는다 — 09-11 의 "힌트
 # 재생이 끝난 뒤 진동"(I-2) 장치는 문구가 바뀌며 필요가 없어져 걷어냈다.
+# 음성 저장소에 이 글자 그대로 구운 음성(mission_msg_handle_hint.wav, 10-05)이 있다 —
+# 글자를 바꾸면 합성으로 떨어져 늦게 나오니 다시 굽는다.
 MSG_HANDLE_HINT = "손잡이가 진동하고 있습니다. 잡아주세요."
 # 주행 중 손을 놓쳐 섰을 때(09-03 사용자 문구). 음성 저장소에 이 글자 그대로
 # 구운 음성(handle_grip_lost.wav)이 있다 — 구운 판은 문장 전체 대조라 **마침표를
@@ -960,14 +954,8 @@ class MissionLogic:
         handle_lost_repeat_sec: float = HANDLE_LOST_REPEAT_SEC,
         handle_lost_give_up_sec: float = HANDLE_LOST_GIVE_UP_SEC,
         handle_state_stale_sec: float = HANDLE_STATE_STALE_SEC,
-        short_approach_ments: bool = False,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
-        # 접근 질문·온보딩 원고 (2026-10-05). 기본 False = 지금 긴 문구.
-        self.approach_question_msg = (
-            MSG_APPROACH_QUESTION_SHORT if short_approach_ments else MSG_APPROACH_QUESTION)
-        self.approach_onboarding_msg = (
-            MSG_APPROACH_ONBOARDING_SHORT if short_approach_ments else MSG_APPROACH_ONBOARDING)
         self.dwell_sec = dwell_sec
         self.estop_release_grace_sec = estop_release_grace_sec
         # 주행 실패 뒤 같은 목적지로 스스로 다시 시도하는 횟수와 간격.
@@ -1727,7 +1715,7 @@ class MissionLogic:
             actions.append(Haptic(HAPTIC_PATTERN_GRIP_ACK))
         # 온보딩 질문을 던지는 자리 — 빈손 되묻기 사다리를 켠다.
         self._arm_dest_prompt(now)
-        actions.append(Say(self.approach_onboarding_msg, priority="response",
+        actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
                            expects_reply=True))
         return actions
 
@@ -1816,7 +1804,7 @@ class MissionLogic:
         self._approach.reset()
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
-            Say(self.approach_question_msg, priority="response", expects_reply=True),
+            Say(MSG_APPROACH_QUESTION, priority="response", expects_reply=True),
         ]
 
     def on_person_detection(

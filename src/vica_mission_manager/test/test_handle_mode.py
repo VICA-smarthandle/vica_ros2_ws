@@ -12,9 +12,6 @@ from vica_mission_manager.mission_logic import (
     HANDLE_LOST_GIVE_UP_SEC,
     HANDLE_LOST_REPEAT_SEC,
     MSG_APPROACH_ONBOARDING,
-    MSG_APPROACH_ONBOARDING_SHORT,
-    MSG_APPROACH_QUESTION,
-    MSG_APPROACH_QUESTION_SHORT,
     MSG_CANCELED,
     MSG_HANDLE_HINT,
     MSG_HANDLE_LOST,
@@ -464,30 +461,3 @@ def test_launch_exposes_the_two_field_tuned_values():
     for name in ("grip_release_grace_sec", "grip_wait_timeout_sec"):
         assert f'DeclareLaunchArgument("{name}"' in LAUNCH
         assert f'"{name}": ParameterValue(' in LAUNCH
-
-
-# ── 짧은 원고 (2026-10-05 인수인계 "로컬 LLM 정비" 1번) ─────────────────────
-class TestShortApproachMents:
-    def test_default_keeps_long_ments(self):
-        logic = MissionLogic(wake_doa_sign=1.0)
-        assert logic.approach_question_msg == MSG_APPROACH_QUESTION
-        assert logic.approach_onboarding_msg == MSG_APPROACH_ONBOARDING
-
-    def test_short_question_on_handle_side_call(self):
-        logic = MissionLogic(wake_doa_sign=1.0, short_approach_ments=True)
-        actions = logic.on_wake_doa(175.0, True, 1.0)
-        assert says(actions) == [MSG_APPROACH_QUESTION_SHORT]
-        assert logic.state == State.AWAITING_USER
-
-    def test_short_onboarding_after_grip(self):
-        logic = MissionLogic(wake_doa_sign=1.0, short_approach_ments=True)
-        sensor_online(logic, 0.0, 2.0)
-        accept(logic, 2.0)
-        actions = run(logic, 2.0, 4.5, contact=True)
-        assert says(actions) == [MSG_APPROACH_ONBOARDING_SHORT]
-
-    def test_short_texts_are_exact(self):
-        """녹음은 글자 하나까지 같아야 나온다 — 인수인계 문구 그대로인지 고정."""
-        assert MSG_APPROACH_QUESTION_SHORT == "안녕하세요? 시각장애인 안내로봇 비카입니다. 안내를 받으시겠어요?"
-        assert MSG_APPROACH_ONBOARDING_SHORT == (
-            "저에게 말을 거실 때는 '비카야'라고 불러주세요. 어디로 가고 싶으신가요?")

@@ -66,6 +66,7 @@ from .mission_logic import (
     HANDLE_SIDE_MIN_YAW_RAD,
     HANDLE_STATE_STALE_SEC,
     Haptic,
+    MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_QUESTION,
     MSG_DEST_RETRY,
     NEAR_CALL_MAX_M,
@@ -210,9 +211,6 @@ class MissionManagerNode(Node):
         # 도착 후 대화(arrival-dialog-flow). 기본 on (2026-08-30 사용자 결정) —
         # 도착 후 유형별 질문·대기·홈 복귀가 동작한다. 끄려면 :=false.
         self.declare_parameter("arrival_dialog", True)
-        # 접근 질문·온보딩 짧은 원고 (2026-10-05). 기본 false = 지금 문구. 로컬 LLM
-        # 실행 명령에서만 :=true. 짧은 원고 녹음을 따로 구워야 녹음으로 나온다.
-        self.declare_parameter("short_approach_ments", False)
         # 손잡이 터치 × 진동 (2026-09-30). 뜻과 근거는 mission_logic 의 같은
         # 이름 상수 주석(GRIP_* · HANDLE_*)에 있다. 정본 설계:
         # docs/superpowers/specs/2026-09-28-touch-haptic-integration-final.md 5절.
@@ -312,7 +310,6 @@ class MissionManagerNode(Node):
             auto_return_home=bool(self.get_parameter("auto_return_home").value),
             person_approach_speed_percent=float(
                 self.get_parameter("person_approach_speed_percent").value),
-            short_approach_ments=bool(self.get_parameter("short_approach_ments").value),
             **{name: float(self.get_parameter(name).value) for name in (
                 "grip_enter_window_sec", "grip_ratio", "grip_wait_timeout_sec",
                 "grip_hint_pulse_sec", "grip_release_grace_sec",
@@ -324,8 +321,6 @@ class MissionManagerNode(Node):
             f"{self.logic.grip_enter_window_sec:.1f}s 중 {self.logic.grip_ratio:.0%} · "
             f"대기 {self.logic.grip_wait_timeout_sec:.0f}s · "
             f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지")
-        if self.logic.approach_question_msg != MSG_APPROACH_QUESTION:
-            self.get_logger().info("접근 질문·온보딩: 짧은 원고(short_approach_ments)")
         if arrival_dialog:
             self.get_logger().info(
                 f"도착 후 대화: 켜짐 · 홈={'있음' if home else '없음(제자리 대기)'}")
@@ -674,15 +669,13 @@ class MissionManagerNode(Node):
         다른 멘트(수락·도착 등)의 재생 완료는 응답 대기와 무관하고, 로직 쪽이
         AWAITING_USER 가 아니면 무시하므로 이중 방어다.
         """
-        # 짧은 원고를 켰으면 그 원고로 대조한다 — 놓치면 8초 대답 대기가 안 켜지고
-        # 30초 안전망까지 기다린다(2026-10-05 인수인계 주의).
-        if self.logic.approach_question_msg in msg.data:
+        if MSG_APPROACH_QUESTION in msg.data:
             self.logic.on_approach_question_spoken(self._now())
         # 손잡이 힌트는 재생 완료를 기다리지 않는다 — 진동이 힌트와 같은 순간
         # 시작해 잡을 때까지 이어진다(2026-09-30, 09-11 I-2 장치 폐기).
         # 온보딩·되묻기 재생이 끝난 시점부터 답 대기 15초를 센다(2026-09-11).
         # 로직이 사다리 중이 아니면 무시하므로 이중 방어다.
-        if self.logic.approach_onboarding_msg in msg.data or MSG_DEST_RETRY in msg.data:
+        if MSG_APPROACH_ONBOARDING in msg.data or MSG_DEST_RETRY in msg.data:
             self._run_actions(self.logic.on_dest_prompt_spoken(self._now()))
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
