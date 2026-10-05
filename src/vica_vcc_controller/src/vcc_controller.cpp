@@ -124,6 +124,11 @@ void VccController::configure(
   p.turn_retarget_angle = dp("turn_retarget_angle", M_PI / 2.0);
   p.turn_retarget_persist = dp("turn_retarget_persist", 0.5);
   p.turn_max_rotation = dp("turn_max_rotation", 0.0);
+  // 2026-10-05 해결안 가: 경로 끝 연장 조준 + 지나침 도착. 기본값은 예전 동작(끔).
+  p.end_extend = dp("end_extend", false);
+  p.end_extend_max_lateral = dp("end_extend_max_lateral", 0.08);
+  p.end_extend_min_length = dp("end_extend_min_length", 0.3);
+  p.pass_arrival = dp("pass_arrival", false);
   p.turn.radii = dp("turn_radii", std::vector<double>{0.2, 0.1});
   p.turn.clearance = dp("turn_clearance", 0.05);
   p.turn.keep_clearance = dp("turn_keep_clearance", -1.0);   // 10-01: 도는 중 유지 기준(0 이하 = turn_clearance)
@@ -389,10 +394,10 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
     char buf[256];
     std::snprintf(buf, sizeof(buf),
       "state=%s reason=%s offset=%.2f target=%.2f blocked=%d turn=%d align=%d fail=%d v=%.3f w=%.3f "
-      "us_fresh=%d rot=%.0f",
+      "us_fresh=%d rot=%.0f ext=%d",
       core::stateName(out.state), out.reason, out.offset, out.target, out.lanes_blocked ? 1 : 0,
       static_cast<int>(out.turn_mode), out.align_attempts, static_cast<int>(out.failure),
-      out.cmd.v, out.cmd.w, us_fresh_, out.turn_rotated * 180.0 / M_PI);
+      out.cmd.v, out.cmd.w, us_fresh_, out.turn_rotated * 180.0 / M_PI, out.end_extended ? 1 : 0);
     s.data = buf;
     state_pub_->publish(s);
     nav_msgs::msg::Path lp;
