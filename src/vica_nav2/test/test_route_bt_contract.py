@@ -23,6 +23,8 @@ import yaml
 
 ROUTE_BT = 'vica_navigate_to_pose_route.xml'
 GUARD = 'IsRoutePathUsable'
+# 2026-10-05 11판(해결안 B): 레일 앞 조각 검사는 IsPathValid 대신 몸통·0.5 m 건너뛰기 검사.
+CLEAR = 'IsRailAheadClear'
 GUARD_LIB = 'vica_is_route_path_usable_condition_bt_node'
 MAP = 'vica_map_0630'
 # 레일 파일 시험을 받는 지도. 2026-09-30 전에는 0630 하나만 봐서 0903_d 레일은 시험이 0 이었다.
@@ -95,7 +97,7 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert [c.tag for c in mode] == ['Sequence', 'Sequence', 'Sequence'] and \
         [c.get('name') for c in mode] == ['RailDirect', 'RejoinCarrot', 'CarrotBeyond']
     rail_direct, rejoin, carrot_seq = mode[0], mode[1], mode[2]
-    assert [c.tag for c in rejoin] == ['IsPathValid', 'GetPoseFromPath', 'Fallback'], '복귀 = 조각 비었는지 → 3 m 조각 끝점 → planner'
+    assert [c.tag for c in rejoin] == [CLEAR, 'GetPoseFromPath', 'Fallback'], '복귀 = 조각 비었는지 → 3 m 조각 끝점 → planner'
     assert rejoin[0].get('path') == trunc.get('output_path') and rejoin[1].get('path') == trunc.get('output_path')
     near_carrot = rejoin[1].get('pose')
     assert near_carrot and near_carrot not in ('{goal}', '{carrot}'), '복귀 당근은 회피 당근과 다른 키(bag 에서 갈라 세기 위해)'
@@ -103,7 +105,7 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
         and rejoin[2][0].get('path') == '{path}' and rejoin[2][1].get('path') == '{path}'
     # 8판: 앞 3 m 조각이 비어 있으면 레일 그대로. IsPathValid 는 조각만 본다(레일 전체를 보던 3판 사고 금지).
     # 8판-1(run18): 레일에서 가까울 때만 — 멀리서 레일 모드가 켜지면 DWB 가 옆 선에 붙느라 지그재그(직진 w 표준편차 0.23).
-    assert [c.tag for c in rail_direct] == [GUARD, 'IsPathValid', 'ComputeRoute'], '레일 직접 = 가까움 검사 → 3 m 조각 검사 → 레일을 {path} 에'
+    assert [c.tag for c in rail_direct] == [GUARD, CLEAR, 'ComputeRoute'], '레일 직접 = 가까움 검사 → 3 m 조각 검사 → 레일을 {path} 에'
     near_gate = rail_direct[0]
     assert near_gate.get('path') == seqs[0][0].get('path') and near_gate.get('goal') == '{goal}'
     assert 0.6 <= float(near_gate.get('max_dist_from_path', '0')) <= 1.0, (
@@ -114,9 +116,9 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
     assert 0.0 < rejoin < float(near_gate.get('max_dist_from_path')), (
         'rejoin_dist_from_path 는 0 보다 크고 max_dist_from_path 보다 작아야 한다(run52~54 경로 교대 2.9~6.9회/분)')
     assert rail_direct[2].get('path') == '{path}' and rail_direct[2].get('goal') == '{goal}'
-    valids = list(seqs[0].iter('IsPathValid'))
+    valids = list(seqs[0].iter(CLEAR))
     assert len(valids) == 2 and all(v.get('path') == trunc.get('output_path') for v in valids), (
-        'IsPathValid 는 앞 3 m 조각({rail_ahead})만 검사한다(레일 직접·복귀 두 곳). 레일 전체({rail_path})를 주면 run9 의 "치명 칸 하나에 레일 통째 거부" 가 돌아온다')
+        f'{CLEAR} 는 앞 3 m 조각({rail_ahead})만 검사한다(레일 직접·복귀 두 곳). 레일 전체({rail_path})를 주면 run9 의 "치명 칸 하나에 레일 통째 거부" 가 돌아온다')
     # 막혔을 때만 당근: 6 m 조각 끝점 -> planner, 실패 시 레일 후퇴(6판).
     assert [c.tag for c in carrot_seq] == ['TruncatePathLocal', 'GetPoseFromPath', 'Fallback'], [c.tag for c in carrot_seq]
     far, pick, cor = carrot_seq[0], carrot_seq[1], carrot_seq[2]
@@ -171,7 +173,7 @@ def test_route_bt_plans_only_to_a_carrot_on_the_rail():
 
     names = _params()['bt_navigator']['ros__parameters']['plugin_lib_names']
     for lib in ('nav2_truncate_path_local_action_bt_node', 'nav2_get_pose_from_path_action_bt_node',
-                'nav2_is_path_valid_condition_bt_node'):
+                'vica_is_rail_ahead_clear_condition_bt_node'):
         assert lib in names, f'{lib} 미등록 — bt_navigator 가 XML 을 읽다 멈춘다'
 
 
@@ -489,3 +491,29 @@ def test_route_graph_penalty_only_on_junction_arcs(map_name):
     assert values == {JUNCTION_PENALTY}
     for (a, b), v in penalty.items():
         assert penalty.get((b, a)) == v, f'벌점이 한 방향에만 있다: {(a, b)}'
+
+
+def test_rail_ahead_check_uses_body_without_handle_and_skips_where_robot_stands():
+    """11판(2026-10-05, 해결안 B). run61·63: IsPathValid 막힘 68·31번 중 첫 접촉이 손잡이 꼬리 38·20번 —
+    로봇이 서 있는 자리의 뒤 사람·곡선에서 휘는 꼬리 옆 벽을 '앞이 막혔다'로 읽어 레일을 버렸다.
+
+    몸통은 global_costmap footprint 에서 꼬리(뒤 끝보다 뒤로 나온 점)만 뺀 사각형이어야 한다 — 앞·옆을
+    줄이면 진짜 막힘을 놓친다. 패딩도 같아야 한다. 건너뛰는 거리는 그 지점 몸통 뒤 끝이 로봇 뒤(손잡이
+    뒤 사람)까지 닿지 않을 만큼(>= 0.4), 앞길을 놓치지 않을 만큼(<= 1.0). 막힘 확인은 2번 이상.
+    """
+    import ast
+    gc = _params()['global_costmap']['global_costmap']['ros__parameters']
+    full = ast.literal_eval(gc['footprint'])
+    pad = float(gc['footprint_padding'])
+    front = max(p[0] for p in full)
+    half = max(abs(p[1]) for p in full)
+    body_rear = max(p[0] for p in full if abs(abs(p[1]) - half) < 1e-9 and p[0] < 0)   # 옆선이 끝나는 뒤 모서리
+    for node in _bt_root().iter(CLEAR):
+        body = ast.literal_eval(node.get('body_footprint'))
+        assert max(p[0] for p in body) == front and max(abs(p[1]) for p in body) == half, '몸통 앞·옆은 footprint 그대로'
+        assert min(p[0] for p in body) == body_rear, '몸통 뒤 끝 = 꼬리가 시작되는 모서리(꼬리만 뺀다)'
+        assert float(node.get('footprint_padding')) == pad
+        skip = float(node.get('skip_distance'))
+        assert 0.4 <= skip <= 1.0, skip
+        assert skip + (body_rear - pad) > -0.62 + 0.4, '건너뛴 지점 몸통 뒤 끝이 손잡이 뒤 사람 자리에 닿으면 안 된다'
+        assert int(node.get('confirm_ticks')) >= 2

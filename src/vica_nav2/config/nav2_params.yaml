@@ -156,6 +156,7 @@ bt_navigator:
       - nav2_goal_updated_condition_bt_node
       - nav2_globally_updated_goal_condition_bt_node
       - nav2_is_path_valid_condition_bt_node
+      - vica_is_rail_ahead_clear_condition_bt_node   # 2026-10-05 해결안 B: 레일 앞 조각 몸통 검사(레일 트리)
       # VICA 자작(vica_nav2_bt_plugins). 레일 경로가 점 1개이거나 로봇에서
       # 멀면 거른다. 2026-09-16 run1·3·5 'zero length' 사고의 직접 수리.
       - vica_is_route_path_usable_condition_bt_node
