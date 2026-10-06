@@ -605,3 +605,111 @@ TEST(VccCoreTurnEnd, EntryNeedsPersistentHeadingError)
   for (int i = 0; i < 6; ++i) {out = s.step(normalizeAngle(170.0 * M_PI / 180.0));}
   EXPECT_EQ(out.state, State::Turn);              // 0.3 s 넘게 이어지면 들어간다
 }
+
+// ── 2026-10-05 해결안 가: 끝 근처 조향과 지나침 도착 ─────────────────────────────────────────
+namespace
+{
+CoreParams paramsEnd(bool on)
+{
+  CoreParams p = params();
+  p.end_extend = on;
+  p.pass_arrival = on;
+  return p;
+}
+// 끝점 x_end 앞(로봇 기준), 옆 y, 끝 방향 yaw_end(경로 점 방향 = 목적지 방향).
+CoreInputs endInputs(const World & w, double t, double v, double wz, double x_end, double y, double yaw_end)
+{
+  Path p;
+  for (double x = x_end - 0.4; x <= x_end + 1e-9; x += 0.05) {p.push_back({x, y, 0.0});}   // 경로 창은 로봇 근처부터
+  p.back().yaw = yaw_end;
+  CoreInputs in = inputs(p, w, t, v, wz);
+  in.goal = {x_end, y, yaw_end};
+  in.xy_tol = 0.15;
+  return in;
+}
+}  // namespace
+
+// run64 834 s: 끝점 0.17 m 앞·옆 −4 cm, 목적지 방향은 왼쪽 +119°. 예전엔 끝점 쪽(오른쪽)으로 회전 명령이
+// 최대까지 붙었다가 정렬이 그걸 되돌려야 했다. 연장이면 도착 직전 회전이 작다.
+TEST(VccCoreEndExtension, TurnsLittleRightBeforeArrival)
+{
+  World w;
+  auto run = [&](bool on) {
+      VccCore c; c.configure(paramsEnd(on));
+      double v = 0.1, wz = 0.0, peak = 0.0;
+      for (int i = 0; i < 8; ++i) {
+        const CoreOutput out = c.step(endInputs(w, 1.0 + 0.1 * i, v, wz, 0.17, -0.04, 2.08));
+        v = out.cmd.v; wz = out.cmd.w;
+        if (out.state == State::Track) {peak = std::max(peak, std::abs(wz));}
+      }
+      return peak;
+    };
+  const double old_peak = run(false), new_peak = run(true);
+  EXPECT_GT(old_peak, 0.3);
+  EXPECT_LT(new_peak, 0.15);
+}
+
+// 끝점을 0.13 m 뒤로 지나쳤다(멈춤 반경 0.12 밖, checker 0.15 안). 예전엔 도착이 아니라 되돌아가려 했고,
+// 이제는 도착 정렬로 넘어간다.
+TEST(VccCoreEndExtension, PassingTheEndInsideTheCheckerCircleArrives)
+{
+  World w;
+  VccCore old_c; old_c.configure(paramsEnd(false));
+  VccCore new_c; new_c.configure(paramsEnd(true));
+  const CoreOutput o = old_c.step(endInputs(w, 1.0, 0.05, 0.0, -0.13, 0.0, 1.0));
+  const CoreOutput n = new_c.step(endInputs(w, 1.0, 0.05, 0.0, -0.13, 0.0, 1.0));
+  EXPECT_NE(o.state, State::Align);
+  EXPECT_EQ(n.state, State::Align);
+}
+
+// 지나쳐도 checker 원 밖(0.16 m)이면 도착이 아니다.
+TEST(VccCoreEndExtension, PassingOutsideTheCheckerCircleIsNotArrival)
+{
+  World w;
+  VccCore c; c.configure(paramsEnd(true));
+  const CoreOutput n = c.step(endInputs(w, 1.0, 0.05, 0.0, -0.16, 0.0, 1.0));
+  EXPECT_NE(n.state, State::Align);
+}
+
+// 해결안 ① (2026-10-06): Track 의 속도 상한이 내려가면 평상 감속, 막혀서 Hold 면 비상 제동.
+namespace
+{
+double cruise(VccCore & c, const World & w, CoreInputs & in)
+{
+  double v = 0.0;
+  for (int i = 0; i < 40; ++i) {
+    in.now = 1.0 + 0.1 * i; in.measured.v = v;
+    v = c.step(in).cmd.v;
+  }
+  return v;
+}
+}  // namespace
+
+TEST(VccCorePlannedDecel, SpeedCapDropIsSoft)
+{
+  CoreParams p = params(); p.output.planned_decel = 0.5;
+  VccCore c; c.configure(p);
+  World w;
+  CoreInputs in = inputs(line(0.0, 0.0), w, 1.0, 0.0);
+  const double v = cruise(c, w, in);
+  ASSERT_NEAR(v, 0.5, 1e-9);
+  in.speed_cap = 0.2; in.now += 0.1; in.measured.v = v;
+  const CoreOutput out = c.step(in);
+  EXPECT_EQ(out.state, State::Track);
+  EXPECT_NEAR(out.cmd.v, 0.5 - 0.05, 1e-9);
+}
+
+TEST(VccCorePlannedDecel, BlockedHoldStillBrakesHard)
+{
+  CoreParams p = params(); p.output.planned_decel = 0.5;
+  VccCore c; c.configure(p);
+  World open, blocked;
+  blocked.box(1.2, 1.3, -2.5, 2.5);
+  CoreInputs in = inputs(line(0.0, 0.0), open, 1.0, 0.0);
+  const double v = cruise(c, open, in);
+  ASSERT_NEAR(v, 0.5, 1e-9);
+  in.clearance = blocked.fn(); in.now += 0.1; in.measured.v = v;
+  const CoreOutput out = c.step(in);
+  EXPECT_EQ(out.state, State::Hold);
+  EXPECT_NEAR(out.cmd.v, 0.5 - 0.125, 1e-9);
+}

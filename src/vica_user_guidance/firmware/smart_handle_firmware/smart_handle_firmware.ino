@@ -70,8 +70,9 @@
 #define LINE_LEN    25
 
 #define SERVO_CENTER  90
-#define SERVO_LEFT   180
-#define SERVO_RIGHT    0
+// 2026-10-06 서보 패들 교체 뒤 좌우를 가운데에서 30도씩으로 줄였다(사용자). 이전 180/0(±90°).
+#define SERVO_LEFT   120
+#define SERVO_RIGHT   60
 #define SERVO_STEP_MS  14
 
 // ── 도착 표시 ─────────────────────────────

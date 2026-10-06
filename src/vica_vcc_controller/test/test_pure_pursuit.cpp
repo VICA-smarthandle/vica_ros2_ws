@@ -62,3 +62,68 @@ TEST(PurePursuit, PrefixStopsAtLength)
   const Path p = pathPrefix(straight(0.0), 1.0);
   EXPECT_NEAR(pathLength(p), 1.0, 0.051);
 }
+
+// ── 2026-10-05 해결안 가: 경로 끝 연장 ───────────────────────────────────────────────────
+namespace
+{
+// x 축과 나란히 end_x 에서 끝나는 경로(옆 y). VCC 경로 창처럼 로봇 근처(끝 0.4 m 전)에서 시작한다.
+Path ending(double y, double end_x, double start_x = 1e9)
+{
+  if (start_x > 1e8) {start_x = end_x - 0.4;}
+  Path p;
+  for (double x = start_x; x <= end_x + 1e-9; x += 0.05) {p.push_back({x, y, 0.0});}
+  return p;
+}
+}  // namespace
+
+// run64 834 s 재현: 끝점이 0.05 m 앞·옆 4 cm. 예전 조준(끝점)은 39°, 연장은 0.6 m 앞이라 4° 안팎.
+TEST(PurePursuitEndExtension, NearTheEndAimStaysFarAndGentle)
+{
+  const Path p = ending(-0.04, 0.05);
+  const Point2D old_aim = carrotOnPath(p, 0.6);
+  EXPECT_GT(std::abs(std::atan2(old_aim.y, old_aim.x)), 0.6);   // 34° 넘게
+  bool ext = false;
+  const Point2D aim = carrotWithEndExtension(p, 0.6, 0.08, 0.3, &ext);
+  ASSERT_TRUE(ext);
+  EXPECT_NEAR(std::hypot(aim.x, aim.y), 0.6, 1e-9);
+  EXPECT_LT(std::abs(std::atan2(aim.y, aim.x)), 5.0 * M_PI / 180.0);
+  EXPECT_LT(std::abs(curvatureTo(aim)), 0.25);                  // 예전 2y/d^2 ≈ 19 1/m
+}
+
+TEST(PurePursuitEndExtension, LargeLateralOffsetFallsBackToTheEndPoint)
+{
+  const Path p = ending(-0.12, 0.3);
+  bool ext = true;
+  const Point2D aim = carrotWithEndExtension(p, 0.6, 0.08, 0.3, &ext);
+  EXPECT_FALSE(ext);
+  EXPECT_NEAR(aim.x, 0.3, 1e-6);
+  EXPECT_NEAR(aim.y, -0.12, 1e-9);
+}
+
+TEST(PurePursuitEndExtension, ShortPathIsNotExtended)
+{
+  const Path p = ending(0.0, 0.2, 0.0);   // 길이 0.2 m < 0.3
+  bool ext = true;
+  carrotWithEndExtension(p, 0.6, 0.08, 0.3, &ext);
+  EXPECT_FALSE(ext);
+}
+
+TEST(PurePursuitEndExtension, EndBehindTheRobotIsNotExtended)
+{
+  const Path p = ending(0.0, -0.05);
+  bool ext = true;
+  const Point2D aim = carrotWithEndExtension(p, 0.6, 0.08, 0.3, &ext);
+  EXPECT_FALSE(ext);
+  EXPECT_NEAR(aim.x, -0.05, 1e-6);
+}
+
+TEST(PurePursuitEndExtension, FarFromTheEndBehavesLikeBefore)
+{
+  const Path p = straight(0.1);
+  bool ext = true;
+  const Point2D aim = carrotWithEndExtension(p, 0.6, 0.08, 0.3, &ext);
+  const Point2D old_aim = carrotOnPath(p, 0.6);
+  EXPECT_FALSE(ext);
+  EXPECT_NEAR(aim.x, old_aim.x, 1e-12);
+  EXPECT_NEAR(aim.y, old_aim.y, 1e-12);
+}

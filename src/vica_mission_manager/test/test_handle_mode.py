@@ -458,6 +458,63 @@ def test_old_hint_spoken_hook_is_gone():
 
 
 def test_launch_exposes_the_two_field_tuned_values():
-    for name in ("grip_release_grace_sec", "grip_wait_timeout_sec"):
+    for name in ("grip_release_grace_sec", "grip_wait_timeout_sec", "grip_assume_held"):
         assert f'DeclareLaunchArgument("{name}"' in LAUNCH
         assert f'"{name}": ParameterValue(' in LAUNCH
+
+
+def test_node_declares_the_demo_switch():
+    assert 'self.declare_parameter("grip_assume_held", False)' in NODE
+    assert 'grip_assume_held=bool(self.get_parameter("grip_assume_held").value)' in NODE
+
+
+# ── 시연 스위치 grip_assume_held (2026-10-05, 터치 모듈 고장 중 시연) ──────────
+
+
+class TestDemoAssumeHeld:
+    """터치 OUT 선을 뺀 채(늘 "놓음") 시연한다: 5초 진동 안내 → 잡은 것으로 넘어감."""
+
+    def demo_logic(self):
+        logic = MissionLogic(wake_doa_sign=1.0, grip_wait_timeout_sec=5.0,
+                             grip_assume_held=True)
+        sensor_online(logic, 0.0, 2.0)
+        return logic
+
+    def test_five_second_hint_then_ack_and_onboard(self):
+        logic = self.demo_logic()
+        first = accept(logic, 2.0)
+        assert haptics(first) == ["long"]
+        assert says(first) == [MSG_HANDLE_HINT]
+        out = run(logic, 2.0, 7.2, contact=False)
+        # 2초마다 반복(4, 6 s) 뒤 5초가 차는 7 s 에 확인 진동과 온보딩.
+        assert haptics(out) == ["long", "long", "tick"]
+        assert says(out) == [MSG_APPROACH_ONBOARDING]
+        assert logic._handle_engaged
+        assert logic.dialog_state == "idle"
+
+    def test_no_hint_after_the_wait(self):
+        logic = self.demo_logic()
+        accept(logic, 2.0)
+        run(logic, 2.0, 7.2, contact=False)
+        later = run(logic, 7.2, 12.0, contact=False)
+        assert "long" not in haptics(later)
+
+    def test_departs_inactive_and_never_pauses_on_release(self):
+        logic = self.demo_logic()
+        accept(logic, 2.0)
+        run(logic, 2.0, 7.2, contact=False)
+        depart(logic, 7.5)
+        assert not logic.handle_active
+        out = run(logic, 7.5, 12.0, contact=False, nav=NavStatus.RUNNING)
+        assert logic.state == State.NAVIGATING
+        assert MSG_HANDLE_LOST not in says(out)
+        assert not any(isinstance(a, CancelNav) for a in out)
+
+    def test_switch_off_keeps_the_original_timeout_behaviour(self):
+        logic = MissionLogic(wake_doa_sign=1.0, grip_wait_timeout_sec=5.0)
+        sensor_online(logic, 0.0, 2.0)
+        accept(logic, 2.0)
+        out = run(logic, 2.0, 7.2, contact=False)
+        assert says(out) == [MSG_APPROACH_ONBOARDING]
+        assert "tick" not in haptics(out)
+        assert not logic._handle_engaged

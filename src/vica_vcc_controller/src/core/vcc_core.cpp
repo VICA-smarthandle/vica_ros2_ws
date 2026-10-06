@@ -102,7 +102,11 @@ CoreOutput VccCore::step(const CoreInputs & in)
     align_failed_since_ = -1.0;
   }
   // 도착으로 보고 서는 반경. checker 원보다 arrive_margin 안쪽(단 반경의 절반보다 작게는 안 한다).
-  const double stop_r = std::max(0.5 * in.xy_tol, in.xy_tol - p_.arrive_margin);
+  const double stop_r_base = std::max(0.5 * in.xy_tol, in.xy_tol - p_.arrive_margin);
+  // 해결안 가: 끝점이 로봇 뒤(지나침)면 checker 원 안쪽까지를 도착으로 본다.
+  const bool passed_end = p_.pass_arrival && in.goal.x < 0.0;
+  const double stop_r = passed_end ?
+    std::max(stop_r_base, in.xy_tol - 0.5 * p_.arrive_margin) : stop_r_base;
 
   // 차선 d 를 실제 옆 위치에 다시 맞춘다: 첫 구간 연장선 기준 로봇의 옆 거리(왼쪽 +).
   // reset 뒤 0, 유턴 뒤 약 2R, 레일<->당근 경로 교체 뒤 어긋난 d 를 그대로 두면 차선 검사가 로봇이
@@ -124,7 +128,11 @@ CoreOutput VccCore::step(const CoreInputs & in)
   lanes_.update(in.path, v, v_des, in.now, in.dt, in.clearance);
   const Path lane_path = lanes_.lanePath(in.path, v);
   const double L = lookaheadDistance(v, p_.lookahead);
-  const Point2D carrot = carrotOnPath(lane_path, L);
+  bool extended = false;
+  const Point2D carrot = p_.end_extend ?
+    carrotWithEndExtension(
+    lane_path, L, p_.end_extend_max_lateral, p_.end_extend_min_length, &extended) :
+    carrotOnPath(lane_path, L);
   const double heading = std::atan2(carrot.y, carrot.x);
   const double path_heading = carrotTangent(lane_path, L);
   const double dist_end = std::hypot(in.goal.x, in.goal.y);
@@ -255,6 +263,9 @@ CoreOutput VccCore::step(const CoreInputs & in)
         if (need) {vdes = 0.0;}
         d.cmd = {vdes, 0.0};
         d.curvature = curvatureTo(carrot);
+        // 해결안 ① (2026-10-06): Track 의 상한은 미리 계산된 것이라 평상 감속으로 내린다.
+        // 조준점이 뒤라 앞으로 가면 안 되는 경우(need)는 비상 제동 그대로다. Hold·충돌 직전은 이 갈래 밖.
+        d.planned = !need;
         break;
       }
     case State::Turn:
@@ -289,6 +300,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   out.align_attempts = align_.attempts();
   out.reason = sm_.reason();
   out.turn_rotated = out.state == State::Turn ? turn_rot_ : 0.0;
+  out.end_extended = extended;
   out.lane_path = lane_path;
 
   if (imminent) {

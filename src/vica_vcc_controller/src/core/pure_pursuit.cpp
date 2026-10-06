@@ -83,6 +83,37 @@ Point2D carrotOnPath(const Path & path, double L)
   return circleSegmentIntersection({path[i - 1].x, path[i - 1].y}, {path[i].x, path[i].y}, L);
 }
 
+Point2D carrotWithEndExtension(
+  const Path & path, double L, double max_lateral, double min_length, bool * extended)
+{
+  if (extended) {*extended = false;}
+  if (path.empty()) {return {0.0, 0.0};}
+  if (carrotIndex(path, L) < path.size() || path.size() < 2 || pathLength(path) < min_length) {
+    return carrotOnPath(path, L);
+  }
+  const Pose2D & e = path.back();
+  if (e.x <= 0.0) {return {e.x, e.y};}
+  // 마지막 모양 방향: 끝에서 0.3 m(없으면 첫 점) 앞 점 -> 끝점. 점 간격 0.05 m 의 잔떨림을 피한다.
+  constexpr double kGeomBack = 0.3;
+  std::size_t j = path.size() - 1;
+  while (j > 0 && std::hypot(path[j].x - e.x, path[j].y - e.y) < kGeomBack) {--j;}
+  double ux = e.x - path[j].x, uy = e.y - path[j].y;
+  const double n = std::hypot(ux, uy);
+  if (n < 1e-6) {return {e.x, e.y};}
+  ux /= n; uy /= n;
+  const double lateral = std::abs(e.x * uy - e.y * ux);   // 원점에서 연장선까지 거리
+  if (lateral > max_lateral) {return {e.x, e.y};}
+  // e + t u (t >= 0) 와 반지름 L 원의 교점
+  const double b = e.x * ux + e.y * uy;
+  const double c = e.x * e.x + e.y * e.y - L * L;
+  const double disc = b * b - c;
+  if (disc < 0.0) {return {e.x, e.y};}
+  const double t = -b + std::sqrt(disc);
+  if (t < 0.0) {return {e.x, e.y};}
+  if (extended) {*extended = true;}
+  return {e.x + t * ux, e.y + t * uy};
+}
+
 double carrotTangent(const Path & path, double L)
 {
   if (path.size() < 2) {return path.empty() ? 0.0 : path.front().yaw;}

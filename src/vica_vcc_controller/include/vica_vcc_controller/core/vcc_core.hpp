@@ -49,6 +49,13 @@ struct CoreParams
   double turn_retarget_persist{0.5};
   // 한 Turn 에서 돈 누적 각(rad)이 이보다 크면 Hold 로 멈추고 다시 판단한다. 0 이하 = 끔.
   double turn_max_rotation{0.0};
+  // ── 경로 끝 연장(2026-10-05 해결안 가) ── 기본 끔, nav2_params.yaml 에서 켠다. pure_pursuit.hpp 근거.
+  bool end_extend{false};
+  double end_extend_max_lateral{0.08};   // 연장선에서 옆으로 이보다 멀면 예전처럼 끝점 조준
+  double end_extend_min_length{0.3};     // 경로가 이보다 짧으면 연장하지 않는다
+  // 끝점을 지나쳤어도(끝점이 로봇 뒤) goal checker 원 안(xy_tol - arrive_margin/2)이면 도착으로 본다.
+  // 부드럽게 꺾으면 멈춤 반경(xy_tol - arrive_margin) 옆을 스쳐 지나칠 수 있어, 그 뒤 되돌아오는 고리를 막는다.
+  bool pass_arrival{false};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -80,6 +87,7 @@ struct CoreOutput
   Failure failure{Failure::None};
   const char * reason{""};
   double turn_rotated{0.0};     // 이번 Turn 에서 돈 누적 각(rad), 진단용
+  bool end_extended{false};     // 이번 주기 조준점이 경로 끝 연장선 위였나(진단용)
   Path lane_path;
 };
 

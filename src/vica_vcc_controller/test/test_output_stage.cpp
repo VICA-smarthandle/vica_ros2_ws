@@ -146,3 +146,32 @@ TEST(OutputStage, RealStopStillRestartsFromNearZeroWithMotorLag)
   EXPECT_LE(c.v, OutputParams{}.resync_margin + 0.05 + 1e-9);
   EXPECT_LE(c.v, 0.2 + 1e-9);
 }
+
+// 해결안 ① (2026-10-06): 미리 알고 줄이는 상한만 평상 감속으로, 나머지는 비상 제동 그대로.
+TEST(OutputStage, PlannedSlowdownUsesPlannedDecel)
+{
+  OutputParams p; p.planned_decel = 0.5;
+  OutputStage o(p);
+  for (int i = 0; i < 60; ++i) {o.apply(Desired{{0.5, 0.0}}, o.last().v, 0.1);}
+  Desired d{{0.2, 0.0}};
+  d.planned = true;
+  EXPECT_NEAR(o.apply(d, 0.5, 0.1).v, 0.5 - 0.05, 1e-9);
+}
+
+TEST(OutputStage, EmergencyStopIgnoresPlannedDecel)
+{
+  OutputParams p; p.planned_decel = 0.5;
+  OutputStage o(p);
+  for (int i = 0; i < 60; ++i) {o.apply(Desired{{0.5, 0.0}}, o.last().v, 0.1);}
+  EXPECT_NEAR(o.apply(Desired{{0.0, 0.0}}, 0.5, 0.1).v, 0.5 - 0.125, 1e-9);
+}
+
+TEST(OutputStage, PlannedDecelIsNeverHarderThanEmergency)
+{
+  OutputParams p; p.planned_decel = 2.0;
+  OutputStage o(p);
+  for (int i = 0; i < 60; ++i) {o.apply(Desired{{0.5, 0.0}}, o.last().v, 0.1);}
+  Desired d{{0.0, 0.0}};
+  d.planned = true;
+  EXPECT_NEAR(o.apply(d, 0.5, 0.1).v, 0.5 - 0.125, 1e-9);
+}
