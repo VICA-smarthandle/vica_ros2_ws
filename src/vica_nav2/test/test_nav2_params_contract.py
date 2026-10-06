@@ -174,7 +174,7 @@ def test_velocity_smoother_arrival_softening_stays_within_goal_tolerance():
     v_at = max(
         fp['desired_linear_vel'] * stop_r / fp['approach_velocity_scaling_dist'],
         fp['min_approach_linear_velocity'])
-    decel = min(max_decel_x, fp['max_linear_decel'])
+    decel = min(max_decel_x, fp['max_linear_decel'], fp.get('planned_linear_decel', fp['max_linear_decel']))
     latency = 0.3   # VCC stop_latency 기본값(backlog D2: CAN·드라이버 지연 300 ms)
     vcc_stop = v_at ** 2 / (2.0 * decel) + v_at * latency
     assert vcc_stop < lim['xy_goal_tolerance'], (
@@ -322,6 +322,9 @@ def test_vcc_limits_match_the_smoother():
     assert fp['max_angular_vel'] <= sm['max_velocity'][2]
     assert sm['min_velocity'][2] == -sm['max_velocity'][2]
     assert fp['max_linear_decel'] == abs(sm['max_decel'][0])
+    # 해결안 ①(2026-10-06): 평상 감속은 비상 제동보다 약하고, 코너 미리 줄이기 곡선보다는 세야 한다.
+    planned = fp.get('planned_linear_decel', fp['max_linear_decel'])
+    assert fp['curve_decel'] <= planned <= fp['max_linear_decel']
     assert fp['desired_linear_vel'] <= sm['max_velocity'][0]
     # 차선 이동 속도는 손잡이 0.115 m/s 탈락선(backlog §11) 아래
     assert fp['lane_rate'] < 0.115

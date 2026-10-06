@@ -670,3 +670,46 @@ TEST(VccCoreEndExtension, PassingOutsideTheCheckerCircleIsNotArrival)
   const CoreOutput n = c.step(endInputs(w, 1.0, 0.05, 0.0, -0.16, 0.0, 1.0));
   EXPECT_NE(n.state, State::Align);
 }
+
+// 해결안 ① (2026-10-06): Track 의 속도 상한이 내려가면 평상 감속, 막혀서 Hold 면 비상 제동.
+namespace
+{
+double cruise(VccCore & c, const World & w, CoreInputs & in)
+{
+  double v = 0.0;
+  for (int i = 0; i < 40; ++i) {
+    in.now = 1.0 + 0.1 * i; in.measured.v = v;
+    v = c.step(in).cmd.v;
+  }
+  return v;
+}
+}  // namespace
+
+TEST(VccCorePlannedDecel, SpeedCapDropIsSoft)
+{
+  CoreParams p = params(); p.output.planned_decel = 0.5;
+  VccCore c; c.configure(p);
+  World w;
+  CoreInputs in = inputs(line(0.0, 0.0), w, 1.0, 0.0);
+  const double v = cruise(c, w, in);
+  ASSERT_NEAR(v, 0.5, 1e-9);
+  in.speed_cap = 0.2; in.now += 0.1; in.measured.v = v;
+  const CoreOutput out = c.step(in);
+  EXPECT_EQ(out.state, State::Track);
+  EXPECT_NEAR(out.cmd.v, 0.5 - 0.05, 1e-9);
+}
+
+TEST(VccCorePlannedDecel, BlockedHoldStillBrakesHard)
+{
+  CoreParams p = params(); p.output.planned_decel = 0.5;
+  VccCore c; c.configure(p);
+  World open, blocked;
+  blocked.box(1.2, 1.3, -2.5, 2.5);
+  CoreInputs in = inputs(line(0.0, 0.0), open, 1.0, 0.0);
+  const double v = cruise(c, open, in);
+  ASSERT_NEAR(v, 0.5, 1e-9);
+  in.clearance = blocked.fn(); in.now += 0.1; in.measured.v = v;
+  const CoreOutput out = c.step(in);
+  EXPECT_EQ(out.state, State::Hold);
+  EXPECT_NEAR(out.cmd.v, 0.5 - 0.125, 1e-9);
+}

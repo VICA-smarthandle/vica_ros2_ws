@@ -14,7 +14,8 @@ Twist2D OutputStage::apply(const Desired & d, double measured_v, double dt)
     const double a = last_.v < p_.ramp_v1 ? p_.ramp_a1 : p_.accel;
     v = std::min({v, last_.v + a * dt, last_.v < p_.ramp_v1 ? std::max(p_.ramp_v1, last_.v) : v});
   } else {
-    v = std::max(v, last_.v - p_.max_decel * dt);
+    const double decel = d.planned ? std::min(p_.planned_decel, p_.max_decel) : p_.max_decel;
+    v = std::max(v, last_.v - decel * dt);
   }
 
   // 곡률이 주어졌는데 w 상한에 걸리면 w 만 자르지 않고 v 를 낮춰 곡률(달리는 호)을 지킨다(M6).

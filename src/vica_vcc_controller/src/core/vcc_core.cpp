@@ -263,6 +263,9 @@ CoreOutput VccCore::step(const CoreInputs & in)
         if (need) {vdes = 0.0;}
         d.cmd = {vdes, 0.0};
         d.curvature = curvatureTo(carrot);
+        // 해결안 ① (2026-10-06): Track 의 상한은 미리 계산된 것이라 평상 감속으로 내린다.
+        // 조준점이 뒤라 앞으로 가면 안 되는 경우(need)는 비상 제동 그대로다. Hold·충돌 직전은 이 갈래 밖.
+        d.planned = !need;
         break;
       }
     case State::Turn:

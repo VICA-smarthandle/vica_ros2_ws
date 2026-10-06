@@ -395,17 +395,26 @@ controller_server:
       # — 시험할 항목), approach 0.6. 되돌리기: 이 블록의 네 값과 smoother 를 0.5 기준 값으로.
       # 2026-10-05 0.7 -> 0.6(사용자 결정, 시연 준비). 0.5 기준 1.2배로 linear_accel 0.17·curve_decel 0.36.
       # slow_clearance 는 10-01 사용자 결정 0.35(0.5 시절 값) 그대로. smoother max_velocity[0] 도 0.6.
-      desired_linear_vel: 0.6
+      # 2026-10-06 0.6 -> 0.5(사용자 결정, run66 "감속이 확"과 함께). 0.5 시절 값으로 되돌림:
+      # linear_accel 0.143·curve_decel 0.3. smoother max_velocity[0] 도 0.5. 평상 감속 분리(planned_linear_decel)와 한 회차.
+      desired_linear_vel: 0.5
       lookahead_time: 2.5                # RPP 값 — run36 직진 최고
       min_lookahead_dist: 0.6            # run39
       max_lookahead_dist: 1.2            # run36: 레일 노드 1 m 를 건너뛴다
       transform_tolerance: 0.2
       max_angular_vel: 0.5               # smoother max_velocity[2] 와 같음
       max_angular_accel: 1.2             # RPP 값
-      max_linear_decel: 1.25             # smoother max_decel[0] — 제동 완화 금지
+      max_linear_decel: 1.25             # smoother max_decel[0] — 비상 제동(Hold·Turn 전 멈춤) 완화 금지
+      # 2026-10-06 해결안 ①(사용자 결정): 평상 감속. Track 의 미리 계산된 상한(코너·차선 옮김·옆 여유·
+      # 도착·속도 제한)만 이 기울기로 내린다. run66 감속 25번(14.9/분) 중 23번이 이 상한이었는데
+      # 전부 1.25 로 내려 몸이 쏠렸다. 0.5 에서 최고 -> 0 이 0.4 s·0.10 m -> 1.0 s·0.25 m.
+      # 정지거리 계산(motionCollides·경로 앞 검사)은 max_linear_decel 그대로라 안전 판단은 같다.
+      # curve_decel(0.3) 이상이어야 코너 계획 곡선을 따라간다(test_nav2_params_contract).
+      # 되돌리기: 이 줄을 지우면 max_linear_decel 과 같아진다.
+      planned_linear_decel: 0.5
       start_ramp_speed: 0.25             # 요구 8: 절반까지 살짝(0.5 s)
       start_ramp_accel: 0.5
-      linear_accel: 0.17                 # 10-01 0.143 -> 0.2(0.7 용), 10-05 -> 0.17(0.6 용, 0.5 기준 1.2배): 0.25 -> 0.6 을 약 2.1 s. 출발 1단계는 그대로
+      linear_accel: 0.143                # 10-01 0.143 -> 0.2(0.7 용), 10-05 -> 0.17(0.6 용), 10-06 -> 0.143(0.5 로 복귀): 0.25 -> 0.5 를 1.75 s. 출발 1단계는 그대로
       resync_margin: 0.15                # run48: 0.05 는 모터 지연 0.45 s 에 매번 되감겨 톱니(0 -> 0.25 에 0.85 s)
       min_speed: 0.12                    # RPP regulated_linear_scaling_min_speed
       # 앞 1.5 m 경로를 20 cm 간격 세 점으로 읽은 반경이 이보다 작으면 v = 최고속도 × 반경 / 이 값.
@@ -413,7 +422,7 @@ controller_server:
       # 줄였지만, 실제로 돈 반경은 0.9~1.7 m(조준점이 꺾임을 깎음)였다 — 필요 이상 감속.
       # 사용자 "줄이는 게 심함, 0.6 은 너무 확" -> 0.8. 되돌리기 1.2.
       curve_min_radius: 0.8
-      curve_decel: 0.36                  # 코너 미리 줄이기. 10-01 0.3 -> 0.42(0.7 용), 10-05 -> 0.36(0.6 용, 0.5 기준 1.2배)
+      curve_decel: 0.3                   # 코너 미리 줄이기. 10-01 0.3 -> 0.42(0.7 용), 10-05 -> 0.36(0.6 용), 10-06 -> 0.3(0.5 로 복귀)
       preview_dist: 1.5
       slow_clearance: 0.35               # 직접 잰 거리. 10-01 0.35 -> 0.49 -> 0.35: run53 사람 앞 차체 0.86 m 부터 감속·0.74 m 부터 기어감(사용자 "너무 멀리 섬")
       approach_velocity_scaling_dist: 0.6
@@ -2734,7 +2743,8 @@ velocity_smoother:
     # [2026-10-01 VCC] 직선 0.5 -> 0.7(사용자 결정). FollowPath.desired_linear_vel 과 한 세트 —
     # 여기만 0.5 로 두면 VCC 가 0.7 을 내도 이 단에서 잘린다. 회전 0.5 는 그대로(손잡이 끝 휘둘림).
     # [2026-10-05] 0.7 -> 0.6(사용자 결정). FollowPath.desired_linear_vel 0.6 과 한 세트.
-    max_velocity: [0.6, 0.0, 0.5]
+    # [2026-10-06] 0.6 -> 0.5(사용자 결정). FollowPath.desired_linear_vel 0.5 와 한 세트.
+    max_velocity: [0.5, 0.0, 0.5]
     # min_velocity 의 셋째 칸은 **반대 방향 회전의 상한**이다. −1.0 으로 두면 왼쪽은
     # 0.5 까지만 돌면서 오른쪽은 1.0 까지 열려 있어 **좌우가 비대칭**이 된다.
     # 지금까지는 컨트롤러가 자체 회전 상한을 갖고 있어 안 드러났다. RPP 는 없다.

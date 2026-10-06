@@ -86,6 +86,7 @@ void VccController::configure(
   p.output.max_w = dp("max_angular_vel", 0.5);
   p.output.max_ang_accel = dp("max_angular_accel", 1.2);
   p.output.max_decel = dp("max_linear_decel", 1.25);
+  p.output.planned_decel = dp("planned_linear_decel", p.output.max_decel);   // 해결안 ①
   p.output.ramp_v1 = dp("start_ramp_speed", 0.25);
   p.output.ramp_a1 = dp("start_ramp_accel", 0.5);
   p.output.accel = dp("linear_accel", 0.143);
