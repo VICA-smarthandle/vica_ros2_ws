@@ -1725,8 +1725,9 @@ class TestReturnBrakeGuardsWakeDoa:
 
 class TestReturnResumeAfterCallInterrupt:
     """복귀 중 호출로 끊긴 뒤 무기한 정지하지 않고 결국 복귀를 재개한다
-    (2026-09-10 사용자 승인 흐름). 기준 시각은 항상 on_return_brake 가 불린
-    순간이다 — 청취 창(음성 쪽, 약 8초)의 길이는 이 모듈이 모른다."""
+    (2026-09-10 사용자 승인 흐름). 기준 시각은 on_return_brake 가 불린
+    순간이다 — 단 대화가 오가면 다시 재고, 귀가 열려 있는 동안은 기다린다
+    (2026-10-06, TestReturnLadderWaitsForConversation)."""
 
     def test_silence_for_15s_gives_leaving_notice(self):
         logic = MissionLogic(return_destination=make_home())
@@ -2888,3 +2889,55 @@ class TestOnboardingDestPrompt:
         )
         assert logic.state == State.IDLE
         assert logic._dest_prompt_stage is None
+
+
+class TestReturnLadderWaitsForConversation:
+    """2026-10-06 실기(15:20): 복귀 중 호출로 멈춘 뒤 로봇이 되물어(clarify)
+    답을 기다리는 중인데 재개 사다리가 15초 시계만 보고 "응답이 없어…"를
+    말하고 떠났다. 대화가 오가는 동안(말이 오가는 intent·귀가 열려 있음)은
+    사다리가 기다린다."""
+
+    def braked(self):
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        return logic
+
+    @staticmethod
+    def said_notice(actions):
+        return any(isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions)
+
+    def test_conversation_intent_restarts_the_clock(self):
+        logic = self.braked()
+        logic.on_intent(make_intent(intent="clarify", matched_destination_id=""),
+                        None, None, True, 8.0)
+        assert not self.said_notice(logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE))
+        assert self.said_notice(logic.on_tick(8.0 + RETURN_RESUME_SEC, NavStatus.NONE))
+
+    def test_open_ear_holds_the_notice_until_it_closes_empty(self):
+        logic = self.braked()
+        logic.on_listen_state("open", 12.0)          # 되물은 뒤 질문 창이 열렸다
+        assert not self.said_notice(logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE))
+        logic.on_listen_state("empty:ghost", 18.0)   # 답 없이 닫혔다
+        assert self.said_notice(logic.on_tick(18.0, NavStatus.NONE))
+
+    def test_call_during_leaving_grace_holds_departure(self):
+        logic = self.braked()
+        assert self.said_notice(logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE))
+        logic.on_listen_state("open", RETURN_RESUME_SEC + 1.0)   # 예고 중 "비카야"
+        logic.on_tick(RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE                         # 떠나지 않고 듣는다
+        logic.on_listen_state("empty:ghost", 22.0)
+        logic.on_tick(22.0, NavStatus.NONE)
+        assert logic.state == State.RETURNING                    # 빈손이면 그때 떠난다
+
+    def test_destination_said_during_grace_starts_guidance(self):
+        logic = self.braked()
+        logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        logic.on_listen_state("open", 16.0)
+        logic.on_listen_state("closed", 17.0)
+        actions = logic.on_intent(make_intent(), make_dest(), None, True, 17.5)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False

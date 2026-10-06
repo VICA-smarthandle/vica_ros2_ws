@@ -1198,6 +1198,12 @@ class MissionLogic:
         # 노드가 스스로 되묻고 재청취를 열므로, 미션까지 겹쳐 되물으면 두
         # 번 묻는 사고가 난다.
         self._forget_dest_prompt()
+        if self._return_interrupted and self.state == State.IDLE:
+            # 복귀가 끊긴 채 대화가 오갔다(되묻기·질문 등) — 무응답 시계를
+            # 이 시각부터 다시 잰다. 예고를 이미 했으면 그것도 되돌린다
+            # (2026-10-06 실기: clarify 직후 "응답이 없어…"로 떠남).
+            self._return_resume_deadline = now + self.return_resume_sec
+            self._return_notice_given = False
         if intent.intent != "navigate":
             # 질문/잡담 등은 LLM(reply)과 ros_tts_node 몫 — 여기선 관여하지 않는다.
             # 잡기 대기 중의 "손잡이 어디 있어요?"도 여기로 온다 — 대기는 그대로 둔다.
@@ -2669,7 +2675,11 @@ class MissionLogic:
                     # 회전이 끼어들었다 IDLE 로 막 돌아온 시점 — 여기서부터
                     # 다시 잰다(호출 시각부터 누적하지 않는다).
                     self._return_resume_deadline = now + self.return_resume_sec
-                elif now >= self._return_resume_deadline:
+                elif (now >= self._return_resume_deadline
+                      and not self._ear_holds(now)):
+                    # 귀가 열려 있거나 말이 LLM 으로 가는 중이면 기다린다 —
+                    # 되물은 질문의 답을 듣는 중에 "응답이 없어"를 말하고
+                    # 떠난 사고(2026-10-06 실기). 상한은 _ear_holds 몫.
                     if not self._return_notice_given:
                         self._return_notice_given = True
                         self._return_resume_deadline = now + LEAVING_GRACE_SEC
