@@ -94,6 +94,8 @@ def _bare_node(gen=5, accept=True):
     node._tree_files = {}        # 안내·대기 장소 트리 끔 — 종전 동작(2026-10-07)
     node._guided_no_rail_bt = ""
     node._route_server_up = lambda: True
+    # Nav2 준비 확인(7789aed)은 액션 서버를 본다 — 가짜 노드에는 없으니 준비됨으로 둔다.
+    node._nav2_ready = lambda: True
     node._task_bt = ""
     node.logic = SimpleNamespace(state=State.NAVIGATING)   # 대기 장소로 가는 중이 아니다
     logger = _FakeLogger()
@@ -306,6 +308,26 @@ class TestGuidedAndWaitTrees:
         node._start_nav(Navigate(destination=_dest(), tree=NAV_TREE_WAIT))
         assert node.navigator.calls == ["cancel", "goal"]
 
+
+
+class TestNav2NotReady:
+    """Nav2 액션 서버가 없으면 goal 을 보내지 않는다(7789aed) — goToPose 무한 대기 방지."""
+
+    def test_goal_is_not_sent_and_reported_as_rejected(self):
+        node = _bare_node()
+        node._nav2_ready = lambda: False
+
+        class _FakeLogic:
+            state = State.NAVIGATING
+
+            def on_tick(self, now, status):
+                return []
+
+        node.logic = _FakeLogic()
+        node._now = lambda: 0.0
+        node._start_nav(Navigate(destination=_dest()))
+        assert node.navigator.goals_sent == 0
+        assert node._published_events == ["goal_rejected"]
 
 class TestIdleCancelSync:
     """취소를 눌렀는데 취소할 주행이 없을 때 앱에 사실을 알리는지.
