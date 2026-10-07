@@ -291,13 +291,18 @@ class TestTransitions:
         assert not any(isinstance(a, Say) for a in actions)
         assert not any(isinstance(a, Navigate) for a in actions)
 
-    def test_navigating_rejects_new_navigate(self):
+    def test_navigating_confirmed_request_stops_and_asks(self):
+        """주행 중 다른 목적지 확정 요청 — 거절(옛 v1 MSG_BUSY) 대신 멈추고 묻는다
+        (2026-10-07 사용자 결정). 자세한 흐름은 test_destination_change.py."""
         logic = MissionLogic()
         start_navigation(logic)
         actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
-                                  make_dest(id="restroom"), BOUNDS, True, 1.0)
-        assert logic.state == State.NAVIGATING
-        assert actions and isinstance(actions[0], Say)
+                                  make_dest(id="restroom", name="화장실"), BOUNDS, True, 1.0)
+        assert logic.state == State.CONFIRMING
+        assert any(isinstance(a, CancelNav) and a.event == "goal_paused" for a in actions)
+        asks = [a for a in actions if isinstance(a, Say)]
+        assert [a.text for a in asks] == ["화장실로 안내해드릴까요?"]
+        assert asks[0].expects_reply and asks[0].priority == "response"
 
     def test_nav_success_arrival_message_then_idle(self):
         logic = MissionLogic(dwell_sec=2.0)
@@ -451,11 +456,14 @@ class TestEmergency:
         assert says and all(s.priority == "emergency" for s in says)
 
     def test_reject_say_has_response_priority(self):
+        # 관리자 주행 중 음성 확정 요청은 옛 v1 정책 그대로 거절된다(2026-10-07 —
+        # 안내 주행만 바꾸기 흐름을 탄다).
         logic = MissionLogic()
-        start_navigation(logic)
+        logic.on_app_destination(make_dest(), BOUNDS, True, 0.0)
+        assert logic.state == State.NAVIGATING
         actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
                                   make_dest(id="restroom"), BOUNDS, True, 1.0)
-        assert actions[0].priority == "response"
+        assert actions and actions[0].priority == "response"
 
     def test_start_and_arrival_say_are_narration(self):
         logic = MissionLogic()
@@ -1582,10 +1590,12 @@ class TestWakeConsumedGuardsWakeDoa:
         logic.on_tick(1.0, NavStatus.SUCCEEDED)
         assert logic.state == State.ASKING_NEXT
         logic.on_wake(1.001)
-        assert logic.state == State.IDLE
+        # 2026-10-07: 도착 질문은 "비카야"에 접히지 않는다(호출 반응표). 상태 관문이
+        # 그대로 wake_doa 를 막는다 — 회전도, 상태 변화도 없다.
+        assert logic.state == State.ASKING_NEXT
         actions = logic.on_wake_doa(90.0, True, 1.002)
         assert not any(isinstance(a, SpinInPlace) for a in actions)
-        assert logic.state == State.IDLE
+        assert logic.state == State.ASKING_NEXT
 
     def test_old_on_wake_behavior_is_unchanged(self):
         """on_wake 자체(답-대기 상태를 IDLE 로 접기)는 그대로다 — 막히는 것은

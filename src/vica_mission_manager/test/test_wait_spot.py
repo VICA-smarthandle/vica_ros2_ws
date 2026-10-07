@@ -205,7 +205,8 @@ class TestWaitSpotFlow:
         assert _say(logic.on_tick(first, NavStatus.NONE)) == [MSG_WAIT_BEACON]
         assert logic.on_tick(first + 5.0, NavStatus.NONE) == []
         acts = logic.on_tick(first + WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE)
-        assert [(a.text, a.priority) for a in acts] == [(MSG_WAIT_BEACON, "narration")]
+        # 가장 낮은 ambient 등급 — 다른 말 중이면 TTS 가 기다리지 않고 버린다(2026-10-07).
+        assert [(a.text, a.priority) for a in acts] == [(MSG_WAIT_BEACON, "ambient")]
 
     def test_beacon_skipped_while_talking(self):
         logic, _ = arrive()
@@ -448,3 +449,11 @@ class TestReviewFixes:
         logic._enter_returning(10.0, dialog_finish=True)
         assert logic._arrived_destination is None
         assert logic.door_side == ""
+
+
+def test_door_side_is_forgotten_when_moving_to_the_wait_spot():
+    """입구 방향은 도착한 자리의 로봇 기준 — 대기 장소로 움직이면 낡은 말이다(10-07 검토)."""
+    logic, _ = arrive(robot_yaw=0.0)
+    assert logic.door_side != ""
+    released(logic, now=3.0)
+    assert logic.door_side == ""

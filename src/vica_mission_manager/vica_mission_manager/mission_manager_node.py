@@ -91,6 +91,7 @@ from .mission_logic import (
     NavStatus,
     Say,
     StopSpeech,
+    WakeReply,
     SetNavSpeedLimit,
     SpinInPlace,
     Pose2D,
@@ -447,7 +448,9 @@ class MissionManagerNode(Node):
             callback_group=self._main_group,
         )
 
-        # 웨이크워드 호출. WAITING 각성·복귀 브레이크(도착 후 대화)에 쓴다.
+        # 웨이크워드 호출("wake"/창 안 구제 "rescue"). 2026-10-07 부터 "네?"와 대답 여부
+        # (호출 반응표)를 여기서 정한다 — 같은 주 그룹이라 주행 시작(_start_nav)이 길게
+        # 붙잡으면 "네?"도 늦는다(최악 약 4초, 음성 쪽 판정 대기 시한의 근거).
         self.create_subscription(
             String, "/vica/wake", self._on_wake, 10,
             callback_group=self._main_group,
@@ -499,6 +502,11 @@ class MissionManagerNode(Node):
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
         self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
+        # "비카야" 판정 (2026-10-07, 호출 반응표). "listen"/"ignore" — 웨이크워드 노드가
+        # 호출 창에서 들은 말을 쥐고 기다리다 listen 이면 LLM 으로 넘기고 ignore 면 버린다.
+        # 이 노드가 멈추면 판정이 안 가고, 음성 쪽이 시간을 넘겨 버린다(대답 없음).
+        self.pub_wake_reply = self.create_publisher(String, "/vica/wake_reply", 10)
+        self._wake_reply_seq = ""   # 지금 판정하는 호출의 번호(_on_wake 가 채운다)
         # 손잡이 진동 요청 (2026-09-10, 2026-09-30 확장). "long"(손잡이 찾기)·
         # "tick"(잡음 확인)을 낸다. user_guidance_driver_node 가 구독해 바이트로
         # 바꾼다. 도착·비상 진동은 여기서 내지 않는다 — 펌웨어가 상태 진입 때 낸다.
@@ -757,9 +765,9 @@ class MissionManagerNode(Node):
         )
 
     def _on_arrival_answer(self, msg: VicaIntent) -> None:
-        """도착 후 대화 중의 답. navigate 답이면 다음 목적지를 게이트 없이
-        넘긴다(로직이 NAVIGATING 으로 전이) — 목적지 확정은 이미 음성 쪽
-        matched_destination_id 로 됐다."""
+        """도착 후 대화 중의 답. navigate 답이면 다음 목적지를 넘기고, 로직이 평소
+        목적지 요청과 같은 관문을 거친 뒤 NAVIGATING 으로 간다(2026-10-07 수리 — 예전엔
+        관문 없이 넘겨 비공개·위치 미등록·주행 미준비 목적지로도 출발했다)."""
         intent = IntentData(
             intent=msg.intent,
             matched_destination_id=msg.matched_destination_id,
@@ -771,27 +779,42 @@ class MissionManagerNode(Node):
         if msg.intent == "navigate":
             next_dest = self.destinations.get(msg.matched_destination_id) or None
         before = self.logic.state
-        actions = self.logic.on_arrival_answer(intent, self._now(), next_dest=next_dest)
+        actions = self.logic.on_arrival_answer(
+            intent, self._now(), next_dest=next_dest,
+            bounds=self.map_bounds, nav_ready=self._nav2_ready())
         self._run_actions(actions)
         self.get_logger().info(
             f"도착 후 답 intent={msg.intent}: {before.value} -> {self.logic.state.value}")
 
     def _on_wake(self, msg: String) -> None:
-        """/vica/wake — RETURNING 은 복귀 브레이크(E), 답-대기 상태는 옛 질문 접기
-        (2026-09-01), 대기·손 놓기 기다림은 대기를 이어 가며 새 대화, 대기 장소로
-        혼자 가는 중은 무시(2026-10-07). 판단은 로직(on_wake)이 한다."""
-        if self.logic.state == State.RETURNING:
-            actions = self.logic.on_return_brake(self._now())
-            if actions:
-                self._run_actions(actions)
-                self.get_logger().info("복귀 중 '비카야' — 복귀 취소하고 응대")
-            return
+        """/vica/wake — 호출 반응표대로 대답할지 정한다(2026-10-07, 판단은 로직).
+
+        "wake": 호출 한 번. 로직(on_wake_call)이 "네?"·상태 정리·판정(WakeReply)을 낸다.
+          RETURNING 이면 복귀 브레이크(E)를 먼저 건다 — 그 뒤 IDLE 로서 대답한다.
+        "rescue": 창 안에서 소리로 건진 호출. 음성 쪽이 이미 대답하고 듣는 중이라 상태
+          정리(on_wake)만 한다 — 판정·인사를 또 내면 "네?"가 두 번 난다.
+        """
+        # "wake:N" — N 은 음성 쪽 호출 번호. 판정에 그대로 붙여 돌려주면 음성 쪽이 앞
+        # 호출의 늦은 판정을 거른다(2026-10-07 검토). 번호 없는 "wake"(옛 판)도 받는다.
+        kind, _, seq = (msg.data or "").strip().partition(":")
+        rescue = kind == "rescue"
+        self._wake_reply_seq = seq if seq.isdigit() else ""
+        now = self._now()
         before = self.logic.state
-        actions = self.logic.on_wake(self._now())
-        if actions or before != self.logic.state:
-            self._run_actions(actions)
-            self.get_logger().info(
-                f"'비카야': {before.value} -> {self.logic.state.value}")
+        actions: list = []
+        if self.logic.state == State.RETURNING:
+            actions.extend(self.logic.on_return_brake(now))
+            if actions:
+                self.get_logger().info("복귀 중 '비카야' — 복귀 취소하고 응대")
+        if rescue:
+            actions.extend(self.logic.on_wake(now))
+        else:
+            actions.extend(self.logic.on_wake_call(now))
+        self._run_actions(actions)
+        reply = next((a for a in actions if isinstance(a, WakeReply)), None)
+        verdict = "창 안 구제" if rescue else ("들음" if reply and reply.listen else "대답 안 함")
+        self.get_logger().info(
+            f"'비카야'({verdict}): {before.value} -> {self.logic.state.value}")
 
     def _on_wake_doa(self, msg: Float32) -> None:
         """/vica/wake_doa — 호출 방향으로 고개를 돌린다 (IDLE 에서만).
@@ -1583,6 +1606,11 @@ class MissionManagerNode(Node):
                 out.data = "control:stop"
                 self.pub_tts.publish(out)
                 self.get_logger().info("발화 큐 청소 (취소·선점)")
+            elif isinstance(action, WakeReply):
+                # "비카야" 판정 — 웨이크워드 노드가 호출 창의 말을 넘길지 버릴지 정한다.
+                verdict = "listen" if action.listen else "ignore"
+                seq = self._wake_reply_seq
+                self.pub_wake_reply.publish(String(data=f"{verdict}:{seq}" if seq else verdict))
             elif isinstance(action, CancelNav):
                 self._cancel_nav(action.destination, action.event)
             elif isinstance(action, Navigate):
@@ -1675,6 +1703,16 @@ class MissionManagerNode(Node):
         goal.pose.orientation.z = qz
         goal.pose.orientation.w = qw
 
+        # Nav2 액션 서버가 없으면 보내지 않는다(2026-10-07 검토). Humble goToPose 는
+        # 서버가 없으면 wait_for_server(1.0)을 끝없이 되풀이해 주 콜백 그룹을 붙잡는다 —
+        # 틱·"비카야" 판정·앱 서비스가 모두 멈춘다. 관문(check_gate)을 거치지 않는
+        # 재시도·재개·주행 중 바꾸기의 원래 목적지 재출발도 여기서 함께 막는다.
+        if not self._nav2_ready():
+            if not self._quiet_goal_events():
+                self._publish_goal_event("goal_rejected", dest, "Nav2 가 준비되지 않았습니다.")
+            self.get_logger().error(f"NavigateToPose 전송 보류: Nav2 미준비 ({dest.id})")
+            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+            return
         # 앞선 취소가 아직 Nav2 응답을 기다리는 중이면 여기서 영원히 기다리지
         # 않는다. 못 보낸 것을 실패로 처리하는 편이 콜백을 막는 것보다 낫다.
         if not self._nav_lock.acquire(timeout=self._nav_lock_timeout_sec):

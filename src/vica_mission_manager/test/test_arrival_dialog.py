@@ -11,7 +11,8 @@ from vica_mission_manager.mission_logic import (
     Pose2D, Say, State,
     MSG_ASK_RESTROOM, MSG_ASK_ENTRANCE, MSG_ASK_GENERIC, MSG_ASK_WAIT_TIME,
     MSG_WAIT_DEFAULT, MSG_FINISH, MSG_LEAVING_NOTICE,
-    MSG_ARRIVAL_RETRY, MSG_WAIT_EXPIRED, GoalEvent,
+    MSG_ARRIVAL_RETRY, MSG_WAIT_EXPIRED, GoalEvent, MSG_WAIT_FINISH_ASK,
+    WAIT_FINISH_REPEAT_SEC,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -132,6 +133,10 @@ class TestFinishAndNext:
         acts = logic.on_arrival_answer(
             _intent("navigate", matched_destination_id="d2"), 3.0, next_dest=nxt)
         assert logic.state == State.NAVIGATING
+        # 출발을 먼저 알린다(2026-10-07 사용자 결정 — 예전엔 이 길만 말없이 움직였다).
+        assert _say(acts) == ["안내소로 안내를 시작합니다."]
+        kinds = [type(a).__name__ for a in acts]
+        assert kinds.index("Say") < kinds.index("Navigate")
 
 
 class TestNoAnswerLadder:
@@ -217,13 +222,45 @@ class TestDenyReconfirm:
         assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
 
 
-class TestWakeFoldsArrivalQuestion:
-    def test_wake_folds_asking_and_stray_answer_is_dead(self):
-        """"비카야"는 도착 질문을 접는다(9/1) — 이후 답은 무시."""
+class TestWakeKeepsArrivalQuestion:
+    """"비카야"는 도착 질문을 접지 않는다(2026-10-07 사용자 결정, 호출 반응표).
+
+    옛 동작(9/1)은 질문을 접고 IDLE 이라, 부른 뒤 "기다려 줘"·"5분"이 갈 곳 없이
+    무시됐다(작업 계획 탭 '비카야 반응표')."""
+
+    def test_wake_keeps_question_and_wait_answer_still_works(self):
         logic = arrive("restroom")               # ASKING_NEXT
         assert logic.on_wake(3.0) == []
-        assert logic.state == State.IDLE
-        assert logic.on_arrival_answer(_intent("affirm"), 4.0) == []
+        assert logic.state == State.ASKING_NEXT
+        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=5), 4.0)
+        assert logic.state == State.WAITING
+        assert any("5분" in t for t in _say(acts))
+
+    def test_wake_keeps_wait_time_question(self):
+        logic = arrive("reception")              # 그 외 유형 — 네 → 시간 질문
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        assert logic.state == State.ASKING_WAIT_TIME
+        logic.on_wake(4.0)
+        assert logic.state == State.ASKING_WAIT_TIME
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 5.0)
+        assert logic.state == State.WAITING
+
+    def test_wake_withdraws_leaving_notice(self):
+        """떠나기 예고 유예 중 불렀으면 떠나지 않는다 — 사용자가 곁에 있다."""
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("unknown"), 3.0)   # 재질문 1회 소진
+        acts = logic.on_arrival_answer(_intent("unknown"), 5.0)
+        assert MSG_LEAVING_NOTICE in _say(acts)
+        logic.on_wake(6.0)
+        assert logic.state == State.ASKING_NEXT
+        # 예고 유예(3초)가 지나도 떠나지 않는다. 8초 시계는 "네?" 재생이 끝나야 돈다.
+        assert not any(isinstance(a, Navigate) for a in logic.on_tick(20.0, NavStatus.NONE))
+        assert logic.state == State.ASKING_NEXT
+        # "네?"가 끝난 뒤 8초 침묵이면 같은 질문부터 다시 한다(사다리 처음부터).
+        logic.on_arrival_question_spoken(21.0)
+        acts = logic.on_tick(30.0, NavStatus.NONE)
+        assert logic.state == State.ASKING_NEXT
+        assert any(MSG_ASK_RESTROOM in t for t in _say(acts))
 
 
 class TestWaitingState:
@@ -618,3 +655,64 @@ class TestLedgerAccessors:
                         nxt, BOUNDS, True, 10.0)
         assert logic.state == State.NAVIGATING
         assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(10.0) == -1
+
+
+class TestQuestionDuringArrivalDialog:
+    """도착 질문 중 정보 질문 — LLM 이 답했으니 미션은 사다리를 쓰지 않는다(2026-10-07 검토).
+
+    호출 뒤 질문 유지와 '방금 도착한 곳 방향' 답이 이 길을 자주 만든다. 예전엔
+    LLM 의 답과 "잘 듣지 못했습니다…"가 겹쳐 나오고 재질문 한 번이 헛되이 쓰였다."""
+
+    def test_question_keeps_the_dialog_without_the_retry_line(self):
+        logic = arrive("restroom")
+        assert logic.on_arrival_answer(_intent("question"), 3.0) == []
+        assert logic.state == State.ASKING_NEXT
+        assert logic._arrival_retried is False
+        # LLM 대답 재생이 끝나면 8초 시계가 다시 돌고, 침묵이면 같은 질문을 다시 한다.
+        logic.on_arrival_question_spoken(4.0)
+        acts = logic.on_tick(13.0, NavStatus.NONE)
+        assert any(MSG_ASK_RESTROOM in t for t in _say(acts))
+
+
+class TestFinishWhileWaiting:
+    """대기 중 돌아와 "다 됐어" — 다음 목적지를 묻는다(2026-10-07 사용자 결정).
+
+    예전엔 미션도 LLM 도 말하지 않아(finish 의 reply 는 빈 말) 대기와 10초 알림이 그대로
+    이어졌다. 다음 목적지를 미리 아는 기능이 생기면 "OO으로 갈까요?"가 된다(미구현)."""
+
+    def waiting(self):
+        logic = arrive("restroom", home=HOME)
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        assert logic.state == State.WAITING
+        return logic
+
+    def test_asks_where_to_and_keeps_waiting(self):
+        logic = self.waiting()
+        acts = logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        says = [a for a in acts if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_WAIT_FINISH_ASK]
+        assert says[0].expects_reply and says[0].priority == "response"
+        assert logic.state == State.WAITING          # 대기는 목적지가 정해질 때 끝난다
+
+    def test_destination_after_the_question_goes(self):
+        logic = self.waiting()
+        logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        logic.on_intent(_intent(matched_destination_id="d2"), _dest("reception", id="d2", name="안내소"),
+                        BOUNDS, True, 25.0)
+        assert logic.state == State.NAVIGATING
+
+    def test_second_finish_ends_the_guide(self):
+        """갈 곳이 없다는 뜻 — 같은 질문을 되풀이하지 않고 안내를 끝낸다."""
+        logic = self.waiting()
+        logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        acts = logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 30.0)
+        assert MSG_FINISH in _say(acts)
+        assert logic.state == State.RETURNING
+
+    def test_finish_much_later_asks_again(self):
+        logic = self.waiting()
+        logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        acts = logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True,
+                               20.0 + WAIT_FINISH_REPEAT_SEC + 1.0)
+        assert _say(acts) == [MSG_WAIT_FINISH_ASK]
+        assert logic.state == State.WAITING
