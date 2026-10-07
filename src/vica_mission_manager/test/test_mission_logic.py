@@ -2941,3 +2941,30 @@ class TestReturnLadderWaitsForConversation:
         assert logic.state == State.NAVIGATING
         assert any(isinstance(a, Navigate) for a in actions)
         assert logic._return_interrupted is False
+
+
+class TestApproachGreeting:
+    """2026-10-07 사용자 결정: 시각장애인에게 다가가기 시작할 때 한 번
+    "안내로봇 비카가 다가가고 있어요."라고 말한다. 다가가는 동안의 위치 알림은
+    음성 쪽 차임(dialog_state=approaching) 몫이다. 후진음은 '피하라'로 들려 안 쓴다."""
+
+    def test_first_approval_greets_once_before_moving(self):
+        from vica_mission_manager.mission_logic import MSG_APPROACH_COMING
+        actions = start_approach(MissionLogic())
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == [MSG_APPROACH_COMING]
+        say_at = next(i for i, a in enumerate(actions) if isinstance(a, Say))
+        nav_at = next(i for i, a in enumerate(actions) if isinstance(a, Navigate))
+        assert say_at < nav_at                        # 소리가 움직임보다 먼저 나간다
+
+    def test_goal_update_while_approaching_does_not_repeat(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        moved = make_approach(goal=Pose2D(x=1.8, y=0.5, yaw_deg=30.0))
+        actions, reason = logic.on_approach_request(moved, BOUNDS, True, 1.0)
+        assert reason == GateReason.OK
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_greeting_text_is_the_decided_wording(self):
+        from vica_mission_manager.mission_logic import MSG_APPROACH_COMING
+        assert MSG_APPROACH_COMING == "안내로봇 비카가 다가가고 있어요."

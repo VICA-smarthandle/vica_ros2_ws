@@ -365,6 +365,10 @@ MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # ("저와 함께 목적지까지 동행해보시는건 어떠세요?" 등)는 길어서 대답이 늦고, 같은
 # 날 잠깐 둔 설정값 short_approach_ments 로 LLM 종류별로 가르던 것도 걷어냈다 —
 # 이 멘트는 LLM 이 아니라 미션이 말하므로 OpenAI·로컬 모두 같은 녹음이 나간다.
+# 다가가기 시작할 때 한 번 (2026-10-07 사용자 결정). 다가가는 동안의 위치 알림은
+# 음성 쪽 차임(dialog_state=approaching, 2초마다 종 두 음) 몫이다. 후진음은 '피하라'로
+# 들려 쓰지 않는다. 구운 판(assets/baked)과 글자가 같아야 한다.
+MSG_APPROACH_COMING = "안내로봇 비카가 다가가고 있어요."
 MSG_APPROACH_QUESTION = "안녕하세요? 시각장애인 안내로봇 비카입니다. 안내를 받으시겠어요?"
 MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
@@ -1623,6 +1627,8 @@ class MissionLogic:
         self._approach.reset()
         return (
             [
+                # 소리가 움직임보다 먼저 — 다가오는 것이 무엇인지 먼저 알린다.
+                Say(MSG_APPROACH_COMING, priority="response"),
                 # 접근 구간 전체를 0.3 m/s 로 묶는다. 목적지 접근 감속 사다리와
                 # 달리 거리에 따라 내려가지 않는다 — 사람에게 다가가는 동안은
                 # 처음부터 끝까지 느려야 한다.
