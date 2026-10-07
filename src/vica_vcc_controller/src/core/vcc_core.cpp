@@ -258,11 +258,15 @@ CoreOutput VccCore::step(const CoreInputs & in)
         vdes = std::min(vdes, lanes_.speedCap());   // 차선을 옮기는 동안의 속도
         vdes = approachLimit(dist_end, vdes, sp);
         if (dist_end < stop_r) {vdes = 0.0;}   // 도착 반경 안에서는 멈춘다(RPP 도 같은 자리에서 회전으로 넘어간다)
+        // 위치만 판정하는 도착은 checker 원에 닿으면 바로, 꺾지 않고 선다(CoreParams.position_only_yaw_tol).
+        const bool position_stop = p_.position_only_yaw_tol > 0.0 &&
+          in.yaw_tol >= p_.position_only_yaw_tol && dist_end < in.xy_tol;
+        if (position_stop) {vdes = 0.0;}
         // 조준점이 유턴 문턱 밖(뒤쪽)이면 앞으로 가지 않는다. 최소 유지 시간 전이라도 같다 —
         // 돌 수 있으면 곧 Turn 이 제자리에서 돌고, 막혔으면 선다(최종 리뷰 I2: 1.42 m 역주행).
         if (need) {vdes = 0.0;}
         d.cmd = {vdes, 0.0};
-        d.curvature = curvatureTo(carrot);
+        d.curvature = position_stop ? 0.0 : curvatureTo(carrot);
         // 해결안 ① (2026-10-06): Track 의 상한은 미리 계산된 것이라 평상 감속으로 내린다.
         // 조준점이 뒤라 앞으로 가면 안 되는 경우(need)는 비상 제동 그대로다. Hold·충돌 직전은 이 갈래 밖.
         d.planned = !need;

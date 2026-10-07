@@ -130,6 +130,7 @@ void VccController::configure(
   p.end_extend_max_lateral = dp("end_extend_max_lateral", 0.08);
   p.end_extend_min_length = dp("end_extend_min_length", 0.3);
   p.pass_arrival = dp("pass_arrival", false);
+  p.position_only_yaw_tol = dp("position_only_yaw_tol", 3.0);   // 2026-10-07 위치만 도착 = 바로 정지
   p.turn.radii = dp("turn_radii", std::vector<double>{0.2, 0.1});
   p.turn.clearance = dp("turn_clearance", 0.05);
   p.turn.keep_clearance = dp("turn_keep_clearance", -1.0);   // 10-01: 도는 중 유지 기준(0 이하 = turn_clearance)

@@ -508,6 +508,10 @@ controller_server:
       end_extend_max_lateral: 0.08       # 연장선에서 옆 8 cm 넘으면 예전처럼 끝점 조준(지나침 방지)
       end_extend_min_length: 0.3         # 0.3 m 보다 짧은 경로(고리 등)는 연장하지 않는다
       pass_arrival: true                 # 끝점을 지나쳤어도 checker 원 안(0.135 m)이면 도착
+      # 2026-10-07 위치만 도착(position_goal_checker, yaw 3.141 = 사용자 안내)이면 checker 원(0.15)에 닿는 순간
+      # 속도 0·곡률 0 으로 곧게 선다 — 마지막에 끝점을 조준해 꺾지 않는다. 원 경계 속도 약 0.17 m/s 를
+      # planned_linear_decel 0.7 로 내려 약 0.25 s·2 cm(급정지 아님). 실기 확인 대기. 끄기: 0.
+      position_only_yaw_tol: 3.0
       pivot_angular_vel: 0.35            # RPP rotate_to_heading_angular_vel
       align_angular_vel: 0.35
       motor_lag: 0.35                    # run41 지연 0.3~0.5 s [추정] — 매 정렬 실측으로 갱신

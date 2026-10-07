@@ -56,6 +56,13 @@ struct CoreParams
   // 끝점을 지나쳤어도(끝점이 로봇 뒤) goal checker 원 안(xy_tol - arrive_margin/2)이면 도착으로 본다.
   // 부드럽게 꺾으면 멈춤 반경(xy_tol - arrive_margin) 옆을 스쳐 지나칠 수 있어, 그 뒤 되돌아오는 고리를 막는다.
   bool pass_arrival{false};
+  // ── 위치만 판정하는 도착(2026-10-07 대기 장소 작업) ─────────────────────────────────
+  // goal checker 의 방향 허용(yaw_tol)이 이 값 이상이면 '위치만' 도착(사용자 안내, position_goal_checker
+  // yaw 3.141)으로 보고, checker 원(xy_tol)에 들어오는 순간 속도 0·곡률 0 으로 곧게 선다. 끝점을
+  // 조준해 마지막에 꺾는 일이 없다. 끝점 0.6 m 안에서 이미 줄인 속도(원 경계 약 0.17 m/s)를 평상 감속으로
+  // 내리므로 급정지가 아니다(약 0.25 s·2 cm). 방향까지 맞추는 도착(홈·배송·대기 장소)은 그대로.
+  // ROS 파라미터 position_only_yaw_tol. 0 이하 = 끔(예전 동작).
+  double position_only_yaw_tol{3.0};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };

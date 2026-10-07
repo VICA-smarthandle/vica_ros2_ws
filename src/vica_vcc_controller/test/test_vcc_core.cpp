@@ -713,3 +713,49 @@ TEST(VccCorePlannedDecel, BlockedHoldStillBrakesHard)
   EXPECT_EQ(out.state, State::Hold);
   EXPECT_NEAR(out.cmd.v, 0.5 - 0.125, 1e-9);
 }
+
+// 2026-10-07 위치만 도착(사용자 안내, yaw 허용 3.141): checker 원에 닿으면 바로, 꺾지 않고 선다.
+TEST(VccCorePositionOnly, StopsStraightAtTheCheckerCircle)
+{
+  World w;
+  // 끝점이 0.14 m 앞·옆 4 cm(멈춤 반경 0.12 밖, checker 0.15 안), 0.17 m/s 로 다가오는 중.
+  auto make = [&](double yaw_tol) {
+      CoreInputs in = inputs(line(0.0, 0.0, 0.14), w, 1.0, 0.17);
+      in.path.back().y = 0.04;
+      in.goal = {0.135, 0.04, 2.0};
+      in.xy_tol = 0.15; in.yaw_tol = yaw_tol;
+      return in;
+    };
+  VccCore pos; pos.configure(params());
+  const CoreOutput p = pos.step(make(3.141));
+  EXPECT_EQ(p.state, State::Track);
+  EXPECT_LT(p.cmd.v, 0.17);          // 줄이기 시작했다(평상 감속)
+  EXPECT_NEAR(p.cmd.w, 0.0, 1e-9);   // 꺾지 않는다
+  // 방향까지 맞추는 도착은 예전처럼 멈춤 반경(0.12)까지 끝점을 조준하며 다가간다.
+  VccCore yaw; yaw.configure(params());
+  const CoreOutput y = yaw.step(make(0.25));
+  EXPECT_EQ(y.state, State::Track);
+  EXPECT_GT(y.cmd.v, p.cmd.v);
+  EXPECT_GT(std::abs(y.cmd.w), 0.0);
+}
+
+TEST(VccCorePositionOnly, OutsideTheCircleStillApproaches)
+{
+  World w;
+  VccCore c; c.configure(params());
+  CoreInputs in = inputs(line(0.0, 0.0, 0.3), w, 1.0, 0.1);
+  in.goal = {0.3, 0.0, 2.0};
+  in.xy_tol = 0.15; in.yaw_tol = 3.141;
+  EXPECT_GT(c.step(in).cmd.v, 0.0);
+}
+
+TEST(VccCorePositionOnly, ZeroDisablesIt)
+{
+  World w;
+  CoreParams p = params(); p.position_only_yaw_tol = 0.0;
+  VccCore c; c.configure(p);
+  CoreInputs in = inputs(line(0.0, 0.0, 0.14), w, 1.0, 0.1);
+  in.goal = {0.14, 0.0, 0.0};
+  in.xy_tol = 0.15; in.yaw_tol = 3.141;
+  EXPECT_GT(c.step(in).cmd.v, 0.0);   // 예전처럼 멈춤 반경(0.12)까지 다가간다
+}
