@@ -216,7 +216,12 @@ def test_custom_bt_only_removes_backup_from_the_nav2_default():
         ]
 
     default = lines(NAV2_DEFAULT_BT.read_text(encoding='utf-8'))
-    ours = lines(_bt_path().read_text(encoding='utf-8'))
+    # (4) FollowPath 의 goal_checker_id -- 2026-10-07 판정기가 둘이 되며 모든 트리에 적는다.
+    #     이름만 붙고 동작은 같은 판정기다. 그 계약은 test_bt_goal_checker_contract.py 가 지킨다.
+    ours = [
+        line.replace(' goal_checker_id="general_goal_checker"', '')
+        for line in lines(_bt_path().read_text(encoding='utf-8'))
+    ]
 
     removed = [line for line in default if line not in ours]
     added = [line for line in ours if line not in default]

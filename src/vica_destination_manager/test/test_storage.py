@@ -103,3 +103,71 @@ def test_rejects_non_mobile_contact_phone(raw: str) -> None:
 def test_missing_contact_phone_defaults_to_empty() -> None:
     # 연락처 없는 장소는 정상이다. 옛 파일에도 이 키가 없다.
     assert normalize_destination(make_destination())["contact_phone"] == ""
+
+
+# ---- 대기 장소 (2026-10-07) ----------------------------------------------------
+
+
+def test_door_yaw_and_wait_spot_survive_round_trip(tmp_path: Path) -> None:
+    # 적힌 키만 파일에 남는다 — 두 칸을 빠뜨리면 저장은 성공해 보여도 조용히 사라진다.
+    destination = make_destination()
+    destination["door_yaw"] = -90.0
+    destination["wait_spot"] = {"x": 1.97, "y": -1.42, "yaw": 360.0, "side": "Right"}
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    saved = storage.read("map_1")[0]
+    assert saved["door_yaw"] == 270.0
+    assert saved["wait_spot"] == {"x": 1.97, "y": -1.42, "yaw": 0.0, "side": "right"}
+
+
+def test_old_destination_has_no_door_yaw_or_wait_spot_keys() -> None:
+    # 옛 파일 모양을 그대로 남긴다. 빈 칸을 새로 쓰지 않는다.
+    normalized = normalize_destination(make_destination())
+    assert "door_yaw" not in normalized
+    assert "wait_spot" not in normalized
+
+
+def test_removing_wait_spot_drops_the_key(tmp_path: Path) -> None:
+    # '대기 장소만 지우기' = 같은 목적지를 wait_spot 없이 다시 저장한다.
+    destination = make_destination()
+    destination["wait_spot"] = {"x": 1.0, "y": 1.0, "yaw": 0.0, "side": "left"}
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    del destination["wait_spot"]
+    storage.upsert("map_1", destination)
+    assert "wait_spot" not in storage.read("map_1")[0]
+
+
+@pytest.mark.parametrize(
+    "wait_spot",
+    [
+        {"x": 1.0, "y": 1.0, "yaw": 0.0, "side": "up"},
+        {"x": 1.0, "y": 1.0, "yaw": 0.0},
+        {"x": "a", "y": 1.0, "side": "left"},
+        {"y": 1.0, "side": "left"},
+        {"x": float("nan"), "y": 1.0, "side": "left"},
+        [1.0, 1.0],
+    ],
+)
+def test_rejects_bad_wait_spot(wait_spot) -> None:
+    destination = make_destination()
+    destination["wait_spot"] = wait_spot
+    with pytest.raises(ValueError, match="wait_spot"):
+        normalize_destination(destination)
+
+
+@pytest.mark.parametrize("door_yaw", ["east", float("inf")])
+def test_rejects_bad_door_yaw(door_yaw) -> None:
+    destination = make_destination()
+    destination["door_yaw"] = door_yaw
+    with pytest.raises(ValueError, match="door_yaw"):
+        normalize_destination(destination)
+
+
+def test_deleting_destination_deletes_its_wait_spot(tmp_path: Path) -> None:
+    # 대기 장소는 목적지 항목 안의 칸이라 목적지와 함께 사라진다(짝 잃은 대기 장소 없음).
+    destination = make_destination()
+    destination["wait_spot"] = {"x": 1.0, "y": 1.0, "yaw": 0.0, "side": "across"}
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    assert storage.delete("map_1", destination["id"]) == []

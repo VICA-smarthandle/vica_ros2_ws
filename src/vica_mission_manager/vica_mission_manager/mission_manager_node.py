@@ -75,7 +75,13 @@ from .mission_logic import (
     RETURN_RESUME_SEC,
     DEST_RETRY_RETURN_SEC,
     APPROACH_BT_FILE,
+    GUIDED_BT_FILE,
+    GUIDED_NO_RAIL_BT_FILE,
+    NAV_TREE_GUIDED,
+    NAV_TREE_WAIT,
+    WAIT_SPOT_BT_FILE,
     ApproachRequest,
+    GoalEvent,
     CancelNav,
     Destination,
     GateReason,
@@ -147,6 +153,14 @@ class MissionManagerNode(Node):
         #   ""     : 끔 — 접근도 기본 트리(레일)를 쓴다(종전 동작)
         #   경로   : 그 파일. 없으면 경고를 남기고 끔과 같게 동작한다.
         self.declare_parameter("approach_bt_xml", "auto")
+        # 사용자 안내 도착 트리(레일 + 위치만 판정 — 방향 정렬 없음, 2026-10-07).
+        # 대기 장소·목적지 복귀·관리자 가보기 트리(레일 없음 + 위치·방향, 2026-10-07).
+        # 값의 규칙은 approach_bt_xml 과 같다("auto"/""/경로). 못 찾으면 기본 트리.
+        self.declare_parameter("guided_bt_xml", "auto")
+        # 레일(route_server)이 없을 때 쓰는 안내 트리. 레일 안내 트리는 ComputeRoute 를 불러
+        # route_server 가 없으면 만들 때부터 실패한다. 규칙은 guided_bt_xml 과 같다.
+        self.declare_parameter("guided_no_rail_bt_xml", "auto")
+        self.declare_parameter("wait_spot_bt_xml", "auto")
         # 마이크 각도 증가 방향. +1 반시계 / -1 시계 — 장비 실측값이다
         # (호출 접근 설계 §5). 틀리면 로봇이 호출 방향의 정반대로 돈다.
         self.declare_parameter("wake_doa_sign", 1.0)
@@ -371,8 +385,21 @@ class MissionManagerNode(Node):
         # 사람 접근 전용 트리 파일(빈 문자열 = 끔). _task_bt 는 마지막으로 수락된
         # NavigateToPose 가 쓴 트리다("" = 기본 트리). 트리가 바뀌는 goal 은 Humble
         # bt_navigator 가 선점을 거절하므로 _start_nav 가 앞 task 를 먼저 끝낸다.
-        self._approach_bt = self._resolve_approach_bt(
-            str(self.get_parameter("approach_bt_xml").value).strip())
+        self._approach_bt = self._resolve_bt(
+            str(self.get_parameter("approach_bt_xml").value).strip(),
+            APPROACH_BT_FILE, "사람 접근 트리(레일 없이 자유주행)")
+        # Navigate.tree 종류 → 트리 파일(2026-10-07). 비어 있으면 기본 트리로 간다.
+        self._tree_files = {
+            NAV_TREE_GUIDED: self._resolve_bt(
+                str(self.get_parameter("guided_bt_xml").value).strip(),
+                GUIDED_BT_FILE, "사용자 안내 트리(위치만 판정)"),
+            NAV_TREE_WAIT: self._resolve_bt(
+                str(self.get_parameter("wait_spot_bt_xml").value).strip(),
+                WAIT_SPOT_BT_FILE, "대기 장소 트리(레일 없음, 위치·방향)"),
+        }
+        self._guided_no_rail_bt = self._resolve_bt(
+            str(self.get_parameter("guided_no_rail_bt_xml").value).strip(),
+            GUIDED_NO_RAIL_BT_FILE, "사용자 안내 트리(레일 없는 지도, 위치만 판정)")
         self._task_bt = ""
         # 주행 번호표. goToPose/spin 이 수락될 때마다 1 오른다. 취소 스레드는
         # 자기가 받은 번호와 지금 번호가 다르면 취소를 건너뛴다 — 번호가
@@ -497,6 +524,15 @@ class MissionManagerNode(Node):
             RequestDestination,
             "/vica/mission/request_delivery",
             self._on_delivery_request,
+            callback_group=self._main_group,
+        )
+        # 관리자 '대기 장소로 가보기'(2026-10-07). 등록 확인용 이동이다 — 지도 설정 화면만
+        # 부른다. 요청 모양은 목적지 요청과 같고(destination_id = 대기 장소를 가진 목적지),
+        # 음성/LLM 은 서비스 클라이언트가 없어 이 문에 닿지 못한다(홈 복귀와 같은 논리).
+        self.create_service(
+            RequestDestination,
+            "/vica/mission/request_wait_spot",
+            self._on_wait_spot_request,
             callback_group=self._main_group,
         )
         self.create_service(
@@ -688,6 +724,9 @@ class MissionManagerNode(Node):
         # 도착 후 대화의 질문도 재생완료 시점부터 8초를 센다. 로직이
         # ASKING_* 가 아니면 무시하므로(이중 방어) 문구 대조 없이 넘긴다.
         self.logic.on_arrival_question_spoken(self._now())
+        # 대기 장소 멘트(M2) 재생이 끝났는가 — 손 놓기 판정은 그때부터다(2026-10-07).
+        # 로직이 자기 M2 문장과 대조하므로 다른 문장이면 무시된다.
+        self._run_actions(self.logic.on_wait_speech_spoken(msg.data, self._now()))
 
     def _on_confirm_answer(self, affirmative: bool) -> None:
         """확인 질문의 네/아니오. 확인 중 목적지를 되찾아 로직에 넘긴다."""
@@ -738,8 +777,9 @@ class MissionManagerNode(Node):
             f"도착 후 답 intent={msg.intent}: {before.value} -> {self.logic.state.value}")
 
     def _on_wake(self, msg: String) -> None:
-        """/vica/wake — WAITING 은 각성(다시 안내 질문), RETURNING 은 복귀
-        브레이크(E), 답-대기 상태는 옛 질문 접기(2026-09-01). 나머지는 무시."""
+        """/vica/wake — RETURNING 은 복귀 브레이크(E), 답-대기 상태는 옛 질문 접기
+        (2026-09-01), 대기·손 놓기 기다림은 대기를 이어 가며 새 대화, 대기 장소로
+        혼자 가는 중은 무시(2026-10-07). 판단은 로직(on_wake)이 한다."""
         if self.logic.state == State.RETURNING:
             actions = self.logic.on_return_brake(self._now())
             if actions:
@@ -1140,6 +1180,8 @@ class MissionManagerNode(Node):
             yaw_deg=yaw_deg,
             frame_id=msg.header.frame_id or "map",
         )
+        # 도착 순간 입구 방향(M1) 계산용(2026-10-07).
+        self.logic.robot_yaw_deg = yaw_deg
         cov = msg.pose.covariance
         self._pose_cov_xy = float(cov[0] + cov[7]) if len(cov) >= 8 else 0.0
 
@@ -1313,6 +1355,41 @@ class MissionManagerNode(Node):
             is_delivery=True,
         )
 
+    def _check_destination_request(
+        self,
+        request: RequestDestination.Request,
+        response: RequestDestination.Response,
+    ):
+        """요청 모양(UUID·지도)을 검사한다. 통과하면 목적지 id, 아니면 None
+        (response 에 사유를 채운다). 목적지 요청·가보기가 같은 검사를 쓴다."""
+        try:
+            request_id = str(UUID(request.request_id))
+            destination_id = str(UUID(request.destination_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id와 destination_id는 UUID여야 합니다."
+            return None
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return None
+        parsed_destination = UUID(destination_id)
+        if (
+            parsed_destination.version != 4
+            or destination_id != request.destination_id.lower()
+        ):
+            response.accepted = False
+            response.message = "destination_id는 canonical UUID v4여야 합니다."
+            return None
+        if request.map_id != self._map_id:
+            response.accepted = False
+            response.message = (
+                f"현재 지도와 요청 지도가 다릅니다: "
+                f"current={self._map_id}, requested={request.map_id}"
+            )
+            return None
+        return destination_id
+
     def _handle_destination_request(
         self,
         request: RequestDestination.Request,
@@ -1321,31 +1398,8 @@ class MissionManagerNode(Node):
         label: str,
         is_delivery: bool = False,
     ) -> RequestDestination.Response:
-        try:
-            request_id = str(UUID(request.request_id))
-            destination_id = str(UUID(request.destination_id))
-        except ValueError:
-            response.accepted = False
-            response.message = "request_id와 destination_id는 UUID여야 합니다."
-            return response
-        if request_id != request.request_id.lower():
-            response.accepted = False
-            response.message = "request_id가 canonical UUID 형식이 아닙니다."
-            return response
-        parsed_destination = UUID(destination_id)
-        if (
-            parsed_destination.version != 4
-            or destination_id != request.destination_id.lower()
-        ):
-            response.accepted = False
-            response.message = "destination_id는 canonical UUID v4여야 합니다."
-            return response
-        if request.map_id != self._map_id:
-            response.accepted = False
-            response.message = (
-                f"현재 지도와 요청 지도가 다릅니다: "
-                f"current={self._map_id}, requested={request.map_id}"
-            )
+        destination_id = self._check_destination_request(request, response)
+        if destination_id is None:
             return response
         # 앱은 어느 상태든 선점한다(ESTOPPED 예외) — 내부에서 전부 취소 후
         # 즉시 출발 (2026-08-31 사용자 결정, on_app_destination 주석 참고).
@@ -1372,6 +1426,33 @@ class MissionManagerNode(Node):
             f"목적지 요청을 수락했습니다: {destination.name}"
             if response.accepted and destination is not None
             else "Nav2가 목적지 요청을 수락하지 않았습니다."
+        )
+        return response
+
+    def _on_wait_spot_request(
+        self,
+        request: RequestDestination.Request,
+        response: RequestDestination.Response,
+    ) -> RequestDestination.Response:
+        """대기 장소로 가보기. 안내 중(IDLE 아님)에는 거절한다 — 로직이 판단한다."""
+        destination_id = self._check_destination_request(request, response)
+        if destination_id is None:
+            return response
+        destination = self.destinations.get(destination_id)
+        actions, reason = self.logic.on_app_wait_spot(
+            destination, self.map_bounds, self._nav2_ready(), self._now())
+        if reason != GateReason.OK:
+            response.accepted = False
+            response.message = f"대기 장소 가보기 거부: {reason.value}"
+            self.get_logger().warn(
+                f"대기 장소 가보기 거부: id={destination_id} reason={reason.value}")
+            return response
+        self._run_actions(actions)
+        response.accepted = self._nav_active
+        response.message = (
+            f"대기 장소로 이동합니다: {destination.name}-대기"
+            if response.accepted and destination is not None
+            else "Nav2가 대기 장소 요청을 수락하지 않았습니다."
         )
         return response
 
@@ -1464,7 +1545,10 @@ class MissionManagerNode(Node):
         # CPU 를 쓰지 않는다 — 이 로봇의 제1 병목은 CPU 다.
         # APPROACHING 을 넣지 않는 것은 의도된 현행 유지다: 접근 중에는 목표점
         # 갱신에 탐지가 필요하다.
-        msg.is_moving = self.logic.state in (State.NAVIGATING, State.SEEKING)
+        # 대기 장소로 혼자 가는 두 상태도 바퀴가 돈다(2026-10-07).
+        msg.is_moving = self.logic.state in (
+            State.NAVIGATING, State.SEEKING,
+            State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
         # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
         msg.is_paused = self.logic.state == State.PAUSED
         # dialog_state 는 state.value 에 손잡이 두 단계(grip_wait·paused_handle)를
@@ -1474,6 +1558,8 @@ class MissionManagerNode(Node):
             self.destinations, now_epoch=time.time(),
             wait_minutes=self.logic.wait_minutes_requested(),
             wait_left_sec=self.logic.wait_left_sec(self._now()),
+            door_side=self.logic.door_side,
+            wait_place=self.logic.wait_place,
         )
         for key, value in fields.items():
             setattr(msg, key, value)
@@ -1505,6 +1591,13 @@ class MissionManagerNode(Node):
                 self._start_spin(action)
             elif isinstance(action, SetNavSpeedLimit):
                 self._publish_nav_speed_limit(action.percent)
+            elif isinstance(action, GoalEvent):
+                # 미션이 판단한 사건(대기 장소 막힘·대기 시간 만료) — 앱 알림.
+                self._publish_goal_event(
+                    action.event, action.destination, action.reason,
+                    extra={"wait_place": action.wait_place,
+                           "wait_minutes": action.wait_minutes})
+                self.get_logger().info(f"앱 알림: {action.event} {action.reason}")
             elif isinstance(action, Haptic):
                 out = String()
                 out.data = action.pattern
@@ -1521,25 +1614,29 @@ class MissionManagerNode(Node):
         else:
             self.get_logger().info(f"Nav2 접근 속도 제한: 최대속도의 {percent:.1f}%")
 
-    def _resolve_approach_bt(self, value: str) -> str:
-        """approach_bt_xml 파라미터를 실제 파일 경로로 바꾼다. 못 쓰면 "" (끔)."""
+    def _resolve_bt(self, value: str, file_name: str, label: str) -> str:
+        """*_bt_xml 파라미터를 실제 파일 경로로 바꾼다. 못 쓰면 "" (끔 = 기본 트리).
+
+        "auto" 는 vica_nav2 share 의 behavior_trees/<file_name> 이다. 사람 접근 트리에서
+        시작한 규칙을 안내·대기 장소 트리도 그대로 쓴다(2026-10-07).
+        """
         if not value:
-            self.get_logger().info("사람 접근 트리: 끔 — 접근도 기본 트리(레일)를 쓴다")
+            self.get_logger().info(f"{label}: 끔 — 기본 트리(레일)를 쓴다")
             return ""
         if value == "auto":
             try:
                 from ament_index_python.packages import get_package_share_directory
                 value = str(Path(get_package_share_directory("vica_nav2"))
-                            / "behavior_trees" / APPROACH_BT_FILE)
+                            / "behavior_trees" / file_name)
             except Exception as exc:  # noqa: BLE001 - 패키지가 없어도 노드는 뜬다
                 self.get_logger().warn(
-                    f"사람 접근 트리를 못 찾아 끔 — 접근도 레일 트리를 쓴다: {exc}")
+                    f"{label}를 못 찾아 끔 — 기본 트리(레일)를 쓴다: {exc}")
                 return ""
         if not Path(value).is_file():
             self.get_logger().warn(
-                f"사람 접근 트리 파일이 없어 끔 — 접근도 레일 트리를 쓴다: {value}")
+                f"{label} 파일이 없어 끔 — 기본 트리(레일)를 쓴다: {value}")
             return ""
-        self.get_logger().info(f"사람 접근 트리(레일 없이 자유주행): {value}")
+        self.get_logger().info(f"{label}: {value}")
         return value
 
     def _finish_task_for_bt_switch(self) -> None:
@@ -1590,8 +1687,17 @@ class MissionManagerNode(Node):
             )
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
             return
-        # 사람 접근 goal 만 레일 없는 트리를 쓴다(빈 문자열 = 기본 트리).
-        bt = nav_behavior_tree(dest.id, self._approach_bt)
+        # 사람 접근 goal 은 접근 트리, 나머지는 Navigate.tree 가 고른 트리
+        # (빈 문자열 = 기본 트리). 2026-10-07 안내(위치만)·대기 장소 트리 추가.
+        bt = (nav_behavior_tree(dest.id, self._approach_bt)
+              or self._tree_files.get(action.tree, ""))
+        # 안내 트리는 레일을 부른다. 레일 서버가 없는 지도(레일 파일 없음·use_route 끔)면
+        # 레일 없는 안내 트리로 바꾼다 — nav2 launch 가 기본 트리를 고르는 것과 같은 판단.
+        if action.tree == NAV_TREE_GUIDED and bt and not self._route_server_up():
+            bt = self._guided_no_rail_bt
+        # 대기 장소로 혼자 가는 주행은 앱에 일반 주행 알림을 내지 않는다 — 앱에는
+        # 미션이 따로 내는 wait_spot_blocked·wait_expired 만 뜬다(주행 실패 팝업 중복 방지).
+        quiet = self._quiet_goal_events()
         try:
             if bt != self._task_bt:
                 self._finish_task_for_bt_switch()
@@ -1605,14 +1711,16 @@ class MissionManagerNode(Node):
         finally:
             self._nav_lock.release()
         if accepted:
-            self._publish_goal_event("goal_sent", dest)
-            self._publish_goal_event("goal_accepted", dest)
+            if not quiet:
+                self._publish_goal_event("goal_sent", dest)
+                self._publish_goal_event("goal_accepted", dest)
             self.get_logger().info(
                 f"NavigateToPose 전송: {dest.id} ({dest.pose.x:.2f}, {dest.pose.y:.2f}, "
-                f"{dest.pose.yaw_deg:.1f}deg) 트리={'접근(자유주행)' if bt else '기본'}"
+                f"{dest.pose.yaw_deg:.1f}deg) 트리={Path(bt).name if bt else '기본'}"
             )
         else:
-            self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
+            if not quiet:
+                self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
             # goal 거부 → 다음 tick 에서 FAILED 처리되도록 상태를 만든다.
             self.get_logger().error(f"NavigateToPose goal 거부됨: {dest.id}")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
@@ -1728,6 +1836,13 @@ class MissionManagerNode(Node):
         # 복귀 중이면 목적지가 홈이다. 도착 여부가 곧 "이 홈에 갈 수 있는가"의
         # 답이므로 여기서 home.yaml 의 visited_ok 를 기록한다.
         returning = self.logic.state == State.RETURNING
+        if self._quiet_goal_events():
+            # 대기 장소로 혼자 가는 주행 — 결과는 로직이 판단해 따로 알린다.
+            if result == TaskResult.SUCCEEDED:
+                return NavStatus.SUCCEEDED
+            if result == TaskResult.CANCELED:
+                return NavStatus.CANCELED
+            return NavStatus.FAILED
         if result == TaskResult.SUCCEEDED:
             if returning:
                 self._record_home_visit(True)
@@ -1755,6 +1870,20 @@ class MissionManagerNode(Node):
                 "Nav2 task failed",
             )
         return NavStatus.FAILED
+
+    def _route_server_up(self) -> bool:
+        """레일 서버(compute_route 액션)가 떠 있는가. 모르면 False — 레일 없는 트리는
+        레일이 있어도 동작하지만(자유주행), 레일 트리는 레일이 없으면 통째로 실패한다."""
+        try:
+            from rclpy.action.graph import get_action_names_and_types
+            names = get_action_names_and_types(self)
+        except Exception:  # noqa: BLE001 - 그래프 조회 실패는 '없음'으로 본다
+            return False
+        return any(name.rstrip("/").endswith("compute_route") for name, _ in names)
+
+    def _quiet_goal_events(self) -> bool:
+        """지금 주행이 앱에 일반 주행 알림을 내지 않는 주행인가(대기 장소로 혼자 가는 길)."""
+        return self.logic.state in (State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
 
     def _record_home_visit(self, visited_ok: bool) -> None:
         """복귀 결과를 home.yaml 에 남긴다. 실패해도 주행 판정을 막지 않는다."""
@@ -1789,7 +1918,8 @@ class MissionManagerNode(Node):
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
 
-    def _publish_goal_event(self, event: str, destination, reason: str = "") -> None:
+    def _publish_goal_event(self, event: str, destination, reason: str = "",
+                            extra: Optional[dict] = None) -> None:
         """goal 사건을 앱에 알린다. destination 이 None 이면 좌표 없이 보낸다.
 
         목적지 없는 사건이 하나 있다 — 취소할 주행이 없을 때의 `state_idle`.
@@ -1817,6 +1947,8 @@ class MissionManagerNode(Node):
                 "yaw": destination.pose.yaw_deg if destination else 0.0,
                 "reason": reason,
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
+                # 대기 알림(wait_spot_blocked·wait_expired)만 싣는 칸. 옛 앱은 모르는 키라 무시한다.
+                **(extra or {}),
             },
             ensure_ascii=False,
         )

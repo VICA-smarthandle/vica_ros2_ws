@@ -93,6 +93,12 @@ def generate_launch_description() -> LaunchDescription:
             # 사람 접근 goal 에만 쓰는 레일 없는 트리(2026-10-02 run60). "auto" 는 vica_nav2 의
             # behavior_trees/vica_navigate_to_pose_approach.xml, 빈 문자열은 끔(접근도 레일).
             DeclareLaunchArgument("approach_bt_xml", default_value="auto"),
+            # 대기 장소(2026-10-07). 사용자 안내 goal 은 위치만 판정하는 트리(도착 회전 없음),
+            # 대기 장소로 혼자 가는 길은 레일 없는 트리. 빈 문자열은 끔(둘 다 기본 레일 트리 —
+            # 안내 도착에서 다시 방향을 맞추고, 대기 장소도 레일로 간다).
+            DeclareLaunchArgument("guided_bt_xml", default_value="auto"),
+            DeclareLaunchArgument("guided_no_rail_bt_xml", default_value="auto"),
+            DeclareLaunchArgument("wait_spot_bt_xml", default_value="auto"),
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
             DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
@@ -182,6 +188,12 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "approach_bt_xml": ParameterValue(
                             LaunchConfiguration("approach_bt_xml"), value_type=str),
+                        "guided_bt_xml": ParameterValue(
+                            LaunchConfiguration("guided_bt_xml"), value_type=str),
+                        "guided_no_rail_bt_xml": ParameterValue(
+                            LaunchConfiguration("guided_no_rail_bt_xml"), value_type=str),
+                        "wait_spot_bt_xml": ParameterValue(
+                            LaunchConfiguration("wait_spot_bt_xml"), value_type=str),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),
                         "auto_return_home": ParameterValue(

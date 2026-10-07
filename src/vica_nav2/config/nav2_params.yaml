@@ -256,7 +256,11 @@ controller_server:
     # 좁은 경로를 한 번도 통과하지 못했다.
     failure_tolerance: 10.0
     progress_checker_plugin: "progress_checker"
-    goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
+    # 2026-10-07 대기 장소: position_goal_checker 추가(사용자 안내 도착 = 위치만 판정).
+    # 판정기가 둘이면 Humble controller_server 는 이름 없는 FollowPath 를 실패시킨다 —
+    # 그래서 모든 트리(behavior_trees/*.xml)의 FollowPath 에 goal_checker_id 를 적는다
+    # (test_bt_goal_checker_contract.py 가 지킨다).
+    goal_checker_plugins: ["general_goal_checker", "position_goal_checker"] # "precise_goal_checker"
     controller_plugins: ["FollowPath"]
 
     # Progress checker parameters
@@ -327,6 +331,26 @@ controller_server:
       # 낮추는 실험은 위 절차(신호·되돌리기 경로)대로 별도 회차에서 한다.
       yaw_goal_tolerance: 0.25
       # 위치·방향뿐 아니라 실제 저속 상태까지 확인한 뒤 도착으로 판정한다.
+      trans_stopped_velocity: 0.03
+      rot_stopped_velocity: 0.05
+    # 사용자 안내 도착 — 위치만 본다(2026-10-07, 인수인계 문서 '작업 계획' 탭 3. 주행).
+    #
+    # 도착해서 방향을 맞추려 제자리에서 돌면 손잡이를 잡은 사용자가 불안하고, 정렬 중
+    # 위치 추정이 미끄러져 회전이 되풀이됐다(10-06 교실·화장실). 그래서 안내 도착은
+    # 진행하던 방향 그대로 선다 — 입구 방향은 미션이 말(M1)로 알린다.
+    #
+    # general_goal_checker 와 같은 판정기(도장 0.15 m)이고 yaw 허용치만 반 바퀴 가까이 연다.
+    # VCC 는 이 값을 getTolerances 로 매 주기 읽어 "방향 오차 > 허용치"일 때만 정렬(Align)
+    # 하므로, 허용치가 거의 π 면 정렬에 들어가지 않는다.
+    #
+    # [함정] π(3.14159…)보다 크게 쓰지 않는다. getTolerances 가 허용치를 쿼터니언에 실어
+    # 넘기고 VCC 가 getYaw 로 되읽는데, π 를 넘으면 음수로 감겨 '항상 방향 틀림'이 된다.
+    # 3.141 이면 정반대(±0.0006 rad 안)로 도착할 때만 걸리고, 그것도 지금보다 나쁘지 않다.
+    position_goal_checker:
+      plugin: "vica_vcc_controller::LatchedGoalChecker"
+      xy_goal_tolerance: 0.15            # = general_goal_checker
+      unlatch_distance: 0.5              # = general_goal_checker
+      yaw_goal_tolerance: 3.141
       trans_stopped_velocity: 0.03
       rot_stopped_velocity: 0.05
     # ═══════════════════════════════════════════════════════════════════════

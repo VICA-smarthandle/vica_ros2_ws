@@ -1,0 +1,65 @@
+<!--
+  대기 장소 트리 — 사람 접근 트리(vica_navigate_to_pose_approach.xml)를 본떴다. 2026-10-07 대기 장소 작업.
+
+  ── 쓰는 곳 ──────────────────────────────────────────────────────────────
+  사용자가 손잡이를 놓은 뒤 로봇이 혼자 가는 길에만 쓴다(Navigate.tree="wait", 파라미터 wait_spot_bt_xml).
+    * 대기 장소로 가기(MOVING_TO_WAIT_SPOT)
+    * 대기 장소가 막혀 목적지로 돌아오기(MOVING_BACK_TO_DEST)
+    * 관리자 '대기 장소로 가보기'(지도 설정, 등록 확인용)
+  레일 없이 바로 간다(대기 장소는 목적지 몇 m 옆이다). 도착 판정은 general_goal_checker(위치+방향) —
+  나가는 방향을 보고 서야 다음 출발 때 돌 필요가 없다.
+
+  ── 버티는 시간 = 복구 횟수 (19차 결정: 미션은 다시 출발시키지 않는다) ─────────────
+  이 트리가 실패를 돌려주면 미션은 곧바로 M6("대기 자리가 막혀 입구 앞에서 기다리겠습니다")을 말하고
+  목적지로 돌아간다. 그래서 사람이 비켜 줄 시간을 이 트리가 번다: 복구 10회 x (costmap 비우기 또는
+  3초 기다리기, 번갈아). 목표는 1분 안팎이다.
+  [미검증] 걸리는 시간은 막힌 모양에 따라 크게 다르다(계산값).
+    * 길 자체가 안 그려질 때(대기 자리를 물건·사람이 차지) : 한 바퀴 1~4 초 -> 약 20~40 초
+    * 다가갔다가 못 움직일 때(progress_checker 20 s/0.10 m) : 한 바퀴 약 21 초 -> 최대 3~4 분
+  실기에서 실패까지 걸린 시간을 재서 횟수·기다림을 맞춘다. 뒤쪽이 너무 길면 이 RecoveryNode 를
+  BT.CPP 기본 <Timeout msec="60000"> 로 감싸는 방법이 있다(사용자 결정 필요).
+
+  ── 주의 ────────────────────────────────────────────────────────────────
+  접근 트리와 같다 — 트리가 바뀌는 goal 은 Mission Manager 가 앞 goal 을 먼저 끝내고 보낸다.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="10" name="WaitSpotRecovery">
+      <PipelineSequence name="WaitSpotWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputeWaitSpotPath">
+            <Fallback name="NearGoalKeepPath">
+              <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+              <Sequence name="WaitSpotPathAlignedEnd">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                    output_path="{path}"/>
+              </Sequence>
+            </Fallback>
+            <ClearEntireCostmap name="ClearGlobalCostmap-WaitSpot"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowWaitSpot">
+          <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-WaitSpot"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+
+      <!-- 복구는 접근 트리와 같은 종류(costmap 비우기·기다리기). 로봇을 움직이는 복구 없음. -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Wait wait_duration="3"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

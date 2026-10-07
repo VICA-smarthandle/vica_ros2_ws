@@ -1,4 +1,19 @@
 <!--
+  사용자 안내 트리 — 레일 트리(vica_navigate_to_pose_route.xml)와 같고, FollowPath 의 도착 판정기만
+  position_goal_checker(위치만, yaw 허용 3.141)다. 2026-10-07 대기 장소 작업(인수인계 문서 '작업 계획' 탭).
+
+  ── 왜 ──────────────────────────────────────────────────────────────────
+  손잡이를 잡고 따라온 사용자 앞에서 도착 정렬(제자리 회전)을 하지 않는다. 진행하던 방향 그대로
+  서고, 입구 방향은 미션이 말(M1, "화장실은 오른쪽에 있습니다")로 알린다.
+  Mission Manager 가 사용자 안내 goal(음성으로 시작한 안내·도착 뒤 다음 목적지·그 재시도와 재개)에만
+  이 파일을 넣는다(파라미터 guided_bt_xml, Navigate.tree="guided"). 홈·배송·원격 주행은 기본 트리 그대로
+  방향까지 맞춘다.
+
+  ── 레일 트리를 고치면 ───────────────────────────────────────────────────
+  이 파일도 똑같이 고친다. test/test_bt_goal_checker_contract.py 가 두 파일이 goal_checker_id 만 다른지
+  검사한다. 아래는 레일 트리 원문(머리 주석 포함)이다.
+-->
+<!--
   레일(Route Server) 위로 다니는 트리. 2026-09-16 신설, 09-17 7판.
 
   ── 무엇을 하나 (공식 nav2_route README "Practical Architectures" 2번 + 4번) ──
@@ -187,7 +202,7 @@
             </RecoveryNode>
           </RateController>
           <RecoveryNode number_of_retries="1" name="FollowRail">
-            <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
+            <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="position_goal_checker"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Rail"
                                 service_name="local_costmap/clear_entirely_local_costmap"/>
           </RecoveryNode>
@@ -210,7 +225,7 @@
               </RecoveryNode>
             </RateController>
             <RecoveryNode number_of_retries="1" name="FollowLastMile">
-              <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
+              <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="position_goal_checker"/>
               <ClearEntireCostmap name="ClearLocalCostmap-LastMile"
                                   service_name="local_costmap/clear_entirely_local_costmap"/>
             </RecoveryNode>

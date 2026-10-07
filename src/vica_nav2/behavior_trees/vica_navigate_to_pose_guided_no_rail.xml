@@ -1,4 +1,18 @@
 <!--
+  사용자 안내 트리(레일 없는 지도용) — 기본 트리(vica_navigate_to_pose_no_backup.xml)와 같고, FollowPath 의
+  도착 판정기만 position_goal_checker(위치만)다. 2026-10-07 대기 장소 작업.
+
+  ── 왜 따로 있나 ─────────────────────────────────────────────────────────
+  레일 안내 트리(guided.xml)는 ComputeRoute 를 부른다. 레일 파일이 없거나 use_route 가 꺼진 지도에서는
+  nav2 launch 가 route_server 를 띄우지 않아 그 트리는 만들 때부터 실패한다(2026-10-01 같은 증상).
+  Mission Manager 는 안내 goal 을 보낼 때 compute_route 액션이 떠 있는지 보고, 없으면 이 파일을 쓴다
+  (파라미터 guided_no_rail_bt_xml). nav2 launch 가 레일 유무로 기본 트리를 고르는 것과 같은 판단이다.
+
+  ── 기본 트리를 고치면 ───────────────────────────────────────────────────
+  이 파일도 똑같이 고친다. test/test_bt_goal_checker_contract.py 가 두 파일이 goal_checker_id 만 다른지
+  검사한다. 아래는 기본 트리 원문(머리 주석 포함)이다.
+-->
+<!--
   Nav2 기본 navigate_to_pose_w_replanning_and_recovery.xml에서 <BackUp/>과 <Spin/>을
   제거한 트리다. 그 외는 기본과 동일하게 유지한다.
 
@@ -98,7 +112,7 @@
           </RecoveryNode>
         </RateController>
         <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
+          <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="position_goal_checker"/>
           <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
         </RecoveryNode>
       </PipelineSequence>

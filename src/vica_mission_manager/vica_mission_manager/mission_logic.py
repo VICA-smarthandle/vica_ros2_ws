@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional, Sequence, Union
 
@@ -59,9 +59,18 @@ class State(str, Enum):
     ASKING_NEXT = "asking_next"
     # "몇 분쯤?" 답 대기 (restroom·entrance 가 아닌 곳에서 대기를 골랐을 때만).
     ASKING_WAIT_TIME = "asking_wait_time"
-    # 제자리 대기. 사람접근 OFF(기다리라 해놓고 행인을 쫓지 않게). "비카야"로
-    # 깨어나거나 시간이 초과되면 나간다.
+    # 대기. 사람접근 OFF(기다리라 해놓고 행인을 쫓지 않게). 목적지가 정해지거나
+    # 시간이 초과되면 나간다. "비카야"로는 끝나지 않는다(2026-10-07).
     WAITING = "waiting"
+    # ---- 대기 장소 (2026-10-07, 작업 계획 탭) -----------------------------------
+    #
+    # 목적지에 대기 장소가 있으면 M2 를 말한 뒤 손을 놓기를 기다리고
+    # (WAITING_RELEASE), 혼자 대기 장소로 가서(MOVING_TO_WAIT_SPOT) WAITING 이 된다.
+    # 대기 장소에 못 들어가면 M6 을 말하고 목적지로 돌아와(MOVING_BACK_TO_DEST)
+    # 거기서 WAITING 이 된다. 셋 다 '대기의 일부'라 대기 시간은 M2 순간부터 흐른다.
+    WAITING_RELEASE = "waiting_release"
+    MOVING_TO_WAIT_SPOT = "moving_to_wait_spot"
+    MOVING_BACK_TO_DEST = "moving_back_to_dest"
 
 
 class NavStatus(str, Enum):
@@ -98,6 +107,8 @@ class GateReason(str, Enum):
     # 홈 복귀 요청 전용 사유.
     NO_HOME = "no_home"
     ALREADY_HOME_BOUND = "already_home_bound"
+    # 대기 장소로 가보기(관리자) 전용 사유.
+    NO_WAIT_SPOT = "no_wait_spot"
 
 
 @dataclass(frozen=True)
@@ -106,6 +117,20 @@ class Pose2D:
     y: float
     yaw_deg: float  # destinations.yaml 은 도(deg) 단위 (함정 목록 2번)
     frame_id: str = "map"
+
+
+@dataclass(frozen=True)
+class WaitSpot:
+    """목적지에 딸린 대기 장소 (2026-10-07). destinations.yaml 의 wait_spot 칸.
+
+    side 는 앱이 저장할 때 계산한 '입구 기준 방향'(right/left/across)이다. 로봇은
+    다시 계산하지 않고 멘트에 그대로 쓴다 — 관리자가 화면에서 본 글자와 같아야 한다.
+    """
+
+    x: float
+    y: float
+    yaw_deg: float   # 나가는 방향(도). 혼자 가는 곳이라 방향까지 맞춰 선다.
+    side: str        # right / left / across
 
 
 @dataclass(frozen=True)
@@ -125,6 +150,11 @@ class Destination:
     # destinations.yaml 의 category2. 도착 후 질문을 유형별로 고른다
     # (restroom=대기 제안, entrance=종료 제안, 그 외=대기 여부). 없으면 "".
     category: str = ""
+    # 입구 방향(도, 지도 기준, 2026-10-07). 도착 멘트 M1("…은/는 오른쪽에 있습니다")
+    # 계산과 배송 도착 방향에 쓴다. 없으면 None — M1 을 말하지 않고, 배송은 pose.yaw.
+    door_yaw_deg: Optional[float] = None
+    # 대기 장소. 없으면 None — 지금처럼 목적지에서 그대로 기다린다.
+    wait_spot: Optional[WaitSpot] = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +220,25 @@ class Say:
 @dataclass(frozen=True)
 class Navigate:
     destination: Destination
+    # 어느 Nav2 행동 트리로 갈지(NAV_TREE_*). 노드가 파일 경로로 바꾼다. 사람 접근
+    # goal 은 이 값과 무관하게 목적지 id 접두어로 접근 트리를 쓴다(nav_behavior_tree).
+    tree: str = ""
+
+
+@dataclass(frozen=True)
+class GoalEvent:
+    """앱에 알릴 사건 하나. 노드가 /vica_goal_event JSON 으로 낸다.
+
+    주행 결과(goal_succeeded 등)는 노드가 Nav2 결과를 보고 스스로 내지만, 대기
+    장소 막힘·대기 시간 만료는 주행 결과가 아니라 미션의 판단이라 여기서 낸다
+    (2026-10-07, 앱 알림 2종)."""
+
+    event: str
+    destination: Optional[Destination] = None
+    reason: str = ""
+    # 앱 팝업의 아래 칸(목업 10·11번). "spot"=대기 장소, "destination"=목적지 앞.
+    wait_place: str = ""
+    wait_minutes: int = -1
 
 
 @dataclass(frozen=True)
@@ -248,7 +297,8 @@ class Haptic:
 
 
 Action = Union[
-    Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic, SpinInPlace, StopSpeech
+    Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic, SpinInPlace, StopSpeech,
+    GoalEvent,
 ]
 
 
@@ -277,6 +327,33 @@ def josa_euro(word: str) -> str:
         return "로"
     jongseong = (ord(last) - 0xAC00) % 28  # 0=받침없음, 8=ㄹ
     return "로" if jongseong in (0, 8) else "으로"
+
+
+# 숫자로 끝나는 이름을 읽을 때 마지막 숫자의 받침(한국어 수 읽기: 영·일·삼·육·칠·팔 받침
+# 있음, 이·사·오·구 없음). "B1"→"비일은", "2"→"이는".
+_DIGIT_HAS_BATCHIM = {
+    "0": True, "1": True, "2": False, "3": True, "4": False,
+    "5": False, "6": True, "7": True, "8": True, "9": False,
+}
+
+
+def josa_eun_neun(word: str) -> str:
+    """단어 뒤에 붙는 조사 '은 / 는' 을 받침에 맞게 돌려준다 (M1, 2026-10-07).
+
+    한글로 끝나면 받침 있음 → '은', 없음 → '는'. 숫자로 끝나면 그 숫자를 읽은
+    소리의 받침을 본다(_DIGIT_HAS_BATCHIM). 그 밖의 글자(영문 등)는 읽는 소리를
+    알 수 없어 '는'으로 둔다.
+    예) 화장실 → 은, 안내센터 → 는, 407호 → 는, 회의실B1 → 은
+    """
+    word = (word or "").rstrip()
+    if not word:
+        return "는"
+    last = word[-1]
+    if "가" <= last <= "힣":
+        return "은" if (ord(last) - 0xAC00) % 28 else "는"
+    if last in _DIGIT_HAS_BATCHIM:
+        return "은" if _DIGIT_HAS_BATCHIM[last] else "는"
+    return "는"
 
 
 def say_destination(template: str, name: str) -> str:
@@ -324,14 +401,48 @@ MSG_ASK_ENTRANCE = "여기까지 안내를 마칠까요?"                  # 종
 MSG_ASK_GENERIC = "여기서 대기할까요?"                          # 대기형·시간 질문
 MSG_ASK_WAIT_TIME = "몇 분쯤 걸리실까요?"
 # 대기 확정. {minutes} 는 코드가 채운다 — 캐시엔 넣지 않는다(가변).
-MSG_WAIT_CONFIRM = "{minutes}분 대기하겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
-MSG_WAIT_DEFAULT = "네, 최대 30분까지 여기서 기다리겠습니다. 돌아오시면 '비카야'라고 말씀해 주세요."
+# 끝말 "불러 주세요"는 대기 장소 멘트(M2)와 맞춘 것이다(2026-10-07 사용자 결정, 옛 "말씀해 주세요").
+MSG_WAIT_CONFIRM = "{minutes}분 대기하겠습니다. 돌아오시면 '비카야'라고 불러 주세요."
+MSG_WAIT_DEFAULT = "네, 최대 30분까지 여기서 기다리겠습니다. 돌아오시면 '비카야'라고 불러 주세요."
+# ---- 대기 장소 (2026-10-07, 작업 계획 탭 '멘트') -------------------------------
+# 문구 정본은 이 상수들이다. 음성 쪽이 미리 합성·굽는 문장과 글자가 같아야 한다.
+# M1 — 도착 멘트 바로 뒤. 입구 방향이 있는 목적지만. {name}{eun} 은 코드가 채운다.
+MSG_DOOR_SIDE = "{name}{eun} {side}에 있습니다."
+# M2 / M2′ — 대기 장소가 있는 목적지에서 대기 확정. {place} = WAIT_PLACE_PHRASES.
+MSG_WAIT_SPOT_CONFIRM = (
+    "{minutes}분 동안 {place}에서 기다리겠습니다. 돌아오시면 '비카야'라고 불러 주세요.")
+MSG_WAIT_SPOT_DEFAULT = (
+    "최대 30분 동안 {place}에서 기다리겠습니다. 돌아오시면 '비카야'라고 불러 주세요.")
+# M3 — 대기 중 10초마다(대기 장소가 있는 목적지만). 사용자가 소리를 따라 로봇을 찾는다.
+MSG_WAIT_BEACON = "동행안내로봇 비카가 대기 중입니다."
+# M6 — 대기 장소로 가다 실패(Nav2 실패 신호). 말한 뒤 목적지로 돌아간다.
+MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
+# M7 — 대기 시간 만료(대기 장소가 있든 없든). 말한 뒤 홈으로 간다.
+MSG_WAIT_EXPIRED = "대기 시간이 종료되어 제자리로 돌아갑니다."
+# 대기 장소 입구 기준 방향 → 멘트 속 장소 말. 상황판(RobotState.wait_place)에도 같은 말을 쓴다.
+WAIT_PLACE_PHRASES = {"right": "입구 오른쪽", "left": "입구 왼쪽", "across": "입구 맞은편"}
+# 대기 장소가 막혀 목적지로 돌아와 기다릴 때의 장소 말.
+WAIT_PLACE_AT_DESTINATION = "입구 앞"
 MSG_FINISH = "안내를 종료합니다."
 # 무응답 사다리 (3절): 못 알아들으면 재질문 1회, 그 뒤/침묵이면 떠나기 예고.
 MSG_ARRIVAL_RETRY = "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해 주세요."
 MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아가겠습니다."
 
 WAIT_MINUTES_CAP = 30
+# M3 간격. 대기 장소로 출발한 순간부터 대기가 끝날 때까지, 상태가 바뀌어도 박자를 잇는다.
+WAIT_BEACON_INTERVAL_SEC = 10.0
+# 손잡이를 이만큼 계속 놓고 있으면 대기 장소로 떠난다(터치 센서가 살아 있을 때).
+# 센서가 없거나 끊겼거나 시연 스위치(grip_assume_held)면 M2 가 끝나자마자 떠난다.
+WAIT_RELEASE_SEC = 5.0
+# M2 재생 완료(tts_done)를 끝내 못 받았을 때의 보험 — 영영 서 있지 않게 한다.
+WAIT_RELEASE_SPEECH_FALLBACK_SEC = 30.0
+# M1 에서 '앞'·'뒤'라고 말하는 폭(도). 그 밖은 모두 오른쪽·왼쪽이다 — 입구는 대개
+# 옆에 있어 90° 입구가 경계에서 멀리 떨어진 '오른쪽' 한가운데에 들어간다.
+DOOR_FRONT_BACK_DEG = 30.0
+# 대기 장소·목적지 복귀 goal 을 감싼 Destination 의 id 접두어. 앱 알림·대장에서
+# 등록 목적지와 구분한다(사람 접근의 APPROACH_DESTINATION_PREFIX 와 같은 방식).
+WAIT_SPOT_DESTINATION_PREFIX = "wait_spot:"
+WAIT_BACK_DESTINATION_PREFIX = "wait_back:"
 LEAVING_GRACE_SEC = 3.0        # 떠나기 예고 후 마지막 끼어들기 유예
 # 홈 복귀 재개 (2026-09-10 사용자 결정). 복귀 중 호출("비카야")로 브레이크가
 # 걸리면(on_return_brake) 그 순간부터 이 시간만큼 침묵하면 떠나기 예고를
@@ -632,6 +743,71 @@ def nav_behavior_tree(destination_id: str, approach_bt: str) -> str:
         return approach_bt
     return ""
 
+
+# ---- 행동 트리 종류 (Navigate.tree, 2026-10-07) ---------------------------------
+# 도착 판정을 목적에 따라 가른다. 노드가 종류를 파일 경로로 바꾸고, 파일을 못 찾으면
+# 경고를 남기고 기본 트리로 간다(사람 접근 트리와 같은 방식).
+NAV_TREE_DEFAULT = ""        # bt_navigator 기본(레일, 위치+방향): 홈·배송·원격 주행
+NAV_TREE_GUIDED = "guided"   # 레일 + 위치만 판정: 사용자 안내 도착(방향 정렬 없음)
+NAV_TREE_WAIT = "wait"       # 레일 없는 짧은 트리 + 위치·방향: 대기 장소·목적지 복귀·가보기
+GUIDED_BT_FILE = "vica_navigate_to_pose_guided.xml"
+GUIDED_NO_RAIL_BT_FILE = "vica_navigate_to_pose_guided_no_rail.xml"  # 레일 없는 지도용
+WAIT_SPOT_BT_FILE = "vica_navigate_to_pose_wait_spot.xml"
+
+
+def door_side_word(door_yaw_deg: float, robot_yaw_deg: float) -> str:
+    """입구가 로봇(= 뒤에서 손잡이를 잡은 사용자) 기준 어느 쪽인가 (M1).
+
+    사용자는 로봇 뒤에서 같은 쪽을 보고 서 있으므로 로봇의 오른쪽이 곧 사용자의
+    오른쪽이다. 앞·뒤는 ±DOOR_FRONT_BACK_DEG 안일 때만 말한다.
+    """
+    rel = math.degrees(wrap_to_pi(math.radians(door_yaw_deg - robot_yaw_deg)))
+    if abs(rel) <= DOOR_FRONT_BACK_DEG:
+        return "앞"
+    if abs(rel) >= 180.0 - DOOR_FRONT_BACK_DEG:
+        return "뒤"
+    # ROS yaw 는 반시계(왼쪽)가 양수다.
+    return "왼쪽" if rel > 0 else "오른쪽"
+
+
+def wait_spot_destination(dest: Destination) -> Destination:
+    """목적지의 대기 장소를 goal 로 감싼다. 나가는 방향까지 맞춰 선다."""
+    spot = dest.wait_spot
+    assert spot is not None
+    return Destination(
+        id=WAIT_SPOT_DESTINATION_PREFIX + dest.id,
+        name=f"{dest.name}-대기",
+        pose=Pose2D(spot.x, spot.y, spot.yaw_deg, dest.pose.frame_id),
+        calibrated=True,
+    )
+
+
+def wait_back_destination(dest: Destination) -> Destination:
+    """대기 장소가 막혀 목적지로 돌아가는 goal. 혼자 가므로 입구 쪽을 보고 선다."""
+    yaw = dest.door_yaw_deg if dest.door_yaw_deg is not None else dest.pose.yaw_deg
+    return Destination(
+        id=WAIT_BACK_DESTINATION_PREFIX + dest.id,
+        name=dest.name,
+        pose=Pose2D(dest.pose.x, dest.pose.y, yaw, dest.pose.frame_id),
+        calibrated=True,
+    )
+
+
+def is_wait_destination_id(destination_id: str) -> bool:
+    """대기 장소·목적지 복귀 goal 의 합성 id 인가 — 대장·앱 알림에서 거른다."""
+    return destination_id.startswith(
+        (WAIT_SPOT_DESTINATION_PREFIX, WAIT_BACK_DESTINATION_PREFIX))
+
+
+def with_door_yaw(dest: Destination) -> Destination:
+    """배송 도착 방향 — 입구 방향이 있으면 그쪽을 바라보고 선다(10-07 결정).
+
+    입구 화살표 하나를 안내 멘트와 배송 정렬에 같이 쓴다. 없으면 옛 pose.yaw 그대로.
+    """
+    if dest.door_yaw_deg is None:
+        return dest
+    return replace(dest, pose=replace(dest.pose, yaw_deg=dest.door_yaw_deg))
+
 # 접근 상태를 한 묶음으로 본다 — 새 목적지 요청을 거부하는 구간이다. SEEKING
 # 이 빠지면 회전 중 음성 목적지 요청이 그대로 통과해 Navigate 가 나가고,
 # 진행 중인 SpinInPlace 를 취소하지 않은 채 두 goal 이 동시에 나가게 된다
@@ -641,10 +817,18 @@ _APPROACH_STATES = (
     State.SEEKING,
 )
 # Nav2 goal 이 살아 있는 상태. E-stop·긴급어가 goal 을 취소해야 하는 구간이다.
+# 대기 장소로 혼자 가는 두 상태도 바퀴가 돈다(2026-10-07).
 _GOAL_ACTIVE_STATES = (
     State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING,
-    State.SEEKING,
+    State.SEEKING, State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST,
 )
+# 대기의 일부인 상태들(2026-10-07). 대기 시간·상황판 대기 칸이 이 구간 내내 살아 있다.
+_WAIT_STATES = (
+    State.WAITING_RELEASE, State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST,
+    State.WAITING,
+)
+# 혼자 움직이는 대기 구간. 사용자 말에 대답하지 않는다(호출 반응표, 대기 상태가 될 때까지).
+_WAIT_MOVING_STATES = (State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
 
 _REJECT_MESSAGES = {
     GateReason.BUSY_NAVIGATING: MSG_BUSY,
@@ -1130,6 +1314,24 @@ class MissionLogic:
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
         self._wait_minutes_requested = -1    # 대장(P1): 대기 요청 분. WAITING 밖에서는 -1
+        # ── 대기 장소 (2026-10-07) ─────────────────────────────────────────
+        # 로봇의 지금 방향(도, map). 노드가 /amcl_pose 로 넣어 준다. 도착 멘트 M1 계산용.
+        self.robot_yaw_deg: Optional[float] = None
+        # 마지막 도착 기준 입구 방향 말("앞"/"뒤"/"오른쪽"/"왼쪽"). 상황판 door_side.
+        self.door_side: str = ""
+        # 도착 후 대화·대기의 목적지. _ask_arrival 이 active_destination 을 비우므로 따로 든다.
+        self._arrived_destination: Optional[Destination] = None
+        # 지금 대기가 어디서인가: "spot"(대기 장소) / "destination"(막혀 목적지) / ""(제자리).
+        self._wait_place: str = ""
+        self._beacon_next_at: Optional[float] = None   # 다음 M3 시각
+        self._release_text: str = ""                   # M2 문장 — 재생 완료 대조
+        self._release_spoken_at: Optional[float] = None
+        self._release_entered_at: Optional[float] = None
+        # 대기 중에 목적지 '제안'이 와서 확인 질문(CONFIRMING)으로 들어갔을 때 돌아갈
+        # 대기 상태. 거절·시간초과·호출이면 이 상태로 되돌아간다(대기 시간·장소 유지).
+        self._wait_hold: Optional[State] = None
+        # 지금 안내 주행의 행동 트리 종류. 재시도·재개가 같은 트리를 쓰게 한다.
+        self._nav_tree: str = NAV_TREE_DEFAULT
         # 귀 상태 (/vica/listen_state). 무응답 판정 전에 귀 사정을 본다.
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
@@ -1221,6 +1423,11 @@ class MissionLogic:
         if self.state == State.ESTOPPED:
             return [Say(MSG_ESTOP_REJECT, priority="response")]
 
+        if self.state in _WAIT_MOVING_STATES:
+            # 대기 장소로 혼자 가는 중 — 대기 상태가 될 때까지 대답하지 않는다
+            # (호출 반응표, 2026-10-07). 사용자는 도착 뒤 다시 부르면 된다.
+            return []
+
         if self.state == State.NAVIGATING:
             # v1 정책: 주행 중 새 목적지는 거부 (소프트 취소는 v2, TODOS.md #4)
             return [Say(MSG_BUSY, priority="response")]
@@ -1247,6 +1454,10 @@ class MissionLogic:
             else:
                 # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
                 # ros_tts_node 가 이미 재생하므로 여기서 중복 발화하지 않는다.
+                if self.state in _WAIT_STATES and self._wait_hold is None:
+                    # 대기 중의 새 목적지 제안. 출발이 확정될 때까지 대기를 끝내지
+                    # 않는다 — 거절·무응답이면 이 대기로 돌아간다(2026-10-07).
+                    self._wait_hold = self.state
                 self.state = State.CONFIRMING
                 self._confirming_dest_id = intent.matched_destination_id or None
                 self._confirm_deadline = now + self.confirm_timeout_sec
@@ -1261,18 +1472,28 @@ class MissionLogic:
             # 오래된/엇갈린 confirm 방어 (request_id 없는 v1 의 임시 방어).
             # 멘트 없이 접는다(2026-09-01 감량) — 침묵이면 사용자가 다시
             # 말하고, 그 요청이 새 확인 흐름을 연다.
-            self._to_idle()
+            self._fold_confirming()
             return []
 
         reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
         if reason != GateReason.OK:
-            self._to_idle()
+            if self.state == State.CONFIRMING:
+                self._fold_confirming()
+            elif self.state not in _WAIT_STATES:
+                # 대기 중 확정 요청이 거절되면 대기를 그대로 둔다.
+                self._to_idle()
             msg = _REJECT_MESSAGES.get(reason)
             return [Say(msg, priority="response")] if msg else []
 
         assert dest is not None  # check_gate 가 보장
+        if self.state in _WAIT_STATES or self._wait_hold is not None:
+            # 대기 중에 목적지가 정해졌다 — 대기는 여기서 끝난다(시간·10초 알림 정리).
+            self._reset_arrival_dialog()
         self.state = State.NAVIGATING
         self.active_destination = dest
+        # 사용자 안내 도착은 위치만 판정한다 — 방향 정렬 회전 없음(2026-10-07).
+        self._nav_tree = NAV_TREE_GUIDED
+        self.door_side = ""
         self.handle_active = self._decide_handle_mode(now)
         self._confirming_dest_id = None
         self._confirm_deadline = None
@@ -1291,7 +1512,7 @@ class MissionLogic:
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(say_destination(MSG_START, dest.name)),
-            Navigate(dest),
+            Navigate(dest, tree=NAV_TREE_GUIDED),
         ]
 
     @property
@@ -1301,15 +1522,46 @@ class MissionLogic:
             return None
         return self._confirming_dest_id
 
+    def _in_wait(self) -> bool:
+        """대기 중인가 — 대기 장소로 가는 길·확인 질문으로 잠깐 들어간 동안도 포함."""
+        return (self.state in _WAIT_STATES
+                or (self.state == State.CONFIRMING and self._wait_hold is not None))
+
     def wait_minutes_requested(self) -> int:
-        """대장(P1): 대기 요청 분. WAITING 이 아니면 -1."""
-        return self._wait_minutes_requested if self.state == State.WAITING else -1
+        """대장(P1): 대기 요청 분. 대기 중이 아니면 -1."""
+        return self._wait_minutes_requested if self._in_wait() else -1
 
     def wait_left_sec(self, now: float) -> int:
-        """대장(P1): 대기 남은 초(0 이상). WAITING 이 아니면 -1."""
-        if self.state != State.WAITING or self._wait_until is None:
+        """대장(P1): 대기 남은 초(0 이상). 대기 중이 아니면 -1."""
+        if not self._in_wait() or self._wait_until is None:
             return -1
         return max(0, int(self._wait_until - now))
+
+    @property
+    def wait_place(self) -> str:
+        """상황판 RobotState.wait_place — 지금 기다리는 곳의 말. 대기 장소 없는 대기는 ""."""
+        if not self._in_wait():
+            return ""
+        if self._wait_place == "spot":
+            dest = self._arrived_destination
+            if dest is not None and dest.wait_spot is not None:
+                return WAIT_PLACE_PHRASES.get(dest.wait_spot.side, "")
+            return ""
+        if self._wait_place == "destination":
+            return WAIT_PLACE_AT_DESTINATION
+        return ""
+
+    def _fold_confirming(self) -> None:
+        """확인 질문(CONFIRMING)을 출발 없이 접는다. 대기 중에 들어온 질문이었으면
+        그 대기로 돌아가고(시간·장소 그대로), 아니면 평소처럼 IDLE 로 내린다."""
+        held = self._wait_hold
+        if held is None:
+            self._to_idle()
+            return
+        self._wait_hold = None
+        self.state = held
+        self._confirming_dest_id = None
+        self._confirm_deadline = None
 
     @property
     def return_interrupted(self) -> bool:
@@ -1343,7 +1595,8 @@ class MissionLogic:
         if not affirmative:
             # "아니오" — 확인 중이던 요청을 접는다. 멘트는 타임아웃과 같은
             # 기존 문구를 쓴다(신규 멘트 금지, 2026-08-31 멘트 최소주의).
-            self._to_idle()
+            # 대기 중에 들어온 질문이었으면 그 대기로 돌아간다.
+            self._fold_confirming()
             return [Say(MSG_CONFIRM_TIMEOUT, priority="response")]
         if dest is None or dest.id != (self._confirming_dest_id or ""):
             # 확인 중이던 목적지를 되찾지 못했다(id 미기록·저장소 갱신 등).
@@ -1429,11 +1682,47 @@ class MissionLogic:
         # 재개다(on_intent 와 같은 이유). _force_clear_all 이 한다.
         actions = self._force_clear_all(now)
         self.state = State.NAVIGATING
-        self.active_destination = dest
+        # 배송은 입구 방향을 바라보고 선다(입구 화살표 하나를 같이 쓴다, 10-07 결정).
+        # 원격 주행은 저장된 pose.yaw 그대로 — 앱이 저장할 때 같은 값을 넣는다.
+        self.active_destination = with_door_yaw(dest) if is_delivery else dest
         self._nav_from_app = True
+        self._nav_tree = NAV_TREE_DEFAULT
+        self.door_side = ""
         template = MSG_START_DELIVERY if is_delivery else MSG_START
         actions.append(Say(say_destination(template, dest.name)))
-        actions.append(Navigate(dest))
+        actions.append(Navigate(self.active_destination))
+        return actions, GateReason.OK
+
+    def on_app_wait_spot(self, dest: Optional[Destination],
+                         bounds: Optional[MapBounds], nav_ready: bool,
+                         now: float) -> tuple:
+        """관리자 '대기 장소로 가보기'(`/vica/mission/request_wait_spot`, 2026-10-07).
+
+        등록이 맞는지 확인하는 이동이다 — 지도 설정 화면에서만 부른다('홈으로
+        가보기'와 같은 자리). 안내 중에는 거절한다: 사용자가 손잡이를 잡고 있거나
+        대기 중일 수 있다. 말하지 않는다(확인용 이동이라 새 멘트를 만들지 않는다).
+        대기 장소와 같은 짧은 트리로 가서 나가는 방향까지 맞춰 선다.
+        """
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if self.state != State.IDLE:
+            return [], GateReason.BUSY_NAVIGATING
+        if dest is None:
+            return [], GateReason.UNKNOWN_DESTINATION
+        if dest.wait_spot is None:
+            return [], GateReason.NO_WAIT_SPOT
+        wait_dest = wait_spot_destination(dest)
+        if not pose_valid(wait_dest, bounds):
+            return [], GateReason.POSE_INVALID
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        actions = self._force_clear_all(now)
+        self.state = State.NAVIGATING
+        self.active_destination = wait_dest
+        self._nav_from_app = True
+        self._nav_tree = NAV_TREE_WAIT
+        self.door_side = ""
+        actions.append(Navigate(wait_dest, tree=NAV_TREE_WAIT))
         return actions, GateReason.OK
 
     def on_cancel_request(self, now: float) -> tuple:
@@ -1545,7 +1834,7 @@ class MissionLogic:
             [
                 SetNavSpeedLimit(NO_SPEED_LIMIT),
                 Say(say_destination(MSG_RESUMED, destination.name)),
-                Navigate(destination),
+                Navigate(destination, tree=self._nav_tree),
             ],
             GateReason.OK,
         )
@@ -2044,6 +2333,10 @@ class MissionLogic:
         else:
             question, is_finish, ask_time = MSG_ASK_GENERIC, False, True
         self.state = State.ASKING_NEXT
+        # 대기 장소는 이 목적지에 딸려 있다 — active_destination 을 비우기 전에 든다.
+        # 목적지 없이 다시 묻는 자리(재질문)에서는 앞서 든 값을 그대로 둔다.
+        if dest is not None:
+            self._arrived_destination = dest
         self.active_destination = None
         self._asking_is_finish = is_finish
         self._asking_time_after_yes = ask_time
@@ -2080,20 +2373,20 @@ class MissionLogic:
         """
         # 새 대화다 — 온보딩 되묻기 사다리가 돌고 있었다면 청산한다.
         self._forget_dest_prompt()
-        if self.state == State.WAITING:
-            # 각성 질문("다시 안내를 시작할까요?")은 2026-09-01 삭제(A안) —
-            # "네"가 도착-대화 문법(대기 승낙→시간 질문)으로 새는 오배선이
-            # 실기에서 혼란→무응답 판정→홈행 연쇄를 만들었다. "네?"가 이미
-            # 말할 차례를 알리므로, 대기를 접고 새 대화로 받는다.
-            self._wait_until = None
-            self._wait_minutes_requested = -1
-            self._reset_arrival_dialog()
-            self._to_idle()
+        if self.state in (State.WAITING, State.WAITING_RELEASE):
+            # 대기를 이어 가며 새 대화로 받는다(2026-10-07, 호출 반응표). 대기는
+            # 목적지가 정해질 때 끝나고, 대기 시간도 그대로다 — 멀리서 로봇을 찾으려
+            # 부른 "비카야"에 대기가 끝나 10초 알림이 멈추면 사용자가 로봇을 잃는다.
+            # (옛 동작: 대기를 접고 IDLE. 각성 질문은 2026-09-01 삭제 그대로다.)
             # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
             self._wake_consumed_at = now
             return []
+        if self.state in _WAIT_MOVING_STATES:
+            # 혼자 대기 장소로 가는 중 — 대기 상태가 될 때까지 대답하지 않는다.
+            return []
         if self.state == State.CONFIRMING:
-            self._to_idle()
+            # 대기 중에 들어온 확인 질문이었으면 그 대기로 돌아간다.
+            self._fold_confirming()
             self._wake_consumed_at = now
             return []
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
@@ -2246,7 +2539,10 @@ class MissionLogic:
             # 도착하며 활성 모드는 끝났다. 다음 목적지는 출발 순간 다시 정한다.
             self.handle_active = self._decide_handle_mode(now)
             self._reset_arrival_dialog()
-            return [SetNavSpeedLimit(NO_SPEED_LIMIT), Navigate(next_dest)]
+            self._nav_tree = NAV_TREE_GUIDED   # 사용자 안내 — 위치만 판정
+            self.door_side = ""
+            return [SetNavSpeedLimit(NO_SPEED_LIMIT),
+                    Navigate(next_dest, tree=NAV_TREE_GUIDED)]
 
         # 종료: finish, 도착 후 cancel(=finish, 2026-08-30), 종료형 질문의 affirm.
         if (kind in ("finish", "cancel")
@@ -2302,15 +2598,143 @@ class MissionLogic:
 
     def _enter_waiting(self, minutes: int, now: float,
                        default_msg: bool = False) -> list:
-        """WAITING 진입 + 대기 확정 멘트. 사람접근은 WAITING 상태값으로 자연히 꺼진다."""
-        self.state = State.WAITING
+        """대기 확정 + 멘트. 사람접근은 대기 상태값으로 자연히 꺼진다.
+
+        대기 장소가 있는 목적지면 M2/M2′ 를 말하고 손 놓기를 기다린다
+        (WAITING_RELEASE). 없으면 지금처럼 그 자리에서 기다린다(WAITING).
+        대기 시간은 어느 쪽이든 이 순간(멘트를 말한 순간)부터 흐른다 — 말한
+        "N분 동안"이 맞게(2026-10-07).
+        """
         self._wait_until = now + minutes * 60.0
         self._wait_minutes_requested = int(minutes)
         self._response_deadline = None
         self._leaving_deadline = None
-        msg = (MSG_WAIT_DEFAULT if default_msg
-               else MSG_WAIT_CONFIRM.format(minutes=minutes))
+        dest = self._arrived_destination
+        spot = dest.wait_spot if dest is not None else None
+        place = WAIT_PLACE_PHRASES.get(spot.side, "") if spot is not None else ""
+        if not place:
+            self.state = State.WAITING
+            self._wait_place = ""
+            msg = (MSG_WAIT_DEFAULT if default_msg
+                   else MSG_WAIT_CONFIRM.format(minutes=minutes))
+            return [Say(msg, priority="response")]
+        msg = (MSG_WAIT_SPOT_DEFAULT.format(place=place) if default_msg
+               else MSG_WAIT_SPOT_CONFIRM.format(minutes=minutes, place=place))
+        self.state = State.WAITING_RELEASE
+        self._wait_place = "spot"
+        self._release_text = msg
+        self._release_spoken_at = None
+        self._release_entered_at = now
         return [Say(msg, priority="response")]
+
+    def _door_side_sentence(self, dest: Optional[Destination]) -> str:
+        """도착 순간의 M1 문장("화장실은 오른쪽에 있습니다."). 못 정하면 "".
+
+        입구 방향이 없는 옛 목적지·로봇 방향을 아직 모를 때는 말하지 않는다 —
+        짐작한 방향을 말하는 것보다 침묵이 낫다. 상황판 door_side 도 함께 정한다.
+        """
+        self.door_side = ""
+        if (dest is None or dest.door_yaw_deg is None
+                or self.robot_yaw_deg is None):
+            return ""
+        side = door_side_word(dest.door_yaw_deg, self.robot_yaw_deg)
+        self.door_side = side
+        return MSG_DOOR_SIDE.format(
+            name=dest.name, eun=josa_eun_neun(dest.name), side=side)
+
+    def on_wait_speech_spoken(self, text: str, now: float) -> list:
+        """M2 재생이 끝났다(노드가 /vica/tts_done 문구로 알려 준다). 손 놓기 판정은
+        이때부터다 — 말하는 도중에 떠나면 사용자가 장소 안내를 끝까지 못 듣는다."""
+        if (self.state == State.WAITING_RELEASE and self._release_text
+                and self._release_text in (text or "")):
+            self._release_spoken_at = now
+        return []
+
+    def _wait_release_tick(self, now: float) -> list:
+        """WAITING_RELEASE: M2 가 끝나고 손을 놓았으면 대기 장소로 떠난다."""
+        spoken = self._release_spoken_at is not None or (
+            self._release_entered_at is not None
+            and now - self._release_entered_at >= WAIT_RELEASE_SPEECH_FALLBACK_SEC)
+        if not spoken:
+            return []
+        # 터치 센서가 살아 있으면 손을 놓은 지 WAIT_RELEASE_SEC 를 기다린다. 센서가
+        # 없거나 끊겼거나 시연 스위치면 놓았는지 알 수 없으니 M2 가 끝나자마자 떠난다.
+        sensor = (not self.grip_assume_held) and self._grip.fresh(now)
+        if sensor and self._grip.released_for(now) < WAIT_RELEASE_SEC:
+            return []
+        # 대화 중("비카야" 뒤 듣는 중 등)이면 떠나지 않는다 — 사용자가 옆에서 말하는
+        # 중이다. 떠나면 뒤이어 온 목적지는 이동 중이라 버려진다.
+        if self._ear_holds(now):
+            return []
+        return self._start_moving_to_wait_spot(now)
+
+    def _start_moving_to_wait_spot(self, now: float) -> list:
+        dest = self._arrived_destination
+        if dest is None or dest.wait_spot is None:
+            # 대기 장소를 잃었다(목적지 다시 읽기 등) — 그 자리에서 기다린다.
+            self.state = State.WAITING
+            self._wait_place = ""
+            return []
+        wait_dest = wait_spot_destination(dest)
+        self.state = State.MOVING_TO_WAIT_SPOT
+        self.active_destination = wait_dest
+        self.handle_active = False
+        self._release_text = ""
+        # M3 박자는 대기 장소로 출발한 순간부터 센다.
+        self._beacon_next_at = now + WAIT_BEACON_INTERVAL_SEC
+        return [SetNavSpeedLimit(NO_SPEED_LIMIT), Navigate(wait_dest, tree=NAV_TREE_WAIT)]
+
+    def _wait_spot_blocked(self, now: float) -> list:
+        """대기 장소에 못 들어갔다(Nav2 실패 신호). 다시 출발시키지 않는다 —
+        버티는 시간은 대기 장소 전용 짧은 트리의 복구 횟수가 정한다(19차 결정).
+        M6 을 말하고 앱에 알린 뒤 목적지로 돌아가 거기서 기다린다."""
+        dest = self._arrived_destination
+        wait_name = f"{dest.name}-대기" if dest is not None else ""
+        actions: list = [
+            Say(MSG_WAIT_SPOT_BLOCKED, priority="response"),
+            GoalEvent("wait_spot_blocked", dest,
+                      f"주행(Nav2)이 '{wait_name}'에 들어가지 못했습니다.",
+                      wait_place="spot", wait_minutes=self._wait_minutes_requested),
+        ]
+        self._wait_place = "destination"
+        if dest is None:
+            self.state = State.WAITING
+            self.active_destination = None
+            return actions
+        back = wait_back_destination(dest)
+        self.state = State.MOVING_BACK_TO_DEST
+        self.active_destination = back
+        actions.append(Navigate(back, tree=NAV_TREE_WAIT))
+        return actions
+
+    def _beacon_tick(self, now: float) -> list:
+        """M3 — 대기 장소가 있는 대기에서 10초마다. 대화 중이면 건너뛴다(박자는 유지)."""
+        if not self._wait_place or self._beacon_next_at is None:
+            return []
+        if now < self._beacon_next_at:
+            return []
+        # 박자를 잇는다 — 밀린 만큼 한꺼번에 몰아 말하지 않는다.
+        while self._beacon_next_at <= now:
+            self._beacon_next_at += WAIT_BEACON_INTERVAL_SEC
+        if self._ear_holds(now):
+            return []
+        return [Say(MSG_WAIT_BEACON, priority="narration")]
+
+    def _wait_expired(self, now: float) -> list:
+        """M7 + 앱 알림 + 홈. 대기 장소가 있든 없든 모든 대기의 만료다."""
+        dest = self._arrived_destination
+        minutes = self._wait_minutes_requested
+        place = self.wait_place or "목적지"
+        actions: list = [
+            Say(MSG_WAIT_EXPIRED, priority="response"),
+            GoalEvent("wait_expired", dest,
+                      f"{place}에서 {minutes}분 기다렸습니다." if minutes > 0 else "",
+                      wait_place=self._wait_place or "destination",
+                      wait_minutes=minutes),
+        ]
+        self._reset_arrival_dialog()
+        actions.extend(self._go_home(now))
+        return actions
 
     def _arrival_no_answer(self, now: float) -> list:
         """무응답 사다리: 못 알아들으면 1회 재질문, 그 뒤엔 떠나기 예고."""
@@ -2447,6 +2871,14 @@ class MissionLogic:
         self._wait_until = None
         self._wait_minutes_requested = -1
         self._response_deadline = None
+        # 대기 장소(2026-10-07) — 대기가 끝나면 장소·알림 박자·확인 보류도 함께 끝이다.
+        self._arrived_destination = None
+        self._wait_place = ""
+        self._beacon_next_at = None
+        self._release_text = ""
+        self._release_spoken_at = None
+        self._release_entered_at = None
+        self._wait_hold = None
 
     def _forget_interrupted_return(self) -> None:
         """복귀 재개 사다리를 청산한다 — "복귀가 끊겨 있다"는 사실과 그
@@ -2535,7 +2967,7 @@ class MissionLogic:
 
         if self.state == State.CONFIRMING:
             if self._confirm_deadline is not None and now >= self._confirm_deadline:
-                self._to_idle()
+                self._fold_confirming()
                 actions.append(Say(MSG_CONFIRM_TIMEOUT))
 
         elif self.state == State.NAVIGATING:
@@ -2561,16 +2993,24 @@ class MissionLogic:
                 # 펌웨어가 ARRIVED 상태 진입 때 스스로 낸다.
                 self.handle_active = False
                 actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                if self.arrival_dialog and not self._nav_from_app:
-                    # 도착 멘트와 유형별 질문을 한 발화로 합쳐 낸다 — 따로 내면
-                    # 우선순위(narration vs response)로 순서가 뒤집힌다(실기 확인
-                    # 2026-08-30). 한 문장이라 재생 완료 시점이 명확해 8초 응답
-                    # 창 시작도 어긋나지 않는다.
-                    actions.extend(self._ask_arrival(dest, now, arrival_text=text))
+                if dest is not None and is_wait_destination_id(dest.id):
+                    # 관리자 '대기 장소로 가보기' 도착 — 확인용 이동이라 말하지 않는다.
+                    self.state = State.ARRIVED
+                    self._dwell_until = now + self.dwell_sec
+                elif self.arrival_dialog and not self._nav_from_app:
+                    # 도착 멘트·M1(입구 방향)·유형별 질문을 한 발화로 합쳐 낸다 — 따로
+                    # 내면 우선순위(narration vs response)로 순서가 뒤집히고(실기 확인
+                    # 2026-08-30), 앞 문장의 재생 완료가 8초 응답 창을 일찍 연다.
+                    # M1 문장은 음성 쪽이 문장 단위로 미리 합성해 두므로 합쳐도 빠르다.
+                    door = self._door_side_sentence(dest)
+                    arrival = f"{text} {door}".strip() if door else text
+                    actions.extend(self._ask_arrival(dest, now, arrival_text=arrival))
                 else:
                     self.state = State.ARRIVED
                     self._dwell_until = now + self.dwell_sec
-                    actions.append(Say(text))
+                    # 앱(관리자) 주행 도착엔 사용자가 없다 — 입구 방향은 사용자 안내에만.
+                    door = "" if self._nav_from_app else self._door_side_sentence(dest)
+                    actions.append(Say(f"{text} {door}".strip() if door else text))
             elif nav_status == NavStatus.RUNNING:
                 # 접근 감속: 목적지에 가까워질수록 최대속도 상한을 한 단계씩 내려
                 # 도착 순간의 속도 낙차(Δv)를 줄인다. 근거와 단계 값의 뜻은
@@ -2598,9 +3038,14 @@ class MissionLogic:
 
                 # 사용자 취소(NavStatus.CANCELED)는 재시도하지 않는다. 목표를
                 # 거둔 것이 사용자의 뜻이므로 로봇이 되살리면 안 된다.
+                # 관리자 '가보기'(대기 장소)는 확인용 이동이라 다시 시도하지도, 말하지도
+                # 않는다 — 실패는 앱의 주행 실패 팝업이 알린다.
+                wait_check = (failed_dest is not None
+                              and is_wait_destination_id(failed_dest.id))
                 retryable = (
                     nav_status == NavStatus.FAILED
                     and failed_dest is not None
+                    and not wait_check
                     and self._nav_retry_count < self.nav_retry_limit
                 )
                 if retryable:
@@ -2614,7 +3059,8 @@ class MissionLogic:
                     # narration 은 큐 정원 초과 시 가장 먼저 버려진다
                     # (tts_queue._trim). 주행 실패는 사용자가 왜 멈췄는지 알
                     # 유일한 단서라 버려지면 안 된다.
-                    actions.append(Say(MSG_NAV_FAILED, priority="response"))
+                    if not wait_check:
+                        actions.append(Say(MSG_NAV_FAILED, priority="response"))
 
         elif self.state == State.APPROACHING:
             if nav_status == NavStatus.SUCCEEDED:
@@ -2775,14 +3221,42 @@ class MissionLogic:
                 # 영구 대기 대신 강제로 무응답 절차를 연다 (구멍 ①).
                 actions.extend(self._leaving_notice(now))
 
+        elif self.state == State.WAITING_RELEASE:
+            # M2 를 말했다. 끝나고 손을 놓으면 대기 장소로 떠난다(2026-10-07).
+            # 손을 끝내 놓지 않아도(센서가 계속 '잡힘') 대기 시간은 흐르므로 만료를 본다 —
+            # 안 보면 로봇이 M7·앱 알림 없이 영원히 선다.
+            if (self._wait_until is not None and now >= self._wait_until
+                    and not self._ear_holds(now)):
+                actions.extend(self._wait_expired(now))
+            else:
+                actions.extend(self._wait_release_tick(now))
+
+        elif self.state == State.MOVING_TO_WAIT_SPOT:
+            if nav_status == NavStatus.SUCCEEDED:
+                self.state = State.WAITING
+                self.active_destination = None
+            elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
+                # E-stop 취소는 이미 ESTOPPED 로 빠졌으므로 여기 온 것은 못 들어간 것이다.
+                actions.extend(self._wait_spot_blocked(now))
+            actions.extend(self._beacon_tick(now))
+
+        elif self.state == State.MOVING_BACK_TO_DEST:
+            # 목적지 복귀는 다시 시도하지 않는다 — 도착이든 실패든 그 자리에서 기다린다.
+            if nav_status in (NavStatus.SUCCEEDED, NavStatus.FAILED,
+                              NavStatus.CANCELED):
+                self.state = State.WAITING
+                self.active_destination = None
+            actions.extend(self._beacon_tick(now))
+
         elif self.state == State.WAITING:
-            # 제자리 대기. 사람접근은 이 상태값으로 자연히 꺼진다(_GOAL_ACTIVE
-            # 아님·IDLE 아님). 시간이 다 되면 예고 없이 홈으로 — 이미 대기
-            # 안내에서 "돌아오면 비카야"를 말했고, 30분을 채운 자리라 예고보다
-            # 복귀가 자연스럽다.
-            if self._wait_until is not None and now >= self._wait_until:
-                self._reset_arrival_dialog()
-                actions.extend(self._go_home(now))
+            # 대기. 사람접근은 이 상태값으로 자연히 꺼진다(_GOAL_ACTIVE 아님·IDLE
+            # 아님). 시간이 다 되면 M7 을 말하고 홈으로 간다(2026-10-07, 옛 동작은
+            # 예고 없이 홈). 사용자와 말하는 중(귀가 바쁨)이면 끝날 때까지 미룬다.
+            if (self._wait_until is not None and now >= self._wait_until
+                    and not self._ear_holds(now)):
+                actions.extend(self._wait_expired(now))
+            else:
+                actions.extend(self._beacon_tick(now))
 
         elif self.state == State.RETURNING:
             # 복귀 실패도 완료로 친다. 대기 위치에 못 갔다고 접근 상태에 갇히면
@@ -2829,7 +3303,7 @@ class MissionLogic:
                     self._distance_baseline = None
                     self._approach.reset()
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
-                    actions.append(Navigate(dest))
+                    actions.append(Navigate(dest, tree=self._nav_tree))
                 # 아직 시각이 안 됐으면 FAILED 로 머물며 기다린다.
             elif self._dwell_until is None or now >= self._dwell_until:
                 self._to_idle()
@@ -2946,6 +3420,11 @@ class MissionLogic:
         track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
         세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
         """
+        # 목적지를 떠난다 — 그 목적지의 대기 장소는 더 쓰지 않는다(2026-10-07). 복귀 중
+        # 불러 세워 "기다려 줘"가 와도 옛 목적지 대기 장소로 가지 않고 그 자리에서 기다린다.
+        self._arrived_destination = None
+        # 입구 방향(M1 기준)도 떠나면 낡은 말이다 — LLM 메모에 옛 목적지 방향이 남지 않게.
+        self.door_side = ""
         # auto_return_home 게이트는 접근 뒤 복귀에만 걸린다 — 꺼져 있으면 그
         # 자리에 선 채로 상태만 정리한다. 관리자 복귀와 안내 종료는 늘 홈으로
         # 간다(2026-09-01 시나리오 확인).
@@ -3038,10 +3517,14 @@ class MissionLogic:
         self._grip_wait_since = None
         self._grip_pulse_at = None
         self._clear_handle_pause()
+        # 대기 장소 흐름도 버린다(2026-10-07) — 해제 뒤 옛 목적지 대기 장소로 가지 않는다.
+        self._arrived_destination = None
+        self.door_side = ""
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
         self.active_destination = None
+        self._arrived_destination = None
         self.paused_destination = None
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
@@ -3084,6 +3567,17 @@ class MissionLogic:
         self.approach_goal_pose = None
         self._response_deadline = None
         self._nav_from_app = False
+        # 다음 주행이 스스로 다시 정한다. 남겨 두면 재시도가 낡은 트리를 탄다.
+        self._nav_tree = NAV_TREE_DEFAULT
+        # 대기 장소의 흔적도 내린다. 특히 확인 보류(_wait_hold)가 남으면 E-stop 뒤
+        # 평범한 확인 질문이 엉뚱하게 '대기로 돌아가기'가 된다. 대기에서 확인으로
+        # 들어간 경우는 _fold_confirming 이 이 함수를 거치지 않고 되돌린다.
+        self._wait_hold = None
+        self._wait_place = ""
+        self._beacon_next_at = None
+        self._release_text = ""
+        self._release_spoken_at = None
+        self._release_entered_at = None
         # 다음 AWAITING_USER 진입(정상 접근·근접 호출 어느 쪽이든)이 각자 다시
         # 명시적으로 정하므로, 여기서 지우지 않아도 안전과는 무관하다 —
         # 다만 묵은 값을 들고 있을 이유도 없어 다른 접근 상태값들과 함께 비운다.

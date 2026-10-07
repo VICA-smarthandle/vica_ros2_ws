@@ -11,7 +11,7 @@ from vica_mission_manager.mission_logic import (
     Pose2D, Say, State,
     MSG_ASK_RESTROOM, MSG_ASK_ENTRANCE, MSG_ASK_GENERIC, MSG_ASK_WAIT_TIME,
     MSG_WAIT_DEFAULT, MSG_FINISH, MSG_LEAVING_NOTICE,
-    MSG_ARRIVAL_RETRY,
+    MSG_ARRIVAL_RETRY, MSG_WAIT_EXPIRED, GoalEvent,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -227,19 +227,26 @@ class TestWakeFoldsArrivalQuestion:
 
 
 class TestWaitingState:
-    def test_wake_folds_waiting_quietly(self):
-        """WAITING 중 "비카야" → 각성 질문 없이 접고 새 대화(9/1 A안)."""
+    def test_wake_keeps_waiting(self):
+        """WAITING 중 "비카야" → 대기를 이어 가며 새 대화(2026-10-07 호출 반응표).
+
+        옛 동작(9/1 A안)은 대기를 접고 IDLE 이었다. 멀리서 로봇을 찾으려 부른
+        "비카야"에 대기가 끝나면 사용자가 로봇을 잃는다 — 대기는 목적지가 정해질
+        때 끝나고, 대기 시간도 그대로다."""
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("affirm"), 3.0)   # WAITING
+        left = logic.wait_left_sec(20.0)
         assert logic.on_wake(20.0) == []
-        assert logic.state == State.IDLE
+        assert logic.state == State.WAITING
+        assert logic.wait_left_sec(20.0) == left
 
     def test_wait_timeout_leaves(self):
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("wait", wait_minutes=1), 3.0)  # 1분
         acts = logic.on_tick(3.0 + 61.0, NavStatus.NONE)
-        # 대기 만료도 침묵 복귀(9/1 감량) — 대기 안내에서 이미 예고했다.
-        assert not _say(acts)
+        # 대기 만료는 M7 을 말하고 앱에 알린 뒤 홈으로(2026-10-07, 옛 동작은 침묵 복귀).
+        assert _say(acts) == [MSG_WAIT_EXPIRED]
+        assert [a.event for a in acts if isinstance(a, GoalEvent)] == ["wait_expired"]
         assert logic.state == State.RETURNING
 
 
@@ -288,10 +295,8 @@ class TestArrivalNavigateConfirm:
     def test_proposal_joins_confirm_flow_not_navigate(self):
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("affirm"), 3.0)     # WAITING
-        logic.on_wake(10.0)                                  # 재개 질문
-        # "입구로 가자" 제안 — 노드가 대화를 닫고 일반 확인 흐름으로 넘긴다
-        logic.exit_arrival_dialog()
-        assert logic.state == State.IDLE
+        logic.on_wake(10.0)                                  # 대기는 그대로(10-07)
+        assert logic.state == State.WAITING
         nxt = _dest("", id="d2", name="입구")
         acts = logic.on_intent(_intent("navigate", matched_destination_id="d2",
                                        need_confirm=True), nxt, BOUNDS, True, 11.0)
@@ -607,5 +612,9 @@ class TestLedgerAccessors:
         assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(0.0) == -1
         logic = arrive("")
         logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
-        logic.on_wake(10.0)                                   # 대기 접음
+        # 대기는 "비카야"가 아니라 목적지가 정해질 때 끝난다(2026-10-07).
+        nxt = _dest("", id="d2", name="입구")
+        logic.on_intent(_intent("navigate", matched_destination_id="d2"),
+                        nxt, BOUNDS, True, 10.0)
+        assert logic.state == State.NAVIGATING
         assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(10.0) == -1

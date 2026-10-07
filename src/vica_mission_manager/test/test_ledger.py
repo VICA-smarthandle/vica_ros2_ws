@@ -109,6 +109,7 @@ class TestStateFields:
             "dialog_state": "waiting", "place_here": "407호 앞", "place_here_dist_m": 1.0,
             "active_destination": "", "last_destination": "407호", "last_arrived_age_sec": 660,
             "aborted_destination": "화장실", "wait_minutes": 10, "wait_left_sec": 340, "battery_pct": -1,
+            "door_side": "", "wait_place": "",   # 2026-10-07 대기 장소 칸(기본 빈 값)
         }
 
     def test_unknowns_are_minus_one_or_empty(self):
@@ -182,3 +183,26 @@ class TestConfirmAbortName:
     def test_confirming_to_navigating_is_not_recorded(self):
         name = confirm_abort_name("a", None, State.CONFIRMING, State.NAVIGATING, None, DESTS)
         assert name is None
+
+
+def test_wait_spot_goals_do_not_pollute_ledger():
+    # 대기 장소·목적지 복귀·가보기 goal 은 실목적지가 아니다(2026-10-07).
+    from vica_mission_manager.mission_logic import (
+        WAIT_BACK_DESTINATION_PREFIX, WAIT_SPOT_DESTINATION_PREFIX)
+    led = Ledger(last_destination="화장실 입구")
+    apply_goal_event(led, "goal_succeeded", WAIT_SPOT_DESTINATION_PREFIX + "d1",
+                     "화장실 입구-대기", 10.0)
+    apply_goal_event(led, "goal_failed", WAIT_BACK_DESTINATION_PREFIX + "d1",
+                     "화장실 입구", 11.0)
+    assert led.last_destination == "화장실 입구"
+    assert led.aborted_destination == ""
+
+
+def test_state_fields_carry_door_side_and_wait_place():
+    f = state_fields(Ledger(), "waiting", None, 0.0, {}, now_epoch=0.0,
+                     wait_minutes=10, wait_left_sec=500,
+                     door_side="오른쪽", wait_place="입구 오른쪽")
+    assert f["door_side"] == "오른쪽" and f["wait_place"] == "입구 오른쪽"
+    f = state_fields(Ledger(), "idle", None, 0.0, {}, now_epoch=0.0,
+                     wait_minutes=-1, wait_left_sec=-1)
+    assert f["door_side"] == "" and f["wait_place"] == ""

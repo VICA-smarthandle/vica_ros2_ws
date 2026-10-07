@@ -13,7 +13,40 @@ from uuid import UUID
 
 import yaml
 
-from .mission_logic import Destination, MapBounds, Pose2D
+from .mission_logic import Destination, MapBounds, Pose2D, WaitSpot
+
+# 대기 장소 입구 기준 방향. 저장 쪽(vica_destination_manager.storage.WAIT_SPOT_SIDES)과
+# 같은 값이다 — 패키지끼리 의존을 만들지 않으려고 사본을 둔다.
+_WAIT_SPOT_SIDES = ("right", "left", "across")
+
+
+def _load_wait_spot(raw) -> Optional[WaitSpot]:
+    """wait_spot 칸을 읽는다. 없거나 모양이 틀리면 None — 지금처럼 제자리 대기.
+
+    틀린 대기 장소 하나 때문에 목적지 전체를 못 읽게 하지는 않는다. 저장 쪽이
+    이미 검증하므로 여기까지 오는 틀린 값은 손으로 고친 파일뿐이다.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x = float(raw["x"])
+        y = float(raw["y"])
+        yaw = float(raw.get("yaw", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    side = str(raw.get("side", "")).strip().lower()
+    if side not in _WAIT_SPOT_SIDES:
+        return None
+    return WaitSpot(x=x, y=y, yaw_deg=yaw, side=side)
+
+
+def _load_door_yaw(raw) -> Optional[float]:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def load_destinations(path: str) -> Dict[str, Destination]:
@@ -55,6 +88,8 @@ def load_destinations(path: str) -> Dict[str, Destination]:
             confirm_prompt=str(entry.get("confirm_prompt", "") or ""),
             arrival_message=str(entry.get("arrival_message", "") or ""),
             category=str(entry.get("category2", "") or "").strip().lower(),
+            door_yaw_deg=_load_door_yaw(entry.get("door_yaw")),
+            wait_spot=_load_wait_spot(entry.get("wait_spot")),
         )
     return result
 

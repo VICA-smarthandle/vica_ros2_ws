@@ -1564,9 +1564,11 @@ class TestWakeConsumedGuardsWakeDoa:
     사고. wake/on_return_brake 가 상태를 바꾼 시각을 함께 봐야 두 토픽의
     도착 순서와 무관하게 결과가 같아진다."""
 
-    def test_wake_doa_right_after_waiting_wake_does_not_open_seeking(self):
+    def test_wake_doa_right_after_confirming_wake_does_not_open_seeking(self):
+        # 옛 시험은 WAITING 이었다. 2026-10-07 부터 WAITING 의 "비카야"는 대기를
+        # 접지 않으므로(호출 반응표), IDLE 로 접히는 확인 대기로 같은 가드를 본다.
         logic = MissionLogic()
-        logic.state = State.WAITING
+        logic.state = State.CONFIRMING
         logic.on_wake(10.0)
         assert logic.state == State.IDLE
         # 같은 호출의 wake_doa 가 수 ms 뒤 도착했다고 가정한다.
@@ -1589,7 +1591,7 @@ class TestWakeConsumedGuardsWakeDoa:
         """on_wake 자체(답-대기 상태를 IDLE 로 접기)는 그대로다 — 막히는 것은
         그 직후의 wake_doa 뿐이다."""
         logic = MissionLogic()
-        logic.state = State.WAITING
+        logic.state = State.CONFIRMING
         assert logic.on_wake(1.0) == []
         assert logic.state == State.IDLE
 
@@ -1604,7 +1606,7 @@ class TestWakeConsumedGuardsWakeDoa:
     def test_guard_expires_and_a_real_new_call_opens_seeking(self):
         """2초가 지난 뒤는 진짜 새 호출이다 — 과도한 봉쇄가 아니다."""
         logic = MissionLogic()
-        logic.state = State.WAITING
+        logic.state = State.CONFIRMING
         logic.on_wake(1.0)
         assert logic.state == State.IDLE
         actions = logic.on_wake_doa(

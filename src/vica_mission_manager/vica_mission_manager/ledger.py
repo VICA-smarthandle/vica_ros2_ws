@@ -14,7 +14,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from .mission_logic import APPROACH_DESTINATION_PREFIX, Destination, Pose2D, State, pose_valid
+from .mission_logic import (
+    APPROACH_DESTINATION_PREFIX, Destination, Pose2D, State, is_wait_destination_id,
+    pose_valid,
+)
 
 NEAR_M = 3.0            # 이 안이면 "OO 앞"
 COV_UNKNOWN = 2.0       # x·y 분산 합이 이보다 크면 위치 미확인(초기 위치 전)
@@ -65,7 +68,10 @@ def apply_goal_event(ledger: Ledger, event: str, dest_id: str, name: str, now: f
     `now` 는 벽시계 epoch 초다 — last_arrived_at 은 파일 보존·재기동 복원에
     벽시계를 쓴다(최종 리뷰 1절, mission_manager_node 는 time.time() 을 넘긴다).
     """
-    if dest_id == HOME_ID or dest_id.startswith(APPROACH_DESTINATION_PREFIX):
+    if (dest_id == HOME_ID or dest_id.startswith(APPROACH_DESTINATION_PREFIX)
+            or is_wait_destination_id(dest_id)):
+        # 대기 장소·목적지 복귀·가보기 goal(2026-10-07)도 실목적지가 아니다 —
+        # "아까 어디 갔었지?"가 "화장실 입구-대기"로 오염되지 않게 한다.
         name = ""
     if event == "goal_sent" and name:
         ledger.active_destination = name
@@ -173,7 +179,8 @@ class LedgerStore:
 
 def state_fields(ledger: Ledger, dialog_state: str, pose: Optional[Pose2D], cov_xy: float,
                  destinations: Dict[str, Destination], now_epoch: float,
-                 wait_minutes: int, wait_left_sec: int, battery_pct: int = -1) -> dict:
+                 wait_minutes: int, wait_left_sec: int, battery_pct: int = -1,
+                 door_side: str = "", wait_place: str = "") -> dict:
     label, dist = place_here(pose, destinations, cov_xy)
     if ledger.last_arrived_at is not None:
         # from_json 이 NaN·Infinity 는 걸렀지만 유한하게 거대한 값(예: 1e300)은
@@ -193,4 +200,7 @@ def state_fields(ledger: Ledger, dialog_state: str, pose: Optional[Pose2D], cov_
         "wait_minutes": int(wait_minutes),
         "wait_left_sec": int(wait_left_sec),
         "battery_pct": int(battery_pct),
+        # 대기 장소(2026-10-07). 판단은 미션 로직이 하고 여기는 값만 옮긴다.
+        "door_side": str(door_side),
+        "wait_place": str(wait_place),
     }

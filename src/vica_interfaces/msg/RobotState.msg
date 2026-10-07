@@ -16,3 +16,6 @@ string aborted_destination    # 확인까지 갔다가 안 간 곳 name. 없으�
 int32 wait_minutes            # 대기 요청 분. 없으면 -1
 int32 wait_left_sec           # 대기 남은 초. 대기 중이 아니면 -1
 int32 battery_pct             # 배터리 %. 모르면 -1
+# ---- 대기 장소 (2026-10-07). 뒤에 덧붙인 칸이라 옛 소비자는 그대로 동작한다 ----
+string door_side              # 마지막 도착 기준 목적지 입구가 있는 쪽 "앞"/"뒤"/"오른쪽"/"왼쪽". 없으면 ""
+string wait_place             # 지금 기다리는 곳 "입구 오른쪽"/"입구 왼쪽"/"입구 맞은편"/"입구 앞". 대기 장소 없는 대기·대기 아님은 ""

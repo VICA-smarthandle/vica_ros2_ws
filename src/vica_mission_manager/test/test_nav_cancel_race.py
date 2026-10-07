@@ -11,6 +11,7 @@ mission_manager_node 는 rclpy 를 import 하므로 없는 환경(개발 노트�
 모듈 전체를 건너뛴다. 젯슨 colcon test 에서 실제로 돈다.
 """
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,9 +21,12 @@ from builtin_interfaces.msg import Time  # noqa: E402
 
 from vica_mission_manager.mission_logic import (  # noqa: E402
     Destination,
+    NAV_TREE_GUIDED,
+    NAV_TREE_WAIT,
     Navigate,
     Pose2D,
     SpinInPlace,
+    State,
 )
 
 
@@ -87,7 +91,11 @@ def _bare_node(gen=5, accept=True):
     node._nav_gen = gen
     node.navigator = _FakeNavigator(accept=accept)
     node._approach_bt = ""       # 사람 접근 트리 끔 — 종전 동작
+    node._tree_files = {}        # 안내·대기 장소 트리 끔 — 종전 동작(2026-10-07)
+    node._guided_no_rail_bt = ""
+    node._route_server_up = lambda: True
     node._task_bt = ""
+    node.logic = SimpleNamespace(state=State.NAVIGATING)   # 대기 장소로 가는 중이 아니다
     logger = _FakeLogger()
     node.get_logger = lambda: logger  # 클래스 메서드를 인스턴스 속성으로 가린다
     node.get_clock = lambda: _FakeClock()
@@ -152,6 +160,8 @@ class TestGenerationBump:
         node = _bare_node(gen=5, accept=False)
 
         class _FakeLogic:
+            state = State.NAVIGATING
+
             def on_tick(self, now, status):
                 return []
 
@@ -227,6 +237,8 @@ class TestBehaviorTreeSwitch:
         node._approach_bt = APPROACH_BT
 
         class _FakeLogic:
+            state = State.NAVIGATING
+
             def on_tick(self, now, status):
                 return []
 
@@ -234,6 +246,65 @@ class TestBehaviorTreeSwitch:
         node._now = lambda: 0.0
         node._start_nav(Navigate(destination=_approach_dest()))
         assert node._task_bt == ""
+
+
+GUIDED_BT = "/share/vica_nav2/behavior_trees/vica_navigate_to_pose_guided.xml"
+GUIDED_NO_RAIL_BT = "/share/vica_nav2/behavior_trees/vica_navigate_to_pose_guided_no_rail.xml"
+WAIT_BT = "/share/vica_nav2/behavior_trees/vica_navigate_to_pose_wait_spot.xml"
+
+
+class TestGuidedAndWaitTrees:
+    """Navigate.tree 가 고른 트리 파일을 보낸다(2026-10-07 대기 장소)."""
+
+    def _node(self, state=State.NAVIGATING):
+        node = _bare_node()
+        node._approach_bt = APPROACH_BT
+        node._tree_files = {NAV_TREE_GUIDED: GUIDED_BT, NAV_TREE_WAIT: WAIT_BT}
+        node._guided_no_rail_bt = GUIDED_NO_RAIL_BT
+        node.logic = SimpleNamespace(state=state)
+        return node
+
+    def test_guided_goal_sends_the_guided_tree(self):
+        node = self._node()
+        node._start_nav(Navigate(destination=_dest(), tree=NAV_TREE_GUIDED))
+        assert node.navigator.trees == [GUIDED_BT]
+        assert node._published_events == ["goal_sent", "goal_accepted"]
+
+    def test_guided_goal_without_rail_server_uses_the_no_rail_tree(self):
+        # 레일 파일이 없는 지도 — 레일 안내 트리는 route_server 가 없어 통째로 실패한다.
+        node = self._node()
+        node._route_server_up = lambda: False
+        node._start_nav(Navigate(destination=_dest(), tree=NAV_TREE_GUIDED))
+        assert node.navigator.trees == [GUIDED_NO_RAIL_BT]
+
+    def test_wait_tree_ignores_the_rail_server(self):
+        node = self._node(state=State.MOVING_TO_WAIT_SPOT)
+        node._route_server_up = lambda: False
+        node._start_nav(Navigate(destination=_dest(), tree=NAV_TREE_WAIT))
+        assert node.navigator.trees == [WAIT_BT]
+
+    def test_default_goal_keeps_the_default_tree(self):
+        node = self._node()
+        node._start_nav(Navigate(destination=_dest()))
+        assert node.navigator.trees == [""]
+
+    def test_approach_id_wins_over_the_tree_kind(self):
+        node = self._node()
+        node._start_nav(Navigate(destination=_approach_dest(), tree=NAV_TREE_GUIDED))
+        assert node.navigator.trees == [APPROACH_BT]
+
+    def test_moving_to_wait_spot_is_quiet_to_the_app(self):
+        node = self._node(state=State.MOVING_TO_WAIT_SPOT)
+        node._start_nav(Navigate(destination=_dest(), tree=NAV_TREE_WAIT))
+        assert node.navigator.trees == [WAIT_BT]
+        assert node._published_events == []
+
+    def test_switch_from_guided_to_wait_cancels_first(self):
+        node = self._node(state=State.MOVING_TO_WAIT_SPOT)
+        node._task_bt = GUIDED_BT
+        node.navigator.task_done = False
+        node._start_nav(Navigate(destination=_dest(), tree=NAV_TREE_WAIT))
+        assert node.navigator.calls == ["cancel", "goal"]
 
 
 class TestIdleCancelSync:

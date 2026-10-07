@@ -107,8 +107,10 @@ def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("pose.x/y/yaw는 유한한 숫자여야 합니다")
 
     contact_phone = normalize_contact_phone(raw.get("contact_phone"))
+    door_yaw = normalize_door_yaw(raw.get("door_yaw"))
+    wait_spot = normalize_wait_spot(raw.get("wait_spot"))
 
-    return {
+    normalized = {
         "id": destination_id,
         "name": name,
         "aliases": aliases,
@@ -132,6 +134,57 @@ def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
         # 개인정보라 로그에는 남기지 않는다 — 노드 로그는 id 만 찍는다.
         "contact_phone": contact_phone,
     }
+    # 대기 장소 (2026-10-07). 둘 다 선택 칸이라 없으면 키 자체를 쓰지 않는다 —
+    # 옛 파일과 같은 모양이 그대로 남고, 미션은 "없음"을 지금 동작(방향 안내 없음·
+    # 제자리 대기)으로 읽는다.
+    if door_yaw is not None:
+        normalized["door_yaw"] = door_yaw
+    if wait_spot is not None:
+        normalized["wait_spot"] = wait_spot
+    return normalized
+
+
+# 대기 장소가 입구의 어느 쪽인가 — 앱이 저장할 때 계산해 보낸다(입구를 바라볼 때
+# 기준). 로봇은 다시 계산하지 않고 이 값을 멘트에 그대로 쓴다: 관리자가 화면에서
+# 본 글자와 로봇이 말하는 글자가 같아야 하기 때문이다.
+WAIT_SPOT_SIDES = ("right", "left", "across")
+
+
+def normalize_door_yaw(raw: Any) -> float | None:
+    """입구 방향(도, 지도 기준). 비어 있으면 None — 옛 목적지는 이 칸이 없다."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("door_yaw는 숫자여야 합니다") from exc
+    if not math.isfinite(value):
+        raise ValueError("door_yaw는 유한한 숫자여야 합니다")
+    return value % 360.0
+
+
+def normalize_wait_spot(raw: Any) -> dict[str, Any] | None:
+    """대기 장소 {x, y, yaw, side}. 없으면 None(= 목적지에서 그대로 대기).
+
+    대기 장소는 목적지가 아니라 목적지에 딸린 칸이다. 그래서 LLM·배송·원격 주행
+    목록에 나오지 않고, 목적지를 지우면 함께 지워진다(10-07 결정).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("wait_spot은 객체여야 합니다")
+    try:
+        x = float(raw["x"])
+        y = float(raw["y"])
+        yaw = float(raw.get("yaw", 0.0))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("wait_spot.x/y/yaw는 숫자여야 합니다") from exc
+    if not all(math.isfinite(value) for value in (x, y, yaw)):
+        raise ValueError("wait_spot.x/y/yaw는 유한한 숫자여야 합니다")
+    side = str(raw.get("side", "")).strip().lower()
+    if side not in WAIT_SPOT_SIDES:
+        raise ValueError("wait_spot.side는 right, left, across 중 하나여야 합니다")
+    return {"x": x, "y": y, "yaw": yaw % 360.0, "side": side}
 
 
 class DestinationStorage:

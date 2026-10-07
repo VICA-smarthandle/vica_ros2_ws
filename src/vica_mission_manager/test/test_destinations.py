@@ -97,3 +97,31 @@ class TestLoadMapBounds:
         assert b.min_y == pytest.approx(-8.59)
         assert b.max_x == pytest.approx(-15.1 + 200 * 0.05)
         assert b.max_y == pytest.approx(-8.59 + 100 * 0.05)
+
+
+def test_door_yaw_and_wait_spot_are_loaded(tmp_path):
+    # 대기 장소(2026-10-07). 저장 쪽이 남긴 두 칸을 미션이 읽는다.
+    p = tmp_path / "destinations.yaml"
+    p.write_text(textwrap.dedent("""
+        destinations:
+          - id: "11111111-1111-4111-8111-111111111111"
+            name: "화장실 입구"
+            pose: {frame_id: "map", x: 3.0, y: 2.0, yaw: 270.0}
+            door_yaw: 270.0
+            wait_spot: {x: 1.97, y: -1.42, yaw: 0.0, side: "right"}
+          - id: "22222222-2222-4222-8222-222222222222"
+            name: "옛 목적지"
+            pose: {frame_id: "map", x: 1.0, y: 1.0, yaw: 0.0}
+          - id: "33333333-3333-4333-8333-333333333333"
+            name: "손으로 틀린 대기 장소"
+            pose: {frame_id: "map", x: 1.0, y: 1.0, yaw: 0.0}
+            wait_spot: {x: 1.0, y: 1.0, side: "up"}
+        """), encoding="utf-8")
+    dests = load_destinations(str(p))
+    room = dests[ROOM_ID]
+    assert room.door_yaw_deg == 270.0
+    assert (room.wait_spot.x, room.wait_spot.y, room.wait_spot.side) == (1.97, -1.42, "right")
+    old = dests[PLACEHOLDER_ID]
+    assert old.door_yaw_deg is None and old.wait_spot is None
+    # 틀린 대기 장소 하나로 목적지 전체를 못 읽게 하지 않는다 — 제자리 대기로.
+    assert dests[CALIBRATED_ID].wait_spot is None
