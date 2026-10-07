@@ -368,7 +368,7 @@ MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # 다가가기 시작할 때 한 번 (2026-10-07 사용자 결정). 다가가는 동안의 위치 알림은
 # 음성 쪽 차임(dialog_state=approaching, 2초마다 종 두 음) 몫이다. 후진음은 '피하라'로
 # 들려 쓰지 않는다. 구운 판(assets/baked)과 글자가 같아야 한다.
-MSG_APPROACH_COMING = "안내로봇 비카가 다가가고 있어요."
+MSG_APPROACH_COMING = "동행로봇 비카가 다가가고 있어요."
 MSG_APPROACH_QUESTION = "안녕하세요? 시각장애인 안내로봇 비카입니다. 안내를 받으시겠어요?"
 MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
