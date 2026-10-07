@@ -15,6 +15,7 @@ rclpy 도 subprocess 도 쓰지 않는다. 노트북에서 pytest 로 전부 검
 """
 
 from enum import Enum
+import json
 import re
 import signal
 import unicodedata
@@ -247,3 +248,40 @@ def save_label(map_id: str, display_name) -> str:
 def map_meta_document(map_id: str, display_name: str, saved_at: str) -> dict:
     """maps/<id>.meta.json 의 내용. map_list_node 와 scripts/vica_map_resolve.py 가 읽는다."""
     return {'map_id': map_id, 'display_name': display_name, 'saved_at': saved_at}
+
+
+# 저장 스크립트 출력에서 정렬 결과 줄을 찾는 머리표. 정본은 map_align.RESULT_PREFIX 다
+# (그쪽은 numpy 를 import 해서 여기서 부르지 않는다). 시험이 둘이 같은지 본다.
+ALIGN_RESULT_PREFIX = 'VICA_ALIGN '
+
+# 앱이 아는 결과 이름. map_align.straighten_saved_map 의 result 와 같다.
+ALIGN_RESULTS = ('rotated', 'small', 'no_walls', 'not_requested', 'failed')
+
+
+def save_script_command(script: str, map_id: str, align: bool) -> list:
+    """Command line for scripts/vica_map_save.sh. 정렬은 둘째 인자로만 켠다."""
+    command = ['bash', script, map_id]
+    if align:
+        command.append('--align')
+    return command
+
+
+def parse_align_result(output: str) -> dict:
+    """Pick the VICA_ALIGN line out of the save script output. 없으면 {}.
+
+    앱 완료 화면의 결과 한 줄(2026-10-07 목업 14번)이 이것으로 정해진다. 모르는
+    result·깨진 JSON 은 {} 로 본다 — 앱은 그때 결과 줄 없이 '저장했습니다'만 보인다.
+    여러 줄이면 마지막 것을 쓴다.
+    """
+    found = {}
+    for line in (output or '').splitlines():
+        line = line.strip()
+        if not line.startswith(ALIGN_RESULT_PREFIX):
+            continue
+        try:
+            document = json.loads(line[len(ALIGN_RESULT_PREFIX):])
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get('result') in ALIGN_RESULTS:
+            found = document
+    return found

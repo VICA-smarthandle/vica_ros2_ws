@@ -30,6 +30,13 @@ base_footprint, vica_2d.lua 의 publish_tracked_pose) 를 받아 두었다가 pe
 직접 받으면 100 Hz JSON 직렬화와 화면 재빌드가 생기고, 이 노드가 TF 청취기를 두면
 /tf 전체를 받게 된다(vica_status_app_node 가 같은 이유로 걷어낸 방식). 여기서
 받는 콜백은 값 저장뿐이라 100 Hz 여도 젯슨 CPU 1 % 안쪽이다.
+
+**지도 기울기도 싣는다(2026-10-07).** 저장 팝업의 '지금 기울기' 줄이 이 값이다.
+저장 스크립트가 쓰는 것과 같은 계산(map_align.tilt_of_occupancy)이라 팝업 숫자와
+저장 결과가 어긋나지 않는다. 젯슨 실측 한 번에 7~27 ms(저장된 지도 6장), 2초마다라
+코어 1 % 남짓이다. 벽칸이 8000개를 넘는 큰 지도는 고르게 건너뛰어 8000개만 쓰므로
+(map_align.MAX_TILT_POINTS) 그보다 크게 늘지 않는다. 벽이 모자라 방향을 못 재면
+싣지 않고, 앱은 그 줄을 숨긴다.
 """
 
 from datetime import datetime
@@ -51,8 +58,9 @@ from rclpy.qos import (
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+from .map_align import tilt_of_occupancy
 from .map_preview import POSE_MAX_AGE_SEC, grid_to_png, quaternion_to_yaw_degrees
-from .map_preview import robot_pose_fields
+from .map_preview import robot_pose_fields, tilt_fields
 
 # 앱이 이 경로로 받아 간다. supervisor_bringup 의 HTTP 서버가 vica_ros2_ws 를
 # 서빙하므로 그대로 URL 이 된다.
@@ -192,8 +200,15 @@ class MapPreviewNode(Node):
             self.get_logger().warn(f'미리보기를 저장하지 못했습니다: {error}')
             return
 
+        try:
+            tilt = tilt_of_occupancy(msg.data, info.width, info.height)
+        except Exception as error:  # noqa: BLE001 - 덤 계산이 노드를 죽이면 안 된다
+            # 기울기는 덤이다. 못 재도 미리보기는 그대로 나간다.
+            self.get_logger().warn(f'지도 기울기를 재지 못했습니다: {error}')
+            tilt = None
+
         self.seq += 1
-        self._announce(info, len(png))
+        self._announce(info, len(png), tilt)
 
     def handle_pose(self, msg: PoseStamped) -> None:
         """Remember the latest map-frame pose. 저장만 하고 아무것도 계산하지 않는다."""
@@ -226,12 +241,13 @@ class MapPreviewNode(Node):
         temp.write_bytes(png)
         os.replace(temp, target)
 
-    def _announce(self, info, size_bytes: int) -> None:
+    def _announce(self, info, size_bytes: int, tilt_deg=None) -> None:
         """Publish the metadata the app needs.
 
         이미지만으로는 부족하다. 지도가 자라면 크기와 원점이 함께 바뀌므로 앱이
         좌표를 그리려면 매번 같이 받아야 한다. 로봇 자세(robot_x·robot_y·robot_yaw,
-        yaw 는 도 단위 반시계 양수)는 알고 있을 때만 붙는다.
+        yaw 는 도 단위 반시계 양수)는 알고 있을 때만 붙는다. 지도 기울기
+        (tilt_deg, 도 단위 반시계 양수)도 잴 수 있을 때만 붙는다.
         """
         payload = {
             'image_url': PREVIEW_URL_PREFIX + PREVIEW_FILENAME,
@@ -249,6 +265,7 @@ class MapPreviewNode(Node):
                 self.robot_pose, self._robot_pose_age_sec(), self.pose_max_age_sec
             )
         )
+        payload.update(tilt_fields(tilt_deg))
         message = String()
         message.data = json.dumps(payload, ensure_ascii=False)
         self.publisher.publish(message)

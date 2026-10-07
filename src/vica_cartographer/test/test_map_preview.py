@@ -99,3 +99,11 @@ def test_compression_actually_helps():
 def test_encode_rejects_pixel_count_mismatch():
     with pytest.raises(ValueError):
         encode_png_gray(b'\x00' * 3, 2, 2)
+
+
+def test_tilt_field_is_rounded_and_omitted_when_unknown():
+    """저장 팝업의 '지금 기울기' 줄(2026-10-07). 못 재면 키 자체가 없다."""
+    from vica_cartographer.map_preview import tilt_fields
+    assert tilt_fields(None) == {}
+    assert tilt_fields(5.437) == {'tilt_deg': 5.4}
+    assert tilt_fields(-0.04) == {'tilt_deg': -0.0}

@@ -9,6 +9,12 @@
 # ^[A-Za-z0-9_-]+$ 규칙은 그대로). 표시 이름은 maps/<id>.meta.json 에 남고
 # 지도 목록의 map_name 으로 앱에 보인다. 규칙은 mapping_session.plan_map_save 가 정한다.
 string name
+# 지도를 바르게 세워 저장할지(2026-10-07, 앱 저장 팝업 '정렬해서 저장').
+# true 면 저장 직후 벽 방향을 재서 2° 이상 기울었을 때만 그림을 돌리고 origin 을
+# 다시 잡는다(vica_cartographer/map_align.py). 원본은 maps/.original/ 에 숨겨 둔다.
+# false 면 예전처럼 그대로 저장한다 — 이 칸을 모르는 옛 앱은 false 로 들어온다.
+# 결과는 /vica/mapping_status 의 save_align 으로 알린다.
+bool align
 ---
 bool accepted
 string message

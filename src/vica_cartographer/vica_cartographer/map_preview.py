@@ -135,3 +135,14 @@ def robot_pose_fields(pose, age_sec, max_age_sec: float = POSE_MAX_AGE_SEC) -> d
         'robot_y': round(float(y), 3),
         'robot_yaw': round(float(yaw), 2),
     }
+
+
+def tilt_fields(tilt_deg) -> dict:
+    """Return the preview JSON field for the map tilt, or {} when unknown.
+
+    저장 팝업의 '지금 기울기' 줄(2026-10-07)이 읽는다. 값은 map_align 이 잰 벽 방향
+    (도 단위, 반시계 양수)이다. 없으면 앱은 그 줄을 숨긴다.
+    """
+    if tilt_deg is None:
+        return {}
+    return {'tilt_deg': round(float(tilt_deg), 1)}

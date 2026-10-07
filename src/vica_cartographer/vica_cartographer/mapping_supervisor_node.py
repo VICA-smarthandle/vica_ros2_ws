@@ -55,12 +55,14 @@ from .mapping_session import (
     blocking_reason,
     duplicated_names,
     is_stack_up,
+    map_meta_document,
     MappingState,
     missing_prerequisites,
-    map_meta_document,
+    parse_align_result,
     plan_map_save,
-    save_label,
     running_stacks,
+    save_label,
+    save_script_command,
     StopEscalation,
 )
 
@@ -108,6 +110,9 @@ class MappingSupervisorNode(Node):
         # 사람이 적은 표시 이름(한글 가능). id 와 같으면 따로 없는 것이다.
         self.map_name = ''
         self.started_at = None
+        # 마지막 저장의 정렬 결과(map_align 이 낸 VICA_ALIGN 줄). 앱 완료 화면의
+        # 결과 한 줄이 이것으로 정해진다(2026-10-07). 새 저장·새 회차에서 비운다.
+        self.save_align = {}
         self._process = None
         self._pgid = None
         # 진행 중인 종료 사다리. None 이면 정리 중이 아니다. _tick 이 매 초
@@ -179,6 +184,7 @@ class MappingSupervisorNode(Node):
                 'map_id': self.map_id,
                 'map_name': self.map_name or self.map_id,
                 'started_at': self.started_at or '',
+                'save_align': self.save_align,
                 'nav2_running': stacks['nav2'],
                 'mapping_running': stacks['mapping'],
                 'duplicated': duplicated_names(names),
@@ -270,6 +276,7 @@ class MappingSupervisorNode(Node):
 
             self.map_id = ''
             self.map_name = ''
+            self.save_align = {}
             self.started_at = datetime.now().isoformat(timespec='seconds')
             self._set_state(MappingState.STARTING, '스택을 띄우는 중입니다.')
 
@@ -330,14 +337,17 @@ class MappingSupervisorNode(Node):
                 )
                 return response
 
+            # 옛 vica_interfaces(정렬 칸 없음)로 빌드된 채여도 죽지 않게 getattr.
+            align = bool(getattr(request, 'align', False))
             self.map_id = map_id
             self.map_name = display_name
+            self.save_align = {}
             label = save_label(map_id, display_name)
             self._set_state(MappingState.SAVING, f'{label} 저장 중입니다.')
 
         threading.Thread(
             target=self._run_save,
-            args=(str(script), map_id, display_name),
+            args=(str(script), map_id, display_name, align),
             name='vica_map_save',
             daemon=True,
         ).start()
@@ -396,11 +406,18 @@ class MappingSupervisorNode(Node):
         except OSError as error:
             self.get_logger().warn(f'{path} 를 쓰지 못했습니다: {error}')
 
-    def _run_save(self, script: str, map_id: str, display_name: str) -> None:
-        """Run vica_map_save.sh and report the result. 콜백 밖에서 돈다."""
+    def _run_save(
+        self, script: str, map_id: str, display_name: str, align: bool = False
+    ) -> None:
+        """Run vica_map_save.sh and report the result. 콜백 밖에서 돈다.
+
+        align 이면 스크립트에 --align 을 넘긴다. 스크립트가 지도를 재고(2° 미만이면
+        그대로) 돌린 결과를 VICA_ALIGN 줄로 내므로, 그것을 save_align 에 담는다.
+        """
+        align_result = {}
         try:
             result = subprocess.run(  # noqa: S603
-                ['bash', script, map_id],
+                save_script_command(script, map_id, align),
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -408,6 +425,7 @@ class MappingSupervisorNode(Node):
             ok = result.returncode == 0
             tail = (result.stdout or result.stderr or '').strip().splitlines()
             detail = tail[-1] if tail else ''
+            align_result = parse_align_result(result.stdout or '')
         except subprocess.TimeoutExpired:
             ok, detail = False, '저장이 300초 안에 끝나지 않았습니다.'
         except OSError as error:
@@ -418,6 +436,7 @@ class MappingSupervisorNode(Node):
 
         label = save_label(map_id, display_name)
         with self._lock:
+            self.save_align = align_result if ok else {}
             if ok:
                 self._set_state(MappingState.MAPPING, f'{label} 저장 완료. {detail}')
             else:
@@ -430,7 +449,10 @@ class MappingSupervisorNode(Node):
             # **저장이 확인됐을 때만** 미리보기를 지운다. 실패했을 때 지우면
             # 2026-08-12 처럼(아홉 회차가 저장 실패로 사라짐) 유일한 그림까지 잃는다.
             self._request_preview_clear()
-        self.get_logger().info(f'저장 {"성공" if ok else "실패"}: {map_id} {detail}')
+        self.get_logger().info(
+            f'저장 {"성공" if ok else "실패"}: {map_id} {detail} '
+            f'정렬={align_result.get("result", "-")}'
+        )
 
     def _request_preview_clear(self) -> None:
         if not self._preview_clear.service_is_ready():
