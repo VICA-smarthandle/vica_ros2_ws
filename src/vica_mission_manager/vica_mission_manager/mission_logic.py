@@ -415,6 +415,9 @@ MSG_ESTOP_WAKE = "지금은 비상 멈춤 상태입니다."
 # 확인 질문 문구가 빈 목적지를 미션이 직접 물을 때(주행 중 바로 온 확정 요청). 음성
 # destination_loader._fill_defaults 의 기본 확인 문구와 같은 글자 — 그쪽이 미리 합성해 둔다.
 MSG_CONFIRM_PROMPT_FALLBACK = "{name}{josa} 안내해드릴까요?"
+# 확인 질문 중 다른 목적지를 확정하면 새 목적지로 다시 묻는다(2026-10-08 사용자 결정 4, 사용자
+# 문구). {prompt} 는 새 목적지의 확인 질문이다 — 음성 쪽이 목적지마다 미리 합성한다.
+MSG_CONFIRM_SWITCH = "네, {prompt}"
 
 MSG_DISTANCE_REMAINING = "목적지까지 약 {meters}미터 남았습니다."
 MSG_CANCELED = "안내를 취소했습니다."
@@ -1627,6 +1630,15 @@ class MissionLogic:
                 self._reset_arrival_dialog()
                 return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
             return self._arrival_no_answer(now)
+        if self.state == State.ASKING_WAIT_TIME and kind == "affirm":
+            # "몇 분쯤 걸리실까요?"에 "네"만 — 같은 질문을 한 번 다시 묻는다(결정 2). 다시 물은
+            # 뒤에도 "네"면 기다려 달라는 뜻이 분명하니 기본 30분을 기다린다.
+            if not self._arrival_retried:
+                self._arrival_retried = True
+                self._response_deadline = None
+                self._asking_entered_at = now
+                return [self._ask(MSG_ASK_WAIT_TIME)]
+            return self._enter_waiting(WAIT_MINUTES_CAP, now, default_msg=True)
         if self.state == State.ASKING_WAIT_TIME and kind == "deny":
             # "몇 분쯤 걸리실까요?"에 "아니(기다리지 마)" — 끝낼지 한 번 확인한다.
             return self._ask_end_confirm(now)
@@ -1894,11 +1906,18 @@ class MissionLogic:
             and self._confirming_dest_id
             and intent.matched_destination_id != self._confirming_dest_id
         ):
-            # 오래된/엇갈린 confirm 방어 (request_id 없는 v1 의 임시 방어).
-            # 멘트 없이 접는다(2026-09-01 감량) — 침묵이면 사용자가 다시
-            # 말하고, 그 요청이 새 확인 흐름을 연다. 주행 중 바꾸기 질문이었으면
-            # 원래 목적지로 다시 출발한다 — 움직이므로 그때는 알린다.
-            return self._fold_confirming(now)
+            # 확인 질문 중 다른 목적지를 확정했다 — 새 목적지로 다시 묻는다(2026-10-08 사용자
+            # 결정 4, "네, XX로 안내해드릴까요?"). 09-01 의 '멘트 없이 접기'는 규칙 1(꼭 한마디)
+            # 로 바꿨다. 갈 수 없는 곳이면 이유를 말하고 묻던 질문은 그대로 둔다.
+            reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
+            if reason != GateReason.OK:
+                msg = _REJECT_MESSAGES.get(reason)
+                return [Say(msg, priority="response")] if msg else []
+            assert dest is not None  # check_gate 가 보장
+            self._confirming_dest_id = dest.id
+            self._confirm_deadline = now + self.confirm_timeout_sec
+            self._confirm_prompt = self._confirm_prompt_for(dest)
+            return [self._ask(MSG_CONFIRM_SWITCH.format(prompt=self._confirm_prompt))]
 
         reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
         if reason != GateReason.OK:

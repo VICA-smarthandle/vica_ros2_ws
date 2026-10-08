@@ -2,16 +2,19 @@
 
 칸 하나의 첫 반응은 test_reaction_table.py 가 못 박는다. 여기는 그 뒤에 이어지는 일을 본다.
 """
-from reaction_states import (BOUNDS, ELEV, SPOT_DEST, asking, asking_wait_time, idle_braked,
-                             intent, lookup, navigating, returning, returning_late, waiting,
-                             waiting_asked, waiting_release)
+from reaction_states import (BOUNDS, ELEV, ROOM, SPOT_DEST, asking, asking_wait_time,
+                             confirming, idle_braked, intent, lookup, navigating, returning,
+                             returning_late, waiting, waiting_asked, waiting_release)
 from vica_mission_manager.mission_logic import (
     MSG_ALREADY_GOING,
     MSG_ASK_ENTRANCE,
+    MSG_ASK_WAIT_TIME,
+    MSG_CONFIRM_SWITCH,
     MSG_CANCEL_KEPT,
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
     MSG_FINISH,
+    MSG_PRIVATE_DEST,
     MSG_START,
     MSG_WAIT_DEFAULT,
     MSG_WAIT_FINISH_ASK,
@@ -226,3 +229,37 @@ def test_late_answer_meaning_follows_the_question():
     assert logic.state == State.RETURNING
     # 한 번 답했으면 그다음 "네"는 늦은 답이 아니다.
     assert logic.on_voice_intent(intent("affirm"), t + 1, lookup, BOUNDS, True) == []
+
+
+# ---- Task 10: 결정 2·4 ----------------------------------------------------------
+def test_wait_time_yes_twice_waits_30_minutes():
+    logic, t = asking_wait_time()
+    assert _says(logic.on_voice_intent(intent("affirm"), t, lookup, BOUNDS, True)) == [
+        MSG_ASK_WAIT_TIME]
+    acts = logic.on_voice_intent(intent("affirm"), t + 3, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_DEFAULT]
+    assert logic.state == State.WAITING
+
+
+def test_switch_question_is_the_users_sentence():
+    assert MSG_CONFIRM_SWITCH.format(prompt="엘리베이터로 안내해드릴까요?") == (
+        "네, 엘리베이터로 안내해드릴까요?")
+
+
+def test_switch_then_yes_goes_to_the_new_place():
+    logic, t = confirming()
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id), t, lookup, BOUNDS, True)
+    assert logic.confirming_dest_id == ELEV.id
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+    assert logic.state == State.NAVIGATING
+
+
+def test_switch_to_a_closed_place_keeps_the_question():
+    closed = ROOM.__class__(**{**ROOM.__dict__, "id": "vip", "name": "원장실",
+                               "authorization": "private"})
+    logic, t = confirming()
+    acts = logic.on_voice_intent(intent(matched_destination_id="vip"), t,
+                                 lambda i: closed if i == "vip" else lookup(i), BOUNDS, True)
+    assert _says(acts) == [MSG_PRIVATE_DEST]
+    assert logic.state == State.CONFIRMING and logic.confirming_dest_id == "wc"

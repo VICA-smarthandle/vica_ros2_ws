@@ -278,7 +278,9 @@ class TestTransitions:
         assert logic.state != State.NAVIGATING
         assert not any(isinstance(a, Navigate) for a in actions)
 
-    def test_stale_confirm_different_dest_rejected(self):
+    def test_stale_confirm_different_dest_asks_again(self):
+        """확인 질문 중 다른 목적지를 확정하면 그 목적지로 다시 묻는다(2026-10-08 결정 4).
+        옛 09-01 동작은 멘트 없이 접기였다 — 출발하지 않는 것은 같다."""
         logic = MissionLogic()
         logic.on_intent(
             make_intent(need_confirm=True, matched_destination_id="restroom"),
@@ -286,9 +288,9 @@ class TestTransitions:
         )
         actions = logic.on_intent(make_intent(matched_destination_id="room_407"),
                                   make_dest(), BOUNDS, True, 5.0)
-        assert logic.state == State.IDLE
-        # 9/1 감량: 멘트 없이 접는다 — 출발만 안 하면 된다.
-        assert not any(isinstance(a, Say) for a in actions)
+        assert logic.state == State.CONFIRMING and logic.confirming_dest_id == "room_407"
+        assert [a.text for a in actions if isinstance(a, Say)] == [
+            "네, 윤지영 교수님 사무실로 안내해드릴까요?"]
         assert not any(isinstance(a, Navigate) for a in actions)
 
     def test_navigating_confirmed_request_stops_and_asks(self):
@@ -1346,19 +1348,19 @@ class TestApproachSafety:
 
 class TestStaleConfirmListens:
     def test_stale_confirm_retry_prompt_expects_a_reply(self):
-        """"다시 말씀해 주세요"는 질문이다 — expects_reply 없이는 말해 놓고
-        안 듣는다 (2026-08-28 실기: 사용자가 "비카야"를 다시 불러야 했다)."""
+        """엇갈린 확정에 다시 묻는 말은 질문이다 — expects_reply 없이는 말해 놓고
+        안 듣는다 (2026-08-28 실기: 사용자가 "비카야"를 다시 불러야 했다).
+        2026-10-08 결정 4로 그 목적지를 "네, …로 안내해드릴까요?"로 다시 묻는다."""
         logic = MissionLogic()
         logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
                         True, 0.0)
         assert logic.state == State.CONFIRMING
         actions = logic.on_intent(
-            make_intent(matched_destination_id="다른_목적지"), make_dest(),
-            BOUNDS, True, 1.0)
-        # 2026-09-01 감량: 엇갈린 confirm 은 멘트 없이 접는다 — 침묵이면
-        # 사용자가 다시 말하고, 그 요청이 새 확인 흐름을 연다.
-        assert not any(isinstance(a, Say) for a in actions)
-        assert logic.state == State.IDLE
+            make_intent(matched_destination_id="다른_목적지"),
+            make_dest(id="다른_목적지"), BOUNDS, True, 1.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert len(says) == 1 and says[0].expects_reply
+        assert logic.state == State.CONFIRMING
 class TestApproachVoiceHooks:
     """계획 문서(voice docs/approach-voice-flow.md)의 남은 두 조각.
 

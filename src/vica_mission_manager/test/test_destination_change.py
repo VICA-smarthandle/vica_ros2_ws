@@ -145,11 +145,14 @@ class TestAnswers:
         assert logic.active_destination == ROOM
         assert _navs(actions)[0].destination == ROOM
 
-    def test_stale_confirmed_other_destination_resumes_with_message(self):
+    def test_other_confirmed_destination_is_asked_again(self):
+        """바꾸기 질문 중 또 다른 목적지를 확정하면 그 목적지로 다시 묻는다 — 바꾸기 질문은
+        그대로다(2026-10-08 결정 4, 옛 09-01 동작은 말없이 원래 목적지로 다시 출발)."""
         logic, _ = asked_change()
         actions = logic.on_intent(_intent(CAFE.id), CAFE, BOUNDS, True, 2.0)
-        assert logic.state == State.NAVIGATING and logic.active_destination == ROOM
-        assert _say(actions) == ["409호로 다시 출발합니다."]
+        assert logic.state == State.CONFIRMING and logic.confirming_dest_id == CAFE.id
+        assert _say(actions) == ["네, 식당으로 모실까요?"]   # CAFE 의 확인 문장 앞에 "네, "
+        assert logic._change_from == ROOM
 
     def test_gate_failure_on_yes_rejects_then_resumes(self):
         lost = Destination(id="lost", name="창고", pose=Pose2D(x=1, y=1, yaw_deg=0, frame_id="map"),
