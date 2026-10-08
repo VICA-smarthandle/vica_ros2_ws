@@ -14,7 +14,7 @@ import math
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union
 
 from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
 from .grip_meter import GripMeter
@@ -1450,6 +1450,97 @@ class MissionLogic:
         return self._approach.percent
 
     # -- 입력 이벤트 -----------------------------------------------------------
+
+    # -- 음성 요청 반응 (미션 요청 반응표, 2026-10-08) -------------------------
+    def on_voice_intent(
+        self,
+        intent: IntentData,
+        now: float,
+        lookup: Callable[[str], Optional[Destination]],
+        bounds: Optional[MapBounds] = None,
+        nav_ready: bool = True,
+    ) -> list:
+        """음성 요청 하나에 대한 반응. 노드는 나온 동작을 실행하고 기록만 한다.
+
+        갈래(라우팅)는 2026-10-08 노드 _on_intent 에서 이리로 옮겼다 — 반응표(상태 18 ×
+        요청 11)를 ROS 없이 순수 시험으로 전수 확인하려고. 호출 반응표(on_wake_call)와
+        같은 방식이다. lookup 은 목적지 id → Destination(없으면 None)이다.
+        설계: docs/superpowers/specs/2026-10-08-mission-request-reactions-design.md
+        """
+        reacted = self._react_by_table(intent, now, lookup, bounds, nav_ready)
+        if reacted is not None:
+            return reacted
+        return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def _react_by_table(
+        self,
+        intent: IntentData,
+        now: float,
+        lookup: Callable[[str], Optional[Destination]],
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+    ) -> Optional[list]:
+        """반응표로 새로 정한 칸(2026-10-08). 맡지 않는 칸은 None — 옛 갈래가 처리한다."""
+        return None
+
+    def _route_voice_intent(
+        self,
+        intent: IntentData,
+        now: float,
+        lookup: Callable[[str], Optional[Destination]],
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+    ) -> list:
+        """옛 노드 _on_intent 의 갈래 그대로(2026-10-08 이전 동작)."""
+        kind = intent.intent
+        actions: list = []
+        # 복귀 주행 중 늦게 도착한 답 — 마지막 그물 (2026-08-30 실기: 무응답 오판으로
+        # 떠난 직후 도착한 답이 버려져 세울 방법이 없었다). 복귀를 조용히 멈추고
+        # (ASKING_NEXT) 아래 갈래가 그 뜻을 그대로 처리한다 — wait 는 대기, navigate
+        # 제안은 확인 흐름.
+        if self.state == State.RETURNING and kind in ("wait", "navigate"):
+            actions.extend(self.on_return_brake(now, quiet=True))
+        # 도착 후 대화 중이면 답을 on_arrival_answer 로 보낸다 — 같은 말이라도 이
+        # 상태에선 뜻이 다르다(도착 후 cancel = 홈 복귀 등). 예외: 새 목적지 '제안'은
+        # 대화를 닫고 아래 일반 확인 흐름(CONFIRMING)으로 합류한다(2026-08-30 실기).
+        if self.is_awaiting_arrival_answer():
+            if kind == "navigate" and intent.need_confirm:
+                self.exit_arrival_dialog()
+            else:
+                next_dest = (lookup(intent.matched_destination_id)
+                             if kind == "navigate" else None)
+                return actions + self.on_arrival_answer(
+                    intent, now, next_dest=next_dest, bounds=bounds, nav_ready=nav_ready)
+        if kind in ("cancel", "pause", "resume"):
+            return actions + self._voice_mission_command(kind, now, nav_ready)
+        # 짧은 답(affirm/deny)은 어느 질문의 답인지 상태가 정한다. CONFIRMING 이면 확인
+        # 질문의 답 — 목적지는 미션이 이미 안다(2026-08-31). 그 외에는 접근 질문 배선 —
+        # AWAITING_USER 가 아니면 on_approach_answer 가 빈 목록을 돌려준다.
+        if kind in ("affirm", "deny"):
+            if self.state == State.CONFIRMING:
+                dest = lookup(self.confirming_dest_id or "")
+                return actions + self.on_confirm_answer(
+                    kind == "affirm", dest, bounds, nav_ready, now)
+            return actions + self.on_approach_answer(kind == "affirm", now)
+        dest = lookup(intent.matched_destination_id)
+        return actions + self.on_intent(intent, dest, bounds, nav_ready, now)
+
+    def _voice_mission_command(self, kind: str, now: float, nav_ready: bool) -> list:
+        """음성 취소·일시정지·재개(옛 노드 _on_voice_mission_command). 취소는 곧바로 하지
+        않고 "취소할까요?"로 되묻는다 — 이미 되물은 상태의 두 번째 "취소"는 긍정이다.
+        관문에 걸리면 이유를 말한다."""
+        if kind == "cancel":
+            if self.cancel_confirm_pending:
+                return self.on_cancel_confirm_answer(True, now)
+            actions, reason = self.on_cancel_confirm_request(now)
+        elif kind == "pause":
+            actions, reason = self.on_pause_request(now)
+        else:
+            actions, reason = self.on_resume_request(nav_ready, now)
+        if reason != GateReason.OK:
+            msg = _REJECT_MESSAGES.get(reason)
+            return [Say(msg, priority="response")] if msg else []
+        return actions
 
     def on_intent(
         self,

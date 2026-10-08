@@ -97,7 +97,6 @@ from .mission_logic import (
     SpinInPlace,
     Pose2D,
     State,
-    _REJECT_MESSAGES,
     check_gate,
     doa_to_spin_yaw,
     nav_behavior_tree,
@@ -662,47 +661,7 @@ class MissionManagerNode(Node):
             return None
 
     def _on_intent(self, msg: VicaIntent) -> None:
-        # 복귀 주행 중 늦게 도착한 답 — 마지막 그물 (2026-08-30 실기: 무응답
-        # 오판으로 떠난 직후 도착한 답이 버려져 세울 방법이 없었다). 복귀를
-        # 조용히 멈추고(ASKING_NEXT) 아래 라우팅이 그 뜻을 그대로 처리한다
-        # — wait 는 대기, navigate 제안은 확인 흐름. finish 는 이미 홈으로
-        # 가는 중이라 제외(그대로 간다).
-        if (self.logic.state == State.RETURNING
-                and msg.intent in ("wait", "navigate")):
-            self._run_actions(self.logic.on_return_brake(self._now(), quiet=True))
-            self.get_logger().info(f"복귀 중 답 도착({msg.intent}) — 복귀 취소")
-
-        # 도착 후 대화 중이면 답(wait/finish/cancel/affirm/deny)을
-        # on_arrival_answer 로 보낸다 — 같은 말이라도 이 상태에선 뜻이 다르다
-        # (도착 후 cancel = 홈 복귀 등). 상태 판정은 로직이 갖고 있다.
-        # 예외: 새 목적지 '제안'(navigate + need_confirm)은 대화의 답이 아니라
-        # 새 안내 요청이다 — 대화를 닫고 아래 일반 확인 흐름(CONFIRMING)으로
-        # 합류시킨다. 제안에서 바로 출발하면 확인 질문 전에 달리고, 뒤따라온
-        # 확정 답이 MSG_BUSY 로 거절된다 (2026-08-30 실기).
-        if self.logic.is_awaiting_arrival_answer():
-            if msg.intent == "navigate" and msg.need_confirm:
-                self.logic.exit_arrival_dialog()
-                # return 하지 않는다 — 아래 일반 경로가 이어서 처리한다.
-            else:
-                self._on_arrival_answer(msg)
-                return
-        # 음성 취소·일시정지·재개는 service 와 같은 로직을 탄다.
-        # 다만 취소는 바로 실행하지 않고 되물어 확인한 뒤에만 처리한다.
-        if msg.intent in ("cancel", "pause", "resume"):
-            self._on_voice_mission_command(msg)
-            return
-        # 짧은 답(affirm/deny)은 어느 질문의 답인지 여기의 상태가 정한다.
-        # CONFIRMING 이면 확인 질문("…로 안내해 드릴까요?")의 답 — 목적지는
-        # 미션이 이미 알고 있어 LLM 의 추측 없이 직접 확정한다(2026-08-31).
-        # 그 외에는 접근 질문 배선 — AWAITING_USER 가 아니면
-        # on_approach_answer 가 빈 목록을 돌려주고, 그때는 무시가 정답이다.
-        if msg.intent in ("affirm", "deny"):
-            if self.logic.state == State.CONFIRMING:
-                self._on_confirm_answer(msg.intent == "affirm")
-            else:
-                self._on_voice_answer(msg.intent == "affirm")
-            return
-
+        """음성 요청. 판단은 로직(on_voice_intent)이 하고 여기선 실행·기록만 한다(2026-10-08)."""
         intent = IntentData(
             intent=msg.intent,
             matched_destination_id=msg.matched_destination_id,
@@ -710,15 +669,21 @@ class MissionManagerNode(Node):
             safety_flag=msg.safety_flag,
             wait_minutes=int(getattr(msg, "wait_minutes", -1)),
         )
-        dest = self.destinations.get(msg.matched_destination_id) or None
-        actions = self.logic.on_intent(
-            intent, dest, self.map_bounds, self._nav2_ready(), self._now()
-        )
-        self.get_logger().info(
-            f"intent={msg.intent} dest={msg.matched_destination_id or '-'} "
-            f"confirm={msg.need_confirm} -> state={self.logic.state.value}"
-        )
+        before = self.logic.state
+        actions = self.logic.on_voice_intent(
+            intent, self._now(), self._lookup_destination,
+            bounds=self.map_bounds, nav_ready=self._nav2_ready())
         self._run_actions(actions)
+        said = [a.text for a in actions if isinstance(a, Say)]
+        self.get_logger().info(
+            f"음성 요청 intent={msg.intent} dest={msg.matched_destination_id or '-'} "
+            f"confirm={msg.need_confirm}: {before.value} -> {self.logic.state.value}"
+            + (f" 말={said}" if said else " (말 없음)"))
+
+    def _lookup_destination(self, dest_id: str) -> Optional[Destination]:
+        if not dest_id:
+            return None
+        return self.destinations.get(dest_id) or None
 
     def _on_tts_done(self, msg: String) -> None:
         """TTS 가 끊기지 않고 끝까지 재생한 문장. 접근 질문일 때만 시계를 켠다.
@@ -740,56 +705,6 @@ class MissionManagerNode(Node):
         # 대기 장소 멘트(M2) 재생이 끝났는가 — 손 놓기 판정은 그때부터다(2026-10-07).
         # 로직이 자기 M2 문장과 대조하므로 다른 문장이면 무시된다.
         self._run_actions(self.logic.on_wait_speech_spoken(msg.data, self._now()))
-
-    def _on_confirm_answer(self, affirmative: bool) -> None:
-        """확인 질문의 네/아니오. 확인 중 목적지를 되찾아 로직에 넘긴다."""
-        dest_id = self.logic.confirming_dest_id or ""
-        dest = self.destinations.get(dest_id) or None
-        before = self.logic.state
-        actions = self.logic.on_confirm_answer(
-            affirmative, dest, self.map_bounds, self._nav2_ready(), self._now()
-        )
-        self.get_logger().info(
-            f"확인 응답 {'긍정' if affirmative else '부정'}: dest={dest_id or '-'} "
-            f"{before.value} -> {self.logic.state.value}"
-        )
-        self._run_actions(actions)
-
-    def _on_voice_answer(self, affirmative: bool) -> None:
-        before = self.logic.state
-        actions = self.logic.on_approach_answer(affirmative, self._now())
-        if not actions:
-            self.get_logger().info(
-                f"affirm/deny 무시: state={before.value} (접근 질문 대기 중이 아님)"
-            )
-            return
-        self._run_actions(actions)
-        self.get_logger().info(
-            f"접근 응답 {'긍정' if affirmative else '부정'}: "
-            f"{before.value} -> {self.logic.state.value}"
-        )
-
-    def _on_arrival_answer(self, msg: VicaIntent) -> None:
-        """도착 후 대화 중의 답. navigate 답이면 다음 목적지를 넘기고, 로직이 평소
-        목적지 요청과 같은 관문을 거친 뒤 NAVIGATING 으로 간다(2026-10-07 수리 — 예전엔
-        관문 없이 넘겨 비공개·위치 미등록·주행 미준비 목적지로도 출발했다)."""
-        intent = IntentData(
-            intent=msg.intent,
-            matched_destination_id=msg.matched_destination_id,
-            need_confirm=msg.need_confirm,
-            safety_flag=msg.safety_flag,
-            wait_minutes=int(getattr(msg, "wait_minutes", -1)),
-        )
-        next_dest = None
-        if msg.intent == "navigate":
-            next_dest = self.destinations.get(msg.matched_destination_id) or None
-        before = self.logic.state
-        actions = self.logic.on_arrival_answer(
-            intent, self._now(), next_dest=next_dest,
-            bounds=self.map_bounds, nav_ready=self._nav2_ready())
-        self._run_actions(actions)
-        self.get_logger().info(
-            f"도착 후 답 intent={msg.intent}: {before.value} -> {self.logic.state.value}")
 
     def _on_wake(self, msg: String) -> None:
         """/vica/wake — 호출 반응표대로 대답할지 정한다(2026-10-07, 판단은 로직).
@@ -897,45 +812,6 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"근접 호출: track={msg.track_id} dist={msg.distance_m:.2f}m "
             f"{before.value} -> {self.logic.state.value}"
-        )
-
-    def _on_voice_mission_command(self, msg: VicaIntent) -> None:
-        """음성으로 온 취소·일시정지·재개를 처리한다.
-
-        취소는 잘못 알아들으면 안내가 끊기므로 곧바로 실행하지 않는다.
-        "취소할까요?"로 되묻고, 확인 응답이 와야 실제로 취소한다. 확인을 기다리는
-        동안에도 주행은 계속되며, 응답이 없으면 그대로 안내를 이어간다.
-        """
-        now = self._now()
-        before = self.logic.state
-
-        if msg.intent == "cancel":
-            if self.logic.cancel_confirm_pending:
-                # 이미 되물은 상태에서 다시 "취소"라고 하면 긍정으로 본다.
-                actions = self.logic.on_cancel_confirm_answer(True, now)
-                self._run_actions(actions)
-                self.get_logger().info(
-                    f"음성 취소 확정: {before.value} -> {self.logic.state.value}"
-                )
-                return
-            actions, reason = self.logic.on_cancel_confirm_request(now)
-        elif msg.intent == "pause":
-            actions, reason = self.logic.on_pause_request(now)
-        else:
-            actions, reason = self.logic.on_resume_request(self._nav2_ready(), now)
-
-        if reason != GateReason.OK:
-            message = _REJECT_MESSAGES.get(reason)
-            if message:
-                self._run_actions([Say(message, priority="response")])
-            self.get_logger().warn(
-                f"음성 {msg.intent} 거부: state={before.value} reason={reason.value}"
-            )
-            return
-
-        self._run_actions(actions)
-        self.get_logger().info(
-            f"음성 {msg.intent} 처리: {before.value} -> {self.logic.state.value}"
         )
 
     # -- 취소 / 일시정지 / 재개 service -------------------------------------------
