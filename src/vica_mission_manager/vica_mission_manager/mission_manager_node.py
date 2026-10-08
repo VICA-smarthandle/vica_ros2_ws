@@ -65,6 +65,7 @@ from .mission_logic import (
     HANDLE_LOST_REPEAT_SEC,
     HANDLE_SIDE_MIN_YAW_RAD,
     HANDLE_STATE_STALE_SEC,
+    HOME_BEACON_INTERVAL_SEC,
     Haptic,
     MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_QUESTION,
@@ -235,6 +236,8 @@ class MissionManagerNode(Node):
         # 시연 스위치(2026-10-05): 잡기 대기 시간이 다 되면 잡은 것으로 넘어가고
         # 손 놓침 정지를 쓰지 않는다. 터치 모듈 고장 중 시연용.
         self.declare_parameter("grip_assume_held", False)
+        # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
+        self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         self.declare_parameter("grip_hint_pulse_sec", GRIP_HINT_PULSE_SEC)
         self.declare_parameter("grip_release_grace_sec", GRIP_RELEASE_GRACE_SEC)
         self.declare_parameter("grip_resume_window_sec", GRIP_RESUME_WINDOW_SEC)
@@ -334,6 +337,8 @@ class MissionManagerNode(Node):
                 "grip_resume_window_sec", "handle_lost_repeat_sec",
                 "handle_lost_give_up_sec", "handle_state_stale_sec")},
             grip_assume_held=bool(self.get_parameter("grip_assume_held").value),
+            home_beacon_interval_sec=float(
+                self.get_parameter("home_beacon_interval_sec").value),
         )
         self.get_logger().info(
             "손잡이: 잡기 "
@@ -1205,6 +1210,8 @@ class MissionManagerNode(Node):
         )
         # 도착 순간 입구 방향(M1) 계산용(2026-10-07).
         self.logic.robot_yaw_deg = yaw_deg
+        # 홈 알림의 '홈에 있는가' 판정용(2026-10-08).
+        self.logic.robot_pose = self._robot_pose
         cov = msg.pose.covariance
         self._pose_cov_xy = float(cov[0] + cov[7]) if len(cov) >= 8 else 0.0
 

@@ -441,7 +441,8 @@ MSG_WAIT_SPOT_CONFIRM = (
 MSG_WAIT_SPOT_DEFAULT = (
     "최대 30분 동안 {place}에서 기다리겠습니다. 돌아오시면 '비카야'라고 불러 주세요.")
 # M3 — 대기 중 10초마다(대기 장소가 있는 목적지만). 사용자가 소리를 따라 로봇을 찾는다.
-MSG_WAIT_BEACON = "동행안내로봇 비카가 대기 중입니다."
+# 홈에서 쉴 때도 1분마다 같은 말을 한다(HOME_BEACON_*, 2026-10-08).
+MSG_WAIT_BEACON = "비카가 대기 중입니다."
 # M6 — 대기 장소로 가다 실패(Nav2 실패 신호). 말한 뒤 목적지로 돌아간다.
 MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
 # M7 — 대기 시간 만료(대기 장소가 있든 없든). 말한 뒤 홈으로 간다.
@@ -462,6 +463,12 @@ MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아�
 WAIT_MINUTES_CAP = 30
 # M3 간격. 대기 장소로 출발한 순간부터 대기가 끝날 때까지, 상태가 바뀌어도 박자를 잇는다.
 WAIT_BEACON_INTERVAL_SEC = 10.0
+# 홈 알림(2026-10-08 사용자 요청) — 홈에서 쉬는(IDLE) 동안 1분마다 M3 를 말해 "여기
+# 있다"를 알린다. 홈인지는 실제 위치(/amcl_pose)로 본다 — 복귀가 실패해도 RETURNING 은
+# 끝나므로 상태만으로는 홈에 있는지 모른다. 노드 파라미터 home_beacon_interval_sec 로
+# 바꾸고 0 이면 끈다.
+HOME_BEACON_INTERVAL_SEC = 60.0
+HOME_BEACON_RADIUS_M = 0.5
 # 손잡이를 이만큼 계속 놓고 있으면 대기 장소로 떠난다(터치 센서가 살아 있을 때).
 # 센서가 없거나 끊겼거나 시연 스위치(grip_assume_held)면 M2 가 끝나자마자 떠난다.
 WAIT_RELEASE_SEC = 5.0
@@ -1185,6 +1192,7 @@ class MissionLogic:
         handle_lost_give_up_sec: float = HANDLE_LOST_GIVE_UP_SEC,
         handle_state_stale_sec: float = HANDLE_STATE_STALE_SEC,
         grip_assume_held: bool = False,
+        home_beacon_interval_sec: float = HOME_BEACON_INTERVAL_SEC,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -1228,6 +1236,8 @@ class MissionLogic:
         # False 이면 접근을 마친 자리에 그대로 선다 — 홈 좌표를 넣기 전의 원래
         # 동작이다. 실기 확인이 끝나면 True 로 바꿔 '제자리 = 홈'으로 만든다.
         self.auto_return_home = auto_return_home
+        # 홈 알림 간격(초). 0 이하면 끈다. 뜻은 HOME_BEACON_INTERVAL_SEC 주석.
+        self.home_beacon_interval_sec = home_beacon_interval_sec
         # 지금 복귀가 '접근 뒤 복귀'인가 '관리자가 부른 홈 복귀'인가.
         #
         # 두 복귀는 가는 곳이 같아서 State.RETURNING 을 함께 쓰지만 **끝낼 때
@@ -1366,6 +1376,9 @@ class MissionLogic:
         # 지금 대기가 어디서인가: "spot"(대기 장소) / "destination"(막혀 목적지) / ""(제자리).
         self._wait_place: str = ""
         self._beacon_next_at: Optional[float] = None   # 다음 M3 시각
+        # 로봇의 지금 위치(map). 노드가 /amcl_pose 로 넣어 준다. 홈 알림 판정용.
+        self.robot_pose: Optional[Pose2D] = None
+        self._home_beacon_next_at: Optional[float] = None   # 다음 홈 알림 시각
         self._release_text: str = ""                   # M2 문장 — 재생 완료 대조
         self._release_spoken_at: Optional[float] = None
         self._release_entered_at: Optional[float] = None
@@ -3020,6 +3033,36 @@ class MissionLogic:
         # 이면 최대 6초 기다렸다 나와 대화 끝에 끼어든다.
         return [Say(MSG_WAIT_BEACON, priority="ambient")]
 
+    def _at_home(self) -> bool:
+        """IDLE 이고 실제 위치가 홈 HOME_BEACON_RADIUS_M 안이다. 위치나 홈이 없으면 False."""
+        home = self.return_destination
+        pose = self.robot_pose
+        if self.state != State.IDLE or home is None or pose is None:
+            return False
+        return math.hypot(pose.x - home.pose.x,
+                          pose.y - home.pose.y) <= HOME_BEACON_RADIUS_M
+
+    def _home_beacon_tick(self, now: float) -> list:
+        """홈 알림 — 홈에서 쉬는 동안 1분마다 M3. 첫 마디는 홈에 선 지 1분 뒤.
+
+        홈을 벗어나거나 IDLE 이 아니게 되면 박자를 지운다(돌아오면 다시 1분부터).
+        대화 중이면 건너뛰고 박자는 잇는다 — M3(_beacon_tick)와 같은 규칙이다.
+        """
+        if self.home_beacon_interval_sec <= 0 or not self._at_home():
+            self._home_beacon_next_at = None
+            return []
+        if self._home_beacon_next_at is None:
+            self._home_beacon_next_at = now + self.home_beacon_interval_sec
+            return []
+        if now < self._home_beacon_next_at:
+            return []
+        while self._home_beacon_next_at <= now:
+            self._home_beacon_next_at += self.home_beacon_interval_sec
+        if self._ear_holds(now):
+            return []
+        # ambient — 다른 말이 나가거나 줄 서 있으면 TTS 가 버린다(M3 와 같다).
+        return [Say(MSG_WAIT_BEACON, priority="ambient")]
+
     def _wait_expired(self, now: float) -> list:
         """M7 + 앱 알림 + 홈. 대기 장소가 있든 없든 모든 대기의 만료다."""
         dest = self._arrived_destination
@@ -3635,6 +3678,8 @@ class MissionLogic:
                         # 멘트 완주를 기다려 낡은 소식이 된다.
                         actions.append(Say(MSG_ESTOP_RELEASED, priority="emergency"))
 
+        # 홈 알림은 상태 분기 뒤에 본다 — 이번 tick 에 IDLE 을 떠났으면 박자를 지운다.
+        actions.extend(self._home_beacon_tick(now))
         return actions
 
     # -- 내부 ------------------------------------------------------------------
