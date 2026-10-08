@@ -3,12 +3,15 @@
 칸 하나의 첫 반응은 test_reaction_table.py 가 못 박는다. 여기는 그 뒤에 이어지는 일을 본다.
 """
 from reaction_states import (BOUNDS, ELEV, ROOM, SPOT_DEST, asking, asking_wait_time,
-                             confirming, idle_braked, intent, lookup, navigating, returning,
-                             returning_late, waiting, waiting_asked, waiting_release)
+                             awaiting_user, confirming, idle_braked, intent, lookup, navigating,
+                             returning, returning_late, turning, waiting, waiting_asked,
+                             waiting_release)
 from vica_mission_manager.mission_logic import (
     MSG_ALREADY_GOING,
+    MSG_APPROACH_ONBOARDING,
     MSG_ASK_ENTRANCE,
     MSG_ASK_WAIT_TIME,
+    MSG_CONFIRM_PROMPT_FALLBACK,
     MSG_CONFIRM_SWITCH,
     MSG_CANCEL_KEPT,
     MSG_CANCEL_CONFIRM,
@@ -263,3 +266,37 @@ def test_switch_to_a_closed_place_keeps_the_question():
                                  lambda i: closed if i == "vip" else lookup(i), BOUNDS, True)
     assert _says(acts) == [MSG_PRIVATE_DEST]
     assert logic.state == State.CONFIRMING and logic.confirming_dest_id == "wc"
+
+
+# ---- Task 11: 접근 질문에 목적지로 답하기 -----------------------------------------
+def _after_turn(logic, t):
+    """회전이 끝났다 — 손잡이 안내 뒤(시험 로봇은 터치 센서가 없어 바로) 다음 질문이 나온다."""
+    return _says(logic.on_tick(t, NavStatus.SUCCEEDED))
+
+
+def test_destination_answer_is_accepted_and_asked_after_the_turn():
+    logic, t = awaiting_user()
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id, need_confirm=True), t,
+                          lookup, BOUNDS, True)
+    assert logic.state == State.TURNING
+    says = _after_turn(logic, t + 4.0)
+    assert says[-1] == say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")
+    assert logic.state == State.CONFIRMING and logic.confirming_dest_id == ELEV.id
+    acts = logic.on_voice_intent(intent("affirm"), t + 6.0, lookup, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+
+
+def test_destination_said_while_turning_is_remembered():
+    logic, t = turning()
+    assert logic.on_voice_intent(intent(matched_destination_id=ELEV.id), t, lookup,
+                                 BOUNDS, True) == []
+    says = _after_turn(logic, t + 3.0)
+    assert says[-1] == say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")
+
+
+def test_unknown_destination_falls_back_to_onboarding():
+    logic, t = awaiting_user()
+    logic.on_voice_intent(intent(matched_destination_id="nowhere", need_confirm=True), t,
+                          lookup, BOUNDS, True)
+    assert logic.state == State.TURNING
+    assert _after_turn(logic, t + 4.0)[-1] == MSG_APPROACH_ONBOARDING

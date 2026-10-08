@@ -332,10 +332,6 @@ EXPECT = {
 }
 
 PENDING = {
-    # Task 11
-    "AWAITING_USER.navc": 11,
-    "AWAITING_USER.navp": 11,
-    "TURNING.navc": 11,
     # Task 12
     "WAITING_ASKED.yes": 12,
 }

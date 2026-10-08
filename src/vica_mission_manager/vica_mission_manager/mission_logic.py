@@ -1408,6 +1408,9 @@ class MissionLogic:
         # 원래 가던 목적지를 여기 든다. 확정되면 새 목적지로, 거절·무응답·호출이면 이
         # 목적지로 다시 출발한다(_fold_confirming). 대기 보류(_wait_hold)와 같은 틀이다.
         self._change_from: Optional[Destination] = None
+        # 접근 질문·돌아서기 중에 사용자가 말한 목적지(2026-10-08 반응표). 손잡이를 내준 뒤
+        # 온보딩 대신 이 목적지로 확인 질문을 한다. 그때 쓰고 비운다.
+        self._approach_dest: Optional[Destination] = None
         # 지금 확인 질문의 문장(2026-10-08 반응표). "다시 가자"·다시 묻기에서 같은 질문을 한다.
         self._confirm_prompt = ""
         # 지금 안내 주행의 행동 트리 종류. 재시도·재개가 같은 트리를 쓰게 한다.
@@ -1513,6 +1516,7 @@ class MissionLogic:
             State.WAITING_RELEASE: self._react_waiting,
             State.WAITING: self._react_waiting,
             State.AWAITING_USER: self._react_awaiting_user,
+            State.TURNING: self._react_turning,
             State.RETURNING: self._react_returning,
         }.get(self.state)
         if handler is None:
@@ -1724,14 +1728,37 @@ class MissionLogic:
         return [Say(msg, priority="response")]
 
     def _react_awaiting_user(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """접근 질문. 취소 = 아니요(물러난다). 잠깐·다시 가자 = "네?" 하고 질문 유지, 답 시계를
-        지금부터 다시 센다."""
+        """접근 질문. 목적지로 답하면("응, 화장실 가고 싶어") 수락으로 받고 그 목적지를 기억한다
+        — 돌아서 손잡이를 내준 뒤 확인 질문으로 묻는다(규칙 1, 옛 동작은 버림·"다른 응대 중").
+        취소 = 아니요(물러난다). 잠깐·다시 가자 = "네?" 하고 질문 유지, 답 시계를 다시 센다."""
+        if intent.intent == "navigate":
+            self._approach_dest = self._approach_destination(intent, lookup, bounds, nav_ready)
+            return self.on_approach_answer(True, now)
         if intent.intent == "cancel":
             return self.on_approach_answer(False, now)
         if intent.intent in ("pause", "resume"):
             self._response_deadline = now + self.approach_response_timeout_sec
             return [self._ask(MSG_WAKE_GREETING)]
         return None
+
+    def _react_turning(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """돌아서는 중에 말한 목적지 — 기억했다가 손잡이를 내준 뒤 확인 질문으로 묻는다.
+        도는 동안은 말을 얹지 않는다(옛 동작은 확정에 "지금은 다른 응대 중입니다")."""
+        if intent.intent != "navigate":
+            return None
+        dest = self._approach_destination(intent, lookup, bounds, nav_ready)
+        if dest is not None:
+            self._approach_dest = dest
+        return []
+
+    def _approach_destination(self, intent, lookup, bounds, nav_ready) -> Optional[Destination]:
+        """접근 대화 중 받은 목적지 — 갈 수 있는 곳만 기억한다. 못 가는 곳이면 None 이고,
+        손잡이를 내준 뒤 평소 온보딩("어디로 가고 싶으신가요?")을 한다."""
+        dest = lookup(intent.matched_destination_id)
+        confirmed = replace(intent, need_confirm=False)
+        if check_gate(confirmed, dest, bounds, self.estop_active, nav_ready) != GateReason.OK:
+            return None
+        return dest
 
     def _react_returning(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """홈 복귀. 기다려 = 세우고 직전 목적지 대기 장소로(결정 1). 다 됐어 = 그대로 홈 + 한마디.
@@ -2526,6 +2553,7 @@ class MissionLogic:
             return [Navigate(destination)], GateReason.OK
 
         self.state = State.APPROACHING
+        self._approach_dest = None
         self.active_destination = destination
         self.approach_track_id = request.track_id
         self.approach_goal_pose = request.goal
@@ -2642,6 +2670,16 @@ class MissionLogic:
         actions: list = []
         if engaged:
             actions.append(Haptic(HAPTIC_PATTERN_GRIP_ACK))
+        approach_dest = self._approach_dest
+        self._approach_dest = None
+        if approach_dest is not None:
+            # 접근 질문에 목적지로 답했다 — 온보딩 대신 그 목적지를 확인한다(2026-10-08 반응표).
+            self.state = State.CONFIRMING
+            self._confirming_dest_id = approach_dest.id
+            self._confirm_deadline = now + self.confirm_timeout_sec
+            self._confirm_prompt = self._confirm_prompt_for(approach_dest)
+            actions.append(self._ask(self._confirm_prompt))
+            return actions
         # 온보딩 질문을 던지는 자리 — 빈손 되묻기 사다리를 켠다.
         self._arm_dest_prompt(now)
         actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
@@ -3932,6 +3970,7 @@ class MissionLogic:
             elif (self._turn_deadline is not None
                   and now >= self._turn_deadline):
                 # spin 이 시작조차 안 됐다(노드 결함 등). 시계로 탈출한다.
+                self._approach_dest = None
                 self._to_idle()
 
         elif self.state == State.AWAITING_USER:
@@ -4262,6 +4301,7 @@ class MissionLogic:
         self._confirm_deadline = None
         self._last_guided = None
         self._late_answer_finish = None
+        self._approach_dest = None
         self._estop_entered_at = now
         self._estop_clear_since = None
         self._announced_milestones = set()
