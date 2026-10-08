@@ -2,8 +2,10 @@
 
 칸 하나의 첫 반응은 test_reaction_table.py 가 못 박는다. 여기는 그 뒤에 이어지는 일을 본다.
 """
-from reaction_states import BOUNDS, intent, lookup, waiting, waiting_release
+from reaction_states import BOUNDS, intent, lookup, navigating, waiting, waiting_release
 from vica_mission_manager.mission_logic import (
+    MSG_CANCEL_CONFIRM,
+    MSG_CANCELED,
     MSG_WAIT_SPOT_CONFIRM,
     NavStatus,
     Say,
@@ -43,3 +45,14 @@ def test_release_waits_for_the_new_wait_sentence():
     logic.on_wait_speech_spoken(new, t + 6.0)
     logic.on_tick(t + 6.1, NavStatus.NONE)
     assert logic.state == State.MOVING_TO_WAIT_SPOT
+
+
+# ---- Task 5: 다 됐어 -----------------------------------------------------------
+def test_navigating_finish_twice_cancels_like_cancel_twice():
+    """안내 주행 중 "다 됐어"는 "취소"와 같은 길 — 되물은 뒤 한 번 더 말하면 취소한다."""
+    logic, t = navigating()
+    first = logic.on_voice_intent(intent("finish"), t, lookup, BOUNDS, True)
+    assert _says(first) == [MSG_CANCEL_CONFIRM]
+    second = logic.on_voice_intent(intent("finish"), t + 2.0, lookup, BOUNDS, True)
+    assert MSG_CANCELED in _says(second)
+    assert logic.state == State.IDLE

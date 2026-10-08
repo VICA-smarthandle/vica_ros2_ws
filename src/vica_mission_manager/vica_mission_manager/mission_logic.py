@@ -1503,22 +1503,25 @@ class MissionLogic:
         return Say(text, priority="response", expects_reply=True)
 
     def _react_idle(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """안내 없음. 그냥 쉬는 중의 기다려 = 이유를 말한다(규칙 1). 홈 가다 세운 뒤(복귀 재개
-        사다리)와 손잡이 잡기·온보딩 질문 중은 여기서 다루지 않는다."""
+        """안내 없음. 그냥 쉬는 중의 기다려·다 됐어 = 이유를 말한다(규칙 1). 홈 가다 세운 뒤
+        (복귀 재개 사다리)와 손잡이 잡기·온보딩 질문 중은 여기서 다루지 않는다."""
         if (self._return_interrupted or self._grip_wait_since is not None
                 or self._dest_prompt_stage is not None):
             return None
-        if intent.intent == "wait":
+        if intent.intent in ("wait", "finish"):
             return [Say(MSG_NOT_NAVIGATING, priority="response")]
         return None
 
     def _react_confirming(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """확인 질문. "네"만 출발이고 기다려는 "아니요"와 같다 — 대기·주행 중 바꾸기 질문이면
-        하던 대기·주행으로 돌아간다(규칙 1). 잠깐 = "네?" 하고 질문을 그대로 둔다. 주행 중
-        바꾸기 질문의 잠깐은 지금처럼 일시정지다."""
+        """확인 질문. "네"만 출발이고 기다려·다 됐어는 "아니요"와 같다 — 대기·주행 중 바꾸기
+        질문이면 하던 대기·주행으로 돌아간다(규칙 1). 주행 중 바꾸기 질문의 다 됐어는 안내
+        전체를 그만둘지 되묻는다. 잠깐 = "네?" 하고 질문을 그대로 둔다. 주행 중 바꾸기
+        질문의 잠깐은 지금처럼 일시정지다."""
         kind = intent.intent
         change = self._change_from is not None
-        if kind == "wait":
+        if kind == "finish" and change:
+            return self._voice_mission_command("cancel", now, nav_ready)
+        if kind in ("wait", "finish"):
             dest = lookup(self.confirming_dest_id or "")
             return self.on_confirm_answer(False, dest, bounds, nav_ready, now)
         if kind == "pause" and not change:
@@ -1527,14 +1530,20 @@ class MissionLogic:
         return None
 
     def _react_navigating(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """안내 주행. 기다려 = 잠깐과 같이 멈춘다(규칙 1)."""
-        if intent.intent == "wait":
+        """안내 주행. 기다려 = 잠깐과 같이 멈춘다, 다 됐어 = 취소처럼 되묻는다(규칙 1)."""
+        kind = intent.intent
+        if kind == "wait":
             return self._voice_mission_command("pause", now, nav_ready)
+        if kind == "finish":
+            return self._voice_mission_command("cancel", now, nav_ready)
         return None
 
     def _react_paused(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """일시정지. 잠깐·기다려 = 선 채로 "잠시 멈추겠습니다…"를 다시(규칙 1, 옛 말은 "안내
-        중이 아닙니다"). 손 놓침 정지는 on_pause_request 가 보통 정지로 바꾼다."""
+        중이 아닙니다"). 손 놓침 정지는 on_pause_request 가 보통 정지로 바꾼다. 다 됐어 =
+        취소처럼 되묻는다."""
+        if intent.intent == "finish":
+            return self._voice_mission_command("cancel", now, nav_ready)
         if intent.intent in ("pause", "wait"):
             actions, reason = self.on_pause_request(now)
             if reason == GateReason.OK:
