@@ -550,7 +550,17 @@ controller_server:
       us_confirm_count: 2
       us_confirm_tol: 0.15
       us_near_confirm_range: 0.40        # run48: 이보다 가까운 값은 한 번에 인정(콘 0.33 을 두 번째 프레임 기다리다 놓침)
-      us_memory_time: 1.5                # run48: 확인된 점을 1.5 s 기억 — 먼 반사 1.18 m 하나로 콘을 잊고 부딪혔다
+      # run48: 확인된 점을 1.5 s 기억 — 먼 반사 1.18 m 하나로 콘을 잊고 부딪혔다.
+      # 2026-10-08 run74 뒤(사용자 결정): '지나갈 때까지 기억'. 옛 규칙은 에코 없음 2번(약 0.8 s)이면 지워,
+      # 몸을 틀어 콘이 대각선 사각으로 나가면 잊고 콘 쪽 차선으로 돌아가 스쳤다(run71 17:06:53, run74 21:12:33).
+      # 이제 센서가 그 자리를 다시 비추며 비었음을 2번 볼 때, 몸 뒤 끝 + 0.2 m 를 지나갔을 때, 2 m 넘게
+      # 멀어졌을 때만 지운다. us_memory_time 은 안전 상한(30 s). 시연장 장애물 = 콘·사람뿐(사용자).
+      # 끄기: us_pass_memory false, us_memory_time 1.5.
+      us_memory_time: 30.0
+      us_pass_memory: true
+      us_pass_margin: 0.2
+      us_pass_max_dist: 2.0
+      us_memory_slots: 4
       us_arc_points: 7
       publish_state: true
     # ══════════════════════════════════════════════════════════════════════

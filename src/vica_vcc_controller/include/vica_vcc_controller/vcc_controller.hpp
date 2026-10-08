@@ -52,7 +52,7 @@ private:
     const std::string & frame, const geometry_msgs::msg::PoseStamped & in,
     geometry_msgs::msg::PoseStamped & out) const;
   void fillClearance(const geometry_msgs::msg::PoseStamped & pose);
-  void fillUltrasonic(double now);
+  void fillUltrasonic(double now, const core::Pose2D & robot);
   double steadyNow() const;
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
@@ -91,6 +91,8 @@ private:
   double us_confirm_tol_{0.15};
   int us_arc_points_{7};
   std::vector<double> us_max_range_;   // 채널별 거리 상한(0 이하 = 없음)
+  double us_rear_x_{0.0};              // 몸 뒤 끝(로봇 좌표, footprint 최소 x)
+  int us_memos_{0};                    // 지금 들고 있는 초음파 기억 수(/vcc/state us_mem)
   int us_fresh_{0};   // 나이 us_max_age 안 측정이 있는 채널 수(설계서 10절: 초음파가 전부 오래되면 표시)
 
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>> state_pub_;

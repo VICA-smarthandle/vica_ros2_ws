@@ -276,3 +276,81 @@ TEST(Ultrasonic, RangeCapTurnsFarReadingIntoNoEcho)
   EXPECT_DOUBLE_EQ(capRange(r(0.72, 0.0), 0.0).range, 0.72);
   EXPECT_DOUBLE_EQ(capRange(r(0.72, 0.0), 0.40).range, 1.5);
 }
+
+// ── 지나갈 때까지 기억(2026-10-08 run74 뒤) ─────────────────────────────────────────
+namespace
+{
+UltrasonicParams passParams()
+{
+  UltrasonicParams p;
+  p.pass_memory = true;
+  p.memory_time = 30.0;
+  return p;
+}
+// 콘을 0.60 m 앞(전역 x 0.60)에서 두 번 봐서 확인한다.
+UltrasonicChannel seenCone()
+{
+  UltrasonicChannel ch(passParams());
+  ch.push(r(0.60, 10.0));
+  ch.push(r(0.60, 10.42));
+  return ch;
+}
+}  // namespace
+
+TEST(UltrasonicPass, ConeLeavingTheBeamByTurningIsRemembered)
+{
+  // run74 21:12:33: 몸을 틀어 콘이 빔 밖(대각선)으로 나가 에코 없음 2번 -> 옛 규칙은 지웠다.
+  UltrasonicChannel ch = seenCone();
+  ch.push(at(1.5, 10.84, {0.0, 0.0, 0.9}));   // 0.9 rad 틀어 반폭 0.52 rad 빔 밖
+  ch.push(at(1.5, 11.26, {0.0, 0.0, 0.9}));
+  ch.push(at(1.5, 11.68, {0.0, 0.0, 0.9}));
+  const auto obs = ch.obstacles(11.7);
+  ASSERT_EQ(obs.size(), 1u);
+  EXPECT_NEAR(obs[0].range, 0.60, 1e-9);
+}
+
+TEST(UltrasonicPass, SeeingThroughTheSpotTwiceErasesIt)
+{
+  // 그 자리를 다시 비추는데 에코 없음 2번 = 정말 비었다(사람이 비켰다).
+  UltrasonicChannel ch = seenCone();
+  ch.push(r(1.5, 10.84));
+  EXPECT_FALSE(ch.obstacles(10.9).empty());   // 한 번은 남는다
+  ch.push(r(1.5, 11.26));
+  EXPECT_TRUE(ch.obstacles(11.3).empty());
+}
+
+TEST(UltrasonicPass, StandingStillDoesNotExpireTheMemory)
+{
+  // 옛 규칙은 1.5 s 면 지웠다. 콘 앞에서 서 있는 동안(빔 밖) 20 s 가 지나도 남는다.
+  UltrasonicChannel ch = seenCone();
+  ch.forget({0.0, 0.0, 0.0}, -0.62);
+  EXPECT_FALSE(ch.obstacles(30.0).empty());
+}
+
+TEST(UltrasonicPass, PassedOrFarMemoryIsForgotten)
+{
+  // 시각 12.0: 마지막 측정(10.42)이 '지금 확인' 창(max_age 1.0 s)을 지나 기억만 남은 때.
+  UltrasonicChannel ch = seenCone();             // 콘 전역 x 0.60, 몸 뒤 끝 -0.62, 여유 0.2
+  ch.forget({1.30, 0.0, 0.0}, -0.62);            // 콘은 로봇 좌표 -0.70 — 아직 몸 옆
+  EXPECT_FALSE(ch.obstacles(12.0).empty());
+  ch.forget({1.50, 0.0, 0.0}, -0.62);            // -0.90 < -0.82 — 지나갔다
+  EXPECT_TRUE(ch.obstacles(12.0).empty());
+
+  UltrasonicChannel far = seenCone();
+  far.forget({0.6, 2.5, -M_PI / 2.0}, -0.62);    // 2.5 m 떨어짐(앞쪽이어도)
+  EXPECT_TRUE(far.obstacles(12.0).empty());
+}
+
+TEST(UltrasonicPass, SafetyCapAndSlots)
+{
+  UltrasonicChannel ch = seenCone();
+  EXPECT_FALSE(ch.obstacles(39.0).empty());
+  EXPECT_TRUE(ch.obstacles(41.0).empty());       // 30 s 상한
+  // 서로 다른 자리 여러 개를 함께 든다(최대 memory_slots 4).
+  UltrasonicChannel many(passParams());
+  for (int k = 0; k < 6; ++k) {
+    const double y = 0.5 * k;
+    many.push(at(0.30, 10.0 + k, {0.0, y, 0.0}));   // 0.40 안이라 한 번에 확인
+  }
+  EXPECT_EQ(many.memoryCount(), 4u);
+}

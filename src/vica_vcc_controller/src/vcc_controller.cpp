@@ -154,6 +154,11 @@ void VccController::configure(
   up.confirm_tol = us_confirm_tol_;
   up.near_confirm_range = dp("us_near_confirm_range", 0.40);   // run48 F4b: 가까운 값은 한 번에
   up.memory_time = dp("us_memory_time", 1.5);                  // run48 F4c: 확인된 점 기억
+  // 2026-10-08 run74 뒤: 지나갈 때까지 기억(켜면 us_memory_time 은 안전 상한). 기본 끔 = 옛 규칙.
+  up.pass_memory = dp("us_pass_memory", false);
+  up.pass_margin = dp("us_pass_margin", 0.2);
+  up.pass_max_dist = dp("us_pass_max_dist", 2.0);
+  up.memory_slots = dp("us_memory_slots", 4);
   publish_state_ = dp("publish_state", true);
   const std::vector<std::string> topics = dp(
     "ultrasonic_topics", std::vector<std::string>{
@@ -163,6 +168,8 @@ void VccController::configure(
   // costmap 이 이미 padding 을 넣은 footprint 를 준다(Costmap2DROS::getRobotFootprint).
   for (const auto & pt : costmap_ros_->getRobotFootprint()) {p.footprint.push_back({pt.x, pt.y});}
   params_ = p;
+  us_rear_x_ = 0.0;
+  for (const auto & q : params_.footprint) {us_rear_x_ = std::min(us_rear_x_, q.x);}
   core_.configure(params_);
   field_.setFootprint(params_.footprint);
 
@@ -330,12 +337,15 @@ void VccController::fillClearance(const geometry_msgs::msg::PoseStamped & pose)
   g.compute();
 }
 
-void VccController::fillUltrasonic(double now)
+void VccController::fillUltrasonic(double now, const core::Pose2D & robot)
 {
   std::vector<core::Point2D> pts;
   std::lock_guard<std::mutex> lock(us_mutex_);
   us_fresh_ = 0;
+  us_memos_ = 0;
   for (auto & ch : us_channels_) {
+    ch.forget(robot, us_rear_x_);   // 지나간 기억 지우기(pass_memory 일 때만)
+    us_memos_ += static_cast<int>(ch.memoryCount());
     if (ch.fresh(now, us_max_age_)) {++us_fresh_;}
     // 지금 확인된 값 ∪ 기억(run48 F4c). 받은 순간의 센서 자세로 놓는다(지금 TF 로 다시 옮기지 않는다).
     for (const auto & r : ch.obstacles(now)) {
@@ -376,7 +386,7 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
   core::Path robot_path = windowPlan(pose, goal_robot);
 
   fillClearance(pose);
-  fillUltrasonic(now);
+  fillUltrasonic(now, toPose2D(pose.pose));
 
   core::CoreInputs in;
   in.now = now;
@@ -401,11 +411,11 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
     char buf[256];
     std::snprintf(buf, sizeof(buf),
       "state=%s reason=%s offset=%.2f target=%.2f blocked=%d turn=%d align=%d fail=%d v=%.3f w=%.3f "
-      "us_fresh=%d rot=%.0f ext=%d defer=%d",
+      "us_fresh=%d rot=%.0f ext=%d defer=%d us_mem=%d",
       core::stateName(out.state), out.reason, out.offset, out.target, out.lanes_blocked ? 1 : 0,
       static_cast<int>(out.turn_mode), out.align_attempts, static_cast<int>(out.failure),
       out.cmd.v, out.cmd.w, us_fresh_, out.turn_rotated * 180.0 / M_PI, out.end_extended ? 1 : 0,
-      out.collision_deferred ? 1 : 0);
+      out.collision_deferred ? 1 : 0, us_memos_);
     s.data = buf;
     state_pub_->publish(s);
     nav_msgs::msg::Path lp;

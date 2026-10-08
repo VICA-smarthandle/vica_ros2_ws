@@ -71,6 +71,10 @@ void UltrasonicChannel::push(const RangeReading & in)
   hist_.push_back(r);
   while (hist_.size() > 4) {hist_.pop_front();}
 
+  if (p_.pass_memory) {
+    pushPass(r, confirmed(r.recv_time, p_.max_age, p_.confirm_count, p_.confirm_tol).has_value());
+    return;
+  }
   // 확인되면 기억을 새 값으로 바꾼다.
   if (confirmed(r.recv_time, p_.max_age, p_.confirm_count, p_.confirm_tol)) {
     memory_ = r;
@@ -90,8 +94,62 @@ void UltrasonicChannel::push(const RangeReading & in)
   }
 }
 
+void UltrasonicChannel::pushPass(const RangeReading & r, bool is_confirmed)
+{
+  const double half = std::max(0.0, r.fov) / 2.0;
+  // 이 측정이 기억한 자리를 다시 비추는가. 비추는데 더 멀리(또는 에코 없음) 봤으면 그 자리는 비었다.
+  for (auto it = memos_.begin(); it != memos_.end(); ) {
+    const double dx = it->c.x - r.sensor.x, dy = it->c.y - r.sensor.y;
+    const double d = std::hypot(dx, dy);
+    const double bearing = std::remainder(std::atan2(dy, dx) - r.sensor.yaw, 2.0 * M_PI);
+    const bool in_beam = d > 1e-6 && d <= r.max_range && std::fabs(bearing) <= half;
+    if (in_beam) {
+      const bool beyond = noEcho(r) || (isObstacle(r) && r.range > d + p_.confirm_tol);
+      if (beyond) {
+        if (++it->clear >= 2) {it = memos_.erase(it); continue;}
+      } else {
+        it->clear = 0;
+      }
+    }
+    ++it;
+  }
+  if (!is_confirmed) {return;}
+  // 확인된 값은 기억에 넣는다. 같은 자리(tol 안)면 새 값으로 바꾼다.
+  const Point2D c = toParent(r.sensor, Point2D{r.range, 0.0});
+  for (auto & m : memos_) {
+    if (std::hypot(m.c.x - c.x, m.c.y - c.y) <= p_.confirm_tol) {m = Memo{r, c, 0}; return;}
+  }
+  memos_.push_back(Memo{r, c, 0});
+  while (static_cast<int>(memos_.size()) > std::max(1, p_.memory_slots)) {memos_.erase(memos_.begin());}
+}
+
+void UltrasonicChannel::forget(const Pose2D & robot, double rear_x)
+{
+  if (!p_.pass_memory) {return;}
+  const double c = std::cos(robot.yaw), s = std::sin(robot.yaw);
+  memos_.erase(
+    std::remove_if(
+      memos_.begin(), memos_.end(), [&](const Memo & m) {
+        const double dx = m.c.x - robot.x, dy = m.c.y - robot.y;
+        const double lx = c * dx + s * dy;   // 로봇 좌표 앞(+)
+        return lx < rear_x - p_.pass_margin || std::hypot(dx, dy) > p_.pass_max_dist;
+      }),
+    memos_.end());
+}
+
 std::vector<RangeReading> UltrasonicChannel::obstacles(double now) const
 {
+  if (p_.pass_memory) {
+    std::vector<RangeReading> out;
+    const auto cf = confirmed(now, p_.max_age, p_.confirm_count, p_.confirm_tol);
+    if (cf) {out.push_back(*cf);}
+    for (const auto & m : memos_) {
+      if (now - m.r.recv_time > p_.memory_time) {continue;}   // 안전 상한
+      if (cf && cf->recv_time == m.r.recv_time) {continue;}
+      out.push_back(m.r);
+    }
+    return out;
+  }
   std::vector<RangeReading> out;
   const auto c = confirmed(now, p_.max_age, p_.confirm_count, p_.confirm_tol);
   if (c) {out.push_back(*c);}
