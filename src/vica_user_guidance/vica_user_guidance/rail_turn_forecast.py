@@ -311,6 +311,11 @@ class RailTurnArbiter:
         """
         if pose is None or pose.offtrack_m > self.max_offtrack_m:
             return None
+        # 목적지 2 m 안 코너는 묶지 않는다(예고 _next_prepare 와 같은 규칙, 2026-10-08 run69).
+        # 도착 직전 레일 끝에는 실제로 없는 U턴 코너가 생기곤 하는데, 도착 정렬 회전이 거기
+        # 묶이면 '코너 끝까지 유지' 가 멈춘 로봇에서 영영 참이라 신호가 63~180 s 남았다.
+        if pose.remaining_m <= self.handoff_m:
+            return None
         for c in corners:
             if c.direction != direction:
                 continue

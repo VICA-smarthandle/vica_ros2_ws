@@ -238,3 +238,20 @@ def test_same_direction_next_corner_chains_without_gap():
     cue = arb.resolve(TurnDecision(DIRECTION_NONE, PHASE_COMPLETE, 2.0, 1, False),
                       cs, RailPose(s_end, 0.0, total - s_end, math.pi / 2), 0.4, True, math.pi / 2)
     assert cue.direction == DIRECTION_LEFT
+
+
+def test_turn_near_the_goal_does_not_hold_after_stopping():
+    # run69(10-08) 홈 도착: 레일 끝 2 m 안의 가짜 U턴 코너에 도착 정렬 회전이 묶여, 멈춘 뒤에도
+    # '코너 끝까지 유지'가 풀리지 않아 왼쪽 신호가 63 s·180 s 남았다. 목적지 2 m 안 코너는
+    # 예고처럼 묶지 않는다 — 회전이 끝나면 신호도 끝난다.
+    cs = find_corners(l_path(first=5.0, second=1.0))
+    assert len(cs) == 1
+    c = cs[0]
+    total = 6.0
+    arb = RailTurnArbiter()
+    on = arb.resolve(now(DIRECTION_LEFT), cs, pose_at(c.start_s, total), 0.0, False, 0.0)
+    assert on.direction == DIRECTION_LEFT              # 실제 회전은 알린다
+    arb.resolve(TurnDecision(DIRECTION_NONE, PHASE_COMPLETE, 20.0, 1, False),
+                cs, pose_at(c.start_s, total), 0.0, False, 0.0)
+    off = arb.resolve(idle(), cs, pose_at(c.start_s, total), 0.0, False, 0.0)
+    assert off.direction == DIRECTION_NONE             # 멈췄으면 꺼진다
