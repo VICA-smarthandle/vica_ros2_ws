@@ -67,6 +67,8 @@ void VccCore::reset(const Twist2D & measured)
   turn_rot_ = 0.0;
   have_last_yaw_ = false;
   retarget_since_ = -1.0;
+  path_fresh_ = false;
+  deferred_last_ = false;
 }
 
 void VccCore::onNewGoal()
@@ -146,6 +148,15 @@ CoreOutput VccCore::step(const CoreInputs & in)
       if (in.clearance(ps) < 0.0) {imminent = true; break;}
     }
   }
+  // 새 경로 첫 주기의 '닿는다'는 다음 주기에 한 번 더 확인한다(CoreParams::new_path_confirm).
+  const bool fresh_path = path_fresh_;
+  path_fresh_ = false;
+  bool deferred = false;
+  if (imminent && fresh_path && p_.new_path_confirm && !deferred_last_) {
+    imminent = false;
+    deferred = true;
+  }
+  deferred_last_ = deferred;
 
   StateInputs si;
   si.now = in.now;
@@ -305,6 +316,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
   out.reason = sm_.reason();
   out.turn_rotated = out.state == State::Turn ? turn_rot_ : 0.0;
   out.end_extended = extended;
+  out.collision_deferred = deferred;
   out.lane_path = lane_path;
 
   if (imminent) {

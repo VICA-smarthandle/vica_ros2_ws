@@ -63,6 +63,14 @@ struct CoreParams
   // 내리므로 급정지가 아니다(약 0.25 s·2 cm). 방향까지 맞추는 도착(홈·배송·대기 장소)은 그대로.
   // ROS 파라미터 position_only_yaw_tol. 0 이하 = 끔(예전 동작).
   double position_only_yaw_tol{3.0};
+  // ── 새 경로 첫 주기 확인(2026-10-08 run69 헛 정지 2회) ─────────────────────────────────
+  // 정지거리 검사는 '경로 선 + 차선 메모' 위에 몸을 놓고 본다. 새 경로가 온 첫 주기에는 그 둘이 아직 로봇과
+  // 안 맞는다 — 205 s 는 새 선 방향으로 몸을 돌려 놓아 지나친 물체에 꼬리가 닿았고, 1225 s 는 옛 차선 메모를
+  // 새 선에 얹어 몸을 벽 쪽 0.26 m 에 놓았다(차선 재동기는 일부러 2주기를 기다린다). 실제 앞은 비어 있었다.
+  // 켜면 그 첫 주기의 '닿는다'는 다음 주기에 한 번 더 나와야 선다(0.1 s, 0.5 m/s 로 5 cm). 실제로 내보낼
+  // (v, w) 호 검사(motionCollides)는 그 주기에도 그대로 바로 세운다. 두 주기 연속 미루는 일은 없다.
+  // ROS 파라미터 new_path_collision_confirm. 기본 끔(예전 동작).
+  bool new_path_confirm{false};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -95,6 +103,7 @@ struct CoreOutput
   const char * reason{""};
   double turn_rotated{0.0};     // 이번 Turn 에서 돈 누적 각(rad), 진단용
   bool end_extended{false};     // 이번 주기 조준점이 경로 끝 연장선 위였나(진단용)
+  bool collision_deferred{false};   // 새 경로 첫 주기라 정지거리 '닿는다'를 한 번 미뤘나(진단용)
   Path lane_path;
 };
 
@@ -113,6 +122,8 @@ public:
   // 새 goal(경로 끝점이 0.5 m 넘게 이동): 도착 정렬만 초기화하고, Align·Hold 면 상황도 되돌린다.
   // 차선·출력단은 이어 간다 — 레일 BT 당근 모드가 끝점을 ~1 Hz 로 옮긴다(최종 리뷰 I3).
   void onNewGoal();
+  // 새 경로를 받았다(플러그인 setPlan). 다음 step 한 번이 '새 경로 첫 주기'다.
+  void onNewPath() {path_fresh_ = true;}
   CoreOutput step(const CoreInputs & in);
 
 private:
@@ -133,5 +144,7 @@ private:
   double last_yaw_{0.0};
   bool have_last_yaw_{false};
   double retarget_since_{-1.0};
+  bool path_fresh_{false};       // 이번 step 이 새 경로 첫 주기인가
+  bool deferred_last_{false};    // 지난 주기에 정지거리 판정을 한 번 미뤘나(연속으로는 안 미룬다)
 };
 }  // namespace vica_vcc_controller::core

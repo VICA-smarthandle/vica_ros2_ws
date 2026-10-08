@@ -759,3 +759,101 @@ TEST(VccCorePositionOnly, ZeroDisablesIt)
   in.xy_tol = 0.15; in.yaw_tol = 3.141;
   EXPECT_GT(c.step(in).cmd.v, 0.0);   // 예전처럼 멈춤 반경(0.12)까지 다가간다
 }
+
+// ── 새 경로 첫 주기 확인 (2026-10-08 run69 헛 정지 1225 s) ─────────────────────────
+// 곧게 달리던 중 새 경로가 오른쪽 0.4 m 에서 시작한다. 차선 메모(d=0)는 2주기 뒤에야 새 선에 맞춰지므로
+// 첫 주기에는 몸을 새 선 위(벽 쪽)에 놓고 정지거리를 본다. 실제 로봇 자리는 벽에서 0.375 m 떨어져 있다.
+namespace
+{
+struct SideWall
+{
+  World w;
+  SideWall() {w.box(-2.5, 2.4, -0.75, -0.65);}
+};
+
+CoreParams confirmParams(bool on)
+{
+  CoreParams p = params();
+  p.new_path_confirm = on;
+  return p;
+}
+
+// 곧은 경로로 몇 주기 달려 차선 메모를 0 에 맞춰 둔다. 다음 시각을 돌려준다.
+double cruise(VccCore & c, const World & w)
+{
+  double t = 1.0;
+  for (int i = 0; i < 3; ++i, t += 0.1) {c.step(inputs(line(0.0, 0.0), w, t, 0.4));}
+  return t;
+}
+}  // namespace
+
+TEST(VccCore, StaleLaneOnNewPathStopsWithoutConfirm)
+{
+  // 예전 동작(끔): 첫 주기에 바로 선다 — run69 1225 s 의 0.6 s HOLD.
+  VccCore c; c.configure(confirmParams(false));
+  SideWall s;
+  const double t = cruise(c, s.w);
+  c.onNewPath();
+  const CoreOutput out = c.step(inputs(line(-0.4, 0.0), s.w, t, 0.4));
+  EXPECT_EQ(out.failure, Failure::CollisionAhead);
+}
+
+TEST(VccCore, StaleLaneOnNewPathIsConfirmedAndPasses)
+{
+  VccCore c; c.configure(confirmParams(true));
+  SideWall s;
+  double t = cruise(c, s.w);
+  c.onNewPath();
+  CoreOutput out = c.step(inputs(line(-0.4, 0.0), s.w, t, 0.4));
+  EXPECT_EQ(out.failure, Failure::None);
+  EXPECT_TRUE(out.collision_deferred);
+  EXPECT_GT(out.cmd.v, 0.0);
+  // 다음 주기: 차선 메모가 로봇 자리에 맞춰져 '닿는다'가 사라진다 — 서지 않는다.
+  out = c.step(inputs(line(-0.4, 0.0), s.w, t + 0.1, 0.4));
+  EXPECT_EQ(out.failure, Failure::None);
+  EXPECT_FALSE(out.collision_deferred);
+}
+
+TEST(VccCore, CollisionStillThereOnSecondCycleStops)
+{
+  // 새 경로가 연달아 와도 두 번 연속 미루지 않는다. 다음 주기에 로봇은 서 있다.
+  CoreParams p = confirmParams(true);
+  p.resync_offset = 10.0;   // 차선 메모가 끝내 안 맞는 경우를 만든다
+  VccCore c; c.configure(p);
+  SideWall s;
+  double t = cruise(c, s.w);
+  c.onNewPath();
+  CoreOutput out = c.step(inputs(line(-0.4, 0.0), s.w, t, 0.4));
+  EXPECT_TRUE(out.collision_deferred);
+  c.onNewPath();
+  out = c.step(inputs(line(-0.4, 0.0), s.w, t + 0.1, 0.4));
+  EXPECT_FALSE(out.collision_deferred);
+  EXPECT_EQ(out.state, State::Hold);   // 첫 주기에 차선 검사(lanes_blocked)가 이미 세웠다
+  EXPECT_EQ(out.cmd.v, 0.0);
+}
+
+TEST(VccCore, WallStraightAheadOnNewPathStillStopsAtOnce)
+{
+  // 코앞의 진짜 벽은 새 경로 첫 주기에도 바로 선다 — 정지거리 판정만 미룰 뿐 다른 검사는 그대로다.
+  VccCore c; c.configure(confirmParams(true));
+  World w;
+  w.box(0.35, 0.40, -2.5, 2.5);
+  c.onNewPath();
+  const CoreOutput out = c.step(inputs(line(0.0, 0.0), w, 1.0, 0.4));
+  EXPECT_EQ(out.state, State::Hold);   // 정지거리 판정은 미뤄도 차선 검사(lanes_blocked)가 바로 세운다
+  EXPECT_EQ(out.cmd.v, 0.0);
+  EXPECT_EQ(out.cmd.w, 0.0);
+}
+
+TEST(VccCore, OldPathIsNotDeferred)
+{
+  // 새 경로가 아니면(같은 경로 둘째 주기 이후) 예전처럼 한 번에 선다.
+  CoreParams p = confirmParams(true);
+  p.resync_offset = 10.0;
+  VccCore c; c.configure(p);
+  SideWall s;
+  const double t = cruise(c, s.w);
+  const CoreOutput out = c.step(inputs(line(-0.4, 0.0), s.w, t, 0.4));
+  EXPECT_EQ(out.failure, Failure::CollisionAhead);
+  EXPECT_FALSE(out.collision_deferred);
+}

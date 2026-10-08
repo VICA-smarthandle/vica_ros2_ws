@@ -131,6 +131,7 @@ void VccController::configure(
   p.end_extend_min_length = dp("end_extend_min_length", 0.3);
   p.pass_arrival = dp("pass_arrival", false);
   p.position_only_yaw_tol = dp("position_only_yaw_tol", 3.0);   // 2026-10-07 위치만 도착 = 바로 정지
+  p.new_path_confirm = dp("new_path_collision_confirm", false);   // 2026-10-08 새 경로 첫 주기 확인
   p.turn.radii = dp("turn_radii", std::vector<double>{0.2, 0.1});
   p.turn.clearance = dp("turn_clearance", 0.05);
   p.turn.keep_clearance = dp("turn_keep_clearance", -1.0);   // 10-01: 도는 중 유지 기준(0 이하 = turn_clearance)
@@ -231,6 +232,7 @@ void VccController::setPlan(const nav_msgs::msg::Path & path)
   for (const auto & ps : path.poses) {plan.push_back(toPose2D(ps.pose));}
   path_window_.setPlan(std::move(plan));
   plan_frame_ = path.header.frame_id;
+  core_.onNewPath();
   if (path.poses.empty()) {return;}
   // 새 goal: 경로 끝점이 0.5 m 넘게 옮겨지면 도착 횟수(와 Align·Hold 상황)를 초기화한다(설계서 6.2 ⑤).
   // 차선·출력단은 이어 간다 — 레일 BT 당근 모드가 끝점을 ~1 Hz 로 옮긴다(최종 리뷰 I3).
@@ -396,10 +398,11 @@ geometry_msgs::msg::TwistStamped VccController::computeVelocityCommands(
     char buf[256];
     std::snprintf(buf, sizeof(buf),
       "state=%s reason=%s offset=%.2f target=%.2f blocked=%d turn=%d align=%d fail=%d v=%.3f w=%.3f "
-      "us_fresh=%d rot=%.0f ext=%d",
+      "us_fresh=%d rot=%.0f ext=%d defer=%d",
       core::stateName(out.state), out.reason, out.offset, out.target, out.lanes_blocked ? 1 : 0,
       static_cast<int>(out.turn_mode), out.align_attempts, static_cast<int>(out.failure),
-      out.cmd.v, out.cmd.w, us_fresh_, out.turn_rotated * 180.0 / M_PI, out.end_extended ? 1 : 0);
+      out.cmd.v, out.cmd.w, us_fresh_, out.turn_rotated * 180.0 / M_PI, out.end_extended ? 1 : 0,
+      out.collision_deferred ? 1 : 0);
     s.data = buf;
     state_pub_->publish(s);
     nav_msgs::msg::Path lp;
