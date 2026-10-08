@@ -149,3 +149,15 @@ def test_side_fov_matches_firmware_side_angle_level():
     for ch in range(8):
         if levels[ch] == 4:
             assert fov[ch] == pytest.approx(level_to_rad[4])
+
+
+def test_every_channel_draws_its_physical_beam_width():
+    """10-08: 그리는 폭(Range.field_of_view) = 펌웨어 지향각 레벨의 물리 빔 폭, 채널마다."""
+    p = yaml.safe_load(CFG.read_text(encoding="utf-8"))["user_guidance_driver_node"]["ros__parameters"]
+    fov = resolve_channel_fov(p["ultrasonic_fov_rad"], p["ultrasonic_fov_rad_per_channel"], 8)
+    src = INO.read_text(encoding="utf-8")
+    line = next(ln for ln in src.splitlines() if ln.startswith("const uint8_t US_ANGLE_LEVEL_CH"))
+    levels = [int(x) for x in line.split("{")[1].split("}")[0].split(",")]
+    level_to_rad = {1: 0.524, 2: 0.698, 3: 0.873, 4: 1.047}
+    for ch in range(8):
+        assert fov[ch] == pytest.approx(level_to_rad[levels[ch]]), ch
