@@ -167,6 +167,9 @@ void VccController::configure(
   field_.setFootprint(params_.footprint);
 
   global_frame_ = costmap_ros_->getGlobalFrameID();
+  // 채널별 거리 상한(ultrasonic_topics 와 같은 순서, 0 이하 = 상한 없음). 2026-10-08 run71 뒤 바퀴 옆 0.40 m.
+  us_max_range_ = dp("us_max_range_per_topic", std::vector<double>{});
+  us_max_range_.resize(topics.size(), 0.0);
   us_channels_.assign(topics.size(), core::UltrasonicChannel(up));
   us_subs_.clear();
   for (size_t i = 0; i < topics.size(); ++i) {
@@ -190,7 +193,7 @@ void VccController::configure(
             return;
           }
           std::lock_guard<std::mutex> lock(us_mutex_);
-          us_channels_[i].push(r);
+          us_channels_[i].push(core::capRange(r, us_max_range_[i]));
         }));
   }
 

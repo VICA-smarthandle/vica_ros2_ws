@@ -103,6 +103,12 @@ std::vector<RangeReading> UltrasonicChannel::obstacles(double now) const
   return out;
 }
 
+RangeReading capRange(RangeReading r, double cap)
+{
+  if (cap > 0.0 && std::isfinite(r.range) && r.range > cap) {r.range = r.max_range;}
+  return r;
+}
+
 std::vector<Point2D> rangeToArcPoints(double range, double fov, int n)
 {
   std::vector<Point2D> pts;

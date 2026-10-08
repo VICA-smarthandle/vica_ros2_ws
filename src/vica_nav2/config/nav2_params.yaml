@@ -541,6 +541,11 @@ controller_server:
       # run65(같은 네 토픽)는 원호 허상으로 차선 옮김 20.2/분이었다 — 다음 주행에서 다시 잰다.
       # 끄기: "/ultrasonic/vcc_off" 한 개로.
       ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right", "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
+      # 채널별 거리 상한(위 순서, 0 = 없음). 2026-10-08 사용자 결정: 바퀴 옆은 0.40 m 안만 — 몸에 붙은 것만.
+      # 0.40 = slow_clearance 0.35 + 몸 여유 0.05: 더 먼 옆 값은 곧게 갈 때 속도를 못 바꾸고 차선·유턴 판단에만
+      # 들어가 허상을 만든다(run71 달리는 중 옆 값의 약 95 % 가 0.4~1.5 m 의 벽·사람). us_near_confirm_range 와
+      # 같은 경계라 남는 값은 한 번에 인정된다. 기억 규칙은 그대로. 끄기: [0.0, 0.0, 0.0, 0.0].
+      us_max_range_per_topic: [0.0, 0.0, 0.40, 0.40]
       us_max_age: 1.0
       us_confirm_count: 2
       us_confirm_tol: 0.15

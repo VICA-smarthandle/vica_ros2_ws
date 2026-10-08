@@ -261,3 +261,18 @@ TEST(Ultrasonic, MemoryExpiresAfterMemoryTime)
   EXPECT_FALSE(ch.obstacles(11.9).empty());   // 확인 나이 1.0 s 는 지났지만 기억 1.5 s 안
   EXPECT_TRUE(ch.obstacles(11.95).empty());
 }
+
+TEST(Ultrasonic, RangeCapTurnsFarReadingIntoNoEcho)
+{
+  // 10-08 바퀴 옆 0.40 m: 상한보다 먼 값(벽 0.72 m)은 에코 없음 — 확인도 기억도 안 된다.
+  UltrasonicChannel ch;
+  ch.push(capRange(r(0.72, 10.0), 0.40));
+  ch.push(capRange(r(0.72, 10.42), 0.40));
+  EXPECT_TRUE(ch.obstacles(10.5).empty());
+  // 상한 안(0.33 m)은 그대로 — 0.40 안이라 한 번에 인정된다.
+  ch.push(capRange(r(0.33, 10.84), 0.40));
+  EXPECT_FALSE(ch.obstacles(10.9).empty());
+  // 상한 0 이하 = 자르지 않음
+  EXPECT_DOUBLE_EQ(capRange(r(0.72, 0.0), 0.0).range, 0.72);
+  EXPECT_DOUBLE_EQ(capRange(r(0.72, 0.0), 0.40).range, 1.5);
+}

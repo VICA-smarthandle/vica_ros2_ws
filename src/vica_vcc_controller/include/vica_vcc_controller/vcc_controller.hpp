@@ -90,6 +90,7 @@ private:
   int us_confirm_count_{2};
   double us_confirm_tol_{0.15};
   int us_arc_points_{7};
+  std::vector<double> us_max_range_;   // 채널별 거리 상한(0 이하 = 없음)
   int us_fresh_{0};   // 나이 us_max_age 안 측정이 있는 채널 수(설계서 10절: 초음파가 전부 오래되면 표시)
 
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>> state_pub_;

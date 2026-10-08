@@ -54,6 +54,10 @@ private:
   int clear_count_{0};   // 기억보다 멀리 본(또는 에코 없는) 연속 측정 수
 };
 
+// 채널 거리 상한(2026-10-08 run71 뒤, 사용자 결정 — 바퀴 옆 0.40 m). cap 보다 먼 값은 VCC 에겐 "에코 없음"
+// (max_range)으로 바꾼다. 확인·기억 규칙은 그대로이고 들어오는 값만 자른다. cap <= 0 이면 그대로.
+RangeReading capRange(RangeReading r, double cap);
+
 // 센서 좌표(x 앞)에서 거리 range, 폭 fov 의 호를 n 점으로.
 std::vector<Point2D> rangeToArcPoints(double range, double fov, int n);
 // 측정값의 호 점을 받은 순간의 센서 자세로 전역 좌표에 놓는다(지금 TF 로 다시 옮기지 않는다).
