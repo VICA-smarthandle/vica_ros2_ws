@@ -2,14 +2,20 @@
 
 칸 하나의 첫 반응은 test_reaction_table.py 가 못 박는다. 여기는 그 뒤에 이어지는 일을 본다.
 """
-from reaction_states import BOUNDS, intent, lookup, navigating, waiting, waiting_release
+from reaction_states import (BOUNDS, ELEV, asking, intent, lookup, navigating, waiting,
+                             waiting_release)
 from vica_mission_manager.mission_logic import (
+    MSG_ALREADY_GOING,
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
+    MSG_FINISH,
+    MSG_START,
+    MSG_WAIT_FINISH_ASK,
     MSG_WAIT_SPOT_CONFIRM,
     NavStatus,
     Say,
     State,
+    say_destination,
 )
 
 
@@ -56,3 +62,36 @@ def test_navigating_finish_twice_cancels_like_cancel_twice():
     second = logic.on_voice_intent(intent("finish"), t + 2.0, lookup, BOUNDS, True)
     assert MSG_CANCELED in _says(second)
     assert logic.state == State.IDLE
+
+
+# ---- Task 6: 다시 가자 ---------------------------------------------------------
+def test_already_going_matches_the_voice_sentence():
+    """음성 replies.ALREADY_GOING("지금 {cur}{cur_josa} 가는 중이에요.")과 같은 글자."""
+    assert say_destination(MSG_ALREADY_GOING, "409호") == "지금 409호로 가는 중이에요."
+    assert say_destination(MSG_ALREADY_GOING, "식당") == "지금 식당으로 가는 중이에요."
+
+
+def test_asking_where_answers():
+    """도착 뒤 "다시 가자" → "네, 어디로 모실까요?" 다음의 답: 목적지 = 출발, 아니요 = 종료."""
+    logic, t = asking()
+    assert _says(logic.on_voice_intent(intent("resume"), t, lookup, BOUNDS, True)) == [
+        MSG_WAIT_FINISH_ASK]
+    acts = logic.on_voice_intent(intent(matched_destination_id=ELEV.id), t + 2, lookup,
+                                 BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+    assert logic.state == State.NAVIGATING
+
+    logic, t = asking()
+    logic.on_voice_intent(intent("resume"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_FINISH]
+    assert logic.state == State.RETURNING
+
+
+def test_waiting_resume_twice_never_ends_the_guidance():
+    """대기 중 "다시 가자"는 몇 번이든 묻기만 한다 — 끝내기는 "다 됐어" 두 번뿐이다."""
+    logic, t = waiting()
+    for k in range(2):
+        acts = logic.on_voice_intent(intent("resume"), t + k, lookup, BOUNDS, True)
+        assert _says(acts) == [MSG_WAIT_FINISH_ASK]
+    assert logic.state == State.WAITING

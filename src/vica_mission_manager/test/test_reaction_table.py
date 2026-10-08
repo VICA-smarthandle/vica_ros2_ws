@@ -332,15 +332,6 @@ EXPECT = {
 }
 
 PENDING = {
-    # Task 6
-    "ASKING_NEXT.resume": 6,
-    "ASKING_WAIT_TIME.resume": 6,
-    "AWAITING_USER.resume": 6,
-    "CONFIRMING.resume": 6,
-    "NAVIGATING.resume": 6,
-    "WAITING.resume": 6,
-    "WAITING_ASKED.resume": 6,
-    "WAITING_RELEASE.resume": 6,
     # Task 7
     "ASKING_WAIT_TIME.no": 7,
     "AWAITING_USER.cancel": 7,

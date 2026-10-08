@@ -509,6 +509,9 @@ MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
 MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
 MSG_NOT_NAVIGATING = "지금은 안내 중이 아닙니다."
 MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
+# 안내 주행 중 "다시 가자" — 이미 가는 중이다(미션 요청 반응표 2026-10-08). 음성
+# replies.ALREADY_GOING 과 같은 글자다 — 음성이 같은 말을 이미 합성해 쓴다.
+MSG_ALREADY_GOING = "지금 {name}{josa} 가는 중이에요."
 # 사람 접근. 질문은 되묻기와 같은 이유로 expects_reply 를 달아 내보낸다.
 # ⚠️ 문구 정본은 voice replies.py·ment_cache (approach-voice-flow.md 확정 흐름).
 # 글자까지 일치해야 사전 녹음이 재생된다 — 바꾸려면 양쪽을 함께 고치고
@@ -1363,6 +1366,7 @@ class MissionLogic:
         self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
         self._asking_question = ""       # 지금 던져 둔 도착 질문(침묵 시 같은 질문을 다시 묻는다)
         self._deny_reconfirmed = False   # 대기형 질문의 거절을 종료형으로 되물었나 (2026-09-20)
+        self._asking_where = False       # 도착 질문을 "네, 어디로 모실까요?"로 바꿔 물었나 (2026-10-08)
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
         self._wait_minutes_requested = -1    # 대장(P1): 대기 요청 분. WAITING 밖에서는 -1
@@ -1391,6 +1395,8 @@ class MissionLogic:
         # 원래 가던 목적지를 여기 든다. 확정되면 새 목적지로, 거절·무응답·호출이면 이
         # 목적지로 다시 출발한다(_fold_confirming). 대기 보류(_wait_hold)와 같은 틀이다.
         self._change_from: Optional[Destination] = None
+        # 지금 확인 질문의 문장(2026-10-08 반응표). "다시 가자"·다시 묻기에서 같은 질문을 한다.
+        self._confirm_prompt = ""
         # 지금 안내 주행의 행동 트리 종류. 재시도·재개가 같은 트리를 쓰게 한다.
         self._nav_tree: str = NAV_TREE_DEFAULT
         # 귀 상태 (/vica/listen_state). 무응답 판정 전에 귀 사정을 본다.
@@ -1527,15 +1533,30 @@ class MissionLogic:
         if kind == "pause" and not change:
             self._confirm_deadline = now + self.confirm_timeout_sec
             return [self._ask(MSG_WAKE_GREETING)]
+        if kind == "resume" and not change and self._confirm_prompt:
+            # 물어 둔 질문에 "다시 가자" — 출발해도 되는지 같은 질문으로 다시 묻는다.
+            self._confirm_deadline = now + self.confirm_timeout_sec
+            return [self._ask(self._confirm_prompt)]
         return None
 
+    @staticmethod
+    def _confirm_prompt_for(dest: Optional[Destination]) -> str:
+        """목적지 확인 질문 문장. 목적지에 문장이 없으면 음성과 같은 기본 문장이다."""
+        if dest is None:
+            return ""
+        return dest.confirm_prompt or say_destination(MSG_CONFIRM_PROMPT_FALLBACK, dest.name)
+
     def _react_navigating(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """안내 주행. 기다려 = 잠깐과 같이 멈춘다, 다 됐어 = 취소처럼 되묻는다(규칙 1)."""
+        """안내 주행. 기다려 = 잠깐과 같이 멈춘다, 다 됐어 = 취소처럼 되묻는다, 다시 가자 =
+        이미 가는 중이라고 답한다(규칙 1, 옛 말은 "다시 출발할 안내가 없습니다")."""
         kind = intent.intent
         if kind == "wait":
             return self._voice_mission_command("pause", now, nav_ready)
         if kind == "finish":
             return self._voice_mission_command("cancel", now, nav_ready)
+        if kind == "resume" and self.active_destination is not None and not self._nav_from_app:
+            return [Say(say_destination(MSG_ALREADY_GOING, self.active_destination.name),
+                        priority="response")]
         return None
 
     def _react_paused(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
@@ -1552,12 +1573,28 @@ class MissionLogic:
         return None
 
     def _react_asking(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """도착 질문·시간 질문. 잠깐 = "네?" 하고 질문 유지 — 다시 묻기 기회를 쓰지 않는다
-        (규칙 1, 옛 말은 알아듣고도 "잘 듣지 못했습니다…")."""
-        if intent.intent == "pause":
+        """도착 질문·시간 질문. 잠깐 = "네?" 하고 질문 유지 — 다시 묻기 기회를 쓰지 않는다.
+        다시 가자 = "네, 어디로 모실까요?"로 묻는다(규칙 1, 옛 말은 알아듣고도 "잘 듣지
+        못했습니다…"). 그 질문의 아니요 = 안내 종료, 네 = 못 알아들은 답이다."""
+        kind = intent.intent
+        if kind == "pause":
             self._response_deadline = None
             self._asking_entered_at = now
             return [self._ask(MSG_WAKE_GREETING)]
+        if kind == "resume":
+            self.state = State.ASKING_NEXT
+            self._asking_where = True
+            self._asking_is_finish = False
+            self._asking_time_after_yes = False
+            self._asking_question = MSG_WAIT_FINISH_ASK
+            self._response_deadline = None
+            self._asking_entered_at = now
+            return [self._ask(MSG_WAIT_FINISH_ASK)]
+        if self._asking_where and kind in ("affirm", "deny"):
+            if kind == "deny":
+                self._reset_arrival_dialog()
+                return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
+            return self._arrival_no_answer(now)
         return None
 
     def _react_waiting(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
@@ -1567,9 +1604,17 @@ class MissionLogic:
         kind = intent.intent
         if kind == "wait":
             return self._rewait(intent.wait_minutes, now)
+        if kind == "resume":
+            return self._ask_where(now)
         if kind == "pause" and self.state == State.WAITING_RELEASE:
             return [self._ask(MSG_WAKE_GREETING)]
         return None
+
+    def _ask_where(self, now: float) -> list:
+        """대기 중 "다시 가자" — 어디로 갈지 묻는다. "다 됐어"의 첫 질문과 같은 문장이지만
+        두 번 말해도 안내를 끝내지 않는다(그건 "다 됐어"만)."""
+        self._wait_finish_asked_at = now
+        return [self._ask(MSG_WAIT_FINISH_ASK)]
 
     def _rewait(self, minutes: int, now: float) -> list:
         """대기 중 "기다려"·"20분 기다려" — 시간을 지금부터 다시 세고 대기 안내를 다시 말한다.
@@ -1591,8 +1636,8 @@ class MissionLogic:
         return [Say(msg, priority="response")]
 
     def _react_awaiting_user(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """접근 질문. 잠깐 = "네?" 하고 질문 유지, 답 시계를 지금부터 다시 센다."""
-        if intent.intent == "pause":
+        """접근 질문. 잠깐·다시 가자 = "네?" 하고 질문 유지, 답 시계를 지금부터 다시 센다."""
+        if intent.intent in ("pause", "resume"):
             self._response_deadline = now + self.approach_response_timeout_sec
             return [self._ask(MSG_WAKE_GREETING)]
         return None
@@ -1745,6 +1790,7 @@ class MissionLogic:
                 self.state = State.CONFIRMING
                 self._confirming_dest_id = intent.matched_destination_id or None
                 self._confirm_deadline = now + self.confirm_timeout_sec
+                self._confirm_prompt = self._confirm_prompt_for(dest)
                 return []
 
         # need_confirm == false (확정 요청)
@@ -1870,6 +1916,7 @@ class MissionLogic:
         self.state = State.CONFIRMING
         self._confirming_dest_id = new_id
         self._confirm_deadline = now + self.confirm_timeout_sec
+        self._confirm_prompt = self._confirm_prompt_for(dest)
         # 앞서 물은 "안내를 취소할까요?"는 이 질문으로 대체됐다 — 남기면 새 목적지로
         # 출발한 뒤 "취소" 한마디가 되묻지 않고 바로 취소된다(2026-10-07 검토).
         self.cancel_confirm_pending = False
@@ -2801,6 +2848,7 @@ class MissionLogic:
         self._arrival_retried = False
         self._asking_question = question
         self._deny_reconfirmed = False
+        self._asking_where = False
         self._leaving_deadline = None
         self._response_deadline = None   # 재생완료(on_arrival_question_spoken)에서 시작
         text = f"{arrival_text} {question}".strip() if arrival_text else question
@@ -3422,6 +3470,7 @@ class MissionLogic:
         self._arrival_retried = False
         self._asking_question = ""
         self._deny_reconfirmed = False
+        self._asking_where = False
         self._leaving_deadline = None
         self._wait_until = None
         self._wait_minutes_requested = -1
