@@ -536,8 +536,11 @@ controller_server:
       # 되돌리기: 아래 원래 네 토픽으로.
       #   ["/ultrasonic/front_left", "/ultrasonic/front_right", "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
       # 2026-10-08 run69 뒤(사용자 결정): 앞쪽 2개만 다시 켠다. 바퀴 옆 2개는 끈 채로 둔다.
-      # 다음 주행에서 차선 옮김 횟수(run65 20.2/분, run58 6.1/분)를 다시 잰다. 끄기: "/ultrasonic/vcc_off" 한 개로.
-      ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right"]
+      # 2026-10-08 run71 뒤(사용자 결정): 앞바퀴 양옆 2개(left_wheel·right_wheel)도 켠다 — 10-05 원래 네 토픽.
+      # run71 17:06:53 옆으로 빠진 물체를 앞 센서가 놓친 뒤 왼쪽 옆면이 스쳤다(left_wheel 0.03 m, VCC 미입력).
+      # run65(같은 네 토픽)는 원호 허상으로 차선 옮김 20.2/분이었다 — 다음 주행에서 다시 잰다.
+      # 끄기: "/ultrasonic/vcc_off" 한 개로.
+      ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right", "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
       us_max_age: 1.0
       us_confirm_count: 2
       us_confirm_tol: 0.15
