@@ -332,15 +332,6 @@ EXPECT = {
 }
 
 PENDING = {
-    # Task 3
-    "ASKING_NEXT.pause": 3,
-    "ASKING_WAIT_TIME.pause": 3,
-    "AWAITING_USER.pause": 3,
-    "CONFIRMING.pause": 3,
-    "PAUSED.pause": 3,
-    "RETURNING.pause": 3,
-    "RETURNING_LATE.pause": 3,
-    "WAITING_RELEASE.pause": 3,
     # Task 4
     "CONFIRMING.wait": 4,
     "CONFIRMING_CHANGE.wait": 4,

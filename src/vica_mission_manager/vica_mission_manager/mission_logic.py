@@ -1481,6 +1481,72 @@ class MissionLogic:
         nav_ready: bool,
     ) -> Optional[list]:
         """반응표로 새로 정한 칸(2026-10-08). 맡지 않는 칸은 None — 옛 갈래가 처리한다."""
+        handler = {
+            State.CONFIRMING: self._react_confirming,
+            State.PAUSED: self._react_paused,
+            State.ASKING_NEXT: self._react_asking,
+            State.ASKING_WAIT_TIME: self._react_asking,
+            State.WAITING_RELEASE: self._react_waiting,
+            State.AWAITING_USER: self._react_awaiting_user,
+            State.RETURNING: self._react_returning,
+        }.get(self.state)
+        if handler is None:
+            return None
+        return handler(intent, now, lookup, bounds, nav_ready)
+
+    @staticmethod
+    def _ask(text: str) -> Say:
+        """대답을 기다리는 말 — 노드가 듣기 창을 연다(expects_reply)."""
+        return Say(text, priority="response", expects_reply=True)
+
+    def _react_confirming(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """확인 질문. 잠깐 = "네?" 하고 질문을 그대로 둔다(규칙 1). 주행 중 바꾸기 질문의
+        잠깐은 지금처럼 일시정지다."""
+        kind = intent.intent
+        change = self._change_from is not None
+        if kind == "pause" and not change:
+            self._confirm_deadline = now + self.confirm_timeout_sec
+            return [self._ask(MSG_WAKE_GREETING)]
+        return None
+
+    def _react_paused(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """일시정지. 잠깐 = 선 채로 "잠시 멈추겠습니다…"를 다시(규칙 1, 옛 말은 "안내 중이
+        아닙니다"). 손 놓침 정지는 on_pause_request 가 보통 정지로 바꾼다."""
+        if intent.intent == "pause":
+            actions, reason = self.on_pause_request(now)
+            if reason == GateReason.OK:
+                return actions
+            return [Say(MSG_PAUSED, priority="response")]
+        return None
+
+    def _react_asking(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """도착 질문·시간 질문. 잠깐 = "네?" 하고 질문 유지 — 다시 묻기 기회를 쓰지 않는다
+        (규칙 1, 옛 말은 알아듣고도 "잘 듣지 못했습니다…")."""
+        if intent.intent == "pause":
+            self._response_deadline = None
+            self._asking_entered_at = now
+            return [self._ask(MSG_WAKE_GREETING)]
+        return None
+
+    def _react_waiting(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """손 놓기 기다림·대기 중. 손 놓기 기다림의 잠깐 = "비카야"처럼 "네?" 하고 듣는다 —
+        듣는 동안은 대기 장소로 떠나지 않는다(_ear_holds)."""
+        if intent.intent == "pause" and self.state == State.WAITING_RELEASE:
+            return [self._ask(MSG_WAKE_GREETING)]
+        return None
+
+    def _react_awaiting_user(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """접근 질문. 잠깐 = "네?" 하고 질문 유지, 답 시계를 지금부터 다시 센다."""
+        if intent.intent == "pause":
+            self._response_deadline = now + self.approach_response_timeout_sec
+            return [self._ask(MSG_WAKE_GREETING)]
+        return None
+
+    def _react_returning(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """홈 복귀. 잠깐 = "비카야"처럼 세우고 "네?"(규칙 1, 옛 말은 "안내 중이 아닙니다"로
+        못 세웠다). 관리자 홈 복귀의 잠깐은 지금처럼 일시정지다."""
+        if intent.intent == "pause" and not self._returning_home:
+            return self.on_return_brake(now) + [self._ask(MSG_WAKE_GREETING)]
         return None
 
     def _route_voice_intent(
