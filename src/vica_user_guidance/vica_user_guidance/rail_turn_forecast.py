@@ -274,6 +274,13 @@ class RailTurnArbiter:
     controller_lookahead_min_m: float = 0.6
     controller_lookahead_max_m: float = 1.2
 
+    # 달리는 중에 레일 코너와 상관없는 회전은 이 각도를 넘어야 새 신호를 켠다(2026-10-08 run69).
+    # 장애물을 비키는 차선 옮김은 몸이 S자로 21~33° 틀었다 돌아와 신호가 0.8~1.3 s 깜빡였다
+    # (짧은 신호 13번 중 약 9번). 진짜 회전은 41~46° 까지 돈다. 0 이하면 끈다(옛 동작).
+    minor_turn_deg: float = 35.0
+    # 이보다 느리면 제자리 회전(출발 유턴·도착 정렬)이라 위 규칙을 쓰지 않는다 — 20° 에서 바로 켠다.
+    minor_turn_min_speed_mps: float = 0.25
+
     _seq: int = 0
     _active: _Active = field(default_factory=_Active)
     _announced: List[Point] = field(default_factory=list)
@@ -302,6 +309,13 @@ class RailTurnArbiter:
         return max(self.controller_lookahead_min_m,
                    min(self.controller_lookahead_max_m,
                        speed * self.controller_lookahead_time_sec))
+
+    def _minor_swerve(self, decision: TurnDecision, speed_mps: float) -> bool:
+        """달리는 중의 작은 회전(차선 옮김)이라 아직 신호를 켜지 않을 것인가."""
+        if self.minor_turn_deg <= 0.0 or speed_mps < self.minor_turn_min_speed_mps:
+            return False
+        angle = decision.turn_angle_deg
+        return not math.isnan(angle) and abs(angle) < self.minor_turn_deg
 
     def _claim(self, corners, pose, direction) -> Optional[RailCorner]:
         """예고 없이 시작된 실제 회전이 레일 코너였다면 그 코너에 묶고 '알린 것'으로 친다.
@@ -350,14 +364,17 @@ class RailTurnArbiter:
             if a.phase != PHASE_IDLE and a.direction == decision.direction:
                 reason = "now_inherit" if a.phase == PHASE_PREPARE else "now"
                 a.phase = PHASE_NOW                      # ① 이어받기: 번호 그대로
-            else:
+                return RailCue(decision.direction, PHASE_NOW, nan,
+                               decision.turn_angle_deg, self._seq, False, reason)
+            c = self._claim(corners, pose, decision.direction)
+            if c is not None or not self._minor_swerve(decision, speed_mps):
                 self._seq += 1                           # 예고 없던(또는 반대) 회전
-                c = self._claim(corners, pose, decision.direction)
                 self._active = _Active(PHASE_NOW, decision.direction,
                                        c.start_xy if c else None)
-                reason = "now_new"
-            return RailCue(decision.direction, PHASE_NOW, nan,
-                           decision.turn_angle_deg, self._seq, False, reason)
+                return RailCue(decision.direction, PHASE_NOW, nan,
+                               decision.turn_angle_deg, self._seq, False, "now_new")
+            # 달리며 비키는 작은 회전: 새 신호를 켜지 않고 아래(켜진 신호 붙잡기·새 예고)로 간다.
+            # 더 돌아 minor_turn_deg 를 넘으면 그 tick 에 켠다.
 
         # ── 켜진 신호 붙잡기(② 코너 끝까지 · 도는 중) ──
         if a.phase != PHASE_IDLE:

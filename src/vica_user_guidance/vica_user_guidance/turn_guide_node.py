@@ -62,6 +62,8 @@ class TurnGuideNode(Node):
         self.declare_parameter("controller_lookahead_time_sec", 2.5)
         self.declare_parameter("controller_lookahead_min_m", 0.6)
         self.declare_parameter("controller_lookahead_max_m", 1.2)
+        self.declare_parameter("minor_turn_deg", 35.0)
+        self.declare_parameter("minor_turn_min_speed_mps", 0.25)
 
         odom_topic = self.get_parameter("odom_topic").value
         publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
@@ -125,6 +127,8 @@ class TurnGuideNode(Node):
             controller_lookahead_time_sec=float(gp("controller_lookahead_time_sec").value),
             controller_lookahead_min_m=float(gp("controller_lookahead_min_m").value),
             controller_lookahead_max_m=float(gp("controller_lookahead_max_m").value),
+            minor_turn_deg=float(gp("minor_turn_deg").value),
+            minor_turn_min_speed_mps=float(gp("minor_turn_min_speed_mps").value),
         )
         self.rail_xy = []
         self.rail_cum = []

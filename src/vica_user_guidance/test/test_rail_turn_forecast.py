@@ -215,12 +215,15 @@ def test_early_actual_turn_claims_the_corner_ahead():
 
 
 def test_opposite_actual_turn_overrides_prepare():
-    # 장애물 회피로 예고와 반대로 틀면 그 회전을 새로 알린다(B안 — 사후 판정 그대로)
+    # 장애물 회피로 예고와 반대로 크게 틀면 그 회전을 새로 알린다(B안 — 사후 판정 그대로).
+    # 작은 비킴(minor_turn_deg 미만)은 예고를 그대로 둔다(10-08, 아래 차선 옮김 시험).
     cs = find_corners(l_path())
     arb = RailTurnArbiter()
     c = cs[0]
     p = arb.resolve(idle(), cs, pose_at(c.start_s - 1.7), 0.4, True, 0.0)
-    r = arb.resolve(now(DIRECTION_RIGHT), cs, pose_at(c.start_s - 1.5), 0.4, True, 0.0)
+    small = arb.resolve(now(DIRECTION_RIGHT), cs, pose_at(c.start_s - 1.6), 0.4, True, 0.0)
+    assert small.direction == DIRECTION_LEFT and small.sequence_id == p.sequence_id
+    r = arb.resolve(now(DIRECTION_RIGHT, angle=40.0), cs, pose_at(c.start_s - 1.5), 0.4, True, 0.0)
     assert r.direction == DIRECTION_RIGHT and r.sequence_id != p.sequence_id
 
 
@@ -255,3 +258,53 @@ def test_turn_near_the_goal_does_not_hold_after_stopping():
                 cs, pose_at(c.start_s, total), 0.0, False, 0.0)
     off = arb.resolve(idle(), cs, pose_at(c.start_s, total), 0.0, False, 0.0)
     assert off.direction == DIRECTION_NONE             # 멈췄으면 꺼진다
+
+
+# ── 차선 옮김 거르기 (2026-10-08 run69) ────────────────
+
+def test_lane_change_swerve_on_straight_rail_does_not_light():
+    # 곧은 레일에서 달리며 장애물을 비키는 S자(21~33°)는 신호를 켜지 않는다. run69 에서
+    # 짧은 깜빡임(0.8~1.3 s) 13번 중 약 9번이 이것이었다.
+    path = line((0, 0), (10, 0))
+    cs = find_corners(path)
+    arb = RailTurnArbiter()
+    for angle in (22.0, 28.0, 33.0):
+        cue = arb.resolve(now(DIRECTION_LEFT, angle=angle), cs, pose_at(3.0), 0.4, True, 0.0)
+        assert cue.direction == DIRECTION_NONE
+    back = arb.resolve(now(DIRECTION_RIGHT, angle=25.0), cs, pose_at(3.3), 0.4, True, 0.0)
+    assert back.direction == DIRECTION_NONE
+
+
+def test_bigger_turn_while_moving_still_lights():
+    # 계속 돌아 35° 를 넘으면(진짜 회전) 그 tick 에 켠다.
+    cs = find_corners(line((0, 0), (10, 0)))
+    arb = RailTurnArbiter()
+    assert arb.resolve(now(DIRECTION_LEFT, angle=25.0), cs, pose_at(3.0), 0.4, True,
+                       0.0).direction == DIRECTION_NONE
+    cue = arb.resolve(now(DIRECTION_LEFT, angle=36.0), cs, pose_at(3.1), 0.4, True, 0.0)
+    assert cue.direction == DIRECTION_LEFT and cue.phase == PHASE_NOW
+
+
+def test_slow_turn_lights_at_the_usual_angle():
+    # 제자리 회전·천천히 호를 그리는 출발 유턴(0.25 m/s 미만)은 지금처럼 20° 에서 켠다.
+    cs = find_corners(line((0, 0), (10, 0)))
+    for speed in (0.0, 0.15):
+        arb = RailTurnArbiter()
+        cue = arb.resolve(now(DIRECTION_LEFT, angle=22.0), cs, pose_at(3.0), speed, True, 0.0)
+        assert cue.direction == DIRECTION_LEFT
+
+
+def test_turn_at_a_rail_corner_lights_at_the_usual_angle():
+    # 레일 코너에 묶이는 회전은 빠르게 달려도 20° 에서 켠다(코너 신호는 늦추지 않는다).
+    cs = find_corners(l_path())
+    c = cs[0]
+    arb = RailTurnArbiter()
+    cue = arb.resolve(now(DIRECTION_LEFT, angle=22.0), cs, pose_at(c.start_s), 0.5, True, 0.0)
+    assert cue.direction == DIRECTION_LEFT
+
+
+def test_minor_turn_filter_can_be_switched_off():
+    cs = find_corners(line((0, 0), (10, 0)))
+    arb = RailTurnArbiter(minor_turn_deg=0.0)
+    cue = arb.resolve(now(DIRECTION_LEFT, angle=22.0), cs, pose_at(3.0), 0.5, True, 0.0)
+    assert cue.direction == DIRECTION_LEFT
