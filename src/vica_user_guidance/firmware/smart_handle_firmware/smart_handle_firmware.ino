@@ -207,7 +207,9 @@ bool arriveTailPending = false;
 // 하나뿐이라 넓혔다. 정지 시험: 빈 곳 바닥 헛값 0, 박스 30/60/100 cm 에서 50°와 차이
 // ≤0.6 cm·놓침 0, 빔 가장자리 꼬깔콘 27~40 % → 약 100 %, 가장자리 필통은 60°에서만 잡힘.
 // 나머지는 US_ANGLE_LEVEL(50°) 그대로. 드라이버 ultrasonic_fov_rad_per_channel 과 짝.
-const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 4, 3, 3, 4, 3, 3, 3, 3 };
+// 2026-10-08 run72 뒤(사용자 결정): 앞 두 개(ch1 앞 왼쪽·ch2 앞 오른쪽)를 레벨 1(30°)로. VCC 가 그리는
+// 폭을 50° 로 넓혔더니 콘 하나가 1.1 m 벽으로 그려져 차선이 다 막혔다 — 물리 빔과 그리는 폭을 30° 로 함께.
+const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 4, 1, 1, 4, 3, 3, 3, 3 };
 #define US_GAP_MS     5     // 채널 사이 간격. 앞 채널 잔향이 다음 측정에 남지 않게
 #define US_REG_DIST   0x02
 #define US_REG_CMD    0x10
