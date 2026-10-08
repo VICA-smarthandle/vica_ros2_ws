@@ -451,6 +451,9 @@ MSG_WAIT_EXPIRED = "대기 시간이 종료되어 제자리로 돌아갑니다."
 # 정해져 출발할 때 끝나므로(호출 반응표) 묻기만 한다. 다음 목적지를 미리 아는 기능이
 # 생기면 "OO으로 갈까요?"로 바꾼다(미구현).
 MSG_WAIT_FINISH_ASK = "네, 어디로 모실까요?"
+# 대기 중 "취소" — 안내를 끝낼지 묻는다(2026-10-08 사용자 결정 3, 사용자 문구). 부정 질문이라
+# "네"(필요 없다) = 종료·홈, "아니요"(필요하다) = 계속 대기. 음성 쪽이 미리 굽는 글자와 같아야 한다.
+MSG_WAIT_NEED_ASK = "안내가 필요 없으신가요?"
 # 대기 장소 입구 기준 방향 → 멘트 속 장소 말. 상황판(RobotState.wait_place)에도 같은 말을 쓴다.
 WAIT_PLACE_PHRASES = {"right": "입구 오른쪽", "left": "입구 왼쪽", "across": "입구 맞은편"}
 # 대기 장소가 막혀 목적지로 돌아와 기다릴 때의 장소 말.
@@ -1387,6 +1390,7 @@ class MissionLogic:
         self._release_spoken_at: Optional[float] = None
         self._release_entered_at: Optional[float] = None
         self._wait_finish_asked_at: Optional[float] = None   # 대기 중 "어디로 모실까요?" 시각
+        self._wait_need_asked_at: Optional[float] = None     # 대기 중 "안내가 필요 없으신가요?" 시각
         # 대기 중에 목적지 '제안'이 와서 확인 질문(CONFIRMING)으로 들어갔을 때 돌아갈
         # 대기 상태. 거절·시간초과·호출이면 이 상태로 되돌아간다(대기 시간·장소 유지).
         self._wait_hold: Optional[State] = None
@@ -1622,7 +1626,8 @@ class MissionLogic:
         """손 놓기 기다림·대기 중. 기다려 = 시간을 지금부터 다시 세고 대기 안내를 다시 말한다.
         다시 가자 = 어디로 갈지 묻는다. 손 놓기 기다림의 잠깐 = "비카야"처럼 "네?" 하고
         듣는다 — 듣는 동안은 대기 장소로 떠나지 않는다(_ear_holds). 손 놓기 기다림의
-        아니요·취소 = 끝낼지 확인. 대기 중 "어디로 모실까요?" 뒤 30초 안의 아니요 = 종료."""
+        아니요·취소 = 끝낼지 확인. 대기 중 취소 = "안내가 필요 없으신가요?"(결정 3). 대기 중
+        "어디로 모실까요?" 뒤 30초 안의 아니요 = 종료."""
         kind = intent.intent
         release = self.state == State.WAITING_RELEASE
         if kind == "wait":
@@ -1636,6 +1641,18 @@ class MissionLogic:
                 # 대기 안내(M2) 바로 뒤 "아니, 기다리지 마"·"취소" — 끝낼지 한 번 확인한다.
                 return self._ask_end_confirm(now)
             return None
+        if self._wait_need_asked_at is not None and kind in ("affirm", "deny", "cancel", "finish"):
+            # "안내가 필요 없으신가요?"의 답(결정 3). 부정 질문이라 네(필요 없다)·다 됐어·두 번째
+            # 취소 = 종료·홈, 아니요(필요하다) = 계속 기다린다.
+            self._wait_need_asked_at = None
+            if kind == "deny":
+                return [Say(MSG_CANCEL_KEPT, priority="response")]
+            self._reset_arrival_dialog()
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
+        if kind == "cancel":
+            self._wait_need_asked_at = now
+            self._wait_finish_asked_at = None
+            return [self._ask(MSG_WAIT_NEED_ASK)]
         asked = self._wait_finish_asked_at
         if kind == "deny" and asked is not None and now - asked <= WAIT_FINISH_REPEAT_SEC:
             # "네, 어디로 모실까요?"에 "아니" — 갈 곳이 없다. "다 됐어"를 두 번 한 것과 같다.
@@ -1647,6 +1664,7 @@ class MissionLogic:
         """대기 중 "다시 가자" — 어디로 갈지 묻는다. "다 됐어"의 첫 질문과 같은 문장이지만
         두 번 말해도 안내를 끝내지 않는다(그건 "다 됐어"만)."""
         self._wait_finish_asked_at = now
+        self._wait_need_asked_at = None
         return [self._ask(MSG_WAIT_FINISH_ASK)]
 
     def _rewait(self, minutes: int, now: float) -> list:
@@ -3523,6 +3541,7 @@ class MissionLogic:
         self._release_spoken_at = None
         self._release_entered_at = None
         self._wait_finish_asked_at = None
+        self._wait_need_asked_at = None
         self._wait_hold = None
 
     def _forget_interrupted_return(self) -> None:

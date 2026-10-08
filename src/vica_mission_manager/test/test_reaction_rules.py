@@ -14,6 +14,7 @@ from vica_mission_manager.mission_logic import (
     MSG_START,
     MSG_WAIT_DEFAULT,
     MSG_WAIT_FINISH_ASK,
+    MSG_WAIT_NEED_ASK,
     MSG_WAIT_SPOT_CONFIRM,
     NavStatus,
     Say,
@@ -145,4 +146,26 @@ def test_waiting_no_after_the_window_is_not_an_answer():
     logic, t = waiting_asked()
     acts = logic.on_voice_intent(intent("deny"), t + 31.0, lookup, BOUNDS, True)
     assert _says(acts) == []
+    assert logic.state == State.WAITING
+
+
+# ---- Task 8: 결정 3 — 대기 중 취소 ---------------------------------------------
+def test_need_question_is_the_users_sentence():
+    assert MSG_WAIT_NEED_ASK == "안내가 필요 없으신가요?"
+
+
+def test_need_question_answers():
+    """부정 질문: 네(필요 없다)·다 됐어·두 번째 취소 = 종료·홈, 아니요(필요하다) = 계속 대기."""
+    for answer in ("affirm", "finish", "cancel"):
+        logic, t = waiting()
+        assert _says(logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)) == [
+            MSG_WAIT_NEED_ASK]
+        acts = logic.on_voice_intent(intent(answer), t + 2, lookup, BOUNDS, True)
+        assert _says(acts) == [MSG_FINISH], answer
+        assert logic.state == State.RETURNING, answer
+
+    logic, t = waiting()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_CANCEL_KEPT]
     assert logic.state == State.WAITING

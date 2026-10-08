@@ -332,9 +332,6 @@ EXPECT = {
 }
 
 PENDING = {
-    # Task 8
-    "WAITING.cancel": 8,
-    "WAITING_ASKED.cancel": 8,
     # Task 9
     "IDLE_BRAKED.finish": 9,
     "IDLE_BRAKED.resume": 9,
