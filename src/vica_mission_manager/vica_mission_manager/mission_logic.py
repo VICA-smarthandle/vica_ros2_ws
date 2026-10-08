@@ -1487,6 +1487,9 @@ class MissionLogic:
         nav_ready: bool,
     ) -> Optional[list]:
         """반응표로 새로 정한 칸(2026-10-08). 맡지 않는 칸은 None — 옛 갈래가 처리한다."""
+        if self.cancel_confirm_pending and intent.intent in ("affirm", "deny"):
+            # "안내를 취소할까요?"의 네·아니요 — 예전엔 접근 질문 배선으로 가서 버려졌다.
+            return self.on_cancel_confirm_answer(intent.intent == "affirm", now)
         handler = {
             State.IDLE: self._react_idle,
             State.CONFIRMING: self._react_confirming,
@@ -1519,15 +1522,15 @@ class MissionLogic:
         return None
 
     def _react_confirming(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """확인 질문. "네"만 출발이고 기다려·다 됐어는 "아니요"와 같다 — 대기·주행 중 바꾸기
-        질문이면 하던 대기·주행으로 돌아간다(규칙 1). 주행 중 바꾸기 질문의 다 됐어는 안내
+        """확인 질문. "네"만 출발이고 기다려·다 됐어·취소는 "아니요"와 같다 — 대기·주행 중
+        바꾸기 질문이면 하던 대기·주행으로 돌아간다(규칙 1). 주행 중 바꾸기 질문의 다 됐어는 안내
         전체를 그만둘지 되묻는다. 잠깐 = "네?" 하고 질문을 그대로 둔다. 주행 중 바꾸기
         질문의 잠깐은 지금처럼 일시정지다."""
         kind = intent.intent
         change = self._change_from is not None
         if kind == "finish" and change:
             return self._voice_mission_command("cancel", now, nav_ready)
-        if kind in ("wait", "finish"):
+        if kind in ("wait", "finish") or (kind == "cancel" and not change):
             dest = lookup(self.confirming_dest_id or "")
             return self.on_confirm_answer(False, dest, bounds, nav_ready, now)
         if kind == "pause" and not change:
@@ -1595,19 +1598,49 @@ class MissionLogic:
                 self._reset_arrival_dialog()
                 return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
             return self._arrival_no_answer(now)
+        if self.state == State.ASKING_WAIT_TIME and kind == "deny":
+            # "몇 분쯤 걸리실까요?"에 "아니(기다리지 마)" — 끝낼지 한 번 확인한다.
+            return self._ask_end_confirm(now)
         return None
+
+    def _ask_end_confirm(self, now: float) -> list:
+        """끝낼지 한 번 확인한다 — "여기까지 안내를 마칠까요?"(종료형). 네 = 종료·홈, 아니요 =
+        대기, 침묵 = 같은 질문 한 번 더 뒤 떠나기 예고(도착 질문의 무응답 사다리 그대로)."""
+        self.state = State.ASKING_NEXT
+        self._deny_reconfirmed = True
+        self._asking_is_finish = True
+        self._asking_time_after_yes = False
+        self._asking_where = False
+        self._asking_question = MSG_ASK_ENTRANCE
+        self._arrival_retried = False
+        self._leaving_deadline = None
+        self._response_deadline = None
+        self._asking_entered_at = now
+        return [self._ask(MSG_ASK_ENTRANCE)]
 
     def _react_waiting(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """손 놓기 기다림·대기 중. 기다려 = 시간을 지금부터 다시 세고 대기 안내를 다시 말한다.
-        손 놓기 기다림의 잠깐 = "비카야"처럼 "네?" 하고 듣는다 — 듣는 동안은 대기 장소로
-        떠나지 않는다(_ear_holds)."""
+        다시 가자 = 어디로 갈지 묻는다. 손 놓기 기다림의 잠깐 = "비카야"처럼 "네?" 하고
+        듣는다 — 듣는 동안은 대기 장소로 떠나지 않는다(_ear_holds). 손 놓기 기다림의
+        아니요·취소 = 끝낼지 확인. 대기 중 "어디로 모실까요?" 뒤 30초 안의 아니요 = 종료."""
         kind = intent.intent
+        release = self.state == State.WAITING_RELEASE
         if kind == "wait":
             return self._rewait(intent.wait_minutes, now)
         if kind == "resume":
             return self._ask_where(now)
-        if kind == "pause" and self.state == State.WAITING_RELEASE:
-            return [self._ask(MSG_WAKE_GREETING)]
+        if release:
+            if kind == "pause":
+                return [self._ask(MSG_WAKE_GREETING)]
+            if kind in ("cancel", "deny"):
+                # 대기 안내(M2) 바로 뒤 "아니, 기다리지 마"·"취소" — 끝낼지 한 번 확인한다.
+                return self._ask_end_confirm(now)
+            return None
+        asked = self._wait_finish_asked_at
+        if kind == "deny" and asked is not None and now - asked <= WAIT_FINISH_REPEAT_SEC:
+            # "네, 어디로 모실까요?"에 "아니" — 갈 곳이 없다. "다 됐어"를 두 번 한 것과 같다.
+            self._reset_arrival_dialog()
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         return None
 
     def _ask_where(self, now: float) -> list:
@@ -1636,7 +1669,10 @@ class MissionLogic:
         return [Say(msg, priority="response")]
 
     def _react_awaiting_user(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """접근 질문. 잠깐·다시 가자 = "네?" 하고 질문 유지, 답 시계를 지금부터 다시 센다."""
+        """접근 질문. 취소 = 아니요(물러난다). 잠깐·다시 가자 = "네?" 하고 질문 유지, 답 시계를
+        지금부터 다시 센다."""
+        if intent.intent == "cancel":
+            return self.on_approach_answer(False, now)
         if intent.intent in ("pause", "resume"):
             self._response_deadline = now + self.approach_response_timeout_sec
             return [self._ask(MSG_WAKE_GREETING)]
@@ -3135,6 +3171,10 @@ class MissionLogic:
         # deny: 종료형이면 "안 끝났다"=대기, 대기형이면 "대기 싫다"=종료.
         if kind == "deny":
             if self._asking_is_finish:
+                if self._wait_minutes_requested > 0:
+                    # 대기 중 "기다리지 마"를 끝낼지 되물은 질문의 "아니요" — 하던 대기 시간
+                    # 그대로 다시 기다린다(2026-10-08 반응표).
+                    return self._enter_waiting(self._wait_minutes_requested, now)
                 return self._enter_waiting(WAIT_MINUTES_CAP, now,
                                            default_msg=True)
             if not self._deny_reconfirmed:

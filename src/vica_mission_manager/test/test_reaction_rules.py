@@ -2,14 +2,17 @@
 
 칸 하나의 첫 반응은 test_reaction_table.py 가 못 박는다. 여기는 그 뒤에 이어지는 일을 본다.
 """
-from reaction_states import (BOUNDS, ELEV, asking, intent, lookup, navigating, waiting,
-                             waiting_release)
+from reaction_states import (BOUNDS, ELEV, asking, asking_wait_time, intent, lookup,
+                             navigating, waiting, waiting_asked, waiting_release)
 from vica_mission_manager.mission_logic import (
     MSG_ALREADY_GOING,
+    MSG_ASK_ENTRANCE,
+    MSG_CANCEL_KEPT,
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
     MSG_FINISH,
     MSG_START,
+    MSG_WAIT_DEFAULT,
     MSG_WAIT_FINISH_ASK,
     MSG_WAIT_SPOT_CONFIRM,
     NavStatus,
@@ -94,4 +97,52 @@ def test_waiting_resume_twice_never_ends_the_guidance():
     for k in range(2):
         acts = logic.on_voice_intent(intent("resume"), t + k, lookup, BOUNDS, True)
         assert _says(acts) == [MSG_WAIT_FINISH_ASK]
+    assert logic.state == State.WAITING
+
+
+# ---- Task 7: 아니요·취소 -------------------------------------------------------
+def test_release_no_then_answers():
+    """M2 직후 "아니(기다리지 마)" → "마칠까요?" → 네 = 종료·홈, 아니요 = 하던 대기 그대로."""
+    logic, t = waiting_release(minutes=10)
+    assert _says(logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)) == [
+        MSG_ASK_ENTRANCE]
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_FINISH]
+    assert logic.state == State.RETURNING
+
+    logic, t = waiting_release(minutes=10)
+    logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_SPOT_CONFIRM.format(minutes=10, place="입구 오른쪽")]
+    assert logic.state == State.WAITING_RELEASE
+
+
+def test_wait_time_no_then_answers():
+    logic, t = asking_wait_time()
+    assert _says(logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)) == [
+        MSG_ASK_ENTRANCE]
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_DEFAULT]
+    assert logic.state == State.WAITING
+
+
+def test_cancel_question_yes_and_no():
+    """"안내를 취소할까요?"의 네·아니요 — 예전엔 둘 다 버려졌다."""
+    logic, t = navigating()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_CANCEL_KEPT]
+    assert logic.state == State.NAVIGATING and not logic.cancel_confirm_pending
+
+    logic, t = navigating()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert MSG_CANCELED in _says(acts)
+    assert logic.state == State.IDLE
+
+
+def test_waiting_no_after_the_window_is_not_an_answer():
+    logic, t = waiting_asked()
+    acts = logic.on_voice_intent(intent("deny"), t + 31.0, lookup, BOUNDS, True)
+    assert _says(acts) == []
     assert logic.state == State.WAITING
