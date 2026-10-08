@@ -332,19 +332,6 @@ EXPECT = {
 }
 
 PENDING = {
-    # Task 9
-    "IDLE_BRAKED.finish": 9,
-    "IDLE_BRAKED.resume": 9,
-    "IDLE_BRAKED.wait": 9,
-    "IDLE_BRAKED_SPOT.finish": 9,
-    "IDLE_BRAKED_SPOT.resume": 9,
-    "IDLE_BRAKED_SPOT.wait": 9,
-    "RETURNING.finish": 9,
-    "RETURNING.wait": 9,
-    "RETURNING_LATE.finish": 9,
-    "RETURNING_LATE.no": 9,
-    "RETURNING_LATE.wait": 9,
-    "RETURNING_LATE.yes": 9,
     # Task 10
     "ASKING_WAIT_TIME.yes": 10,
     "CONFIRMING.navc": 10,

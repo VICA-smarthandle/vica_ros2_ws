@@ -2,8 +2,9 @@
 
 칸 하나의 첫 반응은 test_reaction_table.py 가 못 박는다. 여기는 그 뒤에 이어지는 일을 본다.
 """
-from reaction_states import (BOUNDS, ELEV, asking, asking_wait_time, intent, lookup,
-                             navigating, waiting, waiting_asked, waiting_release)
+from reaction_states import (BOUNDS, ELEV, SPOT_DEST, asking, asking_wait_time, idle_braked,
+                             intent, lookup, navigating, returning, returning_late, waiting,
+                             waiting_asked, waiting_release)
 from vica_mission_manager.mission_logic import (
     MSG_ALREADY_GOING,
     MSG_ASK_ENTRANCE,
@@ -16,6 +17,9 @@ from vica_mission_manager.mission_logic import (
     MSG_WAIT_FINISH_ASK,
     MSG_WAIT_NEED_ASK,
     MSG_WAIT_SPOT_CONFIRM,
+    MSG_WAIT_SPOT_DEFAULT,
+    CancelNav,
+    Navigate,
     NavStatus,
     Say,
     State,
@@ -169,3 +173,56 @@ def test_need_question_answers():
     acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
     assert _says(acts) == [MSG_CANCEL_KEPT]
     assert logic.state == State.WAITING
+
+
+# ---- Task 9: 결정 1 — 홈 가는 중의 "기다려" ------------------------------------
+def test_returning_wait_goes_back_to_the_wait_spot():
+    """대기 장소가 있는 목적지에서 안내를 마치고 홈 가는 중 "기다려" → 복귀를 멈추고 M2′ →
+    말이 끝나면 대기 장소로 떠난다."""
+    logic, t = returning(SPOT_DEST)
+    acts = logic.on_voice_intent(intent("wait"), t, lookup, BOUNDS, True)
+    assert any(isinstance(a, CancelNav) for a in acts)
+    assert _says(acts) == [MSG_WAIT_SPOT_DEFAULT.format(place="입구 오른쪽")]
+    assert logic.state == State.WAITING_RELEASE
+    logic.on_wait_speech_spoken(_says(acts)[0], t + 5.0)
+    acts = logic.on_tick(t + 5.1, NavStatus.NONE)
+    assert logic.state == State.MOVING_TO_WAIT_SPOT
+    assert [a.destination.id for a in acts if isinstance(a, Navigate)] == ["wait_spot:d1"]
+
+
+def test_returning_wait_without_spot_goes_to_the_entrance():
+    logic, t = returning()
+    acts = logic.on_voice_intent(intent("wait", wait_minutes=10), t, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_SPOT_CONFIRM.format(minutes=10, place="입구 앞")]
+    assert [a.destination.id for a in acts if isinstance(a, Navigate)] == ["wait_back:wc"]
+    assert logic.state == State.MOVING_BACK_TO_DEST
+    logic.on_tick(t + 20.0, NavStatus.SUCCEEDED)
+    assert logic.state == State.WAITING
+    assert logic.wait_place == "입구 앞"
+
+
+def test_braked_idle_wait_stops_the_return_ladder():
+    logic, t = idle_braked()
+    logic.on_voice_intent(intent("wait"), t, lookup, BOUNDS, True)
+    assert not logic.return_interrupted
+    logic.on_tick(t + 30.0, NavStatus.SUCCEEDED)        # 입구 앞 도착
+    assert logic.state == State.WAITING
+
+
+def test_after_home_wait_is_plain_idle_again():
+    """홈에 도착하면 직전 목적지를 잊는다 — 그 뒤의 "기다려"는 그냥 쉬는 중의 말이다."""
+    logic, t = returning()
+    logic.on_tick(t + 20.0, NavStatus.SUCCEEDED)        # 홈 도착
+    assert logic.state == State.IDLE
+    acts = logic.on_voice_intent(intent("wait"), t + 21.0, lookup, BOUNDS, True)
+    assert _says(acts) == ["지금은 안내 중이 아닙니다."]
+
+
+def test_late_answer_meaning_follows_the_question():
+    """대기형 질문("기다릴까요?")에 답이 없어 떠난 뒤: 네 = 대기, 아니요 = 그대로 홈."""
+    logic, t = returning_late()
+    acts = logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_FINISH]
+    assert logic.state == State.RETURNING
+    # 한 번 답했으면 그다음 "네"는 늦은 답이 아니다.
+    assert logic.on_voice_intent(intent("affirm"), t + 1, lookup, BOUNDS, True) == []

@@ -1380,6 +1380,12 @@ class MissionLogic:
         self.door_side: str = ""
         # 도착 후 대화·대기의 목적지. _ask_arrival 이 active_destination 을 비우므로 따로 든다.
         self._arrived_destination: Optional[Destination] = None
+        # 마지막으로 사용자와 도착한 목적지(2026-10-08 결정 1). 홈으로 떠나도 남긴다 — 홈 가는
+        # 중의 "기다려"는 이 목적지 대기 장소로 간다. 홈 도착·새 안내·안내 뒤가 아닌 복귀·비상에서 지운다.
+        self._last_guided: Optional[Destination] = None
+        # 도착 질문에 답이 없어 떠났을 때 그 질문이 종료형이었나 — 늦게 온 "네·아니요"의 뜻이다.
+        # None 이면 늦은 답을 받을 질문이 없다(다 됐어·대기 만료로 떠났거나 이미 세웠다).
+        self._late_answer_finish: Optional[bool] = None
         # 지금 대기가 어디서인가: "spot"(대기 장소) / "destination"(막혀 목적지) / ""(제자리).
         self._wait_place: str = ""
         self._beacon_next_at: Optional[float] = None   # 다음 M3 시각
@@ -1510,18 +1516,37 @@ class MissionLogic:
             return None
         return handler(intent, now, lookup, bounds, nav_ready)
 
+    def _wait_at_last_guided(self, minutes: int, now: float) -> list:
+        """홈 가는 중의 "기다려" — 직전 목적지 대기 장소로 가서 기다린다(2026-10-08 결정 1).
+        대기 장소가 없으면 그 목적지 입구 앞으로, 직전 목적지가 없으면 그 자리에서 기다린다."""
+        last = self._last_guided
+        self._reset_arrival_dialog()
+        self._late_answer_finish = None
+        self._arrived_destination = last
+        if minutes is not None and minutes > 0:
+            return self._enter_waiting(min(minutes, WAIT_MINUTES_CAP), now, away=True)
+        return self._enter_waiting(WAIT_MINUTES_CAP, now, default_msg=True, away=True)
+
     @staticmethod
     def _ask(text: str) -> Say:
         """대답을 기다리는 말 — 노드가 듣기 창을 연다(expects_reply)."""
         return Say(text, priority="response", expects_reply=True)
 
     def _react_idle(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """안내 없음. 그냥 쉬는 중의 기다려·다 됐어 = 이유를 말한다(규칙 1). 홈 가다 세운 뒤
-        (복귀 재개 사다리)와 손잡이 잡기·온보딩 질문 중은 여기서 다루지 않는다."""
-        if (self._return_interrupted or self._grip_wait_since is not None
-                or self._dest_prompt_stage is not None):
+        """안내 없음. 홈 가다 "비카야"로 세운 뒤(복귀 재개 사다리)면 기다려 = 직전 목적지 대기
+        장소로(결정 1), 다 됐어·다시 가 = "안내를 종료합니다" 하고 바로 홈. 그냥 쉬는 중의
+        기다려·다 됐어 = 이유를 말한다(규칙 1). 손잡이 잡기·온보딩 질문 중은 다루지 않는다."""
+        kind = intent.intent
+        if self._grip_wait_since is not None or self._dest_prompt_stage is not None:
             return None
-        if intent.intent in ("wait", "finish"):
+        if self._return_interrupted:
+            if kind not in ("wait", "finish", "resume"):
+                return None
+            self._forget_interrupted_return()
+            if kind == "wait":
+                return self._wait_at_last_guided(intent.wait_minutes, now)
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
+        if kind in ("wait", "finish"):
             return [Say(MSG_NOT_NAVIGATING, priority="response")]
         return None
 
@@ -1697,9 +1722,25 @@ class MissionLogic:
         return None
 
     def _react_returning(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
-        """홈 복귀. 잠깐 = "비카야"처럼 세우고 "네?"(규칙 1, 옛 말은 "안내 중이 아닙니다"로
+        """홈 복귀. 기다려 = 세우고 직전 목적지 대기 장소로(결정 1). 다 됐어 = 그대로 홈 + 한마디.
+        답이 없어 떠난 뒤 늦게 온 네·아니요 = 그 질문의 뜻대로(대기형: 네 = 대기·아니요 = 홈,
+        종료형: 반대). 잠깐 = "비카야"처럼 세우고 "네?"(규칙 1, 옛 말은 "안내 중이 아닙니다"로
         못 세웠다). 관리자 홈 복귀의 잠깐은 지금처럼 일시정지다."""
-        if intent.intent == "pause" and not self._returning_home:
+        kind = intent.intent
+        if kind == "wait":
+            return (self.on_return_brake(now, quiet=True)
+                    + self._wait_at_last_guided(intent.wait_minutes, now))
+        if kind == "finish":
+            self._late_answer_finish = None
+            return [Say(MSG_FINISH, priority="response")]
+        if kind in ("affirm", "deny") and self._late_answer_finish is not None:
+            wants_wait = (kind == "affirm") != self._late_answer_finish
+            if wants_wait:
+                return (self.on_return_brake(now, quiet=True)
+                        + self._wait_at_last_guided(-1, now))
+            self._late_answer_finish = None
+            return [Say(MSG_FINISH, priority="response")]
+        if kind == "pause" and not self._returning_home:
             return self.on_return_brake(now) + [self._ask(MSG_WAKE_GREETING)]
         return None
 
@@ -1906,6 +1947,9 @@ class MissionLogic:
         # 사용자는 이미 응답한 것이다). 안 지우면 이번 안내를 마치고 한참 뒤
         # 낡은 복귀 사다리가 갑자기 홈으로 떠난다.
         self._forget_interrupted_return()
+        # 새 안내다 — 지난 안내의 목적지·늦은 답은 넘겨받지 않는다(결정 1).
+        self._last_guided = None
+        self._late_answer_finish = None
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(say_destination(MSG_START, dest.name)),
@@ -2895,6 +2939,7 @@ class MissionLogic:
         # 목적지 없이 다시 묻는 자리(재질문)에서는 앞서 든 값을 그대로 둔다.
         if dest is not None:
             self._arrived_destination = dest
+            self._last_guided = dest
         self.active_destination = None
         self._asking_is_finish = is_finish
         self._asking_time_after_yes = ask_time
@@ -3222,11 +3267,12 @@ class MissionLogic:
         return self._arrival_no_answer(now)
 
     def _enter_waiting(self, minutes: int, now: float,
-                       default_msg: bool = False) -> list:
+                       default_msg: bool = False, away: bool = False) -> list:
         """대기 확정 + 멘트. 사람접근은 대기 상태값으로 자연히 꺼진다.
 
         대기 장소가 있는 목적지면 M2/M2′ 를 말하고 손 놓기를 기다린다
-        (WAITING_RELEASE). 없으면 지금처럼 그 자리에서 기다린다(WAITING).
+        (WAITING_RELEASE). 없으면 지금처럼 그 자리에서 기다린다(WAITING). away(목적지를
+        떠나 있음, 2026-10-08 결정 1)면 대기 장소가 없는 목적지는 그 입구 앞으로 돌아간다.
         대기 시간은 어느 쪽이든 이 순간(멘트를 말한 순간)부터 흐른다 — 말한
         "N분 동안"이 맞게(2026-10-07).
         """
@@ -3237,6 +3283,20 @@ class MissionLogic:
         dest = self._arrived_destination
         spot = dest.wait_spot if dest is not None else None
         place = WAIT_PLACE_PHRASES.get(spot.side, "") if spot is not None else ""
+        if not place and away and dest is not None:
+            # 목적지를 떠나 있다(홈 가는 중 "기다려", 결정 1) — 대기 장소가 없는 목적지면 그
+            # 입구 앞으로 돌아가 기다린다. 장소 말은 대기 장소가 막혔을 때(M6)와 같다.
+            msg = (MSG_WAIT_SPOT_DEFAULT.format(place=WAIT_PLACE_AT_DESTINATION) if default_msg
+                   else MSG_WAIT_SPOT_CONFIRM.format(minutes=minutes,
+                                                     place=WAIT_PLACE_AT_DESTINATION))
+            back = wait_back_destination(dest)
+            self.state = State.MOVING_BACK_TO_DEST
+            self.active_destination = back
+            self.handle_active = False
+            self._wait_place = "destination"
+            self._beacon_next_at = now + WAIT_BEACON_INTERVAL_SEC
+            return [Say(msg, priority="response"), SetNavSpeedLimit(NO_SPEED_LIMIT),
+                    Navigate(back, tree=NAV_TREE_WAIT)]
         if not place:
             self.state = State.WAITING
             self._wait_place = ""
@@ -3499,6 +3559,8 @@ class MissionLogic:
             return []
         # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
         self._wake_consumed_at = now
+        # 세웠다 — 그 뒤의 "네·아니요"는 늦은 답이 아니라 지금 대화다(결정 1).
+        self._late_answer_finish = None
         cancel_dest = self.active_destination
         self.active_destination = None
         actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
@@ -3873,6 +3935,10 @@ class MissionLogic:
             if (self._leaving_deadline is not None
                     and now >= self._leaving_deadline
                     and not self._ear_holds(now)):
+                # 답이 없어 떠난다 — 홈 가는 중 늦게 온 "네·아니요"를 이 질문의 뜻으로 받는다
+                # (2026-10-08 결정 1). 물어 둔 질문이 없었으면 받을 뜻도 없다.
+                self._late_answer_finish = (
+                    self._asking_is_finish if self._asking_question else None)
                 self._reset_arrival_dialog()
                 # 복귀 멘트는 2026-09-01 감량 — 직전 떠나기 예고가 이미 말했다.
                 actions.extend(self._go_home(now))
@@ -4091,9 +4157,14 @@ class MissionLogic:
         track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
         세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
         """
-        # 목적지를 떠난다 — 그 목적지의 대기 장소는 더 쓰지 않는다(2026-10-07). 복귀 중
-        # 불러 세워 "기다려 줘"가 와도 옛 목적지 대기 장소로 가지 않고 그 자리에서 기다린다.
+        # 목적지를 떠난다 — 도착 대화의 목적지는 비운다. 안내를 마치고 떠나는 복귀라면
+        # _last_guided 가 그 목적지를 기억한다: 홈 가는 중 "기다려"는 그 대기 장소로 간다
+        # (2026-10-08 사용자 결정 1 — 10-07 의 '그 자리에서 기다린다'를 바꿨다). 접근 뒤·
+        # 관리자 복귀에는 돌아갈 안내 목적지가 없다.
         self._arrived_destination = None
+        if not dialog_finish:
+            self._last_guided = None
+            self._late_answer_finish = None
         # 입구 방향(M1 기준)도 떠나면 낡은 말이다 — LLM 메모에 옛 목적지 방향이 남지 않게.
         self.door_side = ""
         # auto_return_home 게이트는 접근 뒤 복귀에만 걸린다 — 꺼져 있으면 그
@@ -4131,6 +4202,9 @@ class MissionLogic:
         """
         track_id = self.approach_track_id
         was_home = self._returning_home
+        # 홈에 왔다 — 홈 가는 중의 "기다려"·늦은 답은 여기서 끝이다(결정 1).
+        self._last_guided = None
+        self._late_answer_finish = None
         self._to_idle()
         if not was_home:
             self._suppress_track(track_id, now)
@@ -4167,6 +4241,8 @@ class MissionLogic:
         self._cancel_confirm_deadline = None
         self._confirming_dest_id = None
         self._confirm_deadline = None
+        self._last_guided = None
+        self._late_answer_finish = None
         self._estop_entered_at = now
         self._estop_clear_since = None
         self._announced_milestones = set()
