@@ -225,8 +225,12 @@ class TestTransitions:
         assert any(isinstance(a, Navigate) for a in actions)
 
     def test_confirm_timeout_30s(self):
+        """15초 조용하면 같은 질문을 한 번 더(2026-10-08 다시 묻기), 30초면 접는다."""
         logic = MissionLogic(confirm_timeout_sec=30.0)
         logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        reask = logic.on_tick(15.0, NavStatus.NONE)
+        assert [a.text for a in reask if isinstance(a, Say)] == [
+            "윤지영 교수님 사무실로 안내해드릴까요?"]
         assert logic.on_tick(29.9, NavStatus.NONE) == []
         assert logic.state == State.CONFIRMING
         actions = logic.on_tick(30.0, NavStatus.NONE)
@@ -733,10 +737,13 @@ class TestVoiceCancelConfirm:
         assert logic.cancel_confirm_pending is False
 
     def test_timeout_keeps_navigating(self):
-        # 응답이 없으면 취소하지 않고 안내를 이어간다.
+        # 응답이 없으면 15초에 한 번 다시 묻고(2026-10-08), 그래도 없으면 취소하지 않고
+        # 안내를 이어간다.
         logic = MissionLogic()
         start_navigation(logic)
         logic.on_cancel_confirm_request(1.0)
+        reask = logic.on_tick(16.0, NavStatus.RUNNING)
+        assert [a.text for a in reask if isinstance(a, Say)] == ["안내를 취소할까요?"]
         logic.on_tick(1.0 + logic.confirm_timeout_sec + 0.1, NavStatus.RUNNING)
         assert logic.cancel_confirm_pending is False
         assert logic.state == State.NAVIGATING

@@ -332,8 +332,6 @@ EXPECT = {
 }
 
 PENDING = {
-    # Task 12
-    "WAITING_ASKED.yes": 12,
 }
 
 

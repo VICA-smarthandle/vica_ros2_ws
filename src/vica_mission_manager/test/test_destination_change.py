@@ -129,7 +129,10 @@ class TestAnswers:
         assert navs[0].tree == NAV_TREE_GUIDED
 
     def test_silence_resumes_original(self):
+        """15초 조용하면 한 번 다시 묻고(2026-10-08 다시 묻기), 30초면 원래 목적지로."""
         logic, _ = asked_change(t=1.0)
+        assert logic.on_tick(15.9, NavStatus.NONE) == []
+        assert _say(logic.on_tick(16.0, NavStatus.NONE)) == ["화장실로 안내해드릴까요?"]
         assert logic.on_tick(1.0 + logic.confirm_timeout_sec - 0.1, NavStatus.NONE) == []
         actions = logic.on_tick(1.0 + logic.confirm_timeout_sec, NavStatus.NONE)
         assert logic.state == State.NAVIGATING and logic.active_destination == ROOM

@@ -141,9 +141,11 @@ class TestFinishAndNext:
 
 class TestNoAnswerLadder:
     def test_unknown_retries_once_then_leaves(self):
+        """못 알아들은 답에는 질문 자체를 한 번 더 묻는다(2026-10-08 다시 묻기 — 옛 문장은
+        "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해 주세요.")."""
         logic = arrive("restroom")
         acts = logic.on_arrival_answer(_intent("unknown"), 3.0)
-        assert MSG_ARRIVAL_RETRY in _say(acts)
+        assert _say(acts) == [MSG_ASK_RESTROOM]
         assert logic.state == State.ASKING_NEXT       # 아직 안 떠남
         logic.on_arrival_question_spoken(4.0)
         acts2 = logic.on_arrival_answer(_intent("unknown"), 5.0)
@@ -495,13 +497,15 @@ class TestAskWaitTimeRejectsYesNo:
         logic = self._to_wait_time()
         acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
         assert logic.state == State.ASKING_WAIT_TIME       # 홈에 안 감
-        assert MSG_ARRIVAL_RETRY in _say(acts)
+        assert _say(acts) == [MSG_ASK_WAIT_TIME]           # 질문 자체를 다시(2026-10-08)
 
     def test_deny_reasks(self):
+        """이 경로(on_arrival_answer 직접)는 옛 그물이다 — 음성 요청은 on_voice_intent 가
+        "여기까지 안내를 마칠까요?"로 받는다(test_reaction_table)."""
         logic = self._to_wait_time()
         acts = logic.on_arrival_answer(_intent("deny"), 5.0)
         assert logic.state == State.ASKING_WAIT_TIME       # 30분 대기도 안 함
-        assert MSG_ARRIVAL_RETRY in _say(acts)
+        assert _say(acts) == [MSG_ASK_WAIT_TIME]
 
 
 class TestAskingStuckFallback:

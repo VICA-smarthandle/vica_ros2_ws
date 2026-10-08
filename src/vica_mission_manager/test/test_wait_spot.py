@@ -290,6 +290,7 @@ class TestTalkingWhileWaiting:
         nxt = _dest(id="d2", name="안내소")
         logic.on_intent(_intent(matched_destination_id="d2", need_confirm=True),
                         nxt, BOUNDS, True, 20.0)
+        logic.on_tick(20.0 + 15.0, NavStatus.NONE)     # 15초: 같은 질문 한 번 더(2026-10-08)
         logic.on_tick(20.0 + 31.0, NavStatus.NONE)
         assert logic.state == State.WAITING
         logic.on_intent(_intent(matched_destination_id="d2", need_confirm=True),
