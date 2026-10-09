@@ -2157,7 +2157,11 @@ global_costmap:
       obstacle_inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5          # inflation_layer 와 같게 — 띠 두께만 다르게
-        inflation_radius: 0.35            # 지도에 없던 물체용. 내접 0.277 보다 커야 몸 기준 '못 들어감' 바깥에 비용이 남는다
+        # 2026-10-09 run81 뒤(사용자 결정): 0.35 -> 0.30. 우회 폭을 줄인다. 정지 시험(bench_detour, 병 1·0.6 m·박스 2 m)에서
+        # 0.30 은 이탈 폭 0~9 cm 감소·각도 0~3° 감소였다. 0.25 도 검토했으나 내접 0.277 아래라 띠 바깥 경사 비용이 사라지고
+        # SMAC 이 몸 옆면이 표시에 닿는 경로를 낼 수 있어(Humble 중심 비용 지름길) 하한 위 0.30 으로 정했다.
+        # 볼 것: 우회 직후 VCC lanes_blocked·HOLD. 되돌리기 0.35.
+        inflation_radius: 0.30            # 지도에 없던 물체용(라이다·초음파). 내접 0.277 보다 커야 한다. 벽은 inflation_layer 0.55 그대로
 
       # ===== KZ-5: 관리자가 앱에서 그린 금지구역 (2026-08-31) =====
       #
