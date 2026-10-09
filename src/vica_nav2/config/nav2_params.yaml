@@ -540,7 +540,9 @@ controller_server:
       # run71 17:06:53 옆으로 빠진 물체를 앞 센서가 놓친 뒤 왼쪽 옆면이 스쳤다(left_wheel 0.03 m, VCC 미입력).
       # run65(같은 네 토픽)는 원호 허상으로 차선 옮김 20.2/분이었다 — 다음 주행에서 다시 잰다.
       # 끄기: "/ultrasonic/vcc_off" 한 개로.
-      ultrasonic_topics: ["/ultrasonic/front_left", "/ultrasonic/front_right", "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
+      # 2026-10-09 run77 뒤(사용자 결정): 이전 방식(local costmap RangeSensorLayer 4개)으로 비교 — VCC 직접 읽기 끔.
+      # 되돌리기: ["/ultrasonic/front_left", "/ultrasonic/front_right", "/ultrasonic/left_wheel", "/ultrasonic/right_wheel"]
+      ultrasonic_topics: ["/ultrasonic/vcc_off"]
       # 채널별 거리 상한(위 순서, 0 = 없음). 2026-10-08 사용자 결정: 바퀴 옆은 0.40 m 안만 — 몸에 붙은 것만.
       # 0.40 = slow_clearance 0.35 + 몸 여유 0.05: 더 먼 옆 값은 곧게 갈 때 속도를 못 바꾸고 차선·유턴 판단에만
       # 들어가 허상을 만든다(run71 달리는 중 옆 값의 약 95 % 가 0.4~1.5 m 의 벽·사람). us_near_confirm_range 와
@@ -1728,7 +1730,7 @@ local_costmap:
       # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
       range_sensor_front_left:   # 2번 앞 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
+        enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
         topics: ["/ultrasonic/front_left"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1736,7 +1738,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
+        enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
         topics: ["/ultrasonic/front_right"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1744,7 +1746,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
+        enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
         topics: ["/ultrasonic/left_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1752,7 +1754,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_right_wheel:   # 4번 오른쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: False   # 2026-09-24 VCC 가 초음파를 직접 읽는다(1 s 안 값만). 이 층의 지워지지 않는 표시가 run43 정지 9회의 원인
+        enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
         topics: ["/ultrasonic/right_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0

@@ -209,7 +209,9 @@ bool arriveTailPending = false;
 // 나머지는 US_ANGLE_LEVEL(50°) 그대로. 드라이버 ultrasonic_fov_rad_per_channel 과 짝.
 // 2026-10-08 run72 뒤(사용자 결정): 앞 두 개(ch1 앞 왼쪽·ch2 앞 오른쪽)를 레벨 1(30°)로. VCC 가 그리는
 // 폭을 50° 로 넓혔더니 콘 하나가 1.1 m 벽으로 그려져 차선이 다 막혔다 — 물리 빔과 그리는 폭을 30° 로 함께.
-const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 4, 1, 1, 4, 3, 3, 3, 3 };
+// 2026-10-09 run77 뒤(사용자 결정): 이전 방식(costmap RangeSensorLayer)으로 돌아가며 옛 설정대로 전 채널 레벨 3(50°).
+// 드라이버 그리는 폭은 30°(0.524) — 일부러 다르게(09-02 A/B). 되돌리기: { 4, 1, 1, 4, 3, 3, 3, 3 }.
+const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 3, 3, 3, 3, 3, 3, 3, 3 };
 #define US_GAP_MS     5     // 채널 사이 간격. 앞 채널 잔향이 다음 측정에 남지 않게
 #define US_REG_DIST   0x02
 #define US_REG_CMD    0x10

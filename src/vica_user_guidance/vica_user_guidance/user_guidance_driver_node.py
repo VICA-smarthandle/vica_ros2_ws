@@ -87,6 +87,9 @@ class UserGuidanceDriverNode(Node):
         self.declare_parameter("ultrasonic_fov_rad_per_channel", [-1.0] * protocol.US_CHANNELS)
         self.declare_parameter("ultrasonic_min_range_m", 0.02)
         self.declare_parameter("ultrasonic_max_range_m", 0.30)
+        # 채널별 최대 거리. 0 이하 칸은 ultrasonic_max_range_m 를 쓴다. 이보다 먼 값은 "없음"(max)으로
+        # 보내 그 거리까지만 칠하고 지운다 — Nav2 RangeSensorLayer 는 층별 거리 설정이 없어 메시지 값을 쓴다.
+        self.declare_parameter("ultrasonic_max_range_m_per_channel", [-1.0] * protocol.US_CHANNELS)
         # 순차 발사라 채널마다 측정 시점이 다르다. 프레임 수신 시각에서 이만큼
         # 과거를 stamp 로 쓴다 — MCU 에 시계가 없어 수신 시각을 그대로 쓰면
         # costmap 이 낡은 값을 새것으로 착각한다.
@@ -390,6 +393,12 @@ class UserGuidanceDriverNode(Node):
         )
         self.us_min_range = float(self.get_parameter("ultrasonic_min_range_m").value)
         self.us_max_range = float(self.get_parameter("ultrasonic_max_range_m").value)
+        self.us_max_range_ch = resolve_channel_fov(
+            self.us_max_range,
+            [float(v) for v in self.get_parameter("ultrasonic_max_range_m_per_channel").value],
+            protocol.US_CHANNELS,
+            name="ultrasonic_max_range_m_per_channel",
+        )
         self.us_delay_ns = [ms * 1_000_000 for ms in delays]
         self.us_stale_warn_ns = sec_to_ns(
             float(self.get_parameter("ultrasonic_stale_warn_sec").value)
@@ -420,6 +429,7 @@ class UserGuidanceDriverNode(Node):
         self.get_logger().info(
             f"Ultrasonic Range publishing: {topics} "
             f"(칠하는 폭 도 {[round(math.degrees(v)) for v in self.us_fov_ch]}, "
+            f"최대 거리 m {self.us_max_range_ch}, "
             f"TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
             f", 기준 프레임 {self.us_tf_target})"
         )
@@ -543,11 +553,12 @@ class UserGuidanceDriverNode(Node):
             msg.radiation_type = Range.ULTRASOUND
             msg.field_of_view = self.us_fov_ch[ch]
             msg.min_range = self.us_min_range
-            msg.max_range = self.us_max_range
-            if mm == protocol.US_CLEAR_MM or mm / 1000.0 > self.us_max_range:
+            max_range = self.us_max_range_ch[ch]
+            msg.max_range = max_range
+            if mm == protocol.US_CLEAR_MM or mm / 1000.0 > max_range:
                 # 에코 없음(또는 관심 범위 밖 실거리) = 그 부채꼴은 뚫려 있다.
                 # max_range 로 발행해야 RangeSensorLayer 가 부채꼴을 지운다.
-                msg.range = self.us_max_range
+                msg.range = max_range
             else:
                 msg.range = mm / 1000.0
             self.us_pubs[ch].publish(msg)

@@ -138,26 +138,24 @@ def test_resolve_channel_fov():
         resolve_channel_fov(0.524, [1.0] * 7, 8)
 
 
-def test_side_fov_matches_firmware_side_angle_level():
-    """칠하는 폭 60°(1.047) 채널 = 펌웨어 부팅 지향각 레벨 4 채널."""
+def _cfg_and_levels():
     p = yaml.safe_load(CFG.read_text(encoding="utf-8"))["user_guidance_driver_node"]["ros__parameters"]
-    fov = resolve_channel_fov(p["ultrasonic_fov_rad"], p["ultrasonic_fov_rad_per_channel"], 8)
     src = INO.read_text(encoding="utf-8")
     line = next(ln for ln in src.splitlines() if ln.startswith("const uint8_t US_ANGLE_LEVEL_CH"))
-    levels = [int(x) for x in line.split("{")[1].split("}")[0].split(",")]
-    level_to_rad = {1: 0.524, 2: 0.698, 3: 0.873, 4: 1.047}
-    for ch in range(8):
-        if levels[ch] == 4:
-            assert fov[ch] == pytest.approx(level_to_rad[4])
+    return p, [int(x) for x in line.split("{")[1].split("}")[0].split(",")]
 
 
-def test_every_channel_draws_its_physical_beam_width():
-    """10-08: 그리는 폭(Range.field_of_view) = 펌웨어 지향각 레벨의 물리 빔 폭, 채널마다."""
-    p = yaml.safe_load(CFG.read_text(encoding="utf-8"))["user_guidance_driver_node"]["ros__parameters"]
+def test_draw_30_over_physical_50_like_costmap_era():
+    """10-09: 이전 방식(costmap)으로 돌아가며 옛 09-02 A/B 설정 — 물리 빔 50°(레벨 3), 그리는 폭 30°."""
+    p, levels = _cfg_and_levels()
     fov = resolve_channel_fov(p["ultrasonic_fov_rad"], p["ultrasonic_fov_rad_per_channel"], 8)
-    src = INO.read_text(encoding="utf-8")
-    line = next(ln for ln in src.splitlines() if ln.startswith("const uint8_t US_ANGLE_LEVEL_CH"))
-    levels = [int(x) for x in line.split("{")[1].split("}")[0].split(",")]
-    level_to_rad = {1: 0.524, 2: 0.698, 3: 0.873, 4: 1.047}
-    for ch in range(8):
-        assert fov[ch] == pytest.approx(level_to_rad[levels[ch]]), ch
+    assert levels == [3] * 8
+    assert fov == pytest.approx([0.524] * 8)
+
+
+def test_side_max_range_040_others_common():
+    """10-09: 바퀴 옆(ch0·ch3)만 0.40 m, 나머지는 공통 최대 거리."""
+    p, _ = _cfg_and_levels()
+    r = resolve_channel_fov(p["ultrasonic_max_range_m"], p["ultrasonic_max_range_m_per_channel"], 8,
+                            name="ultrasonic_max_range_m_per_channel")
+    assert r == pytest.approx([0.40, 1.5, 1.5, 0.40, 1.5, 1.5, 1.5, 1.5])
