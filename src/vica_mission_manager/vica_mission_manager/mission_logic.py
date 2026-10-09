@@ -178,6 +178,9 @@ class IntentData:
     safety_flag: str
     # 도착 후 대화의 wait 요청 시간(분). 없거나 무관하면 -1 (2026-08-30).
     wait_minutes: int = -1
+    # LLM 이 이 요청에 소리 내어 답하는 말(없으면 ""). 접근 질문 중의 질문은 그 답이 끝난 뒤
+    # 다시 묻는다(2026-10-09) — 미션이 먼저 말하면 순서가 뒤바뀐다.
+    reply: str = ""
 
 
 @dataclass(frozen=True)
@@ -546,6 +549,9 @@ MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하�
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
 MSG_APPROACH_ONBOARDING = "저에게 말을 거실 때는 '비카야'라고 불러주세요. 어디로 가고 싶으신가요?"
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
+# 접근 질문을 한 번 다시 묻는 말(2026-10-09 사용자 결정·문구). 예·아니요가 아닌 말이나 8초 침묵에 한 번만.
+# 첫 질문의 끝과 같은 글자라 노드가 재생 끝(tts_done)에서 이 글자로 8초를 다시 센다.
+MSG_APPROACH_REASK = "안내를 받으시겠어요?"
 MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
 
 # ---- 온보딩 뒤 빈손 되묻기 사다리 (실기 2026-09-11, 사용자 결정) --------------
@@ -1476,6 +1482,10 @@ class MissionLogic:
         self.approach_track_id: Optional[int] = None
         self.approach_goal_pose: Optional[Pose2D] = None
         self._response_deadline: Optional[float] = None
+        # 접근 질문을 이번 접근에서 이미 한 번 다시 물었나(2026-10-09). 다시 물은 뒤의 비답은 아니요다.
+        self._approach_reasked = False
+        # 질문에 LLM 이 답하는 중 — (그 답의 글자, 재생 끝 소식을 기다리는 상한 시각). 끝나면 다시 묻는다.
+        self._approach_after_reply: Optional[tuple] = None
         # track_id -> 재접근을 다시 허용할 시각. 사람마다 따로 센다.
         self._suppressed_tracks: dict = {}
 
@@ -1821,16 +1831,17 @@ class MissionLogic:
     def _react_awaiting_user(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """접근 질문. 목적지로 답하면("응, 화장실 가고 싶어") 수락으로 받고 그 목적지를 기억한다
         — 돌아서 손잡이를 내준 뒤 확인 질문으로 묻는다(규칙 1, 옛 동작은 버림·"다른 응대 중").
-        취소 = 아니요(물러난다). 잠깐·다시 가자 = "네?" 하고 질문 유지, 답 시계를 다시 센다."""
+        취소 = 아니요(물러난다). 네·아니요는 옛 갈래(on_approach_answer)로 간다. 그 밖의 말(질문·못
+        알아들음·잠깐·다시 가자·기다려·다 됐어)은 한 번 다시 묻고, 다시 물은 뒤면 아니요다(2026-10-09
+        사용자 결정 — 옛 동작은 잠깐·다시 가자만 "네?", 나머지는 버려 8초 뒤 떠났다)."""
         if intent.intent == "navigate":
             self._approach_dest = self._approach_destination(intent, lookup, bounds, nav_ready)
             return self.on_approach_answer(True, now)
         if intent.intent == "cancel":
             return self.on_approach_answer(False, now)
-        if intent.intent in ("pause", "resume"):
-            self._response_deadline = now + self.approach_response_timeout_sec
-            return [self._ask(MSG_WAKE_GREETING)]
-        return None
+        if intent.intent in ("affirm", "deny"):
+            return None
+        return self._approach_not_answered(getattr(intent, "reply", ""), now)
 
     def _react_turning(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """돌아서는 중에 말한 목적지 — 기억했다가 손잡이를 내준 뒤 확인 질문으로 묻는다.
@@ -2898,10 +2909,43 @@ class MissionLogic:
         # 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
         self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
         self._approach.reset()
+        self._approach_reasked = False
+        self._approach_after_reply = None
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             Say(MSG_APPROACH_QUESTION, priority="response", expects_reply=True),
         ]
+
+    def _approach_not_answered(self, reply: str, now: float) -> list:
+        """접근 질문에 예·아니요가 아닌 말(질문·못 알아들음·잠깐 등, 2026-10-09 사용자 결정).
+
+        한 번은 "안내를 받으시겠어요?"로 다시 묻고, 다시 물은 뒤면 아니요로 본다. LLM 이 그 말에
+        소리 내어 답하면(질문의 답) 그 답이 끝난 뒤에 한다 — 미션이 먼저 말하면 순서가 뒤바뀐다.
+        """
+        reply = (reply or "").strip()
+        if reply:
+            self._approach_after_reply = (reply, now + self.approach_response_timeout_sec)
+            self._response_deadline = None
+            return []
+        return self._approach_follow_up(now)
+
+    def _approach_follow_up(self, now: float) -> list:
+        """다시 묻기(이번 접근에서 처음) 또는 아니요(이미 다시 물었으면 — 물러나 홈으로)."""
+        self._approach_after_reply = None
+        if not self._approach_reasked:
+            self._approach_reasked = True
+            # 재생이 끝나면(on_approach_question_spoken) 8초를 다시 센다. 그 소식이 안 오면 안전망.
+            self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
+            return [self._ask(MSG_APPROACH_REASK)]
+        return self.on_approach_answer(False, now)
+
+    def on_approach_reply_spoken(self, text: str, now: float) -> list:
+        """접근 질문 중 질문에 LLM 이 답한 말이 재생을 마쳤다(/vica/tts_done) — 이제 다시 묻거나 물러난다."""
+        if self.state != State.AWAITING_USER or self._approach_after_reply is None:
+            return []
+        if (text or "").strip() != self._approach_after_reply[0]:
+            return []
+        return self._approach_follow_up(now)
 
     def on_person_detection(
         self,
@@ -3167,10 +3211,11 @@ class MissionLogic:
             return [Say(MSG_ESTOP_WAKE, priority="response"), WakeReply(listen=False)]
         if self.state in _WAKE_IGNORE_STATES:
             return [WakeReply(listen=False)]
-        if self.state == State.AWAITING_USER and self.wake_guard_active(now):
-            # 같은 호출의 방향 신호(wake_doa)가 먼저 와 접근 질문을 막 시작했다 — 그 질문이
-            # 이 호출의 대답이다. 끊고 "네?"를 하면 질문이 지워지고 미션은 들리지 않은
-            # 질문의 답을 기다린다(2026-10-07 검토, 호출 방향 회전을 켤 때만 생긴다).
+        if self.state == State.AWAITING_USER:
+            # 접근 질문의 답을 기다리는 동안 '비카야'는 무시한다(2026-10-09 사용자 결정) — 말을 끊지
+            # 않고 "네?"도 하지 않는다. 들은 말은 그대로 LLM 으로 넘겨 이 질문의 답으로 받는다. 음성 쪽
+            # 귀도 이 단계에서는 호출을 확정하지 않으므로 이것은 새어 들어온 호출의 이중 장치다.
+            # (2026-10-07: 같은 호출의 wake_doa 가 질문을 막 연 경우만 이렇게 했다.)
             return [WakeReply(listen=True)]
         # 판정은 "네?" 바로 뒤 — 상태 정리(재출발 등)보다 먼저 음성 쪽에 닿게 한다.
         actions: list = [StopSpeech(), Say(MSG_WAKE_GREETING, priority="response"),
@@ -3227,20 +3272,9 @@ class MissionLogic:
             self._wake_consumed_at = now
             return []
         if self.state == State.AWAITING_USER:
-            if self.wake_guard_active(now):
-                # 이 질문을 연 것 자체가 wake_doa 였을 수 있다(핸들 쪽 호출,
-                # 회전 없이 곧장 질문). /vica/wake 와 /vica/wake_doa 는 같은
-                # 호출에서 수 ms 간격으로 오고 처리 순서가 보장되지 않는다
-                # (2026-09-11 실기 재현) — 도장이 방금(3초 이내) 찍혀 있으면
-                # 이 wake 는 그 형제 신호이지 새 "비카야"가 아니다. 접지
-                # 않고 질문을 그대로 둔다.
-                return []
-            # 같은 사람을 곧장 다시 쫓지 않게 억제하고 제자리에 선다 —
-            # 부른 사람과의 새 대화가 이어진다 (복귀 주행은 하지 않는다).
-            self._suppress_track(self.approach_track_id, now)
-            self._approach.reset()
-            self._to_idle()
-            self._wake_consumed_at = now
+            # 접근 질문은 '비카야'에 접지 않는다(2026-10-09 사용자 결정, run82 17:14·17:17 — 접힌 뒤
+            # 이어진 "그래"·"안내를 받을게요"가 갈 곳 없이 버려졌다). 옛 동작(2026-09-01): 질문을 접고
+            # 트랙을 억제한 채 IDLE.
             return []
         if self.user_attached_guard_active(now):
             # 되감기. 새로 억제를 걸지는 않는다(이미 살아 있을 때만) — 없던
@@ -4141,16 +4175,16 @@ class MissionLogic:
 
         elif self.state == State.AWAITING_USER:
             # 여기서 하는 일은 시계를 보는 것뿐이다. 말을 알아듣는 쪽은 음성이다.
-            if self._response_deadline is not None and now >= self._response_deadline:
-                # 오탐이라 답할 이유가 없었을 수도, 답할 수 없는 상황일 수도 있다.
-                # 어느 쪽이든 계속 서서 기다리면 사람 앞을 막는 셈이 된다.
-                actions.append(Say(MSG_APPROACH_NO_ANSWER, priority="response"))
-                if self._never_approached:
-                    # 거절과 같은 이유(Ruling 10, I-1) — 걸어간 적이 없어
-                    # 물러날 곳이 없다.
-                    self._to_idle()
-                else:
-                    actions.extend(self._enter_returning(now))
+            if self._approach_after_reply is not None:
+                if now >= self._approach_after_reply[1]:
+                    # LLM 답의 재생 끝 소식이 끝내 안 왔다 — 기다리지 않고 다시 묻거나 물러난다.
+                    actions.extend(self._approach_follow_up(now))
+            elif (self._response_deadline is not None and now >= self._response_deadline
+                    and not self._ear_holds(now)):
+                # 8초 침묵 — 한 번 다시 묻고, 다시 물은 뒤면 아니요로 보고 물러난다(2026-10-09 사용자
+                # 결정, 옛 동작은 곧장 "실례했습니다"). 사람이 말하는 중이거나 방금 한 말을 알아듣는
+                # 중이면 기다린다 — 도착 질문과 같은 귀 유예(run82 17:19, 대답 처리 중에 떠났다).
+                actions.extend(self._approach_follow_up(now))
 
         elif self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             # 무응답 사다리 (arrival-dialog 3절). 떠나기 예고 후면 유예를 세고,

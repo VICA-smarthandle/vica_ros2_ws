@@ -14,6 +14,7 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_BUSY,
     MSG_APPROACH_DECLINED,
+    MSG_APPROACH_REASK,
     MSG_ARRIVAL_RETRY,
     MSG_ASK_ENTRANCE,
     MSG_ASK_WAIT_TIME,
@@ -261,14 +262,16 @@ EXPECT = {
     "AWAITING_USER": {
         "navp": ((MSG_APPROACH_ACCEPTED,), State.TURNING),
         "navc": ((MSG_APPROACH_ACCEPTED,), State.TURNING),
-        "wait": ((), State.AWAITING_USER),
-        "finish": ((), State.AWAITING_USER),
+        # 예·아니요가 아닌 말은 한 번 "안내를 받으시겠어요?"로 다시 묻는다(2026-10-09 사용자 결정 — 옛 칸:
+        # 기다려·다 됐어·잡담은 말 없음, 잠깐·다시 가자는 "네?"). 질문(talk)에 LLM 답이 있으면 그 뒤에 묻는다.
+        "wait": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
+        "finish": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
         "cancel": ((MSG_APPROACH_DECLINED,), State.RETURNING),
-        "pause": ((MSG_WAKE_GREETING,), State.AWAITING_USER),
-        "resume": ((MSG_WAKE_GREETING,), State.AWAITING_USER),
+        "pause": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
+        "resume": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
         "yes": ((MSG_APPROACH_ACCEPTED,), State.TURNING),
         "no": ((MSG_APPROACH_DECLINED,), State.RETURNING),
-        "talk": ((), State.AWAITING_USER),
+        "talk": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
     },
     "TURNING": {
         "navp": ((), State.TURNING),

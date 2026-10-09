@@ -73,7 +73,7 @@ from .mission_logic import (
     HOME_BEACON_INTERVAL_SEC,
     Haptic,
     MSG_APPROACH_ONBOARDING,
-    MSG_APPROACH_QUESTION,
+    MSG_APPROACH_REASK,
     MSG_DEST_RETRY,
     NEAR_CALL_MAX_M,
     NEAR_CALL_NO_SPIN_M,
@@ -697,6 +697,7 @@ class MissionManagerNode(Node):
             need_confirm=msg.need_confirm,
             safety_flag=msg.safety_flag,
             wait_minutes=int(getattr(msg, "wait_minutes", -1)),
+            reply=msg.reply,
         )
         before = self.logic.state
         actions = self.logic.on_voice_intent(
@@ -720,8 +721,11 @@ class MissionManagerNode(Node):
         다른 멘트(수락·도착 등)의 재생 완료는 응답 대기와 무관하고, 로직 쪽이
         AWAITING_USER 가 아니면 무시하므로 이중 방어다.
         """
-        if MSG_APPROACH_QUESTION in msg.data:
+        # 첫 접근 질문의 끝과 다시 묻기(2026-10-09)가 같은 글자다 — 둘 다 여기서 8초를 다시 센다.
+        if MSG_APPROACH_REASK in msg.data:
             self.logic.on_approach_question_spoken(self._now())
+        # 접근 질문 중 질문에 LLM 이 답한 말이 끝났으면 다시 묻거나 물러난다(로직이 글자를 대조한다).
+        self._run_actions(self.logic.on_approach_reply_spoken(msg.data, self._now()))
         # 손잡이 힌트는 재생 완료를 기다리지 않는다 — 진동이 힌트와 같은 순간
         # 시작해 잡을 때까지 이어진다(2026-09-30, 09-11 I-2 장치 폐기).
         # 온보딩·되묻기 재생이 끝난 시점부터 답 대기 15초를 센다(2026-09-11).

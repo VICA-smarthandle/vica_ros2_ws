@@ -27,11 +27,14 @@ BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
 
 # 작업 계획 탭 '"비카야" 반응표' 그대로. 상태 이름 정본은 State 다.
 LISTEN_STATES = (
-    State.IDLE, State.CONFIRMING, State.AWAITING_USER, State.PAUSED,
+    State.IDLE, State.CONFIRMING, State.PAUSED,
     State.NAVIGATING, State.ASKING_NEXT, State.ASKING_WAIT_TIME,
     State.WAITING_RELEASE, State.WAITING, State.ARRIVED, State.SEEKING,
     State.RETURNING,
 )
+# 접근 질문의 답을 기다리는 동안은 "비카야"를 무시한다(2026-10-09 사용자 결정) — 말을 끊지 않고 "네?"도
+# 없이, 들은 말은 그 질문의 답으로 LLM 에 넘긴다(listen). 질문도 접지 않는다.
+APPROACH_QUESTION_STATES = (State.AWAITING_USER,)
 IGNORE_STATES = (
     State.APPROACHING, State.TURNING, State.FAILED,
     State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST,
@@ -62,9 +65,18 @@ def _intent(**kw):
 
 def test_table_covers_every_state():
     """새 상태가 생기면 반응표에서 빠지지 않게 — 비상 정지까지 셋이 모든 상태를 덮는다."""
-    covered = set(LISTEN_STATES) | set(IGNORE_STATES) | {State.ESTOPPED}
+    covered = set(LISTEN_STATES) | set(IGNORE_STATES) | set(APPROACH_QUESTION_STATES) | {State.ESTOPPED}
     assert covered == set(State)
     assert not set(LISTEN_STATES) & set(IGNORE_STATES)
+    assert not set(APPROACH_QUESTION_STATES) & (set(LISTEN_STATES) | set(IGNORE_STATES))
+
+
+@pytest.mark.parametrize("state", APPROACH_QUESTION_STATES)
+def test_approach_question_ignores_the_call_but_keeps_listening(state):
+    logic = MissionLogic()
+    logic.state = state
+    assert logic.on_wake_call(1.0) == [WakeReply(listen=True)]
+    assert logic.state == state
 
 
 @pytest.mark.parametrize("state", LISTEN_STATES)

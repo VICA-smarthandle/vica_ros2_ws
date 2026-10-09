@@ -11,9 +11,9 @@ from vica_mission_manager.mission_logic import (
     SpinInPlace,
     StopSpeech,
     MSG_APPROACH_QUESTION,
+    MSG_APPROACH_REASK,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
-    MSG_APPROACH_NO_ANSWER,
     MSG_APPROACH_ONBOARDING,
     MSG_HANDLE_HINT,
     PERSON_APPROACH_SPEED_PERCENT,
@@ -1033,9 +1033,13 @@ class TestApproachTransitions:
         assert logic.on_tick(13.0, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
         assert logic.on_tick(34.9, NavStatus.NONE) == []
+        # 2026-10-09: 안전망이 끝나면 한 번 다시 묻고, 그 재생 끝 소식도 안 오면 아니요로 물러난다.
         actions = logic.on_tick(35.1, NavStatus.NONE)
+        assert logic.state == State.AWAITING_USER
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
+        actions = logic.on_tick(35.1 + APPROACH_QUESTION_STUCK_SEC + 0.1, NavStatus.NONE)
         assert logic.state == State.RETURNING
-        assert any(isinstance(a, Say) for a in actions)
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_DECLINED]
 
     def test_question_as_long_as_window_still_gets_full_8s(self):
         """실기 재현: 질문 재생이 8.0초(응답 창과 같은 길이)여도 재생완료부터
@@ -1067,8 +1071,10 @@ class TestApproachTransitions:
         logic.on_approach_question_spoken(7.0)  # 재생 종료
         assert logic.on_tick(14.9, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
-        logic.on_tick(15.0, NavStatus.NONE)
-        assert logic.state == State.RETURNING
+        # 2026-10-09: 8초 침묵은 떠나지 않고 한 번 다시 묻는다(옛 동작: 곧장 복귀).
+        actions = logic.on_tick(15.0, NavStatus.NONE)
+        assert logic.state == State.AWAITING_USER
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
 
     def test_returning_completion_goes_idle(self):
         logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
@@ -1564,13 +1570,16 @@ class TestWakeFoldsStaleQuestions:
         assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 2.0) == []
         assert logic.state == State.IDLE
 
-    def test_wake_folds_approach_question_and_stays_put(self):
+    def test_wake_keeps_the_approach_question(self):
+        """2026-10-09 사용자 결정 — 접근 질문은 '비카야'에 접지 않는다(옛 동작: 접고 제자리 IDLE,
+        run82 에서 이어진 "그래"가 버려졌다). 이어진 네는 수락이다."""
         logic = MissionLogic(return_destination=make_home())
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         assert logic.on_wake(6.0) == []
-        assert logic.state == State.IDLE         # 물러나지 않고 제자리
-        assert logic.on_approach_answer(True, 7.0) == []
+        assert logic.state == State.AWAITING_USER
+        assert any(isinstance(a, Say) for a in logic.on_approach_answer(True, 7.0))
+        assert logic.state == State.TURNING
 
 
 class TestWakeConsumedGuardsWakeDoa:
@@ -1944,14 +1953,15 @@ class TestAwaitingUserWakeGuardsWakeDoa:
     이 소비를 새 호출로 오인하면 방금 접근한 사람 앞에서 SEEKING 이 열린다."""
 
     def test_wake_doa_right_after_awaiting_user_wake_does_not_open_seeking(self):
+        # 2026-10-09: 질문 대기 중 "비카야"는 질문을 접지 않는다 — 상태 관문이 wake_doa 를 막는다.
         logic = MissionLogic()
         logic.state = State.AWAITING_USER
         logic.approach_track_id = 7
         logic.on_wake(10.0)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
         actions = logic.on_wake_doa(90.0, True, 10.001)
         assert not any(isinstance(a, SpinInPlace) for a in actions)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
 
 
 class TestConfirmReproposalIsAnswer:
@@ -2457,16 +2467,18 @@ class TestNearCallApproach:
         assert reason == GateReason.TRACK_SUPPRESSED
 
     def test_no_answer_still_works(self):
-        """무응답 사다리는 기존 그대로 재사용된다."""
+        """무응답 사다리는 정상 접근과 같다 — 2026-10-09 부터 한 번 다시 묻고, 그래도 답이 없으면 아니요."""
         logic = MissionLogic(return_destination=make_home(),
                              approach_response_timeout_sec=8.0)
         seek_and_finish_turn(logic, t0=1.0)
         logic.on_person_detection(
             track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
         actions = logic.on_tick(3.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
+        actions = logic.on_tick(3.0 + 2 * APPROACH_QUESTION_STUCK_SEC + 0.1, NavStatus.NONE)
         assert logic.state == State.RETURNING
         says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+        assert says and says[0].text == MSG_APPROACH_DECLINED
 
     def test_custom_thresholds(self):
         logic = MissionLogic(near_call_max_m=2.0, near_call_no_spin_m=1.5)
@@ -2601,11 +2613,13 @@ class TestHandleSideCall:
                               auto_return_home=True,
                               approach_response_timeout_sec=8.0)
         logic.on_wake_doa(175.0, True, 1.0)
-        actions = logic.on_tick(1.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        # 2026-10-09: 한 번 다시 묻고, 그래도 답이 없으면 아니요 — 거절과 같이 제자리에서 끝난다.
+        logic.on_tick(1.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        actions = logic.on_tick(1.0 + 2 * APPROACH_QUESTION_STUCK_SEC + 0.1, NavStatus.NONE)
         assert logic.state == State.IDLE
         assert not any(isinstance(a, Navigate) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+        assert says and says[0].text == MSG_APPROACH_DECLINED
 
     def test_existing_gates_still_block_handle_side_calls(self):
         """E-stop 이 걸려 있으면 핸들 쪽 호출도 여전히 거절된다 — 관문 순서가
@@ -2654,23 +2668,22 @@ class TestHandleSideCallWakeSiblingGuard:
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
         assert any(isinstance(a, Haptic) for a in actions)
 
-    def test_wake_more_than_guard_sec_later_still_closes_question(self):
-        """3초가 지난 뒤는 진짜 새 "비카야" 다 — 기존대로 옛 질문을 접는다."""
+    def test_wake_more_than_guard_sec_later_also_keeps_question(self):
+        """2026-10-09: 3초가 지난 진짜 새 "비카야"도 접근 질문을 접지 않는다(옛 동작: 접었다)."""
         logic = MissionLogic(wake_doa_sign=1.0)
         logic.on_wake_doa(175.0, True, 1.0)
         assert logic.state == State.AWAITING_USER
         logic.on_wake(1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
 
-    def test_wake_still_closes_normal_approach_question_without_stamp(self):
-        """정상 접근(track 있음)으로 들어간 AWAITING_USER 는 도장이 없으니
-        기존대로 접힌다 — 이 가드가 다른 진입 경로까지 넓어지면 안 된다."""
+    def test_normal_approach_question_also_survives_wake(self):
+        """2026-10-09: 정상 접근(track 있음)의 질문도 "비카야"에 접히지 않는다(옛 동작: 접혔다)."""
         logic = MissionLogic()
         start_approach(logic)
         arrive_and_ask(logic, t=1.0)
         assert logic.state == State.AWAITING_USER
         logic.on_wake(1.001)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
 
 
 class TestOnboardingDestPrompt:
