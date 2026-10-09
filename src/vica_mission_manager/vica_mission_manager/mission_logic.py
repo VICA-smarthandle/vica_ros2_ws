@@ -210,7 +210,7 @@ class Say:
     text: str
     # ros_tts_node 큐 우선순위 (긴급 > 응답 > 내레이션 > 배경).
     # 노드가 "{priority}:{text}" 접두어로 /vica/tts_request 에 발행한다.
-    # ambient(2026-10-07)는 대기 중 10초 알림(M3) 전용이다 — 다른 말이 나가거나 줄 서
+    # ambient(2026-10-07)는 배경 알림 — 대기 중·홈 알림(M3)과 주행 중 장애물 안내(2026-10-09). 다른 말이 나가거나 줄 서
     # 있으면 TTS 가 바로 버리고, 재생 중 다른 말이 오면 비킨다. 옛 TTS 는 이 이름을
     # 몰라 글자로 읽으므로 음성 저장소와 같은 날 올린다.
     priority: str = "narration"  # emergency / response / narration / ambient
@@ -450,6 +450,13 @@ MSG_WAIT_BEACON = "비카가 대기 중입니다."
 MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
 # M7 — 대기 시간 만료(대기 장소가 있든 없든). 말한 뒤 홈으로 간다.
 MSG_WAIT_EXPIRED = "대기 시간이 종료되어 제자리로 돌아갑니다."
+# 주행 중 장애물 안내(2026-10-08 사용자 선택 A1·S1, 10-09 미션에 넣음). 안내 주행 중 앞에 지도에 없는 물체가
+# 있어 크게 비키거나(avoid) 줄이거나 설 때(slow) 한 번. 판정은 obstacle_judge.py(설계서 3절), 말할지는
+# MissionLogic.obstacle_cue(설계서 5절 2단계). 음성 mission_phrases 에 같은 글자의 녹음이 있다.
+MSG_OBSTACLE_AVOID = "앞에 장애물이 있어 피해 갈게요."
+MSG_OBSTACLE_SLOW = "앞에 장애물이 있어 천천히 갈게요."
+# 행동이 시작되고 이만큼 지난 후보는 버린다 — 늦은 장애물 안내는 지나간 물체 이야기다(1단계 도구와 같은 값).
+OBSTACLE_STALE_SEC = 2.5
 # 대기 중 "다 됐어"(finish) — 다음 목적지를 묻는다(2026-10-07 사용자 결정). 대기는 목적지가
 # 정해져 출발할 때 끝나므로(호출 반응표) 묻기만 한다. 다음 목적지를 미리 아는 기능이
 # 생기면 "OO으로 갈까요?"로 바꾼다(미구현).
@@ -3603,6 +3610,27 @@ class MissionLogic:
             return False
         return math.hypot(pose.x - home.pose.x,
                           pose.y - home.pose.y) <= HOME_BEACON_RADIUS_M
+
+    def obstacle_cue(self, phrase: str, onset: float, now: float) -> tuple[list, str]:
+        """장애물 안내 후보를 말할지 정한다 → (actions, 뺀 이유). 말하면 이유는 "".
+
+        판정(obstacle_judge)이 '앞에 진짜 물체가 있어 비켰다·줄였다'고 넘긴 후보다. 대화가 먼저다
+        (2026-10-09 사용자 확인): 귀가 듣는 중이거나 취소 확인의 답을 기다리면 말하지 않는다 — 로봇 말이
+        시작되면 귀가 열린 재청취 창을 접어 사용자 대답이 잘린다. 로봇이 다른 말을 하는 중이면 TTS 가
+        버리도록 ambient 로 보낸다. 늦은 후보도 버린다. 버린 안내는 다시 하지 않는다.
+        """
+        text = {"avoid": MSG_OBSTACLE_AVOID, "slow": MSG_OBSTACLE_SLOW}.get(phrase)
+        if text is None:
+            return [], "unknown_phrase"
+        if self.dialog_state != State.NAVIGATING.value:
+            return [], "not_navigating"
+        if self.cancel_confirm_pending:
+            return [], "question_pending"
+        if self._ear_holds(now):
+            return [], "ear_busy"
+        if now - onset > OBSTACLE_STALE_SEC:
+            return [], "stale"
+        return [Say(text, priority="ambient")], ""
 
     def _home_beacon_tick(self, now: float) -> list:
         """홈 알림 — 홈에서 쉬는 동안 1분마다 M3. 첫 마디는 홈에 선 지 1분 뒤.
