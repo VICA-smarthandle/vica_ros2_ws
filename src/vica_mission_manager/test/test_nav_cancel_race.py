@@ -97,6 +97,10 @@ def _bare_node(gen=5, accept=True):
     # Nav2 준비 확인(7789aed)은 액션 서버를 본다 — 가짜 노드에는 없으니 준비됨으로 둔다.
     node._nav2_ready = lambda: True
     node._task_bt = ""
+    # 출발 전 local costmap 비우기(2026-10-09)는 끈 상태로 둔다 — 시험은
+    # test_clear_before_departure.py 에 있다.
+    node._clear_before_next_nav = False
+    node._nav_task_is_spin = False
     node.logic = SimpleNamespace(state=State.NAVIGATING)   # 대기 장소로 가는 중이 아니다
     logger = _FakeLogger()
     node.get_logger = lambda: logger  # 클래스 메서드를 인스턴스 속성으로 가린다
