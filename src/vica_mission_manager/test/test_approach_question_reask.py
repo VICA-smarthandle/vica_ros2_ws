@@ -2,21 +2,26 @@
 
 1. 이 질문의 답을 기다리는 동안 '비카야'는 무시한다 — 말을 끊지 않고 '네?'도 하지 않으며 질문을 접지 않는다
    (17:14·17:17 장면: '비카야'에 질문이 접혀 이어진 "그래"·"안내를 받을게요"가 버려졌다).
-2. 예·아니요가 아닌 말(질문·못 알아들음·잠깐 등)이나 8초 침묵에는 한 번만 '안내를 받으시겠어요?'로 다시 묻는다.
+2. 예·아니요가 아닌 말(질문·못 알아들음·잠깐 등)이나 8초 침묵에는 '안내를 받으시겠어요?'로 다시 묻는다
+   — 세 번까지(18:12 실기 뒤 사용자 결정, 처음엔 한 번이었다. '비카야'만 들려도 한 번을 써 버렸다).
    질문이었으면 LLM 의 짧은 답이 끝난 뒤 묻는다.
-3. 다시 물은 뒤에도 예·아니요가 아니면(침묵 포함) 아니요로 보고 물러난다(홈 복귀).
+3. 세 번 다시 물은 뒤에도 예·아니요가 아니면(침묵 포함) 물러난다(홈 복귀). 이때 마지막 말은
+   "필요하시면 '비카야'라고 불러 주세요."다 — 대답을 못 들었는데 "알겠습니다"는 맞지 않는다(18:39 장면,
+   사용자 결정 '나'). 분명한 아니요는 그대로 "알겠습니다. 이만 물러납니다."
 4. 사람이 말하는 중이거나 방금 한 말을 처리하는 중이면 8초가 지나도 떠나지 않는다
    (17:19 장면: "나 골랐어"를 처리하는 사이 "실례했습니다"로 떠났다).
 """
 import pytest
 
 from vica_mission_manager.mission_logic import (
+    APPROACH_REASK_MAX,
     APPROACH_RESPONSE_TIMEOUT_SEC,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_NO_ANSWER,
     MSG_APPROACH_QUESTION,
     MSG_APPROACH_REASK,
+    MSG_APPROACH_UNANSWERED,
     MSG_WAKE_GREETING,
     ApproachRequest,
     Destination,
@@ -69,6 +74,16 @@ def _ticks(logic, t0, t1, step=0.5):
     return out
 
 
+def _use_up_reasks(logic, t=7.0):
+    """못 알아들은 말로 다시 묻기를 다 쓴다. 매번 다시 묻기 재생이 끝난 시각을 알린다. 마지막 시각을 돌려준다."""
+    for _ in range(APPROACH_REASK_MAX):
+        assert _says(_voice(logic, "unknown", t)) == [MSG_APPROACH_REASK]
+        t += 2.0
+        logic.on_approach_question_spoken(t)
+        t += 1.0
+    return t
+
+
 def test_reask_is_the_tail_of_the_first_question():
     """노드는 재생 끝(tts_done)에서 이 글자를 찾아 8초를 다시 센다 — 첫 질문에도 들어 있어야 한다."""
     assert MSG_APPROACH_REASK == "안내를 받으시겠어요?"
@@ -95,7 +110,15 @@ def test_wake_keeps_the_question_so_the_next_yes_is_accepted():
     assert logic.state == State.TURNING
 
 
-# ---- 2·3. 한 번 다시 묻기, 그다음 아니요 -------------------------------------------------
+# ---- 2·3. 세 번까지 다시 묻기, 그다음 물러나기 ----------------------------------------------
+
+def test_reask_up_to_three_times():
+    assert APPROACH_REASK_MAX == 3
+
+
+def test_unanswered_words_point_to_the_wake_word():
+    assert MSG_APPROACH_UNANSWERED == "필요하시면 '비카야'라고 불러 주세요."
+
 
 def test_unclear_answer_is_reasked_once_at_once():
     logic = _asking()
@@ -126,39 +149,65 @@ def test_question_reask_falls_back_if_the_answer_never_finishes():
     assert MSG_APPROACH_REASK in _says(_ticks(logic, 7.5, 7.0 + T + 0.5))
 
 
-def test_silence_is_reasked_once():
+def test_silence_is_reasked_three_times():
     logic = _asking()
-    said = _says(_ticks(logic, 5.5, 5.0 + T + 0.5))
-    assert said == [MSG_APPROACH_REASK]
-    assert logic.state == State.AWAITING_USER
+    t = 5.0
+    for _ in range(APPROACH_REASK_MAX):
+        said = _says(_ticks(logic, t + 0.5, t + T + 0.5))
+        assert said == [MSG_APPROACH_REASK]
+        assert logic.state == State.AWAITING_USER
+        t += T + 2.0
+        logic.on_approach_question_spoken(t)             # 다시 묻기 재생 끝 — 8초를 다시 센다
 
 
-def test_silence_after_the_reask_means_no():
+def test_silence_after_three_reasks_leaves_with_the_wake_word_hint():
     logic = _asking()
-    _ticks(logic, 5.5, 5.0 + T + 0.5)                   # 다시 묻기
-    logic.on_approach_question_spoken(14.0)              # 다시 묻기 재생 끝
-    actions = _ticks(logic, 14.5, 14.0 + T + 0.5)
-    assert _says(actions) == [MSG_APPROACH_DECLINED]
+    t = 5.0
+    for _ in range(APPROACH_REASK_MAX):
+        _ticks(logic, t + 0.5, t + T + 0.5)              # 다시 묻기
+        t += T + 2.0
+        logic.on_approach_question_spoken(t)             # 다시 묻기 재생 끝
+    actions = _ticks(logic, t + 0.5, t + T + 0.5)
+    assert _says(actions) == [MSG_APPROACH_UNANSWERED]
     assert logic.state == State.RETURNING
     assert any(isinstance(a, Navigate) and a.destination == HOME for a in actions)   # 홈으로 간다
 
 
-def test_second_non_answer_means_no():
+def test_second_and_third_non_answers_are_reasked():
     logic = _asking()
     _voice(logic, "unknown", 7.0)
     logic.on_approach_question_spoken(9.0)
-    actions = _voice(logic, "clarify", 10.0)
-    assert _says(actions) == [MSG_APPROACH_DECLINED]
+    assert _says(_voice(logic, "clarify", 10.0)) == [MSG_APPROACH_REASK]
+    logic.on_approach_question_spoken(12.0)
+    assert _says(_voice(logic, "unknown", 13.0)) == [MSG_APPROACH_REASK]
+    assert logic.state == State.AWAITING_USER
+
+
+def test_non_answer_after_three_reasks_leaves_with_the_wake_word_hint():
+    logic = _asking()
+    t = _use_up_reasks(logic)
+    actions = _voice(logic, "clarify", t)
+    assert _says(actions) == [MSG_APPROACH_UNANSWERED]
     assert logic.state == State.RETURNING
 
 
-def test_second_question_is_answered_then_declined():
+def test_question_after_three_reasks_is_answered_then_leaves():
+    """18:39 장면 — 마지막 질문에도 LLM 답이 먼저, 그다음 '비카야' 안내로 물러난다."""
+    logic = _asking()
+    t = _use_up_reasks(logic)
+    reply = "안내를 받으시겠냐고 여쭤봤어요."
+    assert _voice(logic, "question", t, reply=reply) == []
+    actions = logic.on_approach_reply_spoken(reply, t + 1.5)
+    assert _says(actions) == [MSG_APPROACH_UNANSWERED]
+    assert logic.state == State.RETURNING
+
+
+def test_plain_no_keeps_the_declined_words():
+    """분명한 아니요는 다시 물은 뒤에도 "알겠습니다. 이만 물러납니다."다."""
     logic = _asking()
     _voice(logic, "unknown", 7.0)
     logic.on_approach_question_spoken(9.0)
-    reply = "저는 안내 로봇 비카예요."
-    assert _voice(logic, "question", 10.0, reply=reply) == []
-    actions = logic.on_approach_reply_spoken(reply, 11.5)
+    actions = _voice(logic, "deny", 10.0)
     assert _says(actions) == [MSG_APPROACH_DECLINED]
     assert logic.state == State.RETURNING
 
@@ -171,6 +220,13 @@ def test_yes_after_the_reask_is_accepted():
     assert logic.state == State.TURNING
 
 
+def test_yes_after_the_third_reask_is_accepted():
+    logic = _asking()
+    t = _use_up_reasks(logic)
+    assert MSG_APPROACH_ACCEPTED in _says(_voice(logic, "affirm", t))
+    assert logic.state == State.TURNING
+
+
 def test_no_answer_message_is_no_longer_used():
     """옛 동작('실례했습니다')은 다시 묻기·아니요로 바뀌었다."""
     logic = _asking()
@@ -178,18 +234,18 @@ def test_no_answer_message_is_no_longer_used():
     assert MSG_APPROACH_NO_ANSWER not in said
 
 
-def test_each_approach_gets_its_own_reask():
+def test_each_approach_gets_its_own_reasks():
     logic = _asking()
-    _voice(logic, "unknown", 7.0)                         # 이번 접근의 다시 묻기를 씀
-    _voice(logic, "deny", 8.0)                            # 물러남
+    t = _use_up_reasks(logic)                             # 이번 접근의 다시 묻기를 다 씀
+    _voice(logic, "unknown", t)                           # 물러남
     assert logic.state == State.RETURNING
-    logic.on_tick(30.0, NavStatus.SUCCEEDED)              # 복귀 끝
+    logic.on_tick(t + 20.0, NavStatus.SUCCEEDED)          # 복귀 끝
     req = ApproachRequest(goal=Pose2D(1.0, 0.5, 30.0, "map"), track_id=9, approachable=True)
-    logic.on_approach_request(req, BOUNDS, True, 40.0)
-    logic.on_tick(45.0, NavStatus.SUCCEEDED)
+    logic.on_approach_request(req, BOUNDS, True, t + 30.0)
+    logic.on_tick(t + 35.0, NavStatus.SUCCEEDED)
     assert logic.state == State.AWAITING_USER
-    logic.on_approach_question_spoken(46.0)
-    assert _says(_voice(logic, "unknown", 47.0)) == [MSG_APPROACH_REASK]
+    logic.on_approach_question_spoken(t + 36.0)
+    _use_up_reasks(logic, t + 37.0)                       # 새 접근은 다시 세 번
 
 
 # ---- 4. 말하는 중에는 떠나지 않는다 -------------------------------------------------------

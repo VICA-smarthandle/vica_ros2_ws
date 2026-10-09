@@ -549,9 +549,13 @@ MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하�
 MSG_APPROACH_DECLINED = "알겠습니다. 이만 물러납니다."
 MSG_APPROACH_ONBOARDING = "저에게 말을 거실 때는 '비카야'라고 불러주세요. 어디로 가고 싶으신가요?"
 MSG_APPROACH_NO_ANSWER = "실례했습니다. 필요하시면 언제든 불러 주세요."
-# 접근 질문을 한 번 다시 묻는 말(2026-10-09 사용자 결정·문구). 예·아니요가 아닌 말이나 8초 침묵에 한 번만.
-# 첫 질문의 끝과 같은 글자라 노드가 재생 끝(tts_done)에서 이 글자로 8초를 다시 센다.
+# 접근 질문을 다시 묻는 말(2026-10-09 사용자 결정·문구). 예·아니요가 아닌 말이나 8초 침묵에
+# APPROACH_REASK_MAX 번까지. 첫 질문의 끝과 같은 글자라 노드가 재생 끝(tts_done)에서 이 글자로 8초를 다시 센다.
 MSG_APPROACH_REASK = "안내를 받으시겠어요?"
+# 다시 묻기를 다 쓰고도 예·아니요를 못 들어 물러날 때의 말(2026-10-09 18:12 실기 뒤 사용자 결정 '나').
+# 대답을 못 들었는데 "알겠습니다. 이만 물러납니다."는 맞지 않는다(18:39 — LLM 이 답한 직후 그 말로 떠났다).
+# 분명한 아니요는 MSG_APPROACH_DECLINED 그대로. 구운 판(assets/baked)과 글자가 같아야 한다.
+MSG_APPROACH_UNANSWERED = "필요하시면 '비카야'라고 불러 주세요."
 MSG_APPROACH_BUSY = "지금은 다른 응대 중입니다. 잠시 후 다시 말씀해 주세요."
 
 # ---- 온보딩 뒤 빈손 되묻기 사다리 (실기 2026-09-11, 사용자 결정) --------------
@@ -647,6 +651,9 @@ DISTANCE_MILESTONES_M = ()
 # 질문 뒤 답을 기다리는 시간. STT 검증 1.84초를 포함한 값이며, 재생이 끝난
 # 시점부터 센다(on_approach_question_spoken).
 APPROACH_RESPONSE_TIMEOUT_SEC = 8.0
+# 접근 질문을 다시 묻는 횟수 상한(2026-10-09 18:12 실기 뒤 사용자 결정 — 처음엔 한 번이었다).
+# 한 번이면 '비카야'(꺼 둔 호출어가 STT 로 들어와 못 알아들은 말이 된다) 하나에 기회를 다 썼다.
+APPROACH_REASK_MAX = 3
 # 질문 재생완료(tts_done)가 영영 안 올 때(TTS 사망 등)의 탈출용 안전망.
 # 예전엔 질문을 큐에 넣는 시각부터 8초를 세는 폴백이었는데, 질문 음성이
 # 정확히 8.0초라 재생이 끝나는 순간 시계도 끝나 답할 창이 0초였다
@@ -1482,8 +1489,8 @@ class MissionLogic:
         self.approach_track_id: Optional[int] = None
         self.approach_goal_pose: Optional[Pose2D] = None
         self._response_deadline: Optional[float] = None
-        # 접근 질문을 이번 접근에서 이미 한 번 다시 물었나(2026-10-09). 다시 물은 뒤의 비답은 아니요다.
-        self._approach_reasked = False
+        # 접근 질문을 이번 접근에서 다시 물은 횟수(2026-10-09). APPROACH_REASK_MAX 를 다 쓴 뒤의 비답은 물러남이다.
+        self._approach_reasks = 0
         # 질문에 LLM 이 답하는 중 — (그 답의 글자, 재생 끝 소식을 기다리는 상한 시각). 끝나면 다시 묻는다.
         self._approach_after_reply: Optional[tuple] = None
         # track_id -> 재접근을 다시 허용할 시각. 사람마다 따로 센다.
@@ -1832,7 +1839,7 @@ class MissionLogic:
         """접근 질문. 목적지로 답하면("응, 화장실 가고 싶어") 수락으로 받고 그 목적지를 기억한다
         — 돌아서 손잡이를 내준 뒤 확인 질문으로 묻는다(규칙 1, 옛 동작은 버림·"다른 응대 중").
         취소 = 아니요(물러난다). 네·아니요는 옛 갈래(on_approach_answer)로 간다. 그 밖의 말(질문·못
-        알아들음·잠깐·다시 가자·기다려·다 됐어)은 한 번 다시 묻고, 다시 물은 뒤면 아니요다(2026-10-09
+        알아들음·잠깐·다시 가자·기다려·다 됐어)은 세 번까지 다시 묻고, 그 뒤면 물러난다(2026-10-09
         사용자 결정 — 옛 동작은 잠깐·다시 가자만 "네?", 나머지는 버려 8초 뒤 떠났다)."""
         if intent.intent == "navigate":
             self._approach_dest = self._approach_destination(intent, lookup, bounds, nav_ready)
@@ -2909,7 +2916,7 @@ class MissionLogic:
         # 큐 시각 기준 8초는 창이 0초가 되는 결함이었다.
         self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
         self._approach.reset()
-        self._approach_reasked = False
+        self._approach_reasks = 0
         self._approach_after_reply = None
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
@@ -2919,7 +2926,7 @@ class MissionLogic:
     def _approach_not_answered(self, reply: str, now: float) -> list:
         """접근 질문에 예·아니요가 아닌 말(질문·못 알아들음·잠깐 등, 2026-10-09 사용자 결정).
 
-        한 번은 "안내를 받으시겠어요?"로 다시 묻고, 다시 물은 뒤면 아니요로 본다. LLM 이 그 말에
+        세 번까지 "안내를 받으시겠어요?"로 다시 묻고, 그 뒤면 물러난다. LLM 이 그 말에
         소리 내어 답하면(질문의 답) 그 답이 끝난 뒤에 한다 — 미션이 먼저 말하면 순서가 뒤바뀐다.
         """
         reply = (reply or "").strip()
@@ -2930,14 +2937,17 @@ class MissionLogic:
         return self._approach_follow_up(now)
 
     def _approach_follow_up(self, now: float) -> list:
-        """다시 묻기(이번 접근에서 처음) 또는 아니요(이미 다시 물었으면 — 물러나 홈으로)."""
+        """다시 묻기(이번 접근에서 APPROACH_REASK_MAX 번까지) 또는 물러나기(다 썼으면 — 홈으로).
+
+        물러날 때는 "알겠습니다"가 아니라 '비카야'를 알려 주고 떠난다 — 대답을 못 들었다(사용자 결정 '나').
+        """
         self._approach_after_reply = None
-        if not self._approach_reasked:
-            self._approach_reasked = True
+        if self._approach_reasks < APPROACH_REASK_MAX:
+            self._approach_reasks += 1
             # 재생이 끝나면(on_approach_question_spoken) 8초를 다시 센다. 그 소식이 안 오면 안전망.
             self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
             return [self._ask(MSG_APPROACH_REASK)]
-        return self.on_approach_answer(False, now)
+        return self._approach_leave(MSG_APPROACH_UNANSWERED, now)
 
     def on_approach_reply_spoken(self, text: str, now: float) -> list:
         """접근 질문 중 질문에 LLM 이 답한 말이 재생을 마쳤다(/vica/tts_done) — 이제 다시 묻거나 물러난다."""
@@ -3035,7 +3045,12 @@ class MissionLogic:
                 SpinInPlace(self.approach_turn_yaw_rad, reason="수락 — 핸들을 사람 쪽으로"),
             ]
 
-        actions: list = [Say(MSG_APPROACH_DECLINED, priority="response")]
+        return self._approach_leave(MSG_APPROACH_DECLINED, now)
+
+    def _approach_leave(self, message: str, now: float) -> list:
+        """접근 질문을 접고 물러난다 — 아니요(MSG_APPROACH_DECLINED)든 대답 없음(MSG_APPROACH_UNANSWERED)이든
+        같은 길이고 말만 다르다."""
+        actions: list = [Say(message, priority="response")]
         if self._never_approached:
             # 걸어간 적이 없다(핸들 쪽 호출) — 물러날 곳이 없다. 사람이 이미
             # 손잡이 자리(로봇 뒤)에 서 있어, 복귀 주행을 걸면 출발 회전이
@@ -4181,8 +4196,8 @@ class MissionLogic:
                     actions.extend(self._approach_follow_up(now))
             elif (self._response_deadline is not None and now >= self._response_deadline
                     and not self._ear_holds(now)):
-                # 8초 침묵 — 한 번 다시 묻고, 다시 물은 뒤면 아니요로 보고 물러난다(2026-10-09 사용자
-                # 결정, 옛 동작은 곧장 "실례했습니다"). 사람이 말하는 중이거나 방금 한 말을 알아듣는
+                # 8초 침묵 — 세 번까지 다시 묻고, 그 뒤면 물러난다(2026-10-09 사용자 결정, 옛 동작은
+                # 곧장 "실례했습니다"). 사람이 말하는 중이거나 방금 한 말을 알아듣는
                 # 중이면 기다린다 — 도착 질문과 같은 귀 유예(run82 17:19, 대답 처리 중에 떠났다).
                 actions.extend(self._approach_follow_up(now))
 

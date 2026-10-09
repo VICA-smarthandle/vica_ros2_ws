@@ -6,6 +6,7 @@ import pytest
 from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
     APPROACH_QUESTION_STUCK_SEC,
+    APPROACH_REASK_MAX,
     HAPTIC_PATTERN_HANDLE_HINT,
     Haptic,
     SpinInPlace,
@@ -15,6 +16,7 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_ONBOARDING,
+    MSG_APPROACH_UNANSWERED,
     MSG_HANDLE_HINT,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -1033,13 +1035,16 @@ class TestApproachTransitions:
         assert logic.on_tick(13.0, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
         assert logic.on_tick(34.9, NavStatus.NONE) == []
-        # 2026-10-09: 안전망이 끝나면 한 번 다시 묻고, 그 재생 끝 소식도 안 오면 아니요로 물러난다.
-        actions = logic.on_tick(35.1, NavStatus.NONE)
-        assert logic.state == State.AWAITING_USER
-        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
-        actions = logic.on_tick(35.1 + APPROACH_QUESTION_STUCK_SEC + 0.1, NavStatus.NONE)
+        # 2026-10-09: 안전망이 끝날 때마다 다시 묻고(세 번까지), 그 재생 끝 소식도 끝내 안 오면 물러난다.
+        t = 35.1
+        for _ in range(APPROACH_REASK_MAX):
+            actions = logic.on_tick(t, NavStatus.NONE)
+            assert logic.state == State.AWAITING_USER
+            assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
+            t += APPROACH_QUESTION_STUCK_SEC + 0.1
+        actions = logic.on_tick(t, NavStatus.NONE)
         assert logic.state == State.RETURNING
-        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_DECLINED]
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_UNANSWERED]
 
     def test_question_as_long_as_window_still_gets_full_8s(self):
         """실기 재현: 질문 재생이 8.0초(응답 창과 같은 길이)여도 재생완료부터
@@ -2467,18 +2472,21 @@ class TestNearCallApproach:
         assert reason == GateReason.TRACK_SUPPRESSED
 
     def test_no_answer_still_works(self):
-        """무응답 사다리는 정상 접근과 같다 — 2026-10-09 부터 한 번 다시 묻고, 그래도 답이 없으면 아니요."""
+        """무응답 사다리는 정상 접근과 같다 — 2026-10-09 부터 세 번까지 다시 묻고, 그래도 답이 없으면 물러난다."""
         logic = MissionLogic(return_destination=make_home(),
                              approach_response_timeout_sec=8.0)
         seek_and_finish_turn(logic, t0=1.0)
         logic.on_person_detection(
             track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
-        actions = logic.on_tick(3.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
-        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
-        actions = logic.on_tick(3.0 + 2 * APPROACH_QUESTION_STUCK_SEC + 0.1, NavStatus.NONE)
+        t = 3.0 + APPROACH_QUESTION_STUCK_SEC
+        for _ in range(APPROACH_REASK_MAX):
+            actions = logic.on_tick(t, NavStatus.NONE)
+            assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
+            t += APPROACH_QUESTION_STUCK_SEC + 0.1
+        actions = logic.on_tick(t, NavStatus.NONE)
         assert logic.state == State.RETURNING
         says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_APPROACH_DECLINED
+        assert says and says[0].text == MSG_APPROACH_UNANSWERED
 
     def test_custom_thresholds(self):
         logic = MissionLogic(near_call_max_m=2.0, near_call_no_spin_m=1.5)
@@ -2613,13 +2621,16 @@ class TestHandleSideCall:
                               auto_return_home=True,
                               approach_response_timeout_sec=8.0)
         logic.on_wake_doa(175.0, True, 1.0)
-        # 2026-10-09: 한 번 다시 묻고, 그래도 답이 없으면 아니요 — 거절과 같이 제자리에서 끝난다.
-        logic.on_tick(1.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
-        actions = logic.on_tick(1.0 + 2 * APPROACH_QUESTION_STUCK_SEC + 0.1, NavStatus.NONE)
+        # 2026-10-09: 세 번까지 다시 묻고, 그래도 답이 없으면 물러남 — 거절과 같이 제자리에서 끝난다.
+        t = 1.0 + APPROACH_QUESTION_STUCK_SEC
+        for _ in range(APPROACH_REASK_MAX):
+            logic.on_tick(t, NavStatus.NONE)
+            t += APPROACH_QUESTION_STUCK_SEC + 0.1
+        actions = logic.on_tick(t, NavStatus.NONE)
         assert logic.state == State.IDLE
         assert not any(isinstance(a, Navigate) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_APPROACH_DECLINED
+        assert says and says[0].text == MSG_APPROACH_UNANSWERED
 
     def test_existing_gates_still_block_handle_side_calls(self):
         """E-stop 이 걸려 있으면 핸들 쪽 호출도 여전히 거절된다 — 관문 순서가
