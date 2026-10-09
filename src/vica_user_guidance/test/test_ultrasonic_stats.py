@@ -145,12 +145,12 @@ def _cfg_and_levels():
     return p, [int(x) for x in line.split("{")[1].split("}")[0].split(",")]
 
 
-def test_draw_30_over_physical_50_like_costmap_era():
-    """10-09: 이전 방식(costmap)으로 돌아가며 옛 09-02 A/B 설정 — 물리 빔 50°(레벨 3), 그리는 폭 30°."""
+def test_front_physical_30_draw_20_for_global():
+    """10-09 run80 뒤: 앞 두 개(ch1·ch2)는 물리 30°(레벨 1)·그리는 폭 20°, 나머지는 레벨 3·공통 30°."""
     p, levels = _cfg_and_levels()
     fov = resolve_channel_fov(p["ultrasonic_fov_rad"], p["ultrasonic_fov_rad_per_channel"], 8)
-    assert levels == [3] * 8
-    assert fov == pytest.approx([0.524] * 8)
+    assert levels == [3, 1, 1, 3, 3, 3, 3, 3]
+    assert fov == pytest.approx([0.524, 0.349, 0.349, 0.524, 0.524, 0.524, 0.524, 0.524])
 
 
 def test_side_max_range_040_others_common():

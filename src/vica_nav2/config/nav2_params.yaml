@@ -1712,6 +1712,7 @@ local_costmap:
       # 낮은 장애물, 그리고 유리를 맡는다. 발행원은 user_guidance_driver_node
       # (스마트핸들 ESP32U 경유). 설계·근거: docs/handoff_jetson_ultrasonic_i2c.md §6.5.
       # global costmap 에는 넣지 않는다 — 방위 분해능이 없어 저장 지도를 뭉갠다.
+      # -> 2026-10-09 run80 뒤(사용자 결정): 앞 두 개만 global 에도 넣는다(global_costmap plugins 주석).
       #
       # 2026-09-16 두 채널 enabled False 는 그 회차들에 초음파가 미연결이었기 때문
       # (51213e7). 2026-09-23 보드를 ESP32U 로 바꾸고 8개를 붙이면서 전부 True 로.
@@ -2127,7 +2128,31 @@ global_costmap:
       # 벽 0.55 는 "벽 근처 회전 때 이용자 안전"(08-02 사용자 판정)이라 그대로 둔다. 사람과의 실제 간격은
       # VCC(LETHAL 직접 거리, target_clearance 0.20)와 collision_monitor 가 지킨다. local 은 VCC 가 비용을
       # 읽지 않으므로 바꾸지 않는다. 되돌리기: obstacle_inflation_layer 를 빼고 순서를 원래대로.
-      plugins: ["static_layer", "inflation_layer", "obstacle_layer", "obstacle_inflation_layer"]
+      # 2026-10-09 run80 뒤(사용자 결정): 앞 초음파 두 개를 global 에도 넣는다. 라이다보다 낮은 박스·병을 SMAC(접근·당근)과
+      # 레일 막힘 판정(IsRailAheadClear, 레일 앞 3 m 의 LETHAL)이 보게 해, VCC 13 차선 안에서 막히던 것을 경로째 돌아가게 한다.
+      # obstacle_layer 뒤·obstacle_inflation_layer 앞이라 초음파 표시도 0.35 띠만 받는다. 물리 30°·그리는 20°(드라이버).
+      # 대가: 지나간 뒤 빔 밖에 남은 표시는 저절로 안 지워진다(시간 소거 없음) — 레일 거짓 막힘·배회는 bag 으로 센다.
+      # 되돌리기: 두 이름을 이 목록에서 뺀다.
+      plugins: ["static_layer", "inflation_layer", "obstacle_layer",
+                "range_sensor_front_left", "range_sensor_front_right", "obstacle_inflation_layer"]
+
+      # local 의 같은 이름 층과 값이 같다(설명은 local 초음파 절).
+      range_sensor_front_left:   # 2번 앞 왼쪽
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/front_left"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+      range_sensor_front_right:   # 3번 앞 오른쪽
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: True
+        topics: ["/ultrasonic/front_right"]
+        clear_on_max_reading: True
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
 
       obstacle_inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
