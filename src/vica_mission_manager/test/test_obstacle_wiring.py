@@ -58,3 +58,23 @@ def test_package_declares_the_new_dependencies():
                 "<depend>tf2_ros</depend>", "<exec_depend>python3-numpy</exec_depend>",
                 "<exec_depend>python3-scipy</exec_depend>"):
         assert dep in XML, dep
+
+
+def test_cue_queue_is_never_popped_unguarded():
+    """최종 검토 I-1: 판정 줄은 큐를 비우지 않고, 대화 줄은 경쟁에 안전한 take_all 로 꺼낸다."""
+    assert "self._obstacle_cues.clear()" not in NODE
+    drain = NODE[NODE.index("    def _drain_obstacle_cues"):NODE.index("    def _on_approach_request")]
+    assert "take_all(self._obstacle_cues)" in drain
+    assert ".popleft()" not in drain
+
+
+def test_setup_failure_turns_only_the_narration_off():
+    """최종 검토 I-2: 지도를 읽은 뒤의 설치(tf·구독·타이머)가 예외를 내도 미션은 뜨고 안내만 꺼진다."""
+    block = _setup_block()
+    after_grid = block.split("self._obstacle = ObstacleJudge(grid)")[0].split("if grid is None:")[1]
+    assert "return" in after_grid
+    guarded = block[block.index("        try:\n"):]
+    assert "self._obstacle = ObstacleJudge(grid)" in guarded
+    assert "except Exception as exc:" in guarded
+    assert "self._obstacle_guard.enabled = False" in guarded
+    assert "self._on_obstacle_error(exc)" in guarded

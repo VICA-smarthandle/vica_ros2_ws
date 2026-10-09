@@ -115,6 +115,7 @@ from .obstacle_inputs import (
     format_decision,
     load_grid,
     scan_points,
+    take_all,
     yaw_of,
 )
 from .obstacle_judge import ObstacleJudge, cm_what, goal_event, parse_state
@@ -1130,31 +1131,38 @@ class MissionManagerNode(Node):
         if grid is None:
             self.get_logger().warn(f"장애물 안내: 지도를 못 읽어 끕니다 — {why}")
             return
-        self._obstacle = ObstacleJudge(grid)
-        self._laser_offset: Optional[tuple] = None
-        # 위치(tf)는 리스너가 스스로 만드는 Reentrant 그룹으로 받는다 — 새 노드·스레드 없이 이 노드의
-        # MultiThreadedExecutor 가 처리한다. 리스너의 전용 스레드 옵션은 같은 노드를 executor 두 개에 넣게 돼 못 쓴다.
-        self._tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
-        group = MutuallyExclusiveCallbackGroup()
-        latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
-                            reliability=ReliabilityPolicy.BEST_EFFORT)
-        wrap = self._obstacle_guard.wrap
-        self.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group)
-        self.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
-                                 callback_group=group)
-        self.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group)
-        self.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
-                                 callback_group=group)
-        self.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group)
-        self.create_subscription(PathMsg, "/rail_plan", wrap(self._obs_rail), 5, callback_group=group)
-        self.create_subscription(String, "/vica_goal_event", wrap(self._obs_goal), 10, callback_group=group)
-        self.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
+        # 설치(tf·구독·타이머)도 보호막 안이다 — 여기서 예외가 나도 미션은 뜨고 안내만 꺼진다(2026-10-09 최종 검토 I-2).
+        try:
+            self._obstacle = ObstacleJudge(grid)
+            self._laser_offset: Optional[tuple] = None
+            # 위치(tf)는 리스너가 스스로 만드는 Reentrant 그룹으로 받는다 — 새 노드·스레드 없이 이 노드의
+            # MultiThreadedExecutor 가 처리한다. 리스너의 전용 스레드 옵션은 같은 노드를 executor 두 개에 넣게 돼 못 쓴다.
+            self._tf_buffer = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+            group = MutuallyExclusiveCallbackGroup()
+            latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                                reliability=ReliabilityPolicy.BEST_EFFORT)
+            wrap = self._obstacle_guard.wrap
+            self.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group)
+            self.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
+                                     callback_group=group)
+            self.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group)
+            self.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
+                                     callback_group=group)
+            self.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group)
+            self.create_subscription(PathMsg, "/rail_plan", wrap(self._obs_rail), 5, callback_group=group)
+            self.create_subscription(String, "/vica_goal_event", wrap(self._obs_goal), 10, callback_group=group)
+            self.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
+        except Exception as exc:  # noqa: BLE001
+            self._obstacle_guard.enabled = False
+            self._on_obstacle_error(exc)
+            return
         self.get_logger().info(f"장애물 안내: 켜짐 (지도 {map_yaml})")
 
     def _on_obstacle_error(self, exc: BaseException) -> None:
+        # 큐는 비우지 않는다 — 대화 줄이 꺼내는 중에 다른 스레드가 비우면 경쟁이 생긴다(최종 검토 I-1).
+        # 판정이 꺼지면 새 후보는 들어오지 않고, 남은 후보는 대화 줄이 늘 하던 대로 거른다.
         self._obstacle = None
-        self._obstacle_cues.clear()
         self.get_logger().error(f"장애물 안내: 오류로 끕니다 — 안내 주행은 계속됩니다 ({exc!r})")
 
     def _obs_pose(self, t: float) -> None:
@@ -1220,8 +1228,7 @@ class MissionManagerNode(Node):
 
     def _drain_obstacle_cues(self) -> None:
         """판정 줄이 넘긴 후보를 대화 줄에서 말할지 정한다(_tick 끝에서 부른다)."""
-        while self._obstacle_cues:
-            phrase, onset = self._obstacle_cues.popleft()
+        for phrase, onset in take_all(self._obstacle_cues):
             actions, why = self.logic.obstacle_cue(phrase, onset, self._now())
             if why:
                 self.get_logger().info(f"장애물 안내 뺌: {why}")

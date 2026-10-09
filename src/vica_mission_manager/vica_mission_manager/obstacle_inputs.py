@@ -67,6 +67,17 @@ def format_decision(d: dict) -> str:
             f"{where} · 목적지 {d['goal_dist']} m")
 
 
+def take_all(q) -> list:
+    """deque 에 쌓인 것을 다 꺼낸다. 다른 스레드가 같은 deque 를 비워도 IndexError 로 죽지 않는다
+    (2026-10-09 최종 검토 I-1: 대화 줄 _tick 의 예외는 MultiThreadedExecutor 가 다시 던져 미션을 끝낸다)."""
+    out = []
+    while True:
+        try:
+            out.append(q.popleft())
+        except IndexError:
+            return out
+
+
 class Guard:
     """장애물 안내 콜백 보호막 — 예외가 한 번이라도 나면 안내를 끄고 미션은 계속 돈다
     (2026-10-09 사용자 요구: 오류가 나면 장애물 안내만 꺼지고 안내 주행은 계속)."""

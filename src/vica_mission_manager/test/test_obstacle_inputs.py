@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from vica_mission_manager.obstacle_inputs import (
-    Guard, depth_frame_ok, format_decision, load_grid, scan_points, yaw_of,
+    Guard, depth_frame_ok, format_decision, load_grid, scan_points, take_all, yaw_of,
 )
 
 
@@ -110,3 +110,29 @@ class TestGuard:
         g = Guard(lambda e: None)
         assert g.wrap(lambda a, b: a + b)(2, 3) == 5
         assert g.enabled
+
+
+class TestTakeAll:
+    """최종 검토 I-1(2026-10-09): 판정 줄이 같은 deque 를 비우는 순간에도 대화 줄이 IndexError 로 죽지 않는다."""
+
+    def test_takes_everything_in_order(self):
+        from collections import deque
+        q = deque([("avoid", 1.0), ("slow", 2.0)])
+        assert take_all(q) == [("avoid", 1.0), ("slow", 2.0)]
+        assert not q
+
+    def test_survives_another_thread_emptying_the_queue(self):
+        class Raced:
+            """'비어 있지 않다'고 답한 직후 다른 스레드가 비운 것처럼 동작한다."""
+            def __init__(self):
+                self.items = [("avoid", 1.0)]
+
+            def __bool__(self):
+                return True
+
+            def popleft(self):
+                if not self.items:
+                    raise IndexError("pop from an empty deque")
+                return self.items.pop(0)
+
+        assert take_all(Raced()) == [("avoid", 1.0)]
