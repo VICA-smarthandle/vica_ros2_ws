@@ -104,7 +104,8 @@ EXPECT = {
     "CONFIRMING_CHANGE": {
         "navp": ((), State.CONFIRMING),
         "navc": ((SWITCH_ELEV,), State.CONFIRMING),
-        "wait": ((RESUMED_ROOM,), State.NAVIGATING),
+        # "기다려"도 "잠깐"처럼 선다 — 원래 목적지는 보관(2026-10-09 사용자 결정, 검토 M-5).
+        "wait": ((MSG_PAUSED,), State.PAUSED),
         "finish": ((MSG_CANCEL_CONFIRM,), State.CONFIRMING),
         "cancel": ((MSG_CANCEL_CONFIRM,), State.CONFIRMING),
         "pause": ((MSG_PAUSED,), State.PAUSED),
