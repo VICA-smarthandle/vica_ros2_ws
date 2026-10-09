@@ -157,6 +157,8 @@ def generate_launch_description() -> LaunchDescription:
             # 온보딩), 주행 중 손 놓침 정지를 쓰지 않는다. [시연 2026-10-06] true —
             # 터치 OUT 선을 빼고 시연한다. 모듈을 고치면 false 로 되돌린다.
             DeclareLaunchArgument("grip_assume_held", default_value="true"),
+            # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
+            DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -238,6 +240,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "grip_assume_held": ParameterValue(
                             LaunchConfiguration("grip_assume_held"),
+                            value_type=bool,
+                        ),
+                        "obstacle_narration": ParameterValue(
+                            LaunchConfiguration("obstacle_narration"),
                             value_type=bool,
                         ),
                     }

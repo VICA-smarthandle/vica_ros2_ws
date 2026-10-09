@@ -22,18 +22,23 @@ import json
 import math
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
 import rclpy
+import tf2_ros
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
-from nav2_msgs.msg import SpeedLimit
+from nav_msgs.msg import Path as PathMsg
+from nav2_msgs.msg import BehaviorTreeLog, SpeedLimit
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rcl_interfaces.msg import Log
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
@@ -102,6 +107,17 @@ from .mission_logic import (
     nav_behavior_tree,
     yaw_deg_to_quaternion,
 )
+from .obstacle_inputs import (
+    BASE_FRAME,
+    LASER_DEFAULT,
+    Guard,
+    depth_frame_ok,
+    format_decision,
+    load_grid,
+    scan_points,
+    yaw_of,
+)
+from .obstacle_judge import ObstacleJudge, cm_what, goal_event, parse_state
 
 #: 트리가 바뀌는 goal 을 보내기 전, 앞 task 의 취소가 끝나기를 기다리는 상한(초).
 #: _nav_lock_timeout_sec(2.0) 과 같은 크기 — 콜백을 오래 붙잡지 않는다.
@@ -237,6 +253,9 @@ class MissionManagerNode(Node):
         self.declare_parameter("grip_assume_held", False)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
+        # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
+        # false 면 장애물 입력을 아예 구독하지 않는다.
+        self.declare_parameter("obstacle_narration", True)
         self.declare_parameter("grip_hint_pulse_sec", GRIP_HINT_PULSE_SEC)
         self.declare_parameter("grip_release_grace_sec", GRIP_RELEASE_GRACE_SEC)
         self.declare_parameter("grip_resume_window_sec", GRIP_RESUME_WINDOW_SEC)
@@ -644,6 +663,15 @@ class MissionManagerNode(Node):
             amcl_qos,
             callback_group=self._main_group,
         )
+
+        # ---- 주행 중 장애물 안내 (2026-10-09) — 입력은 전용 줄, 말할지는 _tick 이 정한다 ----------
+        self._obstacle: Optional[ObstacleJudge] = None
+        self._obstacle_guard = Guard(self._on_obstacle_error)
+        self._obstacle_cues: deque = deque(maxlen=8)
+        if bool(self.get_parameter("obstacle_narration").value):
+            self._setup_obstacle_narration(map_yaml)
+        else:
+            self.get_logger().info("장애물 안내: 꺼짐(obstacle_narration=false)")
 
         tick_hz = float(self.get_parameter("tick_hz").value)
         self.create_timer(1.0 / tick_hz, self._tick, callback_group=self._main_group)
@@ -1091,6 +1119,114 @@ class MissionManagerNode(Node):
         cov = msg.pose.covariance
         self._pose_cov_xy = float(cov[0] + cov[7]) if len(cov) >= 8 else 0.0
 
+    # -- 주행 중 장애물 안내 (2026-10-09) ------------------------------------------------------
+    # 판정은 obstacle_judge(설계서 3절, 시운전 run81 에서 16번 모두 실물). 입력은 전용 콜백 그룹으로만 받아
+    # 대화 줄(_main_group)과 서로 기다리지 않는다. 라이다·깊이는 최근 1장만 둔다(밀려도 쌓이지 않게).
+    # 판정 줄은 말할 후보만 _obstacle_cues 에 넣고, 말할지는 대화 줄의 _tick 이 logic.obstacle_cue 로 정한다.
+    # 장애물 부분의 예외는 Guard 가 받아 안내만 끈다 — 안내 주행은 계속된다.
+
+    def _setup_obstacle_narration(self, map_yaml: str) -> None:
+        grid, why = load_grid(map_yaml)
+        if grid is None:
+            self.get_logger().warn(f"장애물 안내: 지도를 못 읽어 끕니다 — {why}")
+            return
+        self._obstacle = ObstacleJudge(grid)
+        self._laser_offset: Optional[tuple] = None
+        # 위치(tf)는 리스너가 스스로 만드는 Reentrant 그룹으로 받는다 — 새 노드·스레드 없이 이 노드의
+        # MultiThreadedExecutor 가 처리한다. 리스너의 전용 스레드 옵션은 같은 노드를 executor 두 개에 넣게 돼 못 쓴다.
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        group = MutuallyExclusiveCallbackGroup()
+        latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                            reliability=ReliabilityPolicy.BEST_EFFORT)
+        wrap = self._obstacle_guard.wrap
+        self.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group)
+        self.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
+                                 callback_group=group)
+        self.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group)
+        self.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
+                                 callback_group=group)
+        self.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group)
+        self.create_subscription(PathMsg, "/rail_plan", wrap(self._obs_rail), 5, callback_group=group)
+        self.create_subscription(String, "/vica_goal_event", wrap(self._obs_goal), 10, callback_group=group)
+        self.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
+        self.get_logger().info(f"장애물 안내: 켜짐 (지도 {map_yaml})")
+
+    def _on_obstacle_error(self, exc: BaseException) -> None:
+        self._obstacle = None
+        self._obstacle_cues.clear()
+        self.get_logger().error(f"장애물 안내: 오류로 끕니다 — 안내 주행은 계속됩니다 ({exc!r})")
+
+    def _obs_pose(self, t: float) -> None:
+        try:
+            tr = self._tf_buffer.lookup_transform("map", BASE_FRAME, rclpy.time.Time())
+        except tf2_ros.TransformException:
+            return   # 위치를 아직 모르면 원인 판정만 쉰다
+        p, q = tr.transform.translation, tr.transform.rotation
+        self._obstacle.on_pose(t, p.x, p.y, yaw_of(q))
+
+    def _obs_laser_offset(self) -> tuple:
+        if self._laser_offset is None:
+            try:
+                tr = self._tf_buffer.lookup_transform(BASE_FRAME, "laser_frame", rclpy.time.Time())
+            except tf2_ros.TransformException:
+                return LASER_DEFAULT
+            self._laser_offset = (tr.transform.translation.x, tr.transform.translation.y)
+        return self._laser_offset
+
+    def _obs_scan(self, msg: LaserScan) -> None:
+        t = self._now()
+        self._obs_pose(t)
+        self._obstacle.on_points("scan", t, *scan_points(msg, self._obs_laser_offset()))
+
+    def _obs_depth(self, msg: LaserScan) -> None:
+        if depth_frame_ok(msg.header.frame_id):
+            self._obstacle.on_points("depth", self._now(), *scan_points(msg))
+
+    def _obs_vcc(self, msg: String) -> None:
+        st = parse_state(msg.data)
+        if st is not None:
+            t = self._now()
+            # 안내 주행인지는 미션 자신의 대화 단계로 본다(1단계 도구는 /vica/robot_state 로 받았다).
+            self._obstacle.on_dialog(t, self.logic.dialog_state)
+            self._obstacle.on_vcc(t, st)
+
+    def _obs_bt(self, msg: BehaviorTreeLog) -> None:
+        for e in msg.event_log:
+            self._obstacle.on_bt(e.timestamp.sec + e.timestamp.nanosec * 1e-9, e.node_name, e.current_status)
+
+    def _obs_rosout(self, msg: Log) -> None:
+        if msg.name == "collision_monitor":
+            what = cm_what(msg.msg)
+            if what:
+                self._obstacle.on_cm(self._now(), what)
+
+    def _obs_rail(self, msg: PathMsg) -> None:
+        self._obstacle.on_rail(self._now(), [(p.pose.position.x, p.pose.position.y) for p in msg.poses])
+
+    def _obs_goal(self, msg: String) -> None:
+        # 이 노드가 낸 goal 사건을 이 노드가 다시 받는다 — 판정 입력을 1단계 도구와 똑같이 둔다.
+        ev = goal_event(msg.data)
+        if ev:
+            self._obstacle.on_goal(self._now(), ev["event"], ev["x"], ev["y"], ev["loc"])
+
+    def _obs_tick(self) -> None:
+        t = self._now()
+        self._obs_pose(t)
+        for d in self._obstacle.tick(t):
+            if d["decision"] == "announce":
+                self._obstacle_cues.append((d["phrase"], d["t"]))
+            self.get_logger().info("장애물: " + format_decision(d))
+
+    def _drain_obstacle_cues(self) -> None:
+        """판정 줄이 넘긴 후보를 대화 줄에서 말할지 정한다(_tick 끝에서 부른다)."""
+        while self._obstacle_cues:
+            phrase, onset = self._obstacle_cues.popleft()
+            actions, why = self.logic.obstacle_cue(phrase, onset, self._now())
+            if why:
+                self.get_logger().info(f"장애물 안내 뺌: {why}")
+            self._run_actions(actions)
+
     def _on_approach_request(
         self,
         request: RequestApproach.Request,
@@ -1426,6 +1562,7 @@ class MissionManagerNode(Node):
             self._save_ledger()
         self._ledger_prev_confirming = confirming
         self._run_actions(actions)
+        self._drain_obstacle_cues()
         if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
             # SEEKING 진입·이탈은 여기서도 일어난다(탐색 창 닫힘, 복귀 회전
             # 시작·종료). /vica/robot_state 1 Hz 의 최대 1초 지연을 즉시
