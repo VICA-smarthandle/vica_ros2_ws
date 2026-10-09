@@ -90,6 +90,9 @@ class UserGuidanceDriverNode(Node):
         # 채널별 최대 거리. 0 이하 칸은 ultrasonic_max_range_m 를 쓴다. 이보다 먼 값은 "없음"(max)으로
         # 보내 그 거리까지만 칠하고 지운다 — Nav2 RangeSensorLayer 는 층별 거리 설정이 없어 메시지 값을 쓴다.
         self.declare_parameter("ultrasonic_max_range_m_per_channel", [-1.0] * protocol.US_CHANNELS)
+        # 채널별 켜기(순서 = ultrasonic_topics). 꺼진 채널은 토픽을 만들지도 발행하지도 않는다
+        # — RViz·costmap·VCC·bag 어디에도 안 들어간다. 펌웨어 US_CH_ON 과 짝.
+        self.declare_parameter("ultrasonic_channel_enabled", [True] * protocol.US_CHANNELS)
         # 순차 발사라 채널마다 측정 시점이 다르다. 프레임 수신 시각에서 이만큼
         # 과거를 stamp 로 쓴다 — MCU 에 시계가 없어 수신 시각을 그대로 쓰면
         # costmap 이 낡은 값을 새것으로 착각한다.
@@ -410,7 +413,15 @@ class UserGuidanceDriverNode(Node):
         self.us_stat_acc = StatFrameAccumulator()
         self.us_cfg_acc = ConfigFrameAccumulator()   # 레지스터 되읽기(AA 59) — 부팅·시험 명령 뒤
         self.us_stat_names = [t.rsplit("/", 1)[-1] for t in topics]
-        self.us_pubs = [self.create_publisher(Range, t, 10) for t in topics]
+        self.us_on = [bool(v) for v in self.get_parameter("ultrasonic_channel_enabled").value]
+        if len(self.us_on) != protocol.US_CHANNELS:
+            raise ValueError(
+                f"ultrasonic_channel_enabled 는 {protocol.US_CHANNELS}칸이어야 합니다: {len(self.us_on)}"
+            )
+        self.us_pubs = [
+            self.create_publisher(Range, t, 10) if on else None
+            for t, on in zip(topics, self.us_on)
+        ]
         self.us_last_frame_ns = None
         self.us_stale_warned = False
 
@@ -430,6 +441,7 @@ class UserGuidanceDriverNode(Node):
             f"Ultrasonic Range publishing: {topics} "
             f"(칠하는 폭 도 {[round(math.degrees(v)) for v in self.us_fov_ch]}, "
             f"최대 거리 m {self.us_max_range_ch}, "
+            f"켜진 채널 {[t for t, on in zip(topics, self.us_on) if on]}, "
             f"TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
             f", 기준 프레임 {self.us_tf_target})"
         )
@@ -535,6 +547,8 @@ class UserGuidanceDriverNode(Node):
     def _publish_ranges(self, frame) -> None:
         stamp_base = self.get_clock().now()
         for ch, mm in enumerate(frame.distances_mm):
+            if not self.us_on[ch]:
+                continue   # 꺼진 채널 — 토픽 없음
             if mm == protocol.US_DIST_INVALID:
                 # 채널 무효(3회 연속 실패) — 그 채널만 건너뛴다. 한 센서 고장이
                 # 다른 채널을 죽이지 않는다.

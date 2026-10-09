@@ -1746,7 +1746,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
+        enabled: False   # 2026-10-09 run79 뒤(사용자 결정): 바퀴 옆 초음파는 드라이버·펌웨어에서 끔(앞 두 개만). 엘리베이터·로봇팔 때 다시
         topics: ["/ultrasonic/left_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0
@@ -1754,7 +1754,7 @@ local_costmap:
         mark_threshold: 0.8
       range_sensor_right_wheel:   # 4번 오른쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
+        enabled: False   # 2026-10-09 run79 뒤(사용자 결정): 바퀴 옆 초음파는 드라이버·펌웨어에서 끔(앞 두 개만). 엘리베이터·로봇팔 때 다시
         topics: ["/ultrasonic/right_wheel"]
         clear_on_max_reading: True
         no_readings_timeout: 0.0

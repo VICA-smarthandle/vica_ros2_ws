@@ -239,5 +239,10 @@ user_guidance_driver_node:
     # 과거다: A(앞 왼쪽·후방 오른쪽) 420 / B(앞 오른쪽·후방 왼쪽) 315 /
     # C(바퀴 옆 둘) 210 / D(뒷바퀴 옆 둘) 105. 순서는 위 채널 순서와 같다.
     # 트리거 명령을 바꾸면(0xBC->다른 것) 펌웨어 US_WAIT_MS 와 함께 바꾼다.
-    ultrasonic_measurement_delay_ms: [210, 420, 315, 210, 105, 420, 315, 105]
+    # 2026-10-09 run79 뒤(사용자 결정): 앞 두 개만 켬(펌웨어 US_CH_ON) → A·B 2라운드, 프레임은 B 뒤.
+    # 앞 왼쪽(A) 210·앞 오른쪽(B) 105. 꺼진 채널 값은 쓰이지 않아 옛 값 그대로 둔다.
+    # 전부 켜기(엘리베이터·로봇팔): [210, 420, 315, 210, 105, 420, 315, 105] + 아래 enabled 전부 true + 펌웨어 US_CH_ON 전부 1.
+    ultrasonic_measurement_delay_ms: [210, 210, 105, 210, 105, 420, 315, 105]
+    # 채널별 켜기(순서 = ultrasonic_topics). 2026-10-09: 주행에는 앞 두 개만 — 바퀴 옆·뒤는 주행에 영향 없게 끈다.
+    ultrasonic_channel_enabled: [false, true, true, false, false, false, false, false]
     ultrasonic_stale_warn_sec: 2.0

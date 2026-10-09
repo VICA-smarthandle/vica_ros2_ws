@@ -378,10 +378,21 @@ const uint8_t US_ROUND_CH[US_ROUNDS][US_PER_ROUND] = {
   { 0, 3 },  // C: 왼쪽 바퀴 옆 + 오른쪽 바퀴 옆
   { 7, 4 },  // D: 왼쪽 뒷바퀴 옆 + 오른쪽 뒷바퀴 옆
 };
+// 2026-10-09 run79 뒤(사용자 결정): 주행에는 앞 두 개(ch1·ch2)만 쓴다. 꺼진 채널은 쏘지도 읽지도 않고
+// 프레임에 0(무효)으로 실려 드라이버가 발행하지 않는다. 켜진 채널이 없는 라운드는 건너뛰어 한 바퀴가 짧아진다
+// — 앞 둘만이면 A·B 2라운드 = 210 ms/바퀴, 채널당 약 4.8 Hz(8채널 때 2.4 Hz). 8채널 프레임은 마지막
+// 켜진 라운드(B) 뒤에 나간다 → 드라이버 measurement_delay 는 앞 왼쪽 210·앞 오른쪽 105.
+// 엘리베이터·로봇팔 주행 때 전부 켜기: 모두 1 로 + 드라이버 delay [210, 420, 315, 210, 105, 420, 315, 105].
+const uint8_t US_CH_ON[US_N] = { 0, 1, 1, 0, 0, 0, 0, 0 };
 #define US_LEGACY_CH0 1   // 옛 프레임 d0 = 앞 왼쪽
 #define US_LEGACY_CH1 2   // 옛 프레임 d1 = 앞 오른쪽
 
 enum UsPhase { US_TRIG, US_WAIT, US_READ };
+
+bool usRoundOn(uint8_t r) {
+  for (uint8_t k = 0; k < US_PER_ROUND; k++) if (US_CH_ON[US_ROUND_CH[r][k]]) return true;
+  return false;
+}
 UsPhase       usPhase   = US_TRIG;
 uint8_t       usRound   = 0;
 bool          usTrigOk[US_PER_ROUND] = { false, false };
@@ -487,7 +498,7 @@ void usFail(uint8_t ch) {
   }
 }
 
-// 8채널 프레임 20B. 한 바퀴(4라운드)가 끝날 때 한 번 보낸다.
+// 8채널 프레임 20B. 한 바퀴(켜진 라운드 전부)가 끝날 때 한 번 보낸다.
 void usSendFrame8() {
   uint8_t f[3 + 2 * US_N + 1];
   f[0] = US_FRAME_H1;
@@ -579,7 +590,8 @@ void usTask(unsigned long now) {
         usApplyConfig();
       }
       for (uint8_t k = 0; k < US_PER_ROUND; k++) {
-        usTrigOk[k] = usWrite8(US_ADDR7[US_ROUND_CH[usRound][k]], US_REG_CMD, US_TRIG_CMD);
+        uint8_t ch = US_ROUND_CH[usRound][k];
+        usTrigOk[k] = US_CH_ON[ch] && usWrite8(US_ADDR7[ch], US_REG_CMD, US_TRIG_CMD);
       }
       usPhase   = US_WAIT;
       usPhaseAt = now;
@@ -598,6 +610,7 @@ void usTask(unsigned long now) {
       for (uint8_t k = 0; k < US_PER_ROUND; k++) {
         uint8_t  ch = US_ROUND_CH[usRound][k];
         uint16_t raw;
+        if (!US_CH_ON[ch]) continue;   // 꺼진 채널: usDist 0(무효) 그대로, 통계도 안 셈
         if (usTrigOk[k] && usReadDist(US_ADDR7[ch], &raw)) {
           if (raw >= 1 && raw <= 3000)      { usCount(ch, US_ST_OK);    usStore(ch, raw); }
           else if (raw == 0xFFFD)           { usCount(ch, US_ST_CLEAR); usStore(ch, US_CLEAR_MM); }
@@ -616,8 +629,10 @@ void usTask(unsigned long now) {
       usPhase   = US_TRIG;
       usPhaseAt = now;
       usRound++;
+      while (usRound < US_ROUNDS && !usRoundOn(usRound)) usRound++;   // 꺼진 라운드 건너뜀
       if (usRound >= US_ROUNDS) {
         usRound = 0;
+        while (usRound < US_ROUNDS - 1 && !usRoundOn(usRound)) usRound++;
         usSendFrame8();
         if (++usStatCycles >= US_STAT_EVERY_CYCLES) {
           usStatCycles = 0;

@@ -159,3 +159,18 @@ def test_side_max_range_040_others_common():
     r = resolve_channel_fov(p["ultrasonic_max_range_m"], p["ultrasonic_max_range_m_per_channel"], 8,
                             name="ultrasonic_max_range_m_per_channel")
     assert r == pytest.approx([0.40, 1.5, 1.5, 0.40, 1.5, 1.5, 1.5, 1.5])
+
+
+def test_channel_enabled_matches_firmware_and_delays():
+    """10-09: 드라이버 채널 켜기 = 펌웨어 US_CH_ON, 켜진 채널의 지연 = 켜진 라운드만 도는 바퀴 기준."""
+    p, _ = _cfg_and_levels()
+    src = INO.read_text(encoding="utf-8")
+    line = next(ln for ln in src.splitlines() if ln.startswith("const uint8_t US_CH_ON"))
+    fw_on = [x.strip() == "1" for x in line.split("{")[1].split("}")[0].split(",")]
+    assert p["ultrasonic_channel_enabled"] == fw_on
+    rounds = [[1, 5], [2, 6], [0, 3], [7, 4]]   # 펌웨어 US_ROUND_CH
+    live = [r for r in rounds if any(fw_on[c] for c in r)]
+    for i, r in enumerate(live):
+        for c in r:
+            if fw_on[c]:
+                assert p["ultrasonic_measurement_delay_ms"][c] == 105 * (len(live) - i), c
