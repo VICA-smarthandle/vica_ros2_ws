@@ -48,21 +48,26 @@ def test_default_distance_is_the_agreed_1_1_m():
 def test_default_distance_clears_geometry_lower_bound():
     """1.1 m 는 회전 반경 + 사람 몸 반경 + goal 오차를 넘어야 한다.
 
-    설계 6.3 절: 0.4962 + 0.25 + 0.10 = 0.8462 m 가 하한이다.
+    설계 6.3 절은 0.4962 + 0.25 + 0.10 = 0.8462 m 였다. 2026-10-10 지금 차체(외접 0.570)로는
+    0.570 + 0.25 + 0.10 = 0.92 m — 여유 0.18 m.
     """
     lower_bound = (
         CIRCUMSCRIBED_RADIUS_M + PERSON_BODY_RADIUS_M + APPROACH_GOAL_TOLERANCE_M
     )
     assert DEFAULT_APPROACH_DISTANCE_M > lower_bound
-    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.2538)
+    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.18)
 
 
 def test_default_distance_also_clears_driving_tolerance():
-    """접근 전용 tolerance 를 못 걸어도(0.25 유지) 여유 10.4 cm 는 남는다."""
+    """옛 일반 주행 tolerance 0.25 로 쳐도 여유가 남는다 — 지금 차체로는 3 cm 뿐이다(2026-10-10).
+
+    옛 차체(0.4962)로는 10.4 cm 였다. 지금 접근 도착 판정은 0.15(general_goal_checker)라
+    실제 여유는 이보다 크지만, 사람 위치 오차(run84 6 m 에서 +0.25~0.45 m)는 이 여유로 못 덮는다.
+    """
     lower_bound = (
         CIRCUMSCRIBED_RADIUS_M + PERSON_BODY_RADIUS_M + DRIVING_GOAL_TOLERANCE_M
     )
-    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.1038)
+    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.03)
 
 
 # ---- 정상 케이스 (손으로 검산되는 값) ----------------------------------------

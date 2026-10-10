@@ -28,8 +28,14 @@
 
     회전 반경으로 잡는 이유는, 도착한 뒤 제자리에서 사람 쪽으로 도는 동작이 다음
     사이클에 들어오기 때문이다. 미리 만족시켜 두지 않으면 그때 접근 거리를 다시
-    바꿔야 한다. circumscribed 0.4962 는 현재 `nav2_params.yaml` footprint 값이고
-    (`17f6820` 로 꼬리 0.595 -> 0.495), 사람 몸 반경 0.25 는 어깨 폭 기준이다.
+    바꿔야 한다. 사람 몸 반경 0.25 는 어깨 폭 기준이다.
+
+    [2026-10-10 정정] circumscribed 는 base_link 를 앞 구동축으로 옮긴 뒤의 footprint
+    외접 반경 **0.570**(꼬리 (−0.569, ±0.035))이다 — 위 표의 0.4962 는 그 전 값이다.
+    "네" 뒤 180° 회전을 막는 behavior_server Spin 의 충돌 검사는 padding 0.05 를 더한
+    **0.62** 원으로 본다. run84 E·F 는 다리가 0.63~0.69 m 에 서서 그 원에 걸려 회전이
+    96·129° 에서 멈췄다 — 1.1 m 가 남기는 여유는 사람 위치를 제대로 잴 때만 산다
+    (중간 재측정, approach_recheck).
 
     1.1 m 는 `collision_monitor` 의 `PolygonSlow`(x 0.36 ~ 1.10) 와 일부러 겹친다.
     마지막 구간에서 0.3 -> 0.12 m/s 로 느려지는 것은 설정 오류가 아니라 의도다
@@ -49,8 +55,10 @@ from typing import Optional
 
 from .mission_logic import Pose2D
 
-# 현재 footprint 의 외접원 반경. nav2_params.yaml 과 같은 값이어야 한다.
-CIRCUMSCRIBED_RADIUS_M = 0.4962
+# 현재 footprint 의 외접원 반경(padding 제외). nav2_params.yaml 과 같은 값이어야 한다.
+# 2026-10-10 0.4962 -> 0.570: base_link 를 앞 구동축으로 옮긴 뒤 꼬리 (−0.569, ±0.035).
+# 계산에는 쓰지 않고 1.1 m 의 근거 시험(test_approach_geometry)에만 쓴다.
+CIRCUMSCRIBED_RADIUS_M = 0.570
 
 # 사람 몸 반경(어깨 폭 기준). 사람은 costmap 에 없으므로 이 수치는 계산으로만 지킨다.
 PERSON_BODY_RADIUS_M = 0.25

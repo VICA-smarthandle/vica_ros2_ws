@@ -16,6 +16,13 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Optional, Sequence, Union
 
+from .approach_recheck import (
+    RECHECK_RESEND_M,
+    SAME_PERSON_RADIUS_M,
+    SUPPRESS_RADIUS_M,
+    MidcourseRecheck,
+    same_person,
+)
 from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
 from .grip_meter import GripMeter
 
@@ -203,6 +210,9 @@ class ApproachRequest:
     # Mission 은 탐지 이력을 쌓지 않지만, 실려 온 판정 결과가 false 면 그대로
     # 거부한다 — 요청자를 믿기만 하지는 않는다는 뜻이다.
     approachable: bool = True
+    # 탐지된 사람 자리(map). 같은 사람을 track 번호가 아니라 자리로 알아보는 데 쓴다
+    # (2026-10-10 B6, approach_recheck). 모르면 None — 그때는 예전처럼 번호로만 본다.
+    person: Optional[Pose2D] = None
 
 
 # ---- Actions: 노드가 실행할 일 ---------------------------------------------
@@ -1069,8 +1079,13 @@ def check_approach_gate(
     estop_active: bool,
     nav_ready: bool,
     suppressed: bool,
+    same_person: bool = False,
 ) -> GateReason:
     """사람 접근 요청 게이트. 첫 번째 실패 사유를 돌려준다.
+
+    `same_person` 은 접근 중 다른 track 번호의 요청이 지금 대상과 같은 자리(반경
+    SAME_PERSON_RADIUS_M)인가다 — 추적기가 같은 사람에게 새 번호를 붙여도 다른 사람으로
+    거절하지 않는다(2026-10-10 B6, run84 E·F 12→16·24→26).
 
     check_gate 와 같은 순서로 읽는다 — 요청 자체의 흠 → 안전 → 문맥 → 좌표 →
     Nav2 준비. 다른 점 하나는 이 게이트의 거절이 **말이 되어 나가지 않는다**는
@@ -1088,8 +1103,8 @@ def check_approach_gate(
         return GateReason.ESTOP_ACTIVE
     if state == State.APPROACHING:
         # 같은 사람이면 goal 갱신이고 다른 사람이면 거절이다. 접근 중에 대상을
-        # 갈아타면 두 사람 모두에게 이상한 동작이 된다.
-        if request.track_id != active_track_id:
+        # 갈아타면 두 사람 모두에게 이상한 동작이 된다. 같은 사람은 번호 또는 자리로 안다.
+        if request.track_id != active_track_id and not same_person:
             return GateReason.BUSY_APPROACHING
     elif state in (State.AWAITING_USER, State.RETURNING):
         return GateReason.BUSY_APPROACHING
@@ -1493,6 +1508,11 @@ class MissionLogic:
         # 가는 중인지를 따로 들고 있어야 재접근 억제를 걸 수 있다.
         self.approach_track_id: Optional[int] = None
         self.approach_goal_pose: Optional[Pose2D] = None
+        # 접근 대상 사람의 자리(map). 번호가 바뀌어도 같은 사람을 알아보고(B6), 중간 재측정의
+        # 기준 자리이며, 끝난 뒤 자리로 재접근을 억제한다(2026-10-10). 복귀가 끝날 때까지 든다.
+        self.approach_person: Optional[Pose2D] = None
+        # 접근 거리의 절반쯤(2.5~3.5 m)에서 한 번 다시 잰다(approach_recheck). 끝나면 목표 고정.
+        self._recheck = MidcourseRecheck()
         self._response_deadline: Optional[float] = None
         # 접근 질문을 이번 접근에서 다시 물은 횟수(2026-10-09). APPROACH_REASK_MAX 를 다 쓴 뒤의 비답은 물러남이다.
         self._approach_reasks = 0
@@ -1500,6 +1520,8 @@ class MissionLogic:
         self._approach_after_reply: Optional[tuple] = None
         # track_id -> 재접근을 다시 허용할 시각. 사람마다 따로 센다.
         self._suppressed_tracks: dict = {}
+        # (사람 자리, 재접근을 다시 허용할 시각). 번호가 바뀐 같은 사람도 막는다(2026-10-10 B6).
+        self._suppressed_places: list = []
 
     # -- 접근 감속 조회 ---------------------------------------------------------
 
@@ -2678,8 +2700,16 @@ class MissionLogic:
         같은 track_id 로 접근 중에 다시 오면 goal 갱신으로 받는다 — 사람이
         움직이면 goal 도 따라가야 하기 때문이다. 다만 갱신 임계(0.5 m)보다 덜
         움직였으면 아무것도 하지 않고 승인만 돌려준다.
+
+        2026-10-10: 같은 사람은 번호뿐 아니라 자리로도 안다(B6) — 번호가 바뀐 요청이 지금
+        대상 자리 반경 안이면 번호를 갈아 단다. 중간 재측정이 끝난 뒤로는 goal 을 바꾸지
+        않는다(고정). 재접근 억제도 번호 또는 자리로 건다.
         """
         self._prune_suppressed(now)
+        same = (
+            self.state == State.APPROACHING
+            and same_person(request.person, self.approach_person, SAME_PERSON_RADIUS_M)
+        )
         reason = check_approach_gate(
             request,
             self.state,
@@ -2687,7 +2717,9 @@ class MissionLogic:
             bounds,
             self.estop_active,
             nav_ready,
-            self._is_suppressed(request.track_id, now),
+            self._is_suppressed(request.track_id, now)
+            or self._place_suppressed(request.person, now),
+            same_person=same,
         )
         if reason != GateReason.OK:
             return [], reason
@@ -2695,10 +2727,22 @@ class MissionLogic:
         destination = approach_destination(request)
 
         if self.state == State.APPROACHING:
+            if request.track_id != self.approach_track_id:
+                # 추적기가 같은 사람에게 새 번호를 붙였다(자리로 확인, run84 E·F).
+                self.approach_track_id = request.track_id
+            self._recheck.update_robot(self.robot_pose)
+            if self._recheck.finished:
+                # 중간 재측정이 끝났다(고침·그대로·포기) — 이번 접근의 목표는 고정이다.
+                # 끝 무렵 검출(지팡이가 화면 밖·흔들림)로 도착 직전 목표가 바뀌지 않게 한다.
+                return [], GateReason.OK
             if not self._approach_goal_moved(request.goal):
                 # 재계획 폭주 억제. 승인은 하되 goal 은 그대로 둔다.
                 return [], GateReason.OK
             self.approach_goal_pose = request.goal
+            if request.person is not None:
+                # 사람이 실제로 옮겨 섰다 — 재측정 기준 자리도 따라간다.
+                self.approach_person = request.person
+                self._recheck.move_person(request.person)
             self.active_destination = destination
             return [Navigate(destination)], GateReason.OK
 
@@ -2707,6 +2751,8 @@ class MissionLogic:
         self.active_destination = destination
         self.approach_track_id = request.track_id
         self.approach_goal_pose = request.goal
+        self.approach_person = request.person
+        self._recheck.start(request.person, self.robot_pose)
         self._response_deadline = None
         self._announced_milestones = set()
         self._distance_baseline = None
@@ -2723,6 +2769,52 @@ class MissionLogic:
             ],
             GateReason.OK,
         )
+
+    @property
+    def approach_recheck(self) -> MidcourseRecheck:
+        """중간 재측정 상태(단계·시점·표본 수) — 노드 로그용, 읽기만 한다."""
+        return self._recheck
+
+    def on_approach_detection(
+        self, person: Pose2D, confidence: float, now: float
+    ) -> Optional[Pose2D]:
+        """접근 중 /vica/person_detection 한 건 — 중간 재측정(2026-10-10).
+
+        track 번호는 보지 않는다. 지금 대상 자리 반경 안·신뢰도 0.6 이상 검출을 절반쯤(2.5~3.5 m)
+        에서 5개 모아, 다 모인 그 순간에만 새 사람 자리(중앙값)를 돌려준다. 목표(1.1 m 앞)는
+        노드가 approach_geometry 로 계산해 on_approach_recheck_goal 로 넘긴다 — 접근 요청과 같은
+        나눔(판단은 여기, 기하는 노드).
+        """
+        if self.state != State.APPROACHING:
+            return None
+        return self._recheck.observe(self.robot_pose, person, confidence)
+
+    def on_approach_recheck_goal(
+        self,
+        person: Pose2D,
+        goal: Optional[Pose2D],
+        bounds: Optional[MapBounds],
+        now: float,
+    ) -> tuple:
+        """중간 재측정 자리로 다시 계산한 목표. (actions, 목표가 옮겨질 거리 m).
+
+        RECHECK_RESEND_M(12 cm = VCC 멈춤 반경) 이상 옮겨질 때만 한 번 다시 보낸다. 같은 접근
+        트리라 취소 없이 선점된다 — run84 A 의 도중 갱신 때 VCC 는 TRACK 그대로, 속도 0.43~0.47
+        m/s 였다. 덜 옮겨지면 서는 자리가 같으니 보내지 않는다. 어느 쪽이든 목표는 여기서 고정이다.
+        """
+        if self.state != State.APPROACHING or goal is None or self.approach_goal_pose is None:
+            return [], 0.0
+        moved = math.hypot(goal.x - self.approach_goal_pose.x, goal.y - self.approach_goal_pose.y)
+        self.approach_person = person
+        if moved < RECHECK_RESEND_M:
+            return [], moved
+        destination = approach_destination(ApproachRequest(
+            goal=goal, track_id=self.approach_track_id or TRACK_ID_NONE, person=person))
+        if not pose_valid(destination, bounds):
+            return [], moved
+        self.approach_goal_pose = goal
+        self.active_destination = destination
+        return [Navigate(destination)], moved
 
     def on_approach_cancel_request(self, now: float) -> tuple:
         """접근 포기·대상 이탈 통보(/vica/mission/cancel_approach).
@@ -2969,6 +3061,7 @@ class MissionLogic:
         stable: bool,
         approachable: bool,
         now: float,
+        person: Optional[Pose2D] = None,
     ) -> list:
         """/vica/person_detection 원본 결과 (근접 호출, 2026-09-10 확장).
 
@@ -2998,7 +3091,7 @@ class MissionLogic:
         if self.estop_active:
             return []
         self._prune_suppressed(now)
-        if self._is_suppressed(track_id, now):
+        if self._is_suppressed(track_id, now) or self._place_suppressed(person, now):
             return []
 
         # 대화가 시작됐다 — 복귀 회전이 나가면 안 된다(사람에게 응대하러
@@ -3026,7 +3119,7 @@ class MissionLogic:
             # 핸들 접촉·목적지 안내는 여전히 다음 사이클이다. 방금 수락한 사람에게
             # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 회전 전에 건다.
             track_id = self.approach_track_id
-            self._suppress_track(track_id, now)
+            self._suppress_track(track_id, now, self.approach_person)
             if self.approach_turn_yaw_rad == 0.0 or self._near_call_no_spin:
                 # 회전이 없으면 회전 예고는 거짓말 — 온보딩으로 바로 간다.
                 # 온보딩 끝은 질문이라 expects_reply 로 재청취 창이 열린다.
@@ -4491,34 +4584,53 @@ class MissionLogic:
         걸면 마지막에 만났던 track_id 가 걸려 **다음 사람을 이유 없이 무시한다.**
         """
         track_id = self.approach_track_id
+        person = self.approach_person
         was_home = self._returning_home
         # 홈에 왔다 — 홈 가는 중의 "기다려"·늦은 답은 여기서 끝이다(결정 1).
         self._last_guided = None
         self._late_answer_finish = None
         self._to_idle()
         if not was_home:
-            self._suppress_track(track_id, now)
+            self._suppress_track(track_id, now, person)
 
-    def _suppress_track(self, track_id: Optional[int], now: float) -> None:
+    def _suppress_track(
+        self, track_id: Optional[int], now: float, person: Optional[Pose2D] = None
+    ) -> None:
         """이 사람에게 당분간 다시 다가가지 않는다.
 
         거절했거나 답하지 않은 사람을 로봇이 계속 쫓아다니는 것이 이 기능의 가장
         나쁜 실패 방식이다. 억제는 IDLE 로 내려가도 남아 있어야 하므로
         _to_idle 에서 지우지 않는다.
+
+        자리(person)도 함께 억제한다(2026-10-10 B6) — 추적기가 같은 사람에게 새 번호를
+        붙이면 번호 억제만으로는 또 다가간다(08-24 B5 재현). 반경은 SUPPRESS_RADIUS_M.
         """
+        until = now + self.reapproach_suppress_sec
+        if person is not None:
+            self._suppressed_places.append((person, until))
         if track_id is None or track_id == TRACK_ID_NONE:
             return
-        self._suppressed_tracks[track_id] = now + self.reapproach_suppress_sec
+        self._suppressed_tracks[track_id] = until
 
     def _is_suppressed(self, track_id: int, now: float) -> bool:
         until = self._suppressed_tracks.get(track_id)
         return until is not None and now < until
+
+    def _place_suppressed(self, person: Optional[Pose2D], now: float) -> bool:
+        """이 자리(반경 SUPPRESS_RADIUS_M)의 사람을 최근 억제했나. 자리를 모르면 아니다."""
+        return any(
+            now < until and same_person(person, place, SUPPRESS_RADIUS_M)
+            for place, until in self._suppressed_places
+        )
 
     def _prune_suppressed(self, now: float) -> None:
         """지난 억제를 버린다. 하루 종일 서 있으면 track_id 가 계속 쌓인다."""
         expired = [t for t, until in self._suppressed_tracks.items() if now >= until]
         for track_id in expired:
             del self._suppressed_tracks[track_id]
+        self._suppressed_places = [
+            (place, until) for place, until in self._suppressed_places if now < until
+        ]
 
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
@@ -4544,9 +4656,11 @@ class MissionLogic:
         #
         # 억제까지 거는 것은 설계에 없는 판단이다. 방금 비상 정지가 걸린 그
         # 사람에게 해제 직후 로봇이 다시 다가가는 것이 더 나쁘다고 봤다.
-        self._suppress_track(self.approach_track_id, now)
+        self._suppress_track(self.approach_track_id, now, self.approach_person)
         self.approach_track_id = None
         self.approach_goal_pose = None
+        self.approach_person = None
+        self._recheck.reset()
         self._response_deadline = None
         self._nav_from_app = False
         # 손잡이 상태도 버린다 — 해제 뒤 자동 재개가 없으니 모드도 새로 정한다.
@@ -4605,7 +4719,10 @@ class MissionLogic:
         self._retry_at = None
         # 접근 대상도 비운다. _suppressed_tracks 는 남긴다 — 재접근 억제는
         # IDLE 로 돌아온 뒤에 효력을 내야 하는 값이라 여기서 지우면 무의미해진다.
+        # 사람 자리·재측정도 같다(_suppressed_places 는 남긴다).
         self.approach_track_id = None
+        self.approach_person = None
+        self._recheck.reset()
         # 복귀 종류 표시도 함께 비운다. 남겨 두면 다음 접근 뒤 복귀가 홈 복귀로
         # 오인되어 재접근 억제가 걸리지 않는다.
         self._returning_home = False

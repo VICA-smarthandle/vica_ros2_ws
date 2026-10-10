@@ -849,6 +849,9 @@ class MissionManagerNode(Node):
         하는 것이 정상이다. 로그는 상태가 실제로 바뀐 경우에만 남긴다(그 외는
         5 Hz 소음이 된다).
         """
+        if self.logic.state == State.APPROACHING:
+            self._recheck_approach(msg)
+            return
         before = self.logic.state
         actions = self.logic.on_person_detection(
             track_id=msg.track_id,
@@ -856,6 +859,7 @@ class MissionManagerNode(Node):
             stable=msg.stable,
             approachable=msg.approachable,
             now=self._now(),
+            person=self._detection_pose(msg),
         )
         if before == self.logic.state:
             return
@@ -864,6 +868,45 @@ class MissionManagerNode(Node):
             f"근접 호출: track={msg.track_id} dist={msg.distance_m:.2f}m "
             f"{before.value} -> {self.logic.state.value}"
         )
+
+    @staticmethod
+    def _detection_pose(msg: PersonDetection) -> Optional[Pose2D]:
+        """검출의 사람 자리(map). 좌표가 NaN 이면 None — 자리로 판단하지 않는다."""
+        px, py = msg.pose.position.x, msg.pose.position.y
+        if not (math.isfinite(px) and math.isfinite(py)):
+            return None
+        return Pose2D(x=px, y=py, yaw_deg=0.0, frame_id=msg.header.frame_id or "map")
+
+    def _recheck_approach(self, msg: PersonDetection) -> None:
+        """접근 중 검출 → 중간 재측정(2026-10-10, 설계 docs/superpowers/specs/2026-10-10-…).
+
+        판단(언제·어느 검출·12 cm)은 mission_logic, 1.1 m 앞 목표 계산은 여기(approach_goal) —
+        접근 요청과 같은 나눔이다. 로그는 단계가 바뀔 때와 결과 때만 한 줄씩(5 Hz 소음 방지).
+        """
+        person = self._detection_pose(msg)
+        if person is None:
+            return
+        recheck = self.logic.approach_recheck
+        before = recheck.phase
+        new_person = self.logic.on_approach_detection(person, msg.confidence, self._now())
+        after = recheck.phase
+        if after != before:
+            self.get_logger().info(
+                f"중간 재측정: {before.value} -> {after.value} (처음 거리 "
+                f"{recheck.start_distance_m:.2f} m, 시점 {recheck.trigger_m:.2f} m, "
+                f"표본 {recheck.sample_count}개)")
+        if new_person is None or self._robot_pose is None:
+            return
+        old = self.logic.approach_person
+        shift = (math.hypot(new_person.x - old.x, new_person.y - old.y)
+                 if old is not None else float("nan"))
+        goal = approach_goal(new_person, self._robot_pose)
+        actions, moved = self.logic.on_approach_recheck_goal(
+            new_person, goal, self.map_bounds, self._now())
+        self._run_actions(actions)
+        self.get_logger().info(
+            f"중간 재측정: 사람 자리 {shift:.2f} m 고침 → 목표 {moved:.2f} m "
+            f"{'다시 보냄' if actions else '그대로(12 cm 미만이거나 지도 밖)'} · 이후 목표 고정")
 
     # -- 취소 / 일시정지 / 재개 service -------------------------------------------
     #
@@ -1359,6 +1402,7 @@ class MissionManagerNode(Node):
             goal=goal,                      # None 이면 게이트가 거부한다
             track_id=target.track_id,
             approachable=target.approachable,
+            person=person,                  # 같은 사람은 자리로도 안다(2026-10-10 B6)
         )
 
         before = self.logic.state
