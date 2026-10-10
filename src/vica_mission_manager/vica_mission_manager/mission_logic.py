@@ -521,6 +521,11 @@ RETURN_RESUME_SEC = 15.0
 # 1.3초 뒤 "네, 잠시만…"으로 수락해, 묻고 바로 스스로 답한 꼴이었다.
 EAR_GRACE_SEC = 8.0
 EAR_HOLD_MAX_SEC = 20.0
+# LLM '생각 중'(/vica/thinking, 2026-10-10 사용자 결정): LLM 노드가 사용자 말을 판단하는 동안 켜는 신호다
+# (원래 TTS 의 생각 중 운율용, 2026-09-01). 켜져 있으면 귀 유예가 끝나도 다시 묻지 않는다 — 10-10 12:13
+# Realtime 이 9초 걸린 사이 6초 유예가 먼저 끝나 다시 묻고 곧바로 수락했다. 꺼진 뒤 의도가 미션에 닿을
+# 짧은 틈은 꼬리로 더 기다린다. 켠 채 LLM 노드가 죽으면 EAR_HOLD_MAX_SEC(처음 켠 때부터) 뒤엔 놓는다.
+LLM_THINKING_TAIL_SEC = 1.0
 # 최후 안전망: ASKING 진입 후 이 시간 안에 응답 시계가 못 열리면 강제로
 # 연다. 근본 수리는 TTS 쪽 — 끊긴 발화도 tts_done 을 발행한다(2026-08-31)
 # — 이라 정상 계통에선 절대 안 울리고, 신호 유실·TTS 사망 같은 계통 밖
@@ -1460,6 +1465,10 @@ class MissionLogic:
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
         self._ear_grace_until: Optional[float] = None
+        # LLM 생각 중(/vica/thinking) — 켜진 동안·꺼진 뒤 꼬리까지 대답 대기 시계를 잡는다(2026-10-10).
+        self._llm_thinking = False
+        self._llm_thinking_since: Optional[float] = None
+        self._llm_thinking_tail_until: Optional[float] = None
         # 사용자가 실제로 말을 시작했는가("speech") — 창이 열렸을 뿐("open")
         # 인 상태와 구분한다. 온보딩 되묻기 사다리의 시계는 이것만 본다.
         self._ear_speaking = False
@@ -3118,6 +3127,31 @@ class MissionLogic:
             return self._advance_dest_prompt(now)
         return []
 
+    def on_llm_thinking(self, thinking: bool, now: float) -> list:
+        """/vica/thinking — LLM 노드가 사용자 말을 판단하는 중인가(2026-10-10 사용자 결정). 발화 없음.
+
+        켜진 동안은 대답 대기 시계를 잡고(_llm_thinking_holds), 꺼지면 의도가 닿을 꼬리
+        LLM_THINKING_TAIL_SEC 만큼 더 잡는다. 상한은 처음 켠 때부터 EAR_HOLD_MAX_SEC — 글자 경로가
+        다시 켜도 늘리지 않는다.
+        """
+        if thinking:
+            if not self._llm_thinking:
+                self._llm_thinking_since = now
+            self._llm_thinking = True
+            self._llm_thinking_tail_until = None
+        else:
+            if self._llm_thinking:
+                self._llm_thinking_tail_until = now + LLM_THINKING_TAIL_SEC
+            self._llm_thinking = False
+        return []
+
+    def _llm_thinking_holds(self, now: float) -> bool:
+        if (self._llm_thinking and self._llm_thinking_since is not None
+                and now - self._llm_thinking_since <= EAR_HOLD_MAX_SEC):
+            return True
+        return (self._llm_thinking_tail_until is not None
+                and now < self._llm_thinking_tail_until)
+
     def _dest_prompt_holds(self, now: float) -> bool:
         """온보딩 되묻기 사다리의 시계를 잡아둘 이유가 있는가.
 
@@ -3129,6 +3163,8 @@ class MissionLogic:
         """
         if (self._ear_speaking and self._ear_speech_since is not None
                 and now - self._ear_speech_since <= EAR_HOLD_MAX_SEC):
+            return True
+        if self._llm_thinking_holds(now):
             return True
         return (self._ear_grace_until is not None
                 and now < self._ear_grace_until)
@@ -3147,9 +3183,11 @@ class MissionLogic:
 
     def _ear_holds(self, now: float) -> bool:
         """무응답 시계를 잡아둘 이유가 있는가. 상한(EAR_HOLD_MAX_SEC)은
-        닫힘 신호 유실 대비 — 귀가 영영 바빠 보여도 결국 떠난다."""
+        닫힘 신호 유실 대비 — 귀가 영영 바빠 보여도 결국 떠난다. LLM 이 생각 중이어도 잡는다(2026-10-10)."""
         if (self._ear_busy and self._ear_busy_since is not None
                 and now - self._ear_busy_since <= EAR_HOLD_MAX_SEC):
+            return True
+        if self._llm_thinking_holds(now):
             return True
         return (self._ear_grace_until is not None
                 and now < self._ear_grace_until)

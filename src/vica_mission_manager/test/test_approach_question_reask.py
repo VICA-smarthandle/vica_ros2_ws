@@ -17,6 +17,8 @@ from vica_mission_manager.mission_logic import (
     APPROACH_REASK_MAX,
     APPROACH_RESPONSE_TIMEOUT_SEC,
     EAR_GRACE_SEC,
+    EAR_HOLD_MAX_SEC,
+    LLM_THINKING_TAIL_SEC,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_NO_ANSWER,
@@ -292,12 +294,56 @@ def test_clock_still_ends_after_the_grace():
     assert _says(_ticks(logic, 15.5, 16.0)) == [MSG_APPROACH_REASK]
 
 
+# ---- 5. LLM '생각 중'(/vica/thinking) 동안은 다시 묻지 않는다 (2026-10-10 사용자 결정) ----------
+
+def test_clock_waits_while_the_llm_is_thinking():
+    """10-10 12:13 장면을 시간과 무관하게 막는다 — Realtime 이 9초 걸려도 생각 중이면 기다린다."""
+    logic = _asking()                                    # 시계 13.0
+    logic.on_listen_state("open", 5.2)
+    logic.on_listen_state("closed", 7.5)                 # 귀 유예 15.5 까지
+    logic.on_llm_thinking(True, 5.8)
+    assert _says(_ticks(logic, 8.0, 18.0)) == []          # 유예가 끝나도 생각 중
+    logic.on_llm_thinking(False, 18.2)
+    assert MSG_APPROACH_ACCEPTED in _says(_voice(logic, "affirm", 18.21))
+
+
+def test_short_tail_after_thinking_ends():
+    """생각이 끝난 뒤 의도가 미션에 닿기까지 잠깐(LLM_THINKING_TAIL_SEC)은 더 기다린다."""
+    logic = _asking()
+    logic.on_llm_thinking(True, 6.0)
+    logic.on_llm_thinking(False, 14.0)
+    assert _says(_ticks(logic, 14.0, 14.0 + LLM_THINKING_TAIL_SEC - 0.1)) == []
+    assert _says(_ticks(logic, 14.0 + LLM_THINKING_TAIL_SEC + 0.1, 15.5)) == [MSG_APPROACH_REASK]
+
+
+def test_thinking_that_never_ends_is_capped():
+    """LLM 노드가 생각 중 표시를 켠 채 죽어도 상한(EAR_HOLD_MAX_SEC) 뒤엔 다시 묻는다."""
+    logic = _asking()
+    logic.on_llm_thinking(True, 6.0)
+    assert _says(_ticks(logic, 6.5, 6.0 + EAR_HOLD_MAX_SEC - 0.5)) == []
+    assert _says(_ticks(logic, 6.0 + EAR_HOLD_MAX_SEC + 0.5, 6.0 + EAR_HOLD_MAX_SEC + 1.0)) == [MSG_APPROACH_REASK]
+
+
+def test_thinking_true_twice_keeps_the_first_start():
+    """글자 경로가 다시 켜도 상한은 처음 켠 때부터 센다(무한 연장 방지)."""
+    logic = _asking()
+    logic.on_llm_thinking(True, 6.0)
+    logic.on_llm_thinking(True, 20.0)
+    assert MSG_APPROACH_REASK in _says(_ticks(logic, 6.0 + EAR_HOLD_MAX_SEC + 0.5, 6.0 + EAR_HOLD_MAX_SEC + 1.0))
+
+
 # ---- 노드 배선 (rclpy 없이 소스 글자로, test_handle_mode 방식) -------------------------------
 
 def _node_src():
     from pathlib import Path
     return (Path(__file__).resolve().parents[1] / "vica_mission_manager"
             / "mission_manager_node.py").read_text(encoding="utf-8")
+
+
+def test_node_feeds_the_llm_thinking_signal_to_the_logic():
+    src = _node_src()
+    assert '"/vica/thinking"' in src
+    assert "self.logic.on_llm_thinking(msg.data, self._now())" in src
 
 
 def test_node_passes_the_llm_reply_to_the_logic():

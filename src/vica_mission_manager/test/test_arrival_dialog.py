@@ -396,6 +396,17 @@ class TestEarHold:
         acts = logic.on_tick(18.0, NavStatus.NONE)               # 유예 소진 → 침묵 사다리 1단(재질문)
         assert _say(acts) == [MSG_ASK_RESTROOM]
 
+    def test_llm_thinking_holds_the_arrival_clock(self):
+        """LLM 이 생각 중(/vica/thinking)이면 도착 질문도 다시 묻지 않는다(2026-10-10)."""
+        logic = arrive("restroom")
+        logic.on_listen_state("open", 3.0)
+        logic.on_listen_state("closed", 9.5)
+        logic.on_llm_thinking(True, 8.0)
+        assert _say(logic.on_tick(19.0, NavStatus.NONE)) == []   # 귀 유예(17.5)가 끝나도 생각 중
+        logic.on_llm_thinking(False, 19.5)
+        acts = logic.on_tick(21.0, NavStatus.NONE)               # 생각 끝 + 꼬리 뒤 → 재질문
+        assert _say(acts) == [MSG_ASK_RESTROOM]
+
     def test_empty_fires_promptly(self):
         logic = arrive("restroom")
         logic.on_listen_state("open", 3.0)

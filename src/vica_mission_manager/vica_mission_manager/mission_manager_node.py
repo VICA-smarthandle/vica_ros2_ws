@@ -525,6 +525,14 @@ class MissionManagerNode(Node):
             10,
             callback_group=self._main_group,
         )
+        # LLM 이 사용자 말을 판단하는 중(2026-10-10 사용자 결정) — 켜진 동안은 대답 대기 시계를 잡는다.
+        # 원래 TTS 의 '생각 중' 운율용 신호(음성 LLM 노드가 Realtime·글자 경로 호출 전후로 켜고 끈다).
+        self.create_subscription(
+            Bool, "/vica/thinking",
+            lambda msg: self.logic.on_llm_thinking(msg.data, self._now()),
+            10,
+            callback_group=self._main_group,
+        )
 
         # 손잡이 터치(2026-09-30). 드라이버가 2 Hz 주기 + 바뀐 순간 즉시 낸다.
         # 사실만 적고 판정(잡기·놓침)은 _tick → logic.on_tick 이 한다.
