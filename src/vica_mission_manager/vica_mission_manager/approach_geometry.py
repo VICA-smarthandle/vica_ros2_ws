@@ -22,6 +22,8 @@
 
         안전거리 > circumscribed(0.4962) + 사람 몸 반경(0.25) + goal 오차
 
+    [2026-10-10] 1.1 -> 1.0 (DEFAULT_APPROACH_DISTANCE_M 주석). 아래 표는 1.1 시절 값이다.
+
     | goal tolerance      | 하한   | 1.1 m 일 때 여유 |
     | 0.25 (일반 주행)     | 1.00 m | +10.4 cm        |
     | 0.10 (접근 전용)     | 0.85 m | +25.4 cm        |
@@ -65,10 +67,15 @@ PERSON_BODY_RADIUS_M = 0.25
 
 # 접근 전용 goal tolerance. 일반 주행 0.25 는 그대로 두고 접근 구간에만 건다.
 APPROACH_GOAL_TOLERANCE_M = 0.10
-DRIVING_GOAL_TOLERANCE_M = 0.25
+# 지금 접근 도착 판정(general_goal_checker, LatchedGoalChecker xy). 2026-09-30 0.25 -> 0.15.
+DRIVING_GOAL_TOLERANCE_M = 0.15
 
 # 사람 앞 정지 거리. 근거는 모듈 docstring 참조.
-DEFAULT_APPROACH_DISTANCE_M = 1.1
+# 2026-10-10 1.1 -> 1.0(사용자 결정, run85 뒤): 중간 재측정으로 다리가 목표 −0.01~+0.09 m 에 서게
+# 되자(1.09~1.19 m) "좀 멀다". 1.0 이면 다리 약 0.99~1.09 m — "네" 뒤 회전의 손잡이 꼬리 원(padding
+# 포함 0.62 m)까지 0.37 m 남는다. 지팡이를 다리보다 0.37 m 앞에 짚으면(run84 D) 0.62~0.72 m 라
+# 장애물로 찍히면 회전이 막힐 수 있다 — 그때는 1.1 로 되돌린다.
+DEFAULT_APPROACH_DISTANCE_M = 1.0
 
 # 이 거리 미만이면 사람-로봇 방향이 잡음이라 계산을 포기한다.
 # D455 depth 정밀도는 cm 단위이므로 1 mm 미만의 간격은 실측이 아니라 고장이다.

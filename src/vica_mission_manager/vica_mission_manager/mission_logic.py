@@ -44,7 +44,7 @@ class State(str, Enum):
     # ---- 사람 접근 (devlog/2026-08-23-사람접근-구현설계.md 4절) ----------------
     #
     # 아래 셋은 모두 "안내를 받는 사용자가 아직 없는" 구간이다. 시각장애인을
-    # 탐지해 1.1 m 앞까지 다가가(APPROACHING) 안내가 필요한지 묻고
+    # 탐지해 사람 앞 1.0 m(2026-10-10, 예전 1.1)까지 다가가(APPROACHING) 안내가 필요한지 묻고
     # (AWAITING_USER), 끝나면 대기 위치로 돌아온다(RETURNING).
     APPROACHING = "approaching"
     # 질문을 던지고 답을 기다린다. 주도권은 음성 쪽에 있고 Mission 은 타임아웃만
@@ -677,6 +677,11 @@ APPROACH_QUESTION_STUCK_SEC = 30.0
 # 수락 후 회전이 이 시간 안에 끝나지 않으면 포기하고 IDLE 로 내린다.
 # 180도 / 회전 상한 0.4 rad/s = 7.9 s 에 수락·기동 지연 여유를 더한 값.
 APPROACH_TURN_TIMEOUT_SEC = 15.0
+# 수락 뒤 핸들을 사람 쪽으로 낼 때 명령하는 회전(도). 180 이 아니라 175 인 이유(2026-10-10 사용자 결정):
+# behavior_server Spin 이 늘 6~8° 더 돈다 — run84 187°, run85 186·186·188°(odom·IMU 일치). 180 을 주면
+# 손잡이가 그만큼 비껴 가고, 도착 방향 오차와 겹치면 run85 접근 1 처럼 약 15° 가 된다. 노드 파라미터
+# approach_turn_yaw_deg 의 기본값도 이 값이다.
+APPROACH_TURN_YAW_DEG = 175.0
 # 호출 접근(설계 2026-09-10). "비카야"를 듣고 그쪽으로 고개를 돌린 뒤,
 # 카메라가 사람을 찾을 때까지 기다리는 시간.
 #
@@ -1225,7 +1230,7 @@ class MissionLogic:
         approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
         return_destination: Optional[Destination] = None,
         auto_return_home: bool = False,
-        approach_turn_yaw_rad: float = math.pi,
+        approach_turn_yaw_rad: float = math.radians(APPROACH_TURN_YAW_DEG),
         arrival_dialog: bool = False,
         wake_doa_sign: float = 1.0,
         seek_look_sec: float = SEEK_LOOK_SEC,
@@ -2781,7 +2786,7 @@ class MissionLogic:
         """접근 중 /vica/person_detection 한 건 — 중간 재측정(2026-10-10).
 
         track 번호는 보지 않는다. 지금 대상 자리 반경 안·신뢰도 0.6 이상 검출을 절반쯤(2.5~3.5 m)
-        에서 5개 모아, 다 모인 그 순간에만 새 사람 자리(중앙값)를 돌려준다. 목표(1.1 m 앞)는
+        에서 5개 모아, 다 모인 그 순간에만 새 사람 자리(중앙값)를 돌려준다. 목표(안전거리 앞)는
         노드가 approach_geometry 로 계산해 on_approach_recheck_goal 로 넘긴다 — 접근 요청과 같은
         나눔(판단은 여기, 기하는 노드).
         """
@@ -4175,7 +4180,8 @@ class MissionLogic:
                 # 사람 앞 1.1 m 에 섰다. 여기서부터 주도권은 음성 쪽으로 넘어가고
                 # Mission 은 타임아웃만 센다(설계 4절). 걸어서 도착했으니 정상
                 # 접근이다 — 근접 호출(on_person_detection)의 회전 생략은 이
-                # 경로와 무관하다(도착 거리 1.1 m > near_call_no_spin_m 1.0 m).
+                # 경로와 무관하다(바로 아래에서 _near_call_no_spin 을 내린다 — 2026-10-10
+                # 도착 거리 1.0 m 가 near_call_no_spin_m 1.0 m 와 같아져도 회전한다).
                 self._near_call_no_spin = False
                 actions.extend(self._enter_awaiting_user(now))
             elif nav_status in (NavStatus.FAILED, NavStatus.CANCELED):

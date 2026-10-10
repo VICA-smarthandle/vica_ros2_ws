@@ -936,9 +936,10 @@ class TestApproachTransitions:
         assert limits and limits[0].percent == 0.0
 
     def test_yes_turns_handle_toward_person(self):
-        """수락하면 180도 돌아 핸들을 사람 쪽으로 낸다 (2026-08-24 범위 확장).
+        """수락하면 돌아 핸들을 사람 쪽으로 낸다 (2026-08-24 범위 확장).
 
-        정지 거리 1.1 m 는 애초에 이 회전의 반경 기준으로 설계됐다(설계 6.3절).
+        정지 거리는 애초에 이 회전의 반경 기준으로 설계됐다(설계 6.3절). 명령은 180° 가 아니라
+        175° 다(2026-10-10) — behavior_server Spin 이 늘 6~8° 더 돈다(run84 187°, run85 186~188°).
         """
         logic = MissionLogic()
         start_approach(logic)
@@ -948,7 +949,7 @@ class TestApproachTransitions:
         assert any(isinstance(a, Say) for a in actions)
         spins = [a for a in actions if isinstance(a, SpinInPlace)]
         assert len(spins) == 1
-        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        assert spins[0].yaw_rad == pytest.approx(math.radians(175.0))
         # 회전은 Navigate 가 아니다 — goal 을 새로 만들지 않는다.
         assert not any(isinstance(a, Navigate) for a in actions)
 
@@ -2330,7 +2331,7 @@ class TestNearCallApproach:
         assert says[0].expects_reply is True
 
     def test_near_person_accept_turns_then_onboards(self):
-        """1.0~1.5 m: 걸어가지 않고 질문 -> 수락 시 180도 회전 -> 온보딩."""
+        """1.0~1.5 m: 걸어가지 않고 질문 -> 수락 시 손잡이 회전(명령 175°) -> 온보딩."""
         logic = MissionLogic()
         seek_and_finish_turn(logic, t0=1.0)
         logic.on_person_detection(
@@ -2339,7 +2340,7 @@ class TestNearCallApproach:
         assert logic.state == State.TURNING
         spins = [a for a in actions if isinstance(a, SpinInPlace)]
         assert len(spins) == 1
-        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        assert spins[0].yaw_rad == pytest.approx(math.radians(175.0))
         onboarding_actions = logic.on_tick(6.0, NavStatus.SUCCEEDED)
         assert logic.state == State.IDLE
         says = [a for a in onboarding_actions if isinstance(a, Say)]

@@ -10,6 +10,7 @@ import pytest
 
 mm = pytest.importorskip("vica_mission_manager.mission_manager_node")
 
+from vica_mission_manager.approach_geometry import DEFAULT_APPROACH_DISTANCE_M  # noqa: E402
 from vica_mission_manager.mission_logic import (  # noqa: E402
     ApproachRequest,
     GateReason,
@@ -70,7 +71,7 @@ def test_detections_during_approach_resend_the_goal_once():
         node._on_person_detection(_msg(0.0, -3.6))
     sent = [a for a in node.ran if isinstance(a, Navigate)]
     assert len(sent) == 1
-    assert sent[0].destination.pose.y == pytest.approx(-3.6 + 1.1)
+    assert sent[0].destination.pose.y == pytest.approx(-3.6 + DEFAULT_APPROACH_DISTANCE_M)
     assert node.logic.state == State.APPROACHING
     assert any("다시 보냄" in line for line in node.log.lines)
 

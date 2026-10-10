@@ -60,6 +60,7 @@ from .home_storage import HomeStorage, build_home
 from .ledger import Ledger, LedgerStore, apply_goal_event, confirm_abort_name, state_fields
 from .map_meta import load_map_meta
 from .mission_logic import (
+    APPROACH_TURN_YAW_DEG,
     DIALOG_PAUSED_HANDLE,
     GRIP_ENTER_WINDOW_SEC,
     GRIP_HINT_PULSE_SEC,
@@ -170,7 +171,8 @@ class MissionManagerNode(Node):
         self.declare_parameter("auto_return_home", False)
         self.declare_parameter("confirm_timeout_sec", 30.0)
         # 수락 후 제자리 회전량(도). 0 이면 회전 없이 예전처럼 끝낸다.
-        self.declare_parameter("approach_turn_yaw_deg", 180.0)
+        # 기본 175(2026-10-10) — Spin 이 6~8° 더 도는 몫을 뺀 값. 근거는 mission_logic.APPROACH_TURN_YAW_DEG.
+        self.declare_parameter("approach_turn_yaw_deg", APPROACH_TURN_YAW_DEG)
         # 사람 접근 goal 에만 쓰는 Nav2 행동 트리(레일 없는 자유주행). 2026-10-02 run60.
         #   "auto" : vica_nav2 share 의 behavior_trees/vica_navigate_to_pose_approach.xml
         #   ""     : 끔 — 접근도 기본 트리(레일)를 쓴다(종전 동작)
@@ -880,7 +882,7 @@ class MissionManagerNode(Node):
     def _recheck_approach(self, msg: PersonDetection) -> None:
         """접근 중 검출 → 중간 재측정(2026-10-10, 설계 docs/superpowers/specs/2026-10-10-…).
 
-        판단(언제·어느 검출·12 cm)은 mission_logic, 1.1 m 앞 목표 계산은 여기(approach_goal) —
+        판단(언제·어느 검출·12 cm)은 mission_logic, 안전거리 앞 목표 계산은 여기(approach_goal) —
         접근 요청과 같은 나눔이다. 로그는 단계가 바뀔 때와 결과 때만 한 줄씩(5 Hz 소음 방지).
         """
         person = self._detection_pose(msg)

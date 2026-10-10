@@ -16,7 +16,7 @@
 
 이 모듈이 하지 않는 것:
 
-    목표(1.1 m 앞 자세) 계산은 approach_geometry, 다시 보낼지(12 cm)와 상태 전이는 mission_logic
+    목표(사람 앞 안전거리 자세) 계산은 approach_geometry, 다시 보낼지(12 cm)와 상태 전이는 mission_logic
     몫이다. 여기는 "언제 재고, 어느 검출을 믿고, 어떤 위치를 내놓나" 만 정한다.
 """
 from __future__ import annotations
