@@ -22,14 +22,22 @@
 
         안전거리 > circumscribed(0.4962) + 사람 몸 반경(0.25) + goal 오차
 
+    [2026-10-10] 1.1 -> 1.0 (DEFAULT_APPROACH_DISTANCE_M 주석). 아래 표는 1.1 시절 값이다.
+
     | goal tolerance      | 하한   | 1.1 m 일 때 여유 |
     | 0.25 (일반 주행)     | 1.00 m | +10.4 cm        |
     | 0.10 (접근 전용)     | 0.85 m | +25.4 cm        |
 
     회전 반경으로 잡는 이유는, 도착한 뒤 제자리에서 사람 쪽으로 도는 동작이 다음
     사이클에 들어오기 때문이다. 미리 만족시켜 두지 않으면 그때 접근 거리를 다시
-    바꿔야 한다. circumscribed 0.4962 는 현재 `nav2_params.yaml` footprint 값이고
-    (`17f6820` 로 꼬리 0.595 -> 0.495), 사람 몸 반경 0.25 는 어깨 폭 기준이다.
+    바꿔야 한다. 사람 몸 반경 0.25 는 어깨 폭 기준이다.
+
+    [2026-10-10 정정] circumscribed 는 base_link 를 앞 구동축으로 옮긴 뒤의 footprint
+    외접 반경 **0.570**(꼬리 (−0.569, ±0.035))이다 — 위 표의 0.4962 는 그 전 값이다.
+    "네" 뒤 180° 회전을 막는 behavior_server Spin 의 충돌 검사는 padding 0.05 를 더한
+    **0.62** 원으로 본다. run84 E·F 는 다리가 0.63~0.69 m 에 서서 그 원에 걸려 회전이
+    96·129° 에서 멈췄다 — 1.1 m 가 남기는 여유는 사람 위치를 제대로 잴 때만 산다
+    (중간 재측정, approach_recheck).
 
     1.1 m 는 `collision_monitor` 의 `PolygonSlow`(x 0.36 ~ 1.10) 와 일부러 겹친다.
     마지막 구간에서 0.3 -> 0.12 m/s 로 느려지는 것은 설정 오류가 아니라 의도다
@@ -49,18 +57,25 @@ from typing import Optional
 
 from .mission_logic import Pose2D
 
-# 현재 footprint 의 외접원 반경. nav2_params.yaml 과 같은 값이어야 한다.
-CIRCUMSCRIBED_RADIUS_M = 0.4962
+# 현재 footprint 의 외접원 반경(padding 제외). nav2_params.yaml 과 같은 값이어야 한다.
+# 2026-10-10 0.4962 -> 0.570: base_link 를 앞 구동축으로 옮긴 뒤 꼬리 (−0.569, ±0.035).
+# 계산에는 쓰지 않고 1.1 m 의 근거 시험(test_approach_geometry)에만 쓴다.
+CIRCUMSCRIBED_RADIUS_M = 0.570
 
 # 사람 몸 반경(어깨 폭 기준). 사람은 costmap 에 없으므로 이 수치는 계산으로만 지킨다.
 PERSON_BODY_RADIUS_M = 0.25
 
 # 접근 전용 goal tolerance. 일반 주행 0.25 는 그대로 두고 접근 구간에만 건다.
 APPROACH_GOAL_TOLERANCE_M = 0.10
-DRIVING_GOAL_TOLERANCE_M = 0.25
+# 지금 접근 도착 판정(general_goal_checker, LatchedGoalChecker xy). 2026-09-30 0.25 -> 0.15.
+DRIVING_GOAL_TOLERANCE_M = 0.15
 
 # 사람 앞 정지 거리. 근거는 모듈 docstring 참조.
-DEFAULT_APPROACH_DISTANCE_M = 1.1
+# 2026-10-10 1.1 -> 1.0(사용자 결정, run85 뒤): 중간 재측정으로 다리가 목표 −0.01~+0.09 m 에 서게
+# 되자(1.09~1.19 m) "좀 멀다". 1.0 이면 다리 약 0.99~1.09 m — "네" 뒤 회전의 손잡이 꼬리 원(padding
+# 포함 0.62 m)까지 0.37 m 남는다. 지팡이를 다리보다 0.37 m 앞에 짚으면(run84 D) 0.62~0.72 m 라
+# 장애물로 찍히면 회전이 막힐 수 있다 — 그때는 1.1 로 되돌린다.
+DEFAULT_APPROACH_DISTANCE_M = 1.0
 
 # 이 거리 미만이면 사람-로봇 방향이 잡음이라 계산을 포기한다.
 # D455 depth 정밀도는 cm 단위이므로 1 mm 미만의 간격은 실측이 아니라 고장이다.
