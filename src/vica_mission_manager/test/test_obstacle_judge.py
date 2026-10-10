@@ -404,3 +404,48 @@ class TestWhenAndOnce:
         c.flush()
         ts = [d["t"] for d in c.out]
         assert ts == sorted(ts)
+
+
+# ------------------------------------------------------------------ 입력 끊었다 다시 받기(2026-10-10 CPU ①)
+
+class TestClearInputs:
+    """미션은 안내 주행 중에만 입력을 받는다. 다시 받을 때 지난 주행의 위치·점·VCC·판정 대기를 지운다."""
+
+    def test_old_pose_is_not_used_after_restart(self):
+        # 지난 주행에서 (0,0) 에 있었다. 다시 받기 시작했는데 위치가 아직 안 왔다 —
+        # 옛 위치로 점을 찍으면 엉뚱한 곳에 장애물이 생긴다. 위치를 모르면 원인 판정을 쉰다.
+        j = make()
+        c = Clock(j)
+        c.run(1.0, vcc())
+        j.clear_inputs()
+        out = []
+        for k in range(1, 15):
+            t = round(c.t + 0.1 * k, 3)
+            j.on_points("scan", t, *obstacle(1.5))
+            j.on_vcc(t, vcc(target=0.3 if k > 3 else 0.0))
+            out += j.tick(t)
+        assert [d["decision"] for d in out if d["kind"] == "LAT"] == ["no_cause"]
+
+    def test_pending_decision_is_dropped(self):
+        j = make()
+        c = Clock(j)
+        c.run(1.0, vcc(), points=obstacle(1.5))
+        j.on_vcc(round(c.t + 0.1, 3), vcc(target=0.3))   # 행동 시작, 아직 결정 전
+        assert j.pending
+        j.clear_inputs()
+        assert j.pending == [] and j.tick(c.t + 2.0) == []
+
+    def test_inputs_cleared_but_rail_goal_and_said_memory_kept(self):
+        j = make()
+        c = Clock(j)
+        c.run(1.0, vcc(), points=obstacle(1.2))
+        c.run(1.0, vcc(target=0.3), points=obstacle(1.2))            # 말함
+        assert c.said() == ["avoid"]
+        j.clear_inputs()
+        assert not j.poses and not j.vcc and not j.frames["scan"] and not j.frames["depth"]
+        assert j.rails and j.goal is not None and j.last_ann is not None
+        # 잠깐 멈췄다 곧 다시 가며 같은 장애물을 비킨다 — 6초 안이고 평상 주행 전이라 다시 말하지 않는다
+        c.run(1.0, vcc(), points=obstacle(1.2))
+        c.run(1.0, vcc(target=-0.3), points=obstacle(1.2))
+        c.flush()
+        assert c.said() == ["avoid"]

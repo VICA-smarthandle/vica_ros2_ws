@@ -229,6 +229,21 @@ class ObstacleJudge:
         self.calm_start: Optional[float] = None
         self.calm_done: Optional[float] = None
 
+    def clear_inputs(self) -> None:
+        """입력을 끊었다 다시 받기 전에 지난 주행의 위치·점·VCC 기록·결정 대기를 지운다(2026-10-10 CPU ①).
+
+        옛 위치가 남으면 새 점을 엉뚱한 곳에 찍는다. 레일·목적지·'한 번만' 기억(마지막으로 말한 시각)은 둔다 —
+        잠깐 멈췄다 다시 가도 같은 장애물을 곧바로 다시 말하지 않게.
+        """
+        self.poses.clear()
+        self.frames["scan"].clear()
+        self.frames["depth"].clear()
+        self.vcc.clear()
+        self.pending = []
+        self.dec_armed = True
+        self.cm_prev = "normal"
+        self.calm_start = None
+
     # ---- 입력
     def on_dialog(self, t: float, state: str) -> None:
         self.dialog = state or ""

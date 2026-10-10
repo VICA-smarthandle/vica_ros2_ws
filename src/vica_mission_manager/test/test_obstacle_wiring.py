@@ -78,3 +78,48 @@ def test_setup_failure_turns_only_the_narration_off():
     assert "except Exception as exc:" in guarded
     assert "self._obstacle_guard.enabled = False" in guarded
     assert "self._on_obstacle_error(exc)" in guarded
+
+
+# ---- 입력은 안내 주행 중에만 (2026-10-10 CPU ①: 쉴 때 미션 코어 하나 46 % → 2.4 % 실측) ----
+
+def _part(start: str, end: str) -> str:
+    return NODE[NODE.index(start):NODE.index(end)]
+
+
+def test_tick_switches_inputs_by_guided_driving():
+    tick = _part("    def _tick(self)", "    def _publish_robot_state")
+    assert "self._obstacle_inputs_follow()" in tick
+    follow = _part("    def _obstacle_inputs_follow", "    def _obs_start")
+    assert "self.logic.dialog_state == State.NAVIGATING.value" in follow
+
+
+def test_setup_keeps_only_rail_and_goal_always_on():
+    setup = _part("    def _setup_obstacle_narration", "    def _obstacle_inputs_follow")
+    assert '"/rail_plan"' in setup and '"/vica_goal_event"' in setup
+    for topic in ('"/scan"', '"/camera/depth_scan"', '"/vcc/state"', '"/behavior_tree_log"', '"/rosout"'):
+        assert topic not in setup, topic
+    assert "TransformListener" not in setup
+    assert "self._obs_timer.cancel()" in setup            # 판정 타이머도 주행 전엔 멈춰 둔다
+
+
+def test_start_clears_old_inputs_before_listening():
+    start = _part("    def _obs_start", "    def _obs_stop")
+    for topic in ('"/scan"', '"/camera/depth_scan"', '"/vcc/state"', '"/behavior_tree_log"', '"/rosout"'):
+        assert topic in start, topic
+    order = [start.index(s) for s in ("self._obstacle.clear_inputs()", "tf2_ros.Buffer()",
+                                      "tf2_ros.TransformListener(self._tf_buffer, self)",
+                                      "self._obs_timer.reset()")]
+    assert order == sorted(order)
+
+
+def test_stop_releases_timer_subscriptions_and_tf():
+    stop = _part("    def _obs_stop", "    def _on_obstacle_error")
+    assert "self._obs_timer.cancel()" in stop
+    assert "self.destroy_subscription(" in stop
+    assert "self._tf_listener.unregister()" in stop
+
+
+def test_switching_error_turns_only_the_narration_off():
+    follow = _part("    def _obstacle_inputs_follow", "    def _obs_start")
+    assert "except Exception" in follow and "self._on_obstacle_error(exc)" in follow
+    assert "self._obstacle_guard.enabled = False" in follow

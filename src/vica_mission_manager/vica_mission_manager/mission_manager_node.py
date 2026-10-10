@@ -1157,29 +1157,81 @@ class MissionManagerNode(Node):
         try:
             self._obstacle = ObstacleJudge(grid)
             self._laser_offset: Optional[tuple] = None
-            # 위치(tf)는 리스너가 스스로 만드는 Reentrant 그룹으로 받는다 — 새 노드·스레드 없이 이 노드의
-            # MultiThreadedExecutor 가 처리한다. 리스너의 전용 스레드 옵션은 같은 노드를 executor 두 개에 넣게 돼 못 쓴다.
             self._tf_buffer = tf2_ros.Buffer()
-            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+            self._tf_listener = None
+            self._obs_subs: list = []
+            self._obs_on = False
             group = MutuallyExclusiveCallbackGroup()
-            latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
-                                reliability=ReliabilityPolicy.BEST_EFFORT)
+            self._obs_group = group
             wrap = self._obstacle_guard.wrap
-            self.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group)
-            self.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
-                                     callback_group=group)
-            self.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group)
-            self.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
-                                     callback_group=group)
-            self.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group)
+            # 레일·목적지 사건은 늘 받는다 — 드물고 가볍다. 목적지 사건은 출발 직전에 와서, 주행 중에만 받으면
+            # '목적지 1 m 안에서는 말하지 않기'가 목적지를 모른다. 나머지 입력과 판정 타이머는 _obs_start 가 연다.
             self.create_subscription(PathMsg, "/rail_plan", wrap(self._obs_rail), 5, callback_group=group)
             self.create_subscription(String, "/vica_goal_event", wrap(self._obs_goal), 10, callback_group=group)
-            self.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
+            self._obs_timer = self.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
+            self._obs_timer.cancel()
         except Exception as exc:  # noqa: BLE001
             self._obstacle_guard.enabled = False
             self._on_obstacle_error(exc)
             return
-        self.get_logger().info(f"장애물 안내: 켜짐 (지도 {map_yaml})")
+        self.get_logger().info(f"장애물 안내: 켜짐 (지도 {map_yaml}) — 입력은 안내 주행 중에만 받습니다")
+
+    def _obstacle_inputs_follow(self) -> None:
+        """장애물 입력은 안내 주행(NAVIGATING) 중에만 받는다 — 안내 멘트도 그때만 나간다(obstacle_cue).
+
+        2026-10-10 실측: 입력을 늘 받으면 쉴 때도 미션이 코어 하나의 46 %(끄면 2.4 %), 그중 tf 가 약 21 %.
+        대화 줄의 _tick(5 Hz)에서 부르므로 상태가 바뀐 뒤 0.2초 안에 열고 닫는다.
+        """
+        if self._obstacle is None or not self._obstacle_guard.enabled:
+            return
+        want = self.logic.dialog_state == State.NAVIGATING.value
+        if want == self._obs_on:
+            return
+        try:
+            if want:
+                self._obs_start()
+            else:
+                self._obs_stop()
+        except Exception as exc:  # noqa: BLE001 — 열고 닫다 난 오류도 안내만 끈다
+            self._obstacle_guard.enabled = False
+            self._on_obstacle_error(exc)
+
+    def _obs_start(self) -> None:
+        # 지난 주행의 위치·점·VCC·결정 대기를 먼저 지운다 — 옛 위치로 새 점을 찍으면 없는 장애물을 말한다.
+        # 위치 저장소도 새로 만들어, 새 tf 가 오기 전에는 옛 위치 대신 '위치 모름'(원인 판정 쉼)이 되게 한다.
+        # 판정 타이머·센서 구독은 앞서 _obs_stop 이 닫아 두었으므로 이 줄과 동시에 판정이 돌지 않는다.
+        self._obstacle.clear_inputs()
+        self._tf_buffer = tf2_ros.Buffer()
+        # 위치(tf)는 리스너가 스스로 만드는 Reentrant 그룹으로 받는다 — 새 노드·스레드 없이 이 노드의
+        # MultiThreadedExecutor 가 처리한다. 리스너의 전용 스레드 옵션은 같은 노드를 executor 두 개에 넣게 돼 못 쓴다.
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        group = self._obs_group
+        latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                            reliability=ReliabilityPolicy.BEST_EFFORT)
+        wrap = self._obstacle_guard.wrap
+        self._obs_subs = [
+            self.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group),
+            self.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
+                                     callback_group=group),
+            self.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group),
+            self.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
+                                     callback_group=group),
+            self.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group),
+        ]
+        self._obs_timer.reset()
+        self._obs_on = True
+        self.get_logger().info("장애물 안내: 입력 받기 시작(안내 주행)")
+
+    def _obs_stop(self) -> None:
+        self._obs_on = False
+        self._obs_timer.cancel()
+        for sub in self._obs_subs:
+            self.destroy_subscription(sub)
+        self._obs_subs = []
+        if self._tf_listener is not None:
+            self._tf_listener.unregister()
+            self._tf_listener = None
+        self.get_logger().info("장애물 안내: 입력 멈춤(안내 주행 아님)")
 
     def _on_obstacle_error(self, exc: BaseException) -> None:
         # 큐는 비우지 않는다 — 대화 줄이 꺼내는 중에 다른 스레드가 비우면 경쟁이 생긴다(최종 검토 I-1).
@@ -1596,6 +1648,7 @@ class MissionManagerNode(Node):
         self._ledger_prev_confirming = confirming
         self._run_actions(actions)
         self._drain_obstacle_cues()
+        self._obstacle_inputs_follow()
         if State.SEEKING in (before, self.logic.state) and before != self.logic.state:
             # SEEKING 진입·이탈은 여기서도 일어난다(탐색 창 닫힘, 복귀 회전
             # 시작·종료). /vica/robot_state 1 Hz 의 최대 1초 지연을 즉시
