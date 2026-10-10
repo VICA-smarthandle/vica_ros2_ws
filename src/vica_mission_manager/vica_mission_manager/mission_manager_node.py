@@ -446,6 +446,11 @@ class MissionManagerNode(Node):
         # 실패해도(run82 18:13:41) 다음 출발은 비운다. 켤 때의 첫 출발도 비운다.
         self._clear_before_next_nav = True
         self._nav_task_is_spin = False   # 지금(마지막으로 수락된) task 가 Spin 인가
+        # 배송 도착 표시(2026-10-10 사용자 결정, 웹 배송 문자 A안). 배송 요청으로 시작한 주행의
+        # 목적지 id. 그곳 goal_succeeded 에 "delivery": true 를 실어, 누가 배송을 보냈든(웹 포함)
+        # 관리자 유심 폰 앱이 도착 문자를 보내게 한다. 도착·실패·취소·거부나 다른 곳으로 출발하면
+        # 지운다 — 남겨 두면 나중에 같은 곳으로 간 안내 주행에 배송 문자가 나간다. 일시정지는 남긴다.
+        self._delivery_dest_id: Optional[str] = None
 
         # emergency 계열은 전용 callback group — intent/tick 처리가
         # 긴급 취소를 블로킹하지 않게 한다 (MultiThreadedExecutor 전제).
@@ -1486,7 +1491,11 @@ class MissionManagerNode(Node):
         if before != State.IDLE:
             self.get_logger().info(
                 f"앱 선점 주행: {before.value} 를 취소하고 새 목적지로")
+        # 앞 주행을 선점·취소하는 이벤트가 _run_actions 안에서 먼저 나가므로 그 뒤에 기억한다.
+        # 출발이 거부됐으면(_nav_active 거짓) 배송으로 기억하지 않는다.
         self._run_actions(actions)
+        self._delivery_dest_id = (
+            destination_id if is_delivery and self._nav_active else None)
         response.accepted = self._nav_active
         response.message = (
             f"목적지 요청을 수락했습니다: {destination.name}"
@@ -1777,6 +1786,9 @@ class MissionManagerNode(Node):
 
     def _start_nav(self, action: Navigate) -> None:
         dest = action.destination
+        if self._delivery_dest_id is not None and dest.id != self._delivery_dest_id:
+            # 배송지가 아닌 곳으로 출발한다(음성 안내·홈·접근 등) — 배송은 끝났다.
+            self._delivery_dest_id = None
         goal = PoseStamped()
         goal.header.frame_id = dest.pose.frame_id
         goal.header.stamp = self.get_clock().now().to_msg()
@@ -2067,6 +2079,15 @@ class MissionManagerNode(Node):
         if apply_goal_event(self._ledger, event, dest_id, dest_name, time.time()):
             self._save_ledger()
 
+        # 배송 도착 표시. 배송지의 도착에만 싣고, 그 배송이 끝나는 사건(도착·실패·취소·거부)에서
+        # 기억을 지운다. 일시정지·출발 알림은 배송이 이어지므로 남긴다.
+        delivery_extra = {}
+        if dest_id and dest_id == self._delivery_dest_id:
+            if event == "goal_succeeded":
+                delivery_extra = {"delivery": True}
+            if event in ("goal_succeeded", "goal_failed", "goal_canceled", "goal_rejected"):
+                self._delivery_dest_id = None
+
         msg = String()
         msg.data = json.dumps(
             {
@@ -2082,6 +2103,8 @@ class MissionManagerNode(Node):
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 # 대기 알림(wait_spot_blocked·wait_expired)만 싣는 칸. 옛 앱은 모르는 키라 무시한다.
                 **(extra or {}),
+                # 배송지 도착에만 "delivery": true(2026-10-10). 옛 앱은 모르는 키라 무시한다.
+                **delivery_extra,
             },
             ensure_ascii=False,
         )

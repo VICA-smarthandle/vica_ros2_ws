@@ -101,6 +101,7 @@ def _bare_node(gen=5, accept=True):
     # test_clear_before_departure.py 에 있다.
     node._clear_before_next_nav = False
     node._nav_task_is_spin = False
+    node._delivery_dest_id = None   # 배송 도착 표시(2026-10-10) — 배송 아님
     node.logic = SimpleNamespace(state=State.NAVIGATING)   # 대기 장소로 가는 중이 아니다
     logger = _FakeLogger()
     node.get_logger = lambda: logger  # 클래스 메서드를 인스턴스 속성으로 가린다

@@ -131,6 +131,7 @@ def _bare_node(**nav_kwargs):
     node._task_bt = ""
     node._clear_before_next_nav = True     # __init__ 과 같은 시작값 — 켤 때의 첫 출발
     node._nav_task_is_spin = False
+    node._delivery_dest_id = None   # 배송 도착 표시(2026-10-10) — 배송 아님
     node.logic = _FakeLogic()
     logger = _FakeLogger()
     node.get_logger = lambda: logger
