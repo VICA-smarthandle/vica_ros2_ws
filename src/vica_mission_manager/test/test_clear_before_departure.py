@@ -1,10 +1,12 @@
-"""출발 전 local costmap 비우기 — 직전 안내가 성공으로 끝난 뒤의 새 출발만 비우는지 본다.
+"""출발 전 local·global costmap 비우기 — 직전 안내가 성공으로 끝난 뒤의 새 출발만 비우는지 본다.
 
 배경(2026-10-09 run81·82): 초음파 표시는 빔 밖으로 나가면 지워지지 않는다. 접근·도착
 끝의 회전으로 빔 밖에 남은 표시가 다음 출발의 제자리 회전을 막아, 10초 포기(BT 의
 ClearLocalCostmap)가 비울 때까지 섰다 — run81 15:48 홈, run82 18:14 사회 복지창구.
 사용자 결정: 직전 안내가 다 끝나고 새로 출발할 때마다 비운다. 일시정지 뒤 재개·실패
 뒤 재시도·주행 중 바꾸기는 비우지 않는다(지나온 낮은 물체 기억을 잃지 않게).
+2026-10-10 run84 뒤 global 도 같은 때 비운다 — 접근 때 그린 상자 표시가 치운 뒤에도 4분 넘게
+레일 앞 검사(global)를 막았다.
 
 test_nav_cancel_race.py 처럼 노드를 rclpy 없이 __new__ 로 맨몸 생성한다.
 """
@@ -49,8 +51,9 @@ class _FakeFuture:
 
 
 class _FakeClearClient:
-    def __init__(self, calls, ready=True, responds=True):
+    def __init__(self, calls, name, ready=True, responds=True):
         self.calls = calls
+        self.name = name
         self.ready = ready
         self.responds = responds
         self.removed = 0
@@ -59,7 +62,7 @@ class _FakeClearClient:
         return self.ready
 
     def call_async(self, request):
-        self.calls.append("clear")
+        self.calls.append(f"clear_{self.name}")
         return _FakeFuture(self.responds)
 
     def remove_pending_request(self, future):
@@ -67,12 +70,16 @@ class _FakeClearClient:
 
 
 class _FakeNavigator:
-    def __init__(self, accept=True, ready=True, responds=True):
+    def __init__(self, accept=True, ready=True, responds=True, global_ready=None, global_responds=None):
         self.accept = accept
-        self.calls = []           # 'clear' / 'goal' / 'spin' / 'cancel' 순서
+        self.calls = []           # 'clear_local' / 'clear_global' / 'goal' / 'spin' / 'cancel' 순서
         self.result = None
         self.task_done = True
-        self.clear_costmap_local_srv = _FakeClearClient(self.calls, ready, responds)
+        self.clear_costmap_local_srv = _FakeClearClient(self.calls, "local", ready, responds)
+        self.clear_costmap_global_srv = _FakeClearClient(
+            self.calls, "global",
+            ready if global_ready is None else global_ready,
+            responds if global_responds is None else global_responds)
 
     def goToPose(self, goal, behavior_tree=''):  # noqa: N802 - nav2_simple_commander 이름
         self.calls.append("goal")
@@ -142,6 +149,10 @@ def _bare_node(**nav_kwargs):
     return node
 
 
+#: 비우기 두 요청 — local 다음 global, 둘 다 goal 보다 먼저.
+CLEARED = ["clear_local", "clear_global"]
+
+
 def _dest(dest_id="cafeteria"):
     return Destination(id=dest_id, name="탕비실", pose=Pose2D(1.0, 2.0, 90.0))
 
@@ -160,8 +171,11 @@ class TestClearsOnFreshDeparture:
     def test_first_departure_clears_before_goal(self):
         node = _bare_node()
         node._start_nav(Navigate(destination=_dest()))
-        assert node.navigator.calls == ["clear", "goal"]
+        assert node.navigator.calls == [*CLEARED, "goal"]
         assert node._clear_before_next_nav is False
+        # 분석 스크립트가 찾는 줄 — local 은 10-09 문구 그대로, global 은 같은 꼴로 한 줄 더.
+        infos = [m for level, m in node.get_logger().lines if level == "info" and m.startswith("출발 전")]
+        assert infos == ["출발 전 local costmap 비움 (cafeteria)", "출발 전 global costmap 비움 (cafeteria)"]
 
     def test_departure_after_success_clears(self):
         """도착(성공) 뒤 다음 목적지·홈·대기 장소로 새로 출발 — 비운다."""
@@ -170,7 +184,7 @@ class TestClearsOnFreshDeparture:
         _finish(node, mm.TaskResult.SUCCEEDED)
         node.navigator.calls.clear()
         node._start_nav(Navigate(destination=_dest(mm.HOME_DESTINATION_ID)))
-        assert node.navigator.calls == ["clear", "goal"]
+        assert node.navigator.calls == [*CLEARED, "goal"]
 
     def test_failed_handle_turn_after_approach_still_clears(self):
         """run82 18:14: 접근 성공 -> 손잡이 돌리기 Spin 이 사람에 막혀 실패 -> 목적지 출발.
@@ -183,7 +197,7 @@ class TestClearsOnFreshDeparture:
         _finish(node, mm.TaskResult.FAILED)
         node.navigator.calls.clear()
         node._start_nav(Navigate(destination=_dest()))
-        assert node.navigator.calls == ["clear", "goal"]
+        assert node.navigator.calls == [*CLEARED, "goal"]
 
 
 class TestKeepsMemoryWhenTripNotFinished:
@@ -257,9 +271,34 @@ class TestNeverBlocksDeparture:
     def test_no_response_still_departs(self):
         node = _bare_node(responds=False)
         node._start_nav(Navigate(destination=_dest()))
-        assert node.navigator.calls == ["clear", "goal"]
+        assert node.navigator.calls == [*CLEARED, "goal"]
         assert node.navigator.clear_costmap_local_srv.removed == 1
+        assert node.navigator.clear_costmap_global_srv.removed == 1
         assert any("응답 없음" in m for m in _warns(node))
+
+    def test_global_missing_still_clears_local(self):
+        """global 서비스만 없어도 local 은 비우고 출발한다."""
+        node = _bare_node(global_ready=False)
+        node._start_nav(Navigate(destination=_dest()))
+        assert node.navigator.calls == ["clear_local", "goal"]
+        assert any("global costmap 비우기 건너뜀" in m for m in _warns(node))
+        assert ("info", "출발 전 local costmap 비움 (cafeteria)") in node.get_logger().lines
+
+    def test_both_clears_share_one_deadline(self, monkeypatch):
+        """둘 다 응답이 없어도 기다림은 합쳐 시한 하나(1 s)다 — 출발이 2 s 늦어지지 않는다."""
+        clock = [100.0]
+        waited = []
+
+        def _spin(node, future, timeout_sec=None):
+            waited.append(timeout_sec)
+            clock[0] += timeout_sec      # 응답 없이 시한을 다 쓴다
+
+        monkeypatch.setattr(mm.rclpy, "spin_until_future_complete", _spin)
+        monkeypatch.setattr(mm.time, "monotonic", lambda: clock[0])
+        node = _bare_node(responds=False)
+        node._start_nav(Navigate(destination=_dest()))
+        assert node.navigator.calls == [*CLEARED, "goal"]
+        assert sum(waited) <= mm.CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC + 1e-9
 
     def test_rejected_goal_clears_again_on_next_send(self):
         """goal 이 거부되면 주행이 시작되지 않았다 — 다시 보낼 때도 비운다."""
@@ -269,4 +308,4 @@ class TestNeverBlocksDeparture:
         node.navigator.accept = True
         node.navigator.calls.clear()
         node._start_nav(Navigate(destination=_dest()))
-        assert node.navigator.calls == ["clear", "goal"]
+        assert node.navigator.calls == [*CLEARED, "goal"]

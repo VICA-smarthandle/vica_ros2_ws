@@ -130,8 +130,9 @@ from .obstacle_judge import ObstacleJudge, cm_what, goal_event, parse_state
 #: _nav_lock_timeout_sec(2.0) 과 같은 크기 — 콜백을 오래 붙잡지 않는다.
 BT_SWITCH_WAIT_SEC = 2.0
 
-#: 출발 전 local costmap 비우기의 응답을 기다리는 상한(초). 실측은 BT 한 박자(0.01 s)
-#: 안에 끝났다(run81·82 10회). 넘으면 비우지 않은 채 그대로 출발한다.
+#: 출발 전 costmap(local·global) 비우기의 응답을 기다리는 상한(초). 두 요청을 함께 보내고
+#: 이 시한 하나로 함께 기다린다. 실측은 local 이 BT 한 박자(0.01 s) 안(run81·82 10회),
+#: global 은 요청 뒤 0.03 s 안에 지우기를 마쳤다(10-10 planner_server 로그). 넘으면 그대로 출발한다.
 CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC = 1.0
 
 #: 홈에 붙이는 고정 id.
@@ -444,8 +445,8 @@ class MissionManagerNode(Node):
         # 아니라 방금 보낸 새 goal 이 취소된다. 옛 goal 은 Nav2 가 새 goal 을
         # 받으면서 스스로 선점해 이미 내려가 있다.
         self._nav_gen = 0
-        # 출발 전 local costmap 비우기(2026-10-09 run82 뒤 사용자 결정: 직전 안내가 다
-        # 끝나고 새로 출발할 때마다). 앞 NavigateToPose 가 성공으로 끝났을 때만 True 가
+        # 출발 전 costmap 비우기(2026-10-09 run82 뒤 사용자 결정: 직전 안내가 다 끝나고 새로
+        # 출발할 때마다 local, 10-10 run84 뒤 global 도). 앞 NavigateToPose 가 성공으로 끝났을 때만 True 가
         # 되고, 새 goal 이 수락되면 False 로 돌아간다. 그래서 일시정지 뒤 재개·실패 뒤
         # 재시도·주행 중 바꾸기(앞 goal 이 성공으로 끝나지 않았다)는 비우지 않는다.
         # 제자리 회전(Spin) 결과는 건드리지 않는다 — 접근 뒤 손잡이 돌리기가 사람에 막혀
@@ -1919,10 +1920,10 @@ class MissionManagerNode(Node):
         except Exception as exc:  # noqa: BLE001 - 보내기 자체는 막지 않는다
             self.get_logger().warn(f"트리 전환 전 취소 실패: {exc}")
 
-    def _clear_local_costmap_before_departure(self, dest_id: str) -> None:
-        """새 출발 직전에 local costmap 을 한 번 비운다. _nav_lock 안에서 부른다.
+    def _clear_costmaps_before_departure(self, dest_id: str) -> None:
+        """새 출발 직전에 local·global costmap 을 한 번 비운다. _nav_lock 안에서 부른다.
 
-        왜(2026-10-09 run81·82): 초음파 표시는 빔 밖으로 나가면 지워지지 않는다. 접근·
+        local 왜(2026-10-09 run81·82): 초음파 표시는 빔 밖으로 나가면 지워지지 않는다. 접근·
         도착 끝의 회전(마지막 정렬, 손잡이 돌리기)으로 빔 밖에 남은 표시가 출발 회전을
         막아, 10초 포기(FollowPath 실패 -> BT 의 ClearLocalCostmap)가 비울 때까지 섰다 —
         run81 15:48 홈, run82 18:14 사회 복지창구, 각 10 s. 그 서비스를 출발 순간에
@@ -1931,34 +1932,52 @@ class MissionManagerNode(Node):
         움직이기 전에 돌아온다. 대가: 지금 센서가 못 보는 옆·뒤의 낮은 물체·상판 기억도
         사라진다(10초 포기 때와 같은 일을 10초 먼저 한다).
 
-        BasicNavigator.clearLocalCostmap() 은 서비스가 없으면 끝없이 기다리고 응답도 시한
-        없이 기다린다 — 같은 클라이언트를 시한부로 직접 부른다. 실패해도 출발은 막지
-        않는다(지금까지와 같은 상태이고 10초 포기는 그대로 남는다).
+        global 왜(2026-10-10 run84 뒤 사용자 결정): 레일 앞 검사(IsRailAheadClear)는 global
+        costmap 을 본다. 초음파 표시는 앞 빔이 1.5 m 안에서 그 자리를 다시 비춰야만 지워져,
+        접근 때 그린 상자 표시가 상자를 치운 뒤에도 남았다 — 15:26:55 에 그린 (5.41, 0.25)
+        표시는 빔이 다시 본 15:31:18 까지 레일을 막았고, 로봇은 그 자리를 비켜 가느라 다시
+        보지 못했다(그 사이 15:29 창구 안내가 왼쪽 위 코너를 잘랐다). 출발 때 상자는 앞
+        2.7~3.1 m(빔 1.5 m 밖)라, 비운 뒤에는 빔이 1.5 m 안에서 실제로 볼 때만 다시 그린다.
+        같은 서비스를 BT 복구도 부른다. 비워도 금지구역은 옛 마스크를 그대로 쓰다가 0.07 s
+        안에 다시 받고(10-10 16:32 planner_server 로그), 라이다 표시는 다음 갱신(1 Hz)에
+        돌아온다. 레일 검사는 2번 이어져야 막힘이라 비우기 전 지도를 한 박자 읽어도 레일을
+        안 버린다. 대가: 지금 안 보이는 낮은 물체(초음파만 보는 것) 기억도 사라져, 다시
+        만나면 1.5 m 안에서 새로 찾는다.
+
+        BasicNavigator.clearLocalCostmap()·clearGlobalCostmap() 은 서비스가 없으면 끝없이
+        기다리고 응답도 시한 없이 기다린다 — 같은 클라이언트를 시한부로 직접 부른다. 두 요청을
+        함께 보내고 시한 하나(CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC) 안에서 함께 기다린다.
+        실패해도 출발은 막지 않는다(지금까지와 같은 상태이고 10초 포기는 그대로 남는다).
         """
         try:
             # 앞 task 가 아직 돌고 있으면(회전 중 앱 선점 — 취소 스레드보다 먼저 왔다)
             # 로봇이 움직이는 중이다. 움직이는 중에는 비우지 않는다(검토 2-a).
             if not self.navigator.isTaskComplete():
                 self.get_logger().warn(
-                    f"출발 전 local costmap 비우기 건너뜀 — 앞 task 가 아직 돈다 ({dest_id})")
+                    f"출발 전 costmap 비우기 건너뜀 — 앞 task 가 아직 돈다 ({dest_id})")
                 return
-            client = self.navigator.clear_costmap_local_srv
-            if not client.service_is_ready():
-                self.get_logger().warn(
-                    f"출발 전 local costmap 비우기 건너뜀 — 서비스 없음 ({dest_id})")
-                return
-            future = client.call_async(ClearEntireCostmap.Request())
-            rclpy.spin_until_future_complete(
-                self.navigator, future, timeout_sec=CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC)
-            if not future.done():
-                client.remove_pending_request(future)
-                self.get_logger().warn(
-                    f"출발 전 local costmap 비우기 응답 없음 "
-                    f"({CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC:.1f} s) — 그대로 출발 ({dest_id})")
-                return
-            self.get_logger().info(f"출발 전 local costmap 비움 ({dest_id})")
+            sent = []
+            for name, client in (("local", self.navigator.clear_costmap_local_srv),
+                                 ("global", self.navigator.clear_costmap_global_srv)):
+                if not client.service_is_ready():
+                    self.get_logger().warn(
+                        f"출발 전 {name} costmap 비우기 건너뜀 — 서비스 없음 ({dest_id})")
+                    continue
+                sent.append((name, client, client.call_async(ClearEntireCostmap.Request())))
+            deadline = time.monotonic() + CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC
+            for name, client, future in sent:
+                left = deadline - time.monotonic()
+                if not future.done() and left > 0.0:
+                    rclpy.spin_until_future_complete(self.navigator, future, timeout_sec=left)
+                if not future.done():
+                    client.remove_pending_request(future)
+                    self.get_logger().warn(
+                        f"출발 전 {name} costmap 비우기 응답 없음 "
+                        f"({CLEAR_BEFORE_DEPARTURE_TIMEOUT_SEC:.1f} s) — 그대로 출발 ({dest_id})")
+                    continue
+                self.get_logger().info(f"출발 전 {name} costmap 비움 ({dest_id})")
         except Exception as exc:  # noqa: BLE001 - 보내기 자체는 막지 않는다
-            self.get_logger().warn(f"출발 전 local costmap 비우기 실패: {exc}")
+            self.get_logger().warn(f"출발 전 costmap 비우기 실패: {exc}")
 
     def _start_nav(self, action: Navigate) -> None:
         dest = action.destination
@@ -2013,7 +2032,7 @@ class MissionManagerNode(Node):
             if bt != self._task_bt:
                 self._finish_task_for_bt_switch()
             if self._clear_before_next_nav:
-                self._clear_local_costmap_before_departure(dest.id)
+                self._clear_costmaps_before_departure(dest.id)
             accepted = self.navigator.goToPose(goal, behavior_tree=bt)
             self._nav_active = bool(accepted)
             if accepted:
@@ -2152,7 +2171,7 @@ class MissionManagerNode(Node):
             self._nav_active = False
             result = self.navigator.getResult()
         if not self._nav_task_is_spin and result == TaskResult.SUCCEEDED:
-            # 안내(주행)가 성공으로 끝났다 — 다음 새 출발 직전에 local costmap 을 비운다.
+            # 안내(주행)가 성공으로 끝났다 — 다음 새 출발 직전에 local·global costmap 을 비운다.
             self._clear_before_next_nav = True
         # 복귀 중이면 목적지가 홈이다. 도착 여부가 곧 "이 홈에 갈 수 있는가"의
         # 답이므로 여기서 home.yaml 의 visited_ok 를 기록한다.
