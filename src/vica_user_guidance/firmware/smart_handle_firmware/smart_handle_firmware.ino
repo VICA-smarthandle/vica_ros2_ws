@@ -245,7 +245,7 @@ const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 3, 1, 1, 3, 3, 3, 3, 3 };
 #define US_STAT_EVERY_CYCLES  12   // 12 × 420 ms ≈ 5 s
 enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US_ST_I2C };
 // ── 2026-09-24 레지스터 시험 명령 (하향 1바이트, 정지 시험 전용) ─────────────
-// 젯슨 드라이버는 이 값을 보내지 않는다(상태코드 0~7·진동 0x10/0x11 만). 벤치 스크립트
+// 젯슨 드라이버는 이 값을 보내지 않는다(상태코드 0~7·진동 0x10~0x13 만). 벤치 스크립트
 // (firmware/usonic_register_bench.py)가 드라이버를 끈 상태에서 보낸다. 워치독은 건드리지 않는다.
 //   0x30        부팅 기본값으로 되돌림(지향각 US_ANGLE_LEVEL_CH, 노이즈 US_NOISE_DEFAULT 전 채널)
 //   0x31~0x35   노이즈 저감 레벨(레지스터 0x06) 1~5 를 8채널 모두에
@@ -311,7 +311,7 @@ unsigned long touchSentAt  = 0;
 //
 // 울리는 길은 둘이다 (2026-09-30, docs/superpowers/specs/2026-09-28-touch-haptic-
 // integration-final.md 3절).
-//   * 젯슨 명령 — 0x10/0x11/0x12 바이트. 상태코드(0~7)와 겹치지 않는 별도 바이트라
+//   * 젯슨 명령 — 0x10/0x11/0x12/0x13 바이트. 상태코드(0~7)와 겹치지 않는 별도 바이트라
 //     applyState() 를 거치지 않는다 — LED·서보는 그대로다. 미션이 손잡이 찾기·잡음
 //     확인·놓침에 쓴다(드라이버 노드가 /vica/haptic_request 를 바이트로 바꿔 보낸다).
 //   * 상태 진입 — ESTOP 은 길게 ×1, ARRIVED 는 짧게 ×3. applyState() 는 상태가
@@ -326,10 +326,16 @@ unsigned long touchSentAt  = 0;
 #define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
 #define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (손잡이 찾기·비상 패턴)
 #define HAPTIC_CMD_TICK       0x12   // 300ms x1 (잡음 확인, 2026-09-30)
+// 대기(WAITING) 중 "비카야"에 손잡이 위치 알림(2026-10-09 사용자). 볼일을 마친 사용자가
+// 대기 장소의 비카를 손으로 찾게 1초 떨고 1초 쉬고 1초 떤다.
+#define HAPTIC_CMD_LOCATE     0x13   // 1000ms on/1000ms off x2 (대기 중 호출 위치 알림)
 #define HAPTIC_SHORT_ON_MS    300   // 2026-09-04 150->300. 모터가 회전 올라올 시간(50~100ms)을 준다
 #define HAPTIC_SHORT_OFF_MS   150
 #define HAPTIC_SHORT_COUNT    3
 #define HAPTIC_LONG_ON_MS     1200  // 2026-09-04 800->1200. 사용자 "더 강하게"
+#define HAPTIC_LOCATE_ON_MS   1000  // 2026-10-09 사용자: 1초씩 두 번, 쉬는 시간 1초
+#define HAPTIC_LOCATE_OFF_MS  1000
+#define HAPTIC_LOCATE_COUNT   2
 
 uint8_t       hapticLeft  = 0;      // 남은 ON 횟수
 bool          hapticOn    = false;  // 지금 HIGH 인가
@@ -862,6 +868,8 @@ void loop() {
       hapticStart(1, HAPTIC_LONG_ON_MS, 0);
     } else if (b == HAPTIC_CMD_TICK) {
       hapticStart(1, HAPTIC_SHORT_ON_MS, 0);
+    } else if (b == HAPTIC_CMD_LOCATE) {
+      hapticStart(HAPTIC_LOCATE_COUNT, HAPTIC_LOCATE_ON_MS, HAPTIC_LOCATE_OFF_MS);
     } else if (b == US_CMD_RESET) {
       for (uint8_t ch = 0; ch < US_N; ch++) {
         usAngleLv[ch] = US_ANGLE_LEVEL_CH[ch];

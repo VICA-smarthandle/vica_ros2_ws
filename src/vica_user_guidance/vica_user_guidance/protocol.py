@@ -115,7 +115,7 @@ FIRMWARE_TOUCH_HOLD_MS: int = 200    # 시간 브리지. LOW 본 뒤 이만큼�
 # 드라이버 노드(user_guidance_driver_node) 자체는 이 바이트를 스스로 보내지
 # 않는다(SENDABLE_STATE_CODES 에 없다) — 미션 매니저가 /vica/haptic_request 로
 # 이름을 보내면 그대로 바꿔 흘린다. 미션이 쓰는 때: 손잡이 찾기·놓침(long),
-# 잡음 확인(tick). bench_test.py --haptic 은 수동으로 쏘는 경로다.
+# 잡음 확인(tick), 대기 중 "비카야" 위치 알림(locate, 2026-10-09). bench_test.py --haptic 은 수동으로 쏘는 경로다.
 #
 # ESTOP·ARRIVED 진입 진동은 이 바이트가 아니라 펌웨어 applyState() 가 스스로
 # 낸다(2026-09-30, 7/28 계획서 6.2절 복원) — 상태코드가 바뀔 때만 돈다.
@@ -127,10 +127,16 @@ HAPTIC_CMD_LONG: int = 0x11
 # 300ms on x 1회 — "잡은 걸 알아챘다"(2026-09-30 신설, 설계 D5). 도착(x3)과
 # 횟수로 구별한다. 진행 중인 긴 진동을 덮어써 곧바로 끊는 역할도 한다.
 HAPTIC_CMD_TICK: int = 0x12
+# 1000ms on / 1000ms off x 2회 — 대기(WAITING) 중 "비카야"를 들었을 때 손잡이 위치를
+# 알린다(2026-10-09 사용자). 볼일을 마친 사용자가 대기 장소의 비카를 손으로 찾게 한다.
+HAPTIC_CMD_LOCATE: int = 0x13
 FIRMWARE_HAPTIC_SHORT_ON_MS: int = 300   # 2026-09-04 150->300. 회전 올라올 시간
 FIRMWARE_HAPTIC_SHORT_OFF_MS: int = 150
 FIRMWARE_HAPTIC_SHORT_COUNT: int = 3
 FIRMWARE_HAPTIC_LONG_ON_MS: int = 1200   # 2026-09-04 800->1200
+FIRMWARE_HAPTIC_LOCATE_ON_MS: int = 1000   # 2026-10-09 사용자: 1초씩 두 번, 쉬는 시간 1초
+FIRMWARE_HAPTIC_LOCATE_OFF_MS: int = 1000
+FIRMWARE_HAPTIC_LOCATE_COUNT: int = 2
 
 
 def firmware_arrival_duration_sec() -> float:

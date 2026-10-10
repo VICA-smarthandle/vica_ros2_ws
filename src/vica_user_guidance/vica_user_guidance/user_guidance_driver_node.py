@@ -342,6 +342,7 @@ class UserGuidanceDriverNode(Node):
         "short": protocol.HAPTIC_CMD_SHORT,
         "long": protocol.HAPTIC_CMD_LONG,
         "tick": protocol.HAPTIC_CMD_TICK,
+        "locate": protocol.HAPTIC_CMD_LOCATE,   # 대기 중 호출 위치 알림(2026-10-09)
     }
 
     def cb_haptic_request(self, msg: String) -> None:

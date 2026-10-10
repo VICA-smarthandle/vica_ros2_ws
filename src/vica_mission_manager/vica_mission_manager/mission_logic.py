@@ -307,9 +307,10 @@ class Haptic:
     """손잡이 진동 요청. 노드가 패턴 이름을 그대로 /vica/haptic_request 에
     발행한다 — 이 모듈은 그 토픽도, 값을 해석하는 펌웨어도 모른다.
 
-    쓸 수 있는 패턴은 드라이버가 아는 셋이다("short"/"long"/"tick",
-    user_guidance_driver_node.HAPTIC_PATTERNS). 미션은 "long"(손잡이 찾기)과
-    "tick"(잡음 확인)만 낸다 — 도착·비상 진동은 펌웨어가 상태 진입 때 스스로 낸다.
+    쓸 수 있는 패턴은 드라이버가 아는 넷이다("short"/"long"/"tick"/"locate",
+    user_guidance_driver_node.HAPTIC_PATTERNS). 미션은 "long"(손잡이 찾기)·
+    "tick"(잡음 확인)·"locate"(대기 중 호출 위치 알림, 2026-10-09)만 낸다 — 도착·비상
+    진동은 펌웨어가 상태 진입 때 스스로 낸다.
     """
 
     pattern: str
@@ -611,6 +612,10 @@ HAPTIC_PATTERN_HANDLE_HINT = "long"
 # "잡은 걸 알아챘다"(D5). 도착(짧게 ×3)과 횟수로 구별된다. 진행 중인 긴 진동을
 # 덮어써 곧바로 끊는 역할도 한다(펌웨어 hapticStart 는 새 명령이 이긴다).
 HAPTIC_PATTERN_GRIP_ACK = "tick"
+# 대기(WAITING) 중 "비카야"를 들으면 손잡이를 1초씩 두 번(사이 1초) 떤다(2026-10-09 사용자).
+# 볼일을 마친 사용자가 대기 장소의 비카를 소리(M3)에 더해 손으로도 찾게 한다 — 접근
+# 시나리오에서 돌아선 뒤 손잡이를 떨어 위치를 알리는 것과 같은 뜻이다.
+HAPTIC_PATTERN_WAKE_LOCATE = "locate"
 # 잡음 판정: 최근 2초 중 80 % 이상 접촉(D1). 비율은 시간으로 잰다(grip_meter).
 GRIP_ENTER_WINDOW_SEC = 2.0
 GRIP_RATIO = 0.8
@@ -3262,6 +3267,13 @@ class MissionLogic:
             # (옛 동작: 대기를 접고 IDLE. 각성 질문은 2026-09-01 삭제 그대로다.)
             # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
             self._wake_consumed_at = now
+            if self.state == State.WAITING:
+                # 손잡이 위치 알림(2026-10-09 사용자) — WAITING 에서만. 손 놓기 기다림
+                # (WAITING_RELEASE)은 사용자가 아직 손잡이 곁이라 떨지 않는다. 일반 호출
+                # (on_wake_call)과 창 안에서 건진 호출(노드가 on_wake 만 부름) 모두 여기를
+                # 지나므로 호출 한 번에 한 번 떤다. 비상 정지면 상태가 ESTOPPED 로 바뀌어
+                # 이 분기에 오지 않는다(두 길 모두).
+                return [Haptic(HAPTIC_PATTERN_WAKE_LOCATE)]
             return []
         if self.state in _WAIT_MOVING_STATES:
             # 혼자 대기 장소로 가는 중 — 대기 상태가 될 때까지 대답하지 않는다.

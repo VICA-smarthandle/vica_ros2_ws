@@ -57,6 +57,7 @@ HAPTIC_CMDS = {
     "short": (0x10, "300ms on/150ms off x3 — 도착 패턴"),
     "long":  (0x11, "1200ms x1 — 손잡이 찾기·비상 패턴"),
     "tick":  (0x12, "300ms x1 — 잡음 확인 (2026-09-30)"),
+    "locate": (0x13, "1000ms on/1000ms off x2 — 대기 중 호출 위치 알림 (2026-10-09)"),
 }
 
 # 펌웨어 WATCHDOG_TIMEOUT_MS와 일치해야 한다 (8번 항목 안내 문구용)

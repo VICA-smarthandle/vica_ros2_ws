@@ -33,17 +33,45 @@ def test_tick_code_is_new_and_distinct():
     assert not (codes & set(protocol.STATE_NAMES))
 
 
+def test_locate_code_is_new_and_distinct():
+    """대기 중 "비카야" 위치 알림(2026-10-09). 상태코드·다른 진동·초음파 명령과 안 겹친다."""
+    assert protocol.HAPTIC_CMD_LOCATE == 0x13
+    codes = {protocol.HAPTIC_CMD_SHORT, protocol.HAPTIC_CMD_LONG,
+             protocol.HAPTIC_CMD_TICK, protocol.HAPTIC_CMD_LOCATE}
+    assert len(codes) == 4
+    assert not (codes & set(protocol.STATE_NAMES))
+    # 펌웨어의 다른 1바이트 명령(초음파 0x30~)과도 겹치지 않는다 — 주석을 뺀 코드에서
+    # 0x13 은 HAPTIC_CMD_LOCATE 정의 한 곳뿐이어야 한다.
+    code = re.sub(r"//[^\n]*", "", _ino())
+    assert re.findall(r"\b0x13\b", code) == ["0x13"]
+    assert re.search(r"#define HAPTIC_CMD_LOCATE\s+0x13\b", code)
+
+
 def test_firmware_defines_match_protocol():
     src = _ino()
     assert f"#define HAPTIC_CMD_SHORT      0x{protocol.HAPTIC_CMD_SHORT:02X}" in src
     assert f"#define HAPTIC_CMD_LONG       0x{protocol.HAPTIC_CMD_LONG:02X}" in src
     assert f"#define HAPTIC_CMD_TICK       0x{protocol.HAPTIC_CMD_TICK:02X}" in src
+    assert f"#define HAPTIC_CMD_LOCATE     0x{protocol.HAPTIC_CMD_LOCATE:02X}" in src
+    # 1초 떨고 1초 쉬고 1초 떤다(2026-10-09 사용자).
+    assert f"#define HAPTIC_LOCATE_ON_MS   {protocol.FIRMWARE_HAPTIC_LOCATE_ON_MS}" in src
+    assert f"#define HAPTIC_LOCATE_OFF_MS  {protocol.FIRMWARE_HAPTIC_LOCATE_OFF_MS}" in src
+    assert f"#define HAPTIC_LOCATE_COUNT   {protocol.FIRMWARE_HAPTIC_LOCATE_COUNT}" in src
+    assert (protocol.FIRMWARE_HAPTIC_LOCATE_ON_MS, protocol.FIRMWARE_HAPTIC_LOCATE_OFF_MS,
+            protocol.FIRMWARE_HAPTIC_LOCATE_COUNT) == (1000, 1000, 2)
 
 
 def test_firmware_handles_tick_byte():
     """loop() 가 0x12 를 받아 한 번 떨린다. 없으면 '그 밖의 값은 버린다'로 조용히 사라진다."""
     src = _ino()
     assert re.search(r"b == HAPTIC_CMD_TICK\)\s*\{\s*hapticStart\(1, HAPTIC_SHORT_ON_MS, 0\);", src)
+
+
+def test_firmware_handles_locate_byte():
+    """loop() 가 0x13 을 받아 1초씩 두 번 떤다. 없으면 '그 밖의 값은 버린다'로 조용히 사라진다."""
+    src = _ino()
+    assert re.search(r"b == HAPTIC_CMD_LOCATE\)\s*\{\s*hapticStart\(HAPTIC_LOCATE_COUNT, "
+                     r"HAPTIC_LOCATE_ON_MS, HAPTIC_LOCATE_OFF_MS\);", src)
 
 
 def test_firmware_state_entry_vibrations():
@@ -68,14 +96,20 @@ def _driver_patterns() -> dict:
 
 
 def test_driver_pattern_table():
-    """미션이 보내는 이름 세 개 = 드라이버가 아는 이름 세 개."""
+    """미션이 보내는 이름 = 드라이버가 아는 이름."""
     assert _driver_patterns() == {
         "short": "HAPTIC_CMD_SHORT",
         "long": "HAPTIC_CMD_LONG",
         "tick": "HAPTIC_CMD_TICK",
+        "locate": "HAPTIC_CMD_LOCATE",
     }
 
 
 def test_bench_tool_knows_tick():
     text = BENCH.read_text(encoding="utf-8")
     assert re.search(r'"tick":\s*\(0x12,', text)
+
+
+def test_bench_tool_knows_locate():
+    text = BENCH.read_text(encoding="utf-8")
+    assert re.search(r'"locate":\s*\(0x13,', text)

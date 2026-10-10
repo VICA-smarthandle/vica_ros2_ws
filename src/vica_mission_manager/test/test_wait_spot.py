@@ -14,6 +14,7 @@ from vica_mission_manager.mission_logic import (
     WAIT_BACK_DESTINATION_PREFIX, WAIT_BEACON_INTERVAL_SEC,
     WAIT_RELEASE_SEC, WAIT_RELEASE_SPEECH_FALLBACK_SEC,
     WAIT_SPOT_DESTINATION_PREFIX, door_side_word, josa_eun_neun,
+    Haptic, HAPTIC_PATTERN_WAKE_LOCATE, MSG_WAKE_GREETING,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -273,6 +274,57 @@ class TestTalkingWhileWaiting:
         released(logic, now=3.0)
         logic.on_tick(8.0, NavStatus.SUCCEEDED)
         return logic
+
+    # ---- 대기 중 "비카야" → 손잡이 위치 진동 (2026-10-09 사용자) ----------------------
+    # 볼일을 마친 사용자가 대기 장소의 비카를 손으로도 찾게 1초씩 두 번 떤다.
+    # WAITING 일 때 /vica/wake 를 받은 경우에만 — 다른 상태는 떨지 않는다.
+
+    @staticmethod
+    def _haptics(actions):
+        return [a.pattern for a in actions if isinstance(a, Haptic)]
+
+    def test_wake_while_waiting_vibrates_locate(self):
+        logic = self._waiting()
+        left = logic.wait_left_sec(20.0)
+        assert HAPTIC_PATTERN_WAKE_LOCATE == "locate"
+        assert logic.on_wake(20.0) == [Haptic(HAPTIC_PATTERN_WAKE_LOCATE)]
+        # 대기는 이어 간다 — 진동만 더해졌다.
+        assert logic.state == State.WAITING
+        assert logic.wait_left_sec(20.0) == left
+
+    def test_wake_call_while_waiting_answers_and_vibrates_once(self):
+        """일반 호출(on_wake_call)은 "네?"와 진동 한 번. 창 안에서 건진 호출은 노드가
+        on_wake 만 부르므로 위 시험이 그 길이다 — 어느 길이든 호출 한 번에 한 번 떤다."""
+        logic = self._waiting()
+        acts = logic.on_wake_call(20.0)
+        assert _say(acts) == [MSG_WAKE_GREETING]
+        assert self._haptics(acts) == ["locate"]
+        assert logic.state == State.WAITING
+
+    def test_every_wake_while_waiting_vibrates_again(self):
+        logic = self._waiting()
+        assert self._haptics(logic.on_wake_call(20.0)) == ["locate"]
+        assert self._haptics(logic.on_wake_call(40.0)) == ["locate"]
+        assert logic.state == State.WAITING
+
+    def test_no_vibration_outside_waiting(self):
+        # 손 놓기 기다림 — 사용자가 아직 손잡이 곁이라 떨지 않는다.
+        logic, _ = arrive()
+        wait_minutes(logic, 10, 3.0)
+        assert logic.state == State.WAITING_RELEASE
+        assert self._haptics(logic.on_wake_call(4.0)) == []
+        # 대기 장소로 가는 중 — 호출 자체를 무시한다.
+        logic2, _ = arrive()
+        released(logic2)
+        assert self._haptics(logic2.on_wake_call(9.0)) == []
+        # 그냥 서 있는 IDLE.
+        idle = MissionLogic(return_destination=HOME, arrival_dialog=True)
+        assert self._haptics(idle.on_wake_call(1.0)) == []
+
+    def test_no_vibration_while_estopped(self):
+        logic = self._waiting()
+        logic.on_estop(True, 20.0)
+        assert self._haptics(logic.on_wake_call(21.0)) == []
 
     def test_denied_proposal_returns_to_waiting(self):
         logic = self._waiting()

@@ -12,7 +12,7 @@ from vica_mission_manager.mission_logic import (
     MSG_ASK_RESTROOM, MSG_ASK_ENTRANCE, MSG_ASK_GENERIC, MSG_ASK_WAIT_TIME,
     MSG_WAIT_DEFAULT, MSG_FINISH, MSG_LEAVING_NOTICE,
     MSG_ARRIVAL_RETRY, MSG_WAIT_EXPIRED, GoalEvent, MSG_WAIT_FINISH_ASK,
-    WAIT_FINISH_REPEAT_SEC,
+    WAIT_FINISH_REPEAT_SEC, Haptic, HAPTIC_PATTERN_WAKE_LOCATE,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -275,7 +275,8 @@ class TestWaitingState:
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("affirm"), 3.0)   # WAITING
         left = logic.wait_left_sec(20.0)
-        assert logic.on_wake(20.0) == []
+        # 2026-10-09: 대기 중 호출엔 손잡이 위치 진동(1초씩 두 번)만 낸다 — 대기는 그대로.
+        assert logic.on_wake(20.0) == [Haptic(HAPTIC_PATTERN_WAKE_LOCATE)]
         assert logic.state == State.WAITING
         assert logic.wait_left_sec(20.0) == left
 
