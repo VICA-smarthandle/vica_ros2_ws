@@ -228,12 +228,13 @@ class ObstacleJudge:
         self.last_ann: Optional[float] = None
         self.calm_start: Optional[float] = None
         self.calm_done: Optional[float] = None
+        self.trip_ended = False   # 마지막 goal 이 일시정지가 아닌 끝(도착·취소 등)으로 끝났나
 
     def clear_inputs(self) -> None:
         """입력을 끊었다 다시 받기 전에 지난 주행의 위치·점·VCC 기록·결정 대기를 지운다(2026-10-10 CPU ①).
 
         옛 위치가 남으면 새 점을 엉뚱한 곳에 찍는다. 레일·목적지·'한 번만' 기억(마지막으로 말한 시각)은 둔다 —
-        잠깐 멈췄다 다시 가도 같은 장애물을 곧바로 다시 말하지 않게.
+        잠깐 멈췄다 다시 가도 같은 장애물을 곧바로 다시 말하지 않게. 새 안내에서 지우는 것은 on_goal 몫이다.
         """
         self.poses.clear()
         self.frames["scan"].clear()
@@ -250,9 +251,16 @@ class ObstacleJudge:
 
     def on_goal(self, t: float, event: str, x=None, y=None, loc: str = "") -> None:
         if event in GOAL_START:
+            if self.trip_ended:
+                # 앞 주행이 도착·취소 등으로 끝난 뒤의 새 출발 — '한 번만' 기억을 지운다(2026-10-10 수리 B).
+                # 입력은 안내 주행 중에만 받아(CPU ①) 귀가·대기 장소 이동 중 평상 주행으로 지워질 기회가
+                # 없다(10-10 12:12·12:14 새 안내의 장애물이 전부 '묶음'). 일시정지 뒤 재개는 같은 안내라 둔다.
+                self.last_ann = self.calm_start = self.calm_done = None
+            self.trip_ended = False
             self.goal = {"x": x, "y": y, "loc": loc or ""}
         elif event in GOAL_END:
             self.goal = None
+            self.trip_ended = event != "goal_paused"
 
     def on_rail(self, t: float, xy) -> None:
         a = np.asarray(xy, dtype=float).reshape(-1, 2)

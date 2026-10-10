@@ -449,3 +449,46 @@ class TestClearInputs:
         c.run(1.0, vcc(target=-0.3), points=obstacle(1.2))
         c.flush()
         assert c.said() == ["avoid"]
+
+
+# ------------------------------------------------------------------ 새 안내는 '한 번만' 기억을 지운다(2026-10-10 수리 B)
+
+class TestNewTripForgets:
+    """10-10 12:12·12:14 주행: 앞 안내(12:10)의 '한 번만' 기억이 남아 새 안내의 장애물이 전부 '묶음'이 됐다.
+    안내 주행 중에만 입력을 받으니(①) 귀가·대기 장소 이동 중에 평상 주행으로 지워질 기회가 없다.
+    도착·취소 등으로 끝난 뒤 새로 출발하면 지운다. 일시정지 뒤 재개는 같은 안내라 둔다."""
+
+    def _said_then(self, j, c, end_event):
+        c.run(1.0, vcc(), points=obstacle(1.2))
+        c.run(1.0, vcc(target=0.3), points=obstacle(1.2))            # 말함
+        assert c.said() == ["avoid"]
+        j.on_goal(c.t, end_event)
+        j.clear_inputs()
+        j.on_goal(c.t + 0.5, "goal_sent", 9.0, 0.0, "dest-2")
+        c.t = round(c.t + 0.5, 3)
+        c.run(1.0, vcc(), points=obstacle(1.2))                       # 6초 안, 평상 주행 없음
+        c.run(1.0, vcc(target=-0.3), points=obstacle(1.2))
+        c.flush()
+
+    @pytest.mark.parametrize("end", ["goal_succeeded", "goal_canceled", "goal_failed", "goal_aborted"])
+    def test_new_trip_after_the_end_speaks_again(self, end):
+        j = make()
+        c = Clock(j)
+        self._said_then(j, c, end)
+        assert c.said() == ["avoid", "avoid"]
+
+    def test_resume_after_pause_keeps_the_memory(self):
+        j = make()
+        c = Clock(j)
+        self._said_then(j, c, "goal_paused")
+        assert c.said() == ["avoid"]
+
+    def test_return_home_in_between_also_ends_the_trip(self):
+        j = make()
+        c = Clock(j)
+        c.run(1.0, vcc(), points=obstacle(1.2))
+        c.run(1.0, vcc(target=0.3), points=obstacle(1.2))
+        j.on_goal(c.t, "goal_succeeded")
+        j.on_goal(c.t, "return_home_sent", 0.0, 0.0, "home")
+        j.on_goal(c.t, "return_home_succeeded")
+        assert j.last_ann is None and j.calm_done is None
