@@ -71,6 +71,15 @@ struct CoreParams
   // (v, w) 호 검사(motionCollides)는 그 주기에도 그대로 바로 세운다. 두 주기 연속 미루는 일은 없다.
   // ROS 파라미터 new_path_collision_confirm. 기본 끔(예전 동작).
   bool new_path_confirm{false};
+  // ── 마지막 구간 곧게 가기(2026-10-10 (b′), 사용자 결정) ────────────────────────────────────
+  // 남은 경로가 end_extend_min_length 보다 짧으면 연장 조준이 꺼지고 끝점을 바로 조준한다. 끝점이 코앞이라
+  // 옆 몇 cm 만 어긋나도 조준각이 커져 회전이 최대까지 붙고, 도착 정렬이 그 회전을 되돌린다(run65~67 도착
+  // 반대 회전 10~27°, run82 사람 접근 9°). 끝점(goal)이 앞에 있고 옆으로 이 값 안이면 그 구간은 곡률 0 으로
+  // 곧게 간다 — 곧게 가도 끝점을 이 거리로 스치므로 멈춤 반경(xy_tol − arrive_margin) 안에 든다.
+  // 옆으로 이보다 멀면 예전처럼 끝점을 조준한다. 방향까지 맞추는 도착(사람 접근·홈·대기 장소·배송)에만 쓴다 —
+  // 위치만 도착(안내, position_only_yaw_tol)의 마지막 꺾임(run71 6~17°)은 사용자 보류(10-08)라 그대로 둔다.
+  // ROS 파라미터 end_straight_lateral. 0 이하 = 끔(예전 동작).
+  double end_straight_lateral{0.0};
 };
 
 enum class Failure { None, CollisionAhead, Blocked, AlignFailed };
@@ -104,6 +113,7 @@ struct CoreOutput
   double turn_rotated{0.0};     // 이번 Turn 에서 돈 누적 각(rad), 진단용
   bool end_extended{false};     // 이번 주기 조준점이 경로 끝 연장선 위였나(진단용)
   bool collision_deferred{false};   // 새 경로 첫 주기라 정지거리 '닿는다'를 한 번 미뤘나(진단용)
+  bool end_straight{false};     // 이번 주기 마지막 구간이라 곡률 0 으로 곧게 갔나(진단용, (b′))
   Path lane_path;
 };
 

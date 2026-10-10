@@ -671,6 +671,169 @@ TEST(VccCoreEndExtension, PassingOutsideTheCheckerCircleIsNotArrival)
   EXPECT_NE(n.state, State::Align);
 }
 
+// ── 2026-10-10 (b′): 남은 경로가 0.3 m 아래면 끝점이 앞·옆 0.08 m 안일 때 곧게 간다 ─────────────────
+// run82 사람 접근 track 69: 남은 경로가 0.3 m 밑으로 떨어져 연장 조준이 꺼지자 옆 1~5 cm 끝점을 조준해
+// 오른쪽 최대 회전(−0.5)으로 9° 더 틀었고, 정렬이 그만큼 더 되돌렸다.
+namespace
+{
+CoreParams paramsStraight(double lateral)
+{
+  CoreParams p = paramsEnd(true);
+  p.end_straight_lateral = lateral;
+  return p;
+}
+// 로봇이 세계 원점에서 +x 로 서 있고, 경로는 y = ey 인 직선 위 끝점 (ex, ey) 까지 남았다(< 0.3 m).
+// 끝 방향 eyaw(목적지 방향)는 경로 방향과 다르다 — 정렬은 eyaw 쪽으로 돈다.
+struct EndSim
+{
+  VccCore c;
+  World w;
+  double ex, ey, eyaw;
+  double x{0.0}, y{0.0}, th{0.0}, v{0.1}, wz{0.0}, t{1.0};
+  double rot_before_align{0.0};   // 정렬 전 Track 에서 돈 각(부호 있음, 왼쪽 +)
+  double dist_at_align{-1.0};     // 정렬로 넘어간 순간 끝점까지 거리
+  bool straight_seen{false};
+  EndSim(const CoreParams & p, double ex_, double ey_, double eyaw_) : ex(ex_), ey(ey_), eyaw(eyaw_)
+  {
+    c.configure(p);
+  }
+  Point2D toRobot(double px, double py) const
+  {
+    const double dx = px - x, dy = py - y;
+    return {dx * std::cos(th) + dy * std::sin(th), -dx * std::sin(th) + dy * std::cos(th)};
+  }
+  CoreOutput step()
+  {
+    Path p;
+    for (double px = std::min(x, ex); px <= ex + 1e-9; px += 0.05) {
+      const Point2D q = toRobot(px, ey);
+      p.push_back({q.x, q.y, -th});
+    }
+    const Point2D g = toRobot(ex, ey);
+    if (p.empty() || std::hypot(p.back().x - g.x, p.back().y - g.y) > 1e-9) {p.push_back({g.x, g.y, 0.0});}
+    p.back().yaw = normalizeAngle(eyaw - th);
+    CoreInputs in = inputs(p, w, t, v, wz);
+    in.goal = {g.x, g.y, normalizeAngle(eyaw - th)};
+    in.xy_tol = 0.15;
+    in.yaw_tol = 0.25;
+    in.robot_yaw = th;
+    const CoreOutput out = c.step(in);
+    if (out.end_straight) {straight_seen = true;}
+    if (out.state == State::Align && dist_at_align < 0.0) {dist_at_align = std::hypot(g.x, g.y);}
+    if (dist_at_align < 0.0) {rot_before_align += out.cmd.w * 0.1;}
+    v = out.cmd.v; wz = out.cmd.w;
+    x += v * std::cos(th) * 0.1; y += v * std::sin(th) * 0.1;
+    th = normalizeAngle(th + wz * 0.1);
+    t += 0.1;
+    return out;
+  }
+  void run(int n = 80) {for (int i = 0; i < n && dist_at_align < 0.0; ++i) {step();}}
+};
+}  // namespace
+
+TEST(VccCoreEndStraight, OffByDefault)
+{
+  EXPECT_EQ(CoreParams{}.end_straight_lateral, 0.0);
+}
+
+// 끝점 0.25 m 앞·옆 −4 cm, 목적지 방향은 왼쪽 +0.6 rad. 예전엔 오른쪽으로 먼저 돌고, 켜면 곧게 가서 선다.
+TEST(VccCoreEndStraight, NoWrongWayTurnBeforeArrival)
+{
+  EndSim off(paramsStraight(0.0), 0.25, -0.04, 0.6);
+  off.run();
+  EndSim on(paramsStraight(0.08), 0.25, -0.04, 0.6);
+  on.run();
+  ASSERT_GT(off.dist_at_align, 0.0);
+  ASSERT_GT(on.dist_at_align, 0.0);
+  EXPECT_LT(off.rot_before_align, -3.0 * M_PI / 180.0);    // 예전: 정렬 반대쪽으로 3° 넘게
+  EXPECT_NEAR(on.rot_before_align, 0.0, 0.5 * M_PI / 180.0);
+  EXPECT_TRUE(on.straight_seen);
+  EXPECT_FALSE(off.straight_seen);
+  EXPECT_LT(on.dist_at_align, 0.12 + 1e-9);                 // 멈춤 반경 안에서 정렬로 넘어간다
+}
+
+// 옆 0.08 m 경계: 곧게 가도 끝점을 0.08 m 로 스쳐 멈춤 반경(0.12) 안에 든다 — 놓치지 않는다.
+TEST(VccCoreEndStraight, ArrivesAtTheLateralLimit)
+{
+  EndSim on(paramsStraight(0.08), 0.25, -0.08, 0.6);
+  on.run();
+  EXPECT_TRUE(on.straight_seen);
+  EXPECT_GT(on.dist_at_align, 0.0);
+  EXPECT_LT(on.dist_at_align, 0.12 + 1e-9);
+  EXPECT_NEAR(on.rot_before_align, 0.0, 0.5 * M_PI / 180.0);
+}
+
+// 끝점이 옆으로 0.08 m 보다 멀면(run68·run82 track 47 처럼) 예전대로 끝점을 조준한다.
+TEST(VccCoreEndStraight, FarSidewaysEndKeepsAiming)
+{
+  World w;
+  VccCore off; off.configure(paramsStraight(0.0));
+  VccCore on; on.configure(paramsStraight(0.08));
+  Path p;
+  for (double x = 0.05; x <= 0.25 + 1e-9; x += 0.05) {p.push_back({x, -0.12, 0.0});}
+  CoreInputs in = inputs(p, w, 1.0, 0.1);
+  in.goal = {0.25, -0.12, 0.6};
+  in.xy_tol = 0.15;
+  in.yaw_tol = 0.25;
+  const CoreOutput o = off.step(in);
+  const CoreOutput n = on.step(in);
+  EXPECT_FALSE(n.end_straight);
+  EXPECT_LT(n.cmd.w, -0.05);
+  EXPECT_DOUBLE_EQ(n.cmd.w, o.cmd.w);
+  EXPECT_DOUBLE_EQ(n.cmd.v, o.cmd.v);
+}
+
+// 남은 경로가 0.3 m 이상이면 연장 조준(해결안 가) 구간이다 — 곧게 가기는 끼어들지 않는다.
+TEST(VccCoreEndStraight, LongRemainingPathKeepsEndExtension)
+{
+  World w;
+  VccCore off; off.configure(paramsStraight(0.0));
+  VccCore on; on.configure(paramsStraight(0.08));
+  const CoreOutput o = off.step(endInputs(w, 1.0, 0.1, 0.0, 0.45, -0.04, 0.6));
+  const CoreOutput n = on.step(endInputs(w, 1.0, 0.1, 0.0, 0.45, -0.04, 0.6));
+  EXPECT_FALSE(n.end_straight);
+  EXPECT_DOUBLE_EQ(n.cmd.w, o.cmd.w);
+  EXPECT_DOUBLE_EQ(n.cmd.v, o.cmd.v);
+}
+
+// 끝점이 뒤에 있으면(지나침) 곧게 가기가 아니다 — 지나침 도착·유턴 규칙이 그대로 맡는다.
+TEST(VccCoreEndStraight, EndBehindIsNotStraight)
+{
+  World w;
+  VccCore on; on.configure(paramsStraight(0.08));
+  Path p;   // 남은 경로 0.1 m(< 0.3), 끝점은 0.13 m 뒤
+  for (double x = -0.23; x <= -0.13 + 1e-9; x += 0.05) {p.push_back({x, 0.0, 0.0});}
+  p.back().yaw = 1.0;
+  CoreInputs in = inputs(p, w, 1.0, 0.05);
+  in.goal = {-0.13, 0.0, 1.0};
+  in.xy_tol = 0.15;
+  in.yaw_tol = 0.25;
+  const CoreOutput n = on.step(in);
+  EXPECT_FALSE(n.end_straight);
+  EXPECT_EQ(n.state, State::Align);
+}
+
+// 위치만 도착(안내, yaw 허용 3.141)은 (b′) 대상이 아니다 — 그 마지막 꺾임(run71 6~17°)은 사용자 보류(10-08).
+// 곧게 가기를 켜도 예전과 똑같이 끝점을 조준한다.
+TEST(VccCoreEndStraight, PositionOnlyArrivalIsUntouched)
+{
+  World w;
+  VccCore off; off.configure(paramsStraight(0.0));
+  VccCore on; on.configure(paramsStraight(0.08));
+  Path p;
+  for (double x = 0.05; x <= 0.25 + 1e-9; x += 0.05) {p.push_back({x, -0.04, 0.0});}
+  CoreInputs in = inputs(p, w, 1.0, 0.1);
+  in.goal = {0.25, -0.04, 0.6};
+  in.xy_tol = 0.15;
+  in.yaw_tol = 3.141;
+  const CoreOutput o = off.step(in);
+  const CoreOutput n = on.step(in);
+  EXPECT_FALSE(n.end_straight);
+  EXPECT_LT(n.cmd.w, -0.01);                 // 끝점(오른쪽)을 조준한다 — 예전 동작
+  EXPECT_DOUBLE_EQ(n.cmd.w, o.cmd.w);
+  EXPECT_DOUBLE_EQ(n.cmd.v, o.cmd.v);
+}
+
 // 해결안 ① (2026-10-06): Track 의 속도 상한이 내려가면 평상 감속, 막혀서 Hold 면 비상 제동.
 namespace
 {
