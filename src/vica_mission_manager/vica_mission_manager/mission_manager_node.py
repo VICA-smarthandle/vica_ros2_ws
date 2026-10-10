@@ -31,17 +31,20 @@ from uuid import UUID
 import rclpy
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
-from nav_msgs.msg import Path as PathMsg
+from nav_msgs.msg import Odometry, Path as PathMsg
 from nav2_msgs.msg import BehaviorTreeLog, SpeedLimit
 from nav2_msgs.srv import ClearEntireCostmap
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.exceptions import InvalidHandle
+from rclpy.executors import (ExternalShutdownException, MultiThreadedExecutor, ShutdownException,
+                             SingleThreadedExecutor)
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rcl_interfaces.msg import Log
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
+from tf2_msgs.msg import TFMessage
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.msg import PersonDetection, SmartHandleState
 from vica_interfaces.srv import (
@@ -112,6 +115,7 @@ from .obstacle_inputs import (
     BASE_FRAME,
     LASER_DEFAULT,
     Guard,
+    OdomTrail,
     depth_frame_ok,
     format_decision,
     load_grid,
@@ -1150,47 +1154,100 @@ class MissionManagerNode(Node):
         cov = msg.pose.covariance
         self._pose_cov_xy = float(cov[0] + cov[7]) if len(cov) >= 8 else 0.0
 
+    def destroy_node(self) -> bool:
+        # 장애물 안내 보조 노드·실행기를 먼저 닫는다 — 본체가 사라진 뒤 판정 타이머가 더 돌지 않게.
+        executor = getattr(self, "_obs_executor", None)
+        if executor is not None:
+            executor.shutdown(timeout_sec=1.0)
+        node = getattr(self, "_obs_node", None)
+        if node is not None:
+            node.destroy_node()
+        return super().destroy_node()
+
     # -- 주행 중 장애물 안내 (2026-10-09) ------------------------------------------------------
-    # 판정은 obstacle_judge(설계서 3절, 시운전 run81 에서 16번 모두 실물). 입력은 전용 콜백 그룹으로만 받아
-    # 대화 줄(_main_group)과 서로 기다리지 않는다. 라이다·깊이는 최근 1장만 둔다(밀려도 쌓이지 않게).
+    # 판정은 obstacle_judge(설계서 3절, 시운전 run81 에서 16번 모두 실물). 입력은 보조 노드(vica_mission_obstacle)가
+    # 단일 실행기로 자기 스레드에서 받아 대화 줄(_main_group)과 서로 기다리지 않는다. 라이다·깊이는 최근 1장만 둔다.
     # 판정 줄은 말할 후보만 _obstacle_cues 에 넣고, 말할지는 대화 줄의 _tick 이 logic.obstacle_cue 로 정한다.
     # 장애물 부분의 예외는 Guard 가 받아 안내만 끈다 — 안내 주행은 계속된다.
+    #
+    # CPU(2026-10-10 실측, 코어 하나 기준): 처음 배선(본체 다중 실행기·tf·늘 받기)은 쉴 때도 46 %. 판정 계산이 아니라
+    # 메시지 받기 부담이었다 — ① 입력은 안내 주행 중에만, ② 위치는 tf(초당 52통) 대신 /amcl_pose + /odom 변화
+    # (녹화본 run81·run82 판정 같음), ③ rclpy 다중 실행기 대신 보조 노드의 단일 실행기.
 
     def _setup_obstacle_narration(self, map_yaml: str) -> None:
         grid, why = load_grid(map_yaml)
         if grid is None:
             self.get_logger().warn(f"장애물 안내: 지도를 못 읽어 끕니다 — {why}")
             return
-        # 설치(tf·구독·타이머)도 보호막 안이다 — 여기서 예외가 나도 미션은 뜨고 안내만 꺼진다(2026-10-09 최종 검토 I-2).
+        # 설치(노드·구독·타이머)도 보호막 안이다 — 여기서 예외가 나도 미션은 뜨고 안내만 꺼진다(2026-10-09 최종 검토 I-2).
         try:
             self._obstacle = ObstacleJudge(grid)
             self._laser_offset: Optional[tuple] = None
-            self._tf_buffer = tf2_ros.Buffer()
-            self._tf_listener = None
+            self._tf_buffer = tf2_ros.Buffer()       # /tf_static(라이다 위치)만 넣는다 — /tf 는 받지 않는다
+            self._obs_amcl: Optional[tuple] = None   # 마지막 AMCL 위치 (헤더 시각, x, y, yaw)
+            self._obs_trail = OdomTrail()
             self._obs_subs: list = []
             self._obs_on = False
-            group = MutuallyExclusiveCallbackGroup()
+            node = rclpy.create_node("vica_mission_obstacle")
+            self._obs_node = node
+            # 한 줄(단일 실행기)이라 Reentrant 여도 콜백이 동시에 돌지 않는다. 한 번에 하나 그룹은 구독을 닫는 순간의
+            # InvalidHandle(Humble 은 그룹의 '실행 중' 표시를 풀기 전에 낸다)에 영영 잠긴다(2026-10-10 검토).
+            group = ReentrantCallbackGroup()
             self._obs_group = group
             wrap = self._obstacle_guard.wrap
-            # 레일·목적지 사건은 늘 받는다 — 드물고 가볍다. 목적지 사건은 출발 직전에 와서, 주행 중에만 받으면
-            # '목적지 1 m 안에서는 말하지 않기'가 목적지를 모른다. 나머지 입력과 판정 타이머는 _obs_start 가 연다.
-            self.create_subscription(PathMsg, "/rail_plan", wrap(self._obs_rail), 5, callback_group=group)
-            self.create_subscription(String, "/vica_goal_event", wrap(self._obs_goal), 10, callback_group=group)
-            self._obs_timer = self.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
+            # 늘 받는 것은 드물고 가볍다. 목적지 사건은 출발 직전에 와서, 주행 중에만 받으면 '목적지 1 m 안에서는
+            # 말하지 않기'가 목적지를 모른다. AMCL·tf_static 은 보관(transient_local)이라 늦게 붙어도 마지막 값을 받는다.
+            kept = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            static = QoSProfile(depth=100, history=HistoryPolicy.KEEP_LAST,
+                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            node.create_subscription(PathMsg, "/rail_plan", wrap(self._obs_rail), 5, callback_group=group)
+            node.create_subscription(String, "/vica_goal_event", wrap(self._obs_goal), 10, callback_group=group)
+            node.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", wrap(self._obs_amcl_msg), kept,
+                                     callback_group=group)
+            node.create_subscription(TFMessage, "/tf_static", wrap(self._obs_static), static, callback_group=group)
+            # 판정 타이머와 나머지 입력은 _obs_start 가 연다.
+            self._obs_timer = node.create_timer(0.1, wrap(self._obs_tick), callback_group=group)
             self._obs_timer.cancel()
+            self._obs_executor = SingleThreadedExecutor()
+            self._obs_executor.add_node(self._obs_node)
+            threading.Thread(target=self._obs_spin, name="obstacle_inputs", daemon=True).start()
         except Exception as exc:  # noqa: BLE001
             self._obstacle_guard.enabled = False
             self._on_obstacle_error(exc)
             return
         self.get_logger().info(f"장애물 안내: 켜짐 (지도 {map_yaml}) — 입력은 안내 주행 중에만 받습니다")
 
+    def _obs_spin(self) -> None:
+        # spin() 대신 spin_once() 를 돈다 — 대화 줄이 구독을 닫는 순간 이 줄이 막 집은 메시지를 꺼내면 rclpy(Humble)가
+        # InvalidHandle 을 낸다(executors._take_subscription). 그 메시지 하나만 버리고 계속 돈다.
+        # spin_once 에 시한을 주지 않는다 — Humble 은 시한마다 타이머를 새로 만든다.
+        while rclpy.ok():
+            try:
+                self._obs_executor.spin_once()
+            except InvalidHandle:
+                continue
+            except (ExternalShutdownException, ShutdownException):
+                return
+            except Exception as exc:  # noqa: BLE001 — 보조 실행기가 죽으면 안내만 끈다
+                if rclpy.ok():
+                    self._obstacle_guard.enabled = False
+                    self._on_obstacle_error(exc)
+                return
+
     def _obstacle_inputs_follow(self) -> None:
         """장애물 입력은 안내 주행(NAVIGATING) 중에만 받는다 — 안내 멘트도 그때만 나간다(obstacle_cue).
 
-        2026-10-10 실측: 입력을 늘 받으면 쉴 때도 미션이 코어 하나의 46 %(끄면 2.4 %), 그중 tf 가 약 21 %.
+        2026-10-10 실측: 입력을 늘 받으면 쉴 때도 미션이 코어 하나의 46 %(끄면 2.4 %).
         대화 줄의 _tick(5 Hz)에서 부르므로 상태가 바뀐 뒤 0.2초 안에 열고 닫는다.
         """
         if self._obstacle is None or not self._obstacle_guard.enabled:
+            # 오류로 안내가 꺼졌는데 입력이 열려 있으면 한 번 닫는다 — 꺼진 안내가 메시지 받기 부담만 남기지 않게.
+            if getattr(self, "_obs_on", False):
+                try:
+                    self._obs_stop()
+                except Exception:  # noqa: BLE001 — 이미 꺼진 안내다. 닫다 난 오류는 더 할 일이 없다
+                    pass
             return
         want = self.logic.dialog_state == State.NAVIGATING.value
         if want == self._obs_on:
@@ -1205,40 +1262,38 @@ class MissionManagerNode(Node):
             self._on_obstacle_error(exc)
 
     def _obs_start(self) -> None:
-        # 지난 주행의 위치·점·VCC·결정 대기를 먼저 지운다 — 옛 위치로 새 점을 찍으면 없는 장애물을 말한다.
-        # 위치 저장소도 새로 만들어, 새 tf 가 오기 전에는 옛 위치 대신 '위치 모름'(원인 판정 쉼)이 되게 한다.
-        # 판정 타이머·센서 구독은 앞서 _obs_stop 이 닫아 두었으므로 이 줄과 동시에 판정이 돌지 않는다.
+        # 지난 주행의 위치·점·VCC·결정 대기와 바퀴 기록을 먼저 지운다 — 옛 위치로 새 점을 찍으면 없는 장애물을 말한다.
+        # 새 /odom 이 오기 전에는 '위치 모름'(원인 판정 쉼)이다. 판정 타이머·센서 구독은 앞서 _obs_stop 이 닫아
+        # 두었으므로 이 줄과 동시에 판정이 돌지 않는다(늘 받는 레일·목적지·AMCL 은 지우는 것을 건드리지 않는다).
         self._obstacle.clear_inputs()
-        self._tf_buffer = tf2_ros.Buffer()
-        # 위치(tf)는 리스너가 스스로 만드는 Reentrant 그룹으로 받는다 — 새 노드·스레드 없이 이 노드의
-        # MultiThreadedExecutor 가 처리한다. 리스너의 전용 스레드 옵션은 같은 노드를 executor 두 개에 넣게 돼 못 쓴다.
-        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
-        group = self._obs_group
+        self._obs_trail.clear()
+        node, group = self._obs_node, self._obs_group
         latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
         wrap = self._obstacle_guard.wrap
-        self._obs_subs = [
-            self.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group),
-            self.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
-                                     callback_group=group),
-            self.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group),
-            self.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
-                                     callback_group=group),
-            self.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group),
-        ]
-        self._obs_timer.reset()
+        # 열림 표시와 구독 목록을 먼저 둔다 — 여는 도중 오류가 나도 다음 _tick 의 닫기가 연 것만큼 정리한다.
         self._obs_on = True
+        self._obs_subs = []
+        # 타이머를 구독보다 먼저 켠다 — rclpy 는 타이머 reset 으로 실행기를 깨우지 않는다. 아래 구독을 만들 때
+        # 실행기가 깨어나 대기 목록을 다시 짜므로, 그때 켜진 타이머가 들어간다.
+        self._obs_timer.reset()
+        subs = self._obs_subs
+        subs.append(node.create_subscription(Odometry, "/odom", wrap(self._obs_odom_msg), 10, callback_group=group))
+        subs.append(node.create_subscription(LaserScan, "/scan", wrap(self._obs_scan), latest, callback_group=group))
+        subs.append(node.create_subscription(LaserScan, "/camera/depth_scan", wrap(self._obs_depth), latest,
+                                             callback_group=group))
+        subs.append(node.create_subscription(String, "/vcc/state", wrap(self._obs_vcc), 10, callback_group=group))
+        subs.append(node.create_subscription(BehaviorTreeLog, "/behavior_tree_log", wrap(self._obs_bt), 50,
+                                             callback_group=group))
+        subs.append(node.create_subscription(Log, "/rosout", wrap(self._obs_rosout), 50, callback_group=group))
         self.get_logger().info("장애물 안내: 입력 받기 시작(안내 주행)")
 
     def _obs_stop(self) -> None:
         self._obs_on = False
         self._obs_timer.cancel()
         for sub in self._obs_subs:
-            self.destroy_subscription(sub)
+            self._obs_node.destroy_subscription(sub)
         self._obs_subs = []
-        if self._tf_listener is not None:
-            self._tf_listener.unregister()
-            self._tf_listener = None
         self.get_logger().info("장애물 안내: 입력 멈춤(안내 주행 아님)")
 
     def _on_obstacle_error(self, exc: BaseException) -> None:
@@ -1247,13 +1302,27 @@ class MissionManagerNode(Node):
         self._obstacle = None
         self.get_logger().error(f"장애물 안내: 오류로 끕니다 — 안내 주행은 계속됩니다 ({exc!r})")
 
+    @staticmethod
+    def _stamp(msg) -> float:
+        return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+    def _obs_amcl_msg(self, msg: PoseWithCovarianceStamped) -> None:
+        p = msg.pose.pose
+        self._obs_amcl = (self._stamp(msg), p.position.x, p.position.y, yaw_of(p.orientation))
+
+    def _obs_odom_msg(self, msg: Odometry) -> None:
+        p = msg.pose.pose
+        self._obs_trail.add(self._stamp(msg), p.position.x, p.position.y, yaw_of(p.orientation))
+
+    def _obs_static(self, msg: TFMessage) -> None:
+        for tr in msg.transforms:
+            self._tf_buffer.set_transform_static(tr, "default_authority")
+
     def _obs_pose(self, t: float) -> None:
-        try:
-            tr = self._tf_buffer.lookup_transform("map", BASE_FRAME, rclpy.time.Time())
-        except tf2_ros.TransformException:
+        pose = self._obs_trail.pose_since(self._obs_amcl)
+        if pose is None:
             return   # 위치를 아직 모르면 원인 판정만 쉰다
-        p, q = tr.transform.translation, tr.transform.rotation
-        self._obstacle.on_pose(t, p.x, p.y, yaw_of(q))
+        self._obstacle.on_pose(t, *pose)
 
     def _obs_laser_offset(self) -> tuple:
         if self._laser_offset is None:

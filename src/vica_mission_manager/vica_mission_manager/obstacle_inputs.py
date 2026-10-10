@@ -7,6 +7,7 @@ scripts/avoid_cue.py(1단계 점검 도구)의 것을 그대로 옮겼다.
 from __future__ import annotations
 
 import math
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -65,6 +66,43 @@ def format_decision(d: dict) -> str:
     where = "" if d.get("near") is None else f" 앞 {d['near']:.2f} m 옆 {d['lat']:+.2f} m"
     return (f"{kind} → {dec}{say}{tail} · 점 {d['n']}(라이다 {d['n_scan']}·깊이 {d['n_depth']}·벽 {d['n_wall']})"
             f"{where} · 목적지 {d['goal_dist']} m")
+
+
+class OdomTrail:
+    """바퀴 오도메트리 최근 기록(헤더 시각) — 지금 위치 = 마지막 AMCL 위치 + 그 뒤 오도메트리 변화.
+
+    tf 의 map→odom × odom→base 와 같은 셈이다. tf(초당 52통)를 받지 않으려고 쓴다(2026-10-10 CPU ②-나).
+    녹화본 run81·run82 에서 tf 로 낸 판정과 185/185·89/89 같았다(방향 오차 95 % 0.5°).
+    AMCL 이 기록보다 오래됐으면 가장 오래된 기록부터 센다 — AMCL 은 0.10 m·0.10 rad 움직일 때마다 새로 내므로
+    그사이 놓친 움직임은 그 이하다.
+    """
+
+    def __init__(self, keep_sec: float = 5.0):
+        self._keep = keep_sec
+        self._q: deque = deque()
+
+    def add(self, stamp: float, x: float, y: float, yaw: float) -> None:
+        self._q.append((stamp, x, y, yaw))
+        while self._q and self._q[0][0] < stamp - self._keep:
+            self._q.popleft()
+
+    def clear(self) -> None:
+        self._q.clear()
+
+    def pose_since(self, amcl: Optional[tuple]) -> Optional[tuple]:
+        """amcl = (헤더 시각, x, y, yaw) 지도 좌표 → 지금 (x, y, yaw). 모르면 None."""
+        if amcl is None or not self._q:
+            return None
+        ta, ax, ay, aa = amcl
+        items = list(self._q)
+        ref = min(items, key=lambda o: abs(o[0] - ta))
+        _, x0, y0, a0 = ref
+        _, x1, y1, a1 = items[-1]
+        dx, dy = x1 - x0, y1 - y0
+        c, s = math.cos(-a0), math.sin(-a0)
+        fx, fy = c * dx - s * dy, s * dx + c * dy          # 그 사이 움직임(그때 로봇 기준)
+        c, s = math.cos(aa), math.sin(aa)
+        return ax + c * fx - s * fy, ay + s * fx + c * fy, aa + (a1 - a0)
 
 
 def take_all(q) -> list:

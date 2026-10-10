@@ -17,11 +17,15 @@ def test_switch_is_declared_and_exposed():
     assert '"obstacle_narration": ParameterValue(' in LAUNCH
 
 
-def test_inputs_use_their_own_group_not_the_dialog_group():
+def test_inputs_live_on_a_helper_node_with_a_single_threaded_executor():
+    # 2026-10-10 CPU ③: 장애물 입력은 미션 본체의 다중 실행기(메시지당 부담이 크다) 대신 보조 노드 하나를
+    # 단일 실행기로 자기 스레드에서 돌린다. 대화 줄(_main_group)·긴급 줄과는 처음부터 갈라져 있다.
     block = _setup_block()
-    assert "group = MutuallyExclusiveCallbackGroup()" in block
+    assert 'rclpy.create_node("vica_mission_obstacle")' in block
+    assert "SingleThreadedExecutor()" in block and "self._obs_executor.add_node(self._obs_node)" in block
+    assert "threading.Thread(target=self._obs_spin" in block
     assert "_main_group" not in block and "_emergency_group" not in block
-    assert block.count("callback_group=group") == 8          # 구독 7 + 판정 타이머 1
+    assert "self.create_subscription(" not in block           # 장애물 입력은 본체 노드에 붙지 않는다
 
 
 def test_sensor_inputs_keep_only_the_latest():
@@ -31,14 +35,22 @@ def test_sensor_inputs_keep_only_the_latest():
     assert '"/camera/depth_scan", wrap(self._obs_depth), latest' in block
 
 
-def test_tf_listener_lives_in_this_node_without_a_new_node():
+def test_pose_comes_from_amcl_and_odom_not_tf():
+    # 2026-10-10 CPU ②-나: tf(초당 52통) 대신 마지막 AMCL 위치 + 바퀴 오도메트리 변화(녹화본 판정 같음).
+    assert "TransformListener" not in NODE
     block = _setup_block()
-    assert "tf2_ros.TransformListener(self._tf_buffer, self)" in block
-    assert "spin_thread" not in block and "create_node" not in block
+    assert '"/amcl_pose", wrap(self._obs_amcl_msg)' in block
+    assert '"/odom", wrap(self._obs_odom_msg)' in block
+    assert "self._obs_trail.pose_since(self._obs_amcl)" in NODE
+    # 라이다 위치는 /tf_static 만 받아 버퍼에 넣는다(드물다)
+    assert '"/tf_static", wrap(self._obs_static)' in block and "set_transform_static" in NODE
 
 
 def test_every_obstacle_callback_is_guarded():
-    assert _setup_block().count("wrap(self._obs_") == 8
+    block = _setup_block()
+    made = block.count("create_subscription(") + block.count("create_timer(")
+    assert made == 11                                         # 늘 받는 4 + 판정 타이머 1 + 주행 중 6
+    assert block.count("wrap(self._obs_") == made
 
 
 def test_speaking_is_decided_in_the_dialog_tick():
@@ -95,8 +107,9 @@ def test_tick_switches_inputs_by_guided_driving():
 
 def test_setup_keeps_only_rail_and_goal_always_on():
     setup = _part("    def _setup_obstacle_narration", "    def _obstacle_inputs_follow")
-    assert '"/rail_plan"' in setup and '"/vica_goal_event"' in setup
-    for topic in ('"/scan"', '"/camera/depth_scan"', '"/vcc/state"', '"/behavior_tree_log"', '"/rosout"'):
+    for topic in ('"/rail_plan"', '"/vica_goal_event"', '"/amcl_pose"', '"/tf_static"'):   # 드물다
+        assert topic in setup, topic
+    for topic in ('"/odom"', '"/scan"', '"/camera/depth_scan"', '"/vcc/state"', '"/behavior_tree_log"', '"/rosout"'):
         assert topic not in setup, topic
     assert "TransformListener" not in setup
     assert "self._obs_timer.cancel()" in setup            # 판정 타이머도 주행 전엔 멈춰 둔다
@@ -104,22 +117,56 @@ def test_setup_keeps_only_rail_and_goal_always_on():
 
 def test_start_clears_old_inputs_before_listening():
     start = _part("    def _obs_start", "    def _obs_stop")
-    for topic in ('"/scan"', '"/camera/depth_scan"', '"/vcc/state"', '"/behavior_tree_log"', '"/rosout"'):
+    for topic in ('"/odom"', '"/scan"', '"/camera/depth_scan"', '"/vcc/state"', '"/behavior_tree_log"', '"/rosout"'):
         assert topic in start, topic
-    order = [start.index(s) for s in ("self._obstacle.clear_inputs()", "tf2_ros.Buffer()",
-                                      "tf2_ros.TransformListener(self._tf_buffer, self)",
-                                      "self._obs_timer.reset()")]
+    # 타이머를 구독보다 먼저 켠다 — 구독을 만들 때 실행기가 깨어나 켜진 타이머를 대기 목록에 넣는다
+    order = [start.index(s) for s in ("self._obstacle.clear_inputs()", "self._obs_trail.clear()",
+                                      "self._obs_timer.reset()", '"/odom"')]
     assert order == sorted(order)
 
 
-def test_stop_releases_timer_subscriptions_and_tf():
+def test_stop_releases_timer_and_subscriptions():
     stop = _part("    def _obs_stop", "    def _on_obstacle_error")
     assert "self._obs_timer.cancel()" in stop
-    assert "self.destroy_subscription(" in stop
-    assert "self._tf_listener.unregister()" in stop
+    assert "self._obs_node.destroy_subscription(" in stop
 
 
 def test_switching_error_turns_only_the_narration_off():
     follow = _part("    def _obstacle_inputs_follow", "    def _obs_start")
     assert "except Exception" in follow and "self._on_obstacle_error(exc)" in follow
     assert "self._obstacle_guard.enabled = False" in follow
+
+
+# ---- 보조 노드 견고성 (2026-10-10 독립 검토) ----
+
+def test_helper_callbacks_cannot_lock_a_group():
+    # 구독을 닫는 순간 실행기가 막 집은 메시지를 꺼내면 rclpy(Humble)가 InvalidHandle 을 낸다 — 그룹의
+    # '실행 중' 표시를 풀기 전이라, 한 번에 하나 그룹이면 그 그룹이 영영 잠긴다. 단일 실행기라 Reentrant 여도
+    # 동시에 돌지 않는다.
+    block = _setup_block()
+    assert "group = ReentrantCallbackGroup()" in block
+    made = block.count("create_subscription(") + block.count("create_timer(")
+    assert block.count("callback_group=group") == made
+
+
+def test_helper_spin_survives_a_closed_subscription():
+    spin = _part("    def _obs_spin", "    def _obstacle_inputs_follow")
+    assert "self._obs_executor.spin_once()" in spin
+    assert "except InvalidHandle:" in spin and "continue" in spin.split("except InvalidHandle:")[1].split("except")[0]
+
+
+def test_inputs_close_after_narration_turns_off():
+    follow = _part("    def _obstacle_inputs_follow", "    def _obs_start")
+    off = follow.split("if self._obstacle is None or not self._obstacle_guard.enabled:")[1].split("want =")[0]
+    assert "self._obs_stop()" in off
+    start = _part("    def _obs_start", "    def _obs_stop")
+    # 여는 도중 오류가 나도 닫기가 정리할 수 있게, 열림 표시와 구독 목록을 먼저 둔다
+    assert start.index("self._obs_on = True") < start.index("self._obs_timer.reset()") < start.index('"/odom"')
+    assert "subs = self._obs_subs" in start and start.count("subs.append(node.create_subscription(") == 6
+
+
+def test_helper_node_is_closed_with_the_mission():
+    destroy = _part("    def destroy_node(self)", "    def _setup_obstacle_narration")
+    assert 'getattr(self, "_obs_executor", None)' in destroy and "executor.shutdown(" in destroy
+    assert 'getattr(self, "_obs_node", None)' in destroy and "node.destroy_node()" in destroy
+    assert "super().destroy_node()" in destroy

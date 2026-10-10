@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from vica_mission_manager.obstacle_inputs import (
-    Guard, depth_frame_ok, format_decision, load_grid, scan_points, take_all, yaw_of,
+    Guard, OdomTrail, depth_frame_ok, format_decision, load_grid, scan_points, take_all, yaw_of,
 )
 
 
@@ -136,3 +136,51 @@ class TestTakeAll:
                 return self.items.pop(0)
 
         assert take_all(Raced()) == [("avoid", 1.0)]
+
+
+class TestOdomTrail:
+    """위치 = 마지막 AMCL 위치(그 시각) + 그 뒤 바퀴 오도메트리 변화 (2026-10-10 CPU ②-나).
+
+    tf(map→odom × odom→base)와 같은 셈이다. 녹화본 run81·run82 에서 판정 185/185·89/89 같음.
+    """
+
+    def _trail(self, *samples, keep=5.0):
+        tr = OdomTrail(keep_sec=keep)
+        for s in samples:
+            tr.add(*s)
+        return tr
+
+    def test_nothing_known_yet(self):
+        assert OdomTrail().pose_since((0.0, 1.0, 2.0, 0.0)) is None
+        assert self._trail((0.0, 0.0, 0.0, 0.0)).pose_since(None) is None
+
+    def test_forward_motion_follows_the_amcl_heading(self):
+        # AMCL: 지도 (2, 3)에서 +y(90°)를 본다. 그 뒤 바퀴로 1 m 앞으로 → 지도 (2, 4)
+        tr = self._trail((10.0, 0.0, 0.0, 0.0), (11.0, 1.0, 0.0, 0.0))
+        x, y, a = tr.pose_since((10.0, 2.0, 3.0, math.pi / 2))
+        assert (x, y) == (pytest.approx(2.0, abs=1e-9), pytest.approx(4.0, abs=1e-9))
+        assert a == pytest.approx(math.pi / 2)
+
+    def test_odom_frame_turned_against_the_map(self):
+        # 오도메트리 틀에서는 +y(90°)로 1 m 갔지만 로봇 기준으론 앞으로 1 m — 지도에선 AMCL 방향(0°)으로 1 m
+        tr = self._trail((10.0, 5.0, 5.0, math.pi / 2), (11.0, 5.0, 6.0, math.pi / 2 + 0.2))
+        x, y, a = tr.pose_since((10.0, 0.0, 0.0, 0.0))
+        assert (x, y) == (pytest.approx(1.0, abs=1e-9), pytest.approx(0.0, abs=1e-9))
+        assert a == pytest.approx(0.2)
+
+    def test_reference_is_the_sample_nearest_the_amcl_time(self):
+        tr = self._trail((10.0, 0.0, 0.0, 0.0), (10.5, 0.5, 0.0, 0.0), (11.0, 1.0, 0.0, 0.0))
+        x, _, _ = tr.pose_since((10.45, 0.0, 0.0, 0.0))      # 10.5 기준 → 그 뒤 0.5 m
+        assert x == pytest.approx(0.5)
+
+    def test_amcl_older_than_the_trail_uses_the_oldest_sample(self):
+        tr = self._trail((20.0, 1.0, 0.0, 0.0), (21.0, 1.3, 0.0, 0.0))
+        x, _, _ = tr.pose_since((3.0, 0.0, 0.0, 0.0))
+        assert x == pytest.approx(0.3)
+
+    def test_keeps_only_recent_samples_and_clears(self):
+        tr = self._trail((0.0, 0.0, 0.0, 0.0), (4.0, 0.4, 0.0, 0.0), (10.0, 1.0, 0.0, 0.0), keep=5.0)
+        x, _, _ = tr.pose_since((0.0, 0.0, 0.0, 0.0))
+        assert x == pytest.approx(0.0)                        # 0.0·4.0 은 버려졌다 → 가장 오래된 것 = 10.0
+        tr.clear()
+        assert tr.pose_since((0.0, 0.0, 0.0, 0.0)) is None
