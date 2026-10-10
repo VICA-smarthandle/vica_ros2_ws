@@ -101,7 +101,13 @@ bt_navigator:
     # 실패("Nav2 task failed")+관리자 호출 팝업이 뜨던 원인(실기 로그 3건).
     # 100ms 는 BT tick(10ms) 열 번 분량 — 지각은 참되, 서버가 진짜 죽은
     # 경우의 실패 판정은 유지된다.
-    default_server_timeout: 100
+    # 100 -> 300 (2026-10-10, run83 뒤 사용자 결정): 전부 다시 켠 뒤 CPU 90 % 고정에서
+    # 시간초과 126번(compute_route 44·compute_path_to_pose 42·costmap 비우기 27·follow_path 8)
+    # → 사회 복지창구 2번·홈 3번 Nav2 실패(run82 는 0번). Humble 은 접수·서비스 응답을
+    # RUNNING 으로 기다려 트리를 막지 않는다. 막는 곳은 halt(취소) 뿐 — cancel·result 를
+    # 각각 이 시한까지 기다려 최대 0.2 -> 0.6 s 멈춘다(bt_action_node.hpp halt). 1 s 이상은
+    # 그 멈춤이 2 s 가 돼 안 쓴다. 근본은 CPU 다(같은 때 controller 10 Hz·planner 5 Hz 미달).
+    default_server_timeout: 300
     wait_for_service_timeout: 1000
     # 'default_nav_through_poses_bt_xml'은 기본값을 쓴다:
     #   nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
