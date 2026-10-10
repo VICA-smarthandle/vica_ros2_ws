@@ -386,13 +386,14 @@ class TestEarHold:
         assert _say(logic.on_tick(12.0, NavStatus.NONE)) == []
 
     def test_closed_grants_grace_for_llm(self):
-        """전사 성공(closed) 후에도 LLM 처리 시간(6초)을 기다린다."""
+        """전사 성공(closed) 후에도 LLM 처리 시간(8초, 2026-10-10 6 -> 8)을 기다린다."""
         logic = arrive("restroom")
         logic.on_listen_state("open", 3.0)
         logic.on_listen_state("speech", 7.0)
         logic.on_listen_state("closed", 9.5)     # STT 통과 — LLM 진행 중
         assert _say(logic.on_tick(10.5, NavStatus.NONE)) == []   # 유예
-        acts = logic.on_tick(16.0, NavStatus.NONE)               # 유예 소진 → 침묵 사다리 1단(재질문)
+        assert _say(logic.on_tick(17.0, NavStatus.NONE)) == []   # 옛 6초 유예는 15.5 에 끝났다
+        acts = logic.on_tick(18.0, NavStatus.NONE)               # 유예 소진 → 침묵 사다리 1단(재질문)
         assert _say(acts) == [MSG_ASK_RESTROOM]
 
     def test_empty_fires_promptly(self):

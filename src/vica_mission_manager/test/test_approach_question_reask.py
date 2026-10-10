@@ -16,6 +16,7 @@ import pytest
 from vica_mission_manager.mission_logic import (
     APPROACH_REASK_MAX,
     APPROACH_RESPONSE_TIMEOUT_SEC,
+    EAR_GRACE_SEC,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_NO_ANSWER,
@@ -265,6 +266,30 @@ def test_clock_waits_while_the_words_are_being_understood():
     logic.on_listen_state("closed", 12.5)                # 13초에 시계 끝 — 유예 중
     assert _says(_ticks(logic, 13.0, 15.0)) == []
     assert _says(_voice(logic, "clarify", 15.2)) == [MSG_APPROACH_REASK]
+
+
+def test_ear_grace_is_eight_seconds():
+    """10-10 사용자 결정(2-가): 6 -> 8초. LLM 이 늦으면 미션이 먼저 다시 묻고 곧이어 수락했다."""
+    assert EAR_GRACE_SEC == 8.0
+
+
+def test_clock_waits_eight_seconds_for_a_late_llm():
+    """10-10 12:13 장면 — "그래."가 STT 를 지나(closed) Realtime 이 9초 만에 실패, 글자 경로의 affirm 은
+    closed 7.4초 뒤 왔다. 6초 유예라 그 전에 다시 묻고 1.3초 뒤 수락("네, 잠시만…")했다."""
+    logic = _asking()                                    # 질문 재생 끝 5.0 → 시계 13.0
+    logic.on_listen_state("open", 5.2)
+    logic.on_listen_state("speech", 5.9)
+    logic.on_listen_state("closed", 7.5)                 # 유예 7.5 + 8 = 15.5 까지
+    assert _says(_ticks(logic, 8.0, 15.0)) == []          # 옛 6초면 13.5 에 다시 물었다
+    assert MSG_APPROACH_ACCEPTED in _says(_voice(logic, "affirm", 14.9))
+
+
+def test_clock_still_ends_after_the_grace():
+    logic = _asking()
+    logic.on_listen_state("open", 5.2)
+    logic.on_listen_state("closed", 7.5)
+    assert _says(_ticks(logic, 8.0, 15.0)) == []
+    assert _says(_ticks(logic, 15.5, 16.0)) == [MSG_APPROACH_REASK]
 
 
 # ---- 노드 배선 (rclpy 없이 소스 글자로, test_handle_mode 방식) -------------------------------
