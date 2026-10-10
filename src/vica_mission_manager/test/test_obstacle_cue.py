@@ -81,3 +81,39 @@ def test_late_cue_is_dropped():
 def test_unknown_phrase_is_dropped():
     actions, why = _driving().obstacle_cue("boom", 100.0, 100.1)
     assert actions == [] and why == "unknown_phrase"
+
+
+# ---- 수리 A′(2026-10-10 사용자 결정): 이 말의 LLM 답이 이미 왔으면 장애물 안내는 대답 유예를 안 본다 ----
+# 10-10 12:10 주행: 확인 "네" 가 닫힌(27.7) 뒤 0.18초 만에 답이 와 출발했는데, 33.0 장애물 안내가 유예(8초)에 막혔다.
+
+def test_obstacle_cue_ignores_the_grace_once_the_llm_answered():
+    logic = _driving()
+    logic.on_listen_state("open", 100.0)            # 재청취 창
+    logic.on_llm_thinking(True, 102.5)              # 소리 경로: 말이 끝나자 LLM 이 판단 시작
+    logic.on_listen_state("closed", 104.0)          # 받아쓰기 끝 — 유예 시작
+    logic.on_llm_thinking(False, 104.2)             # 답 도착
+    actions, why = logic.obstacle_cue("slow", 105.0, 105.1)
+    assert actions == [] and why == "ear_busy"      # 생각 중 꼬리(1초) 안
+    actions, why = logic.obstacle_cue("slow", 109.3, 109.4)
+    assert why == "" and _said(actions) == [(MSG_OBSTACLE_SLOW, "ambient")]
+    assert logic._ear_holds(109.4)                  # 대화 쪽 대답 대기 시계(8초)는 그대로
+
+
+def test_obstacle_cue_waits_while_the_llm_is_still_thinking():
+    logic = _driving()
+    logic.on_listen_state("open", 100.0)
+    logic.on_llm_thinking(True, 102.5)
+    logic.on_listen_state("closed", 104.0)
+    actions, why = logic.obstacle_cue("slow", 109.0, 109.1)
+    assert actions == [] and why == "ear_busy"
+
+
+def test_an_older_answer_does_not_free_the_grace():
+    # 앞 말의 판단은 이번 창이 열리기 전에 끝났다 — 이번 말의 답은 아직이다.
+    logic = _driving()
+    logic.on_llm_thinking(True, 98.0)
+    logic.on_llm_thinking(False, 99.0)
+    logic.on_listen_state("open", 100.0)
+    logic.on_listen_state("closed", 101.0)
+    actions, why = logic.obstacle_cue("slow", 103.0, 103.1)
+    assert actions == [] and why == "ear_busy"

@@ -3192,6 +3192,23 @@ class MissionLogic:
         return (self._ear_grace_until is not None
                 and now < self._ear_grace_until)
 
+    def _obstacle_ear_holds(self, now: float) -> bool:
+        """장애물 안내용 _ear_holds — 이 말의 LLM 답이 이미 왔으면 닫힘 뒤 유예(EAR_GRACE_SEC)는 보지 않는다
+        (2026-10-10 사용자 결정 A′). 유예는 '답이 아직 오는 중일 수 있다'는 짐작인데, 이번 창이 열린 뒤
+        생각 중이 켜졌다 꺼졌으면 답은 왔다 — 12:10 주행에서 답이 닫힘 0.18초 뒤에 와 출발했는데도 장애물
+        안내가 8초 막혔다. 듣는 중·생각 중(꼬리 포함)은 그대로 잡는다. 대화 쪽 시계(_ear_holds)는 안 바꾼다."""
+        if (self._ear_busy and self._ear_busy_since is not None
+                and now - self._ear_busy_since <= EAR_HOLD_MAX_SEC):
+            return True
+        if self._llm_thinking_holds(now):
+            return True
+        if self._ear_grace_until is None or now >= self._ear_grace_until:
+            return False
+        answered = (not self._llm_thinking and self._llm_thinking_since is not None
+                    and self._ear_busy_since is not None
+                    and self._llm_thinking_since >= self._ear_busy_since)
+        return not answered
+
     def exit_arrival_dialog(self) -> None:
         """도착 후 대화를 조용히 닫는다 — 새 목적지 '제안'(need_confirm=True)이
         왔을 때 노드가 부른다. navigate 는 2단계(제안→확정)라 제안에서 바로
@@ -3728,7 +3745,7 @@ class MissionLogic:
             return [], "not_navigating"
         if self.cancel_confirm_pending:
             return [], "question_pending"
-        if self._ear_holds(now):
+        if self._obstacle_ear_holds(now):
             return [], "ear_busy"
         if now - onset > OBSTACLE_STALE_SEC:
             return [], "stale"
