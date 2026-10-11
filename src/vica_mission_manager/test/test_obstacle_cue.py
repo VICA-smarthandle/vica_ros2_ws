@@ -7,7 +7,8 @@ import pytest
 
 from vica_mission_manager import obstacle_judge as oj
 from vica_mission_manager.mission_logic import (
-    EAR_GRACE_SEC, MSG_OBSTACLE_AVOID, MSG_OBSTACLE_SLOW, OBSTACLE_STALE_SEC, MissionLogic, Say, State,
+    EAR_GRACE_SEC, MSG_OBSTACLE_AVOID, MSG_OBSTACLE_SLOW, MSG_OBSTACLE_STOP, OBSTACLE_STALE_SEC, MissionLogic, Say,
+    State,
 )
 
 
@@ -22,10 +23,17 @@ def _said(actions):
 
 
 def test_phrases_match_the_judge():
-    assert oj.PHRASES == {"avoid": MSG_OBSTACLE_AVOID, "slow": MSG_OBSTACLE_SLOW}
+    assert oj.PHRASES == {"avoid": MSG_OBSTACLE_AVOID, "slow": MSG_OBSTACLE_SLOW, "stop": MSG_OBSTACLE_STOP}
 
 
-@pytest.mark.parametrize("phrase,text", [("avoid", MSG_OBSTACLE_AVOID), ("slow", MSG_OBSTACLE_SLOW)])
+def test_three_phrases_are_the_users_words():
+    # 2026-10-10 사용자 결정 — 비켜 감·감속·정지 셋
+    assert (MSG_OBSTACLE_AVOID, MSG_OBSTACLE_SLOW, MSG_OBSTACLE_STOP) == (
+        "앞에 장애물이 있어 비켜갈게요.", "앞에 장애물이 있어 감속할게요.", "앞에 장애물이 있어 정지합니다.")
+
+
+@pytest.mark.parametrize("phrase,text", [("avoid", MSG_OBSTACLE_AVOID), ("slow", MSG_OBSTACLE_SLOW),
+                                         ("stop", MSG_OBSTACLE_STOP)])
 def test_speaks_while_guiding_as_ambient(phrase, text):
     actions, why = _driving().obstacle_cue(phrase, 100.0, 100.4)
     assert why == ""

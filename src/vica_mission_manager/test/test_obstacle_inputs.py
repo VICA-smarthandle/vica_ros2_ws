@@ -79,7 +79,7 @@ def _decision(**kw):
 
 def test_format_decision_announce():
     assert format_decision(_decision()) == (
-        "차선 옮김 → 말함 '앞에 장애물이 있어 피해 갈게요.' · 점 5(라이다 2·깊이 3·벽 0) "
+        "차선 옮김 → 말함 '앞에 장애물이 있어 비켜갈게요.' · 점 5(라이다 2·깊이 3·벽 0) "
         "앞 1.20 m 옆 +0.10 m · 목적지 4.5 m")
 
 

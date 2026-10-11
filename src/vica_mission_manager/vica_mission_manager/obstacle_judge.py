@@ -7,6 +7,12 @@
 가던 길 위에 '지도에 없는' 점이 3개 이상 있는지 본다. 있으면 한 번 말하고, 같은 장애물에는 다시
 말하지 않는다. 숫자는 녹화본 10개(run60~69)로 맞췄고 시운전 run81(10-09)에서 16번 모두 실물이었다.
 
+멘트는 로봇이 실제로 한 일로 셋(2026-10-10 사용자 결정): 비켜 감(차선 옮김·경로 우회) / 감속(급감속·충돌감시
+감속) / 정지(VCC 장애물 정지·충돌감시 정지). 예전엔 선 때도 '천천히 갈게요'라 했다(10-10 16번 중 6번이 실제 정지).
+감속이 STOP_UPGRADE 안에 정지로 이어지면 정지 한 마디만 한다(10-10 감속→정지 7번 중 6번이 0.63초 안).
+10-11 수리(10-10 21:16 실기 뒤 사용자 결정): 같은 시각의 정지도 센다(VCC 가 서면 급감속·정지가 한 줄에서 난다),
+서 있는 로봇의 경로 우회는 말하지 않는다, 지난번 말한 자리에서 NEW_OBSTACLE_M 넘게 떨어진 장애물은 새 장애물이다.
+
 음성 저장소 scripts/obstacle_judge.py(1단계 점검 도구)를 2026-10-09 그대로 옮겼다 — 이제 이 파일이 정본이다.
 미션 노드가 실시간으로 쓰고, 녹화본 재현은 1단계 도구(avoid_cue.py --bag)로 한다.
 입력 시각은 모두 '받은 시각'(초)이다.
@@ -43,17 +49,22 @@ DEC_FROM = 0.35         #   이만큼 이상이던 것이
 DEC_RATIO = 0.5         #   이 비율 이하로 떨어지면
 STATE_GAP = 0.5         # /vcc/state 가 이만큼 끊기면 이어진 것으로 보지 않는다
 OBST_REASONS = ("lanes_blocked", "collision_imminent", "motion_collision")
-GOAL_QUIET = 1.0        # 목적지 이 거리 안에서는 말하지 않는다(시연장 크기 기준 출발값)
+GOAL_QUIET = 1.0        # 목적지 이 거리 안에서는 비켜 감·감속을 말하지 않는다(정지는 말한다, 10-11)
 DET_MERGE = 8.0         # 우회 결정(FAILURE)이 이 시간 안에 다시 오면 같은 우회
 CM_MIN_V = 0.10         # 충돌감시는 VCC 가 이 속도 이상 달릴 때만(회전·정지 중 제외)
 MIN_GAP = 6.0           # 한 번 말하면 최소 이만큼
 CALM_SEC = 2.0          # 그리고 평상 주행이 이만큼 이어진 뒤에만 다시 말한다
 CALM_V = 0.3            # 평상 주행: TRACK·|target|<0.3·명령 속도 이 이상
+STOP_UPGRADE = 0.7      # 감속 시작 뒤 이 안에 정지가 시작되면 감속 대신 정지라고 말한다
+NEW_OBSTACLE_M = 1.0    # 지난번 말한 장애물(가장 가까운 점)에서 이만큼 떨어지면 새 장애물 — 평상 주행 없이도 말한다
+NEW_OBSTACLE_GAP = 3.0  # 새 장애물도 직전 멘트 뒤 이만큼은 둔다(멘트 약 2초 — 붙어 나오지 않게)
 HISTORY_SEC = 12.0      # VCC·자세 기록을 이만큼 둔다
 FRAME_KEEP = 3.0        # 점 한 장을 이만큼 둔다
 
-KIND_PHRASE = {"LAT": "avoid", "DET": "avoid", "DEC": "slow", "HOLD": "slow", "CM": "slow"}
-PHRASES = {"avoid": "앞에 장애물이 있어 피해 갈게요.", "slow": "앞에 장애물이 있어 천천히 갈게요."}
+# 충돌감시(CM)는 감속·정지 둘 다라 _phrase 가 정한다(여기 값은 감속).
+KIND_PHRASE = {"LAT": "avoid", "DET": "avoid", "DEC": "slow", "HOLD": "stop", "CM": "slow"}
+PHRASES = {"avoid": "앞에 장애물이 있어 비켜갈게요.", "slow": "앞에 장애물이 있어 감속할게요.",
+           "stop": "앞에 장애물이 있어 정지합니다."}
 GOAL_START = ("goal_sent", "return_home_sent")
 GOAL_END = ("goal_succeeded", "goal_canceled", "goal_failed", "goal_aborted", "goal_paused", "goal_rejected",
             "return_home_succeeded", "return_home_failed", "return_home_canceled", "return_home_aborted")
@@ -226,6 +237,7 @@ class ObstacleJudge:
         self.cm_prev = "normal"
         self.det_last = -1e9
         self.last_ann: Optional[float] = None
+        self.last_ann_xy: Optional[tuple] = None   # 마지막으로 말한 장애물의 가장 가까운 점(지도 좌표)
         self.calm_start: Optional[float] = None
         self.calm_done: Optional[float] = None
         self.trip_ended = False   # 마지막 goal 이 일시정지가 아닌 끝(도착·취소 등)으로 끝났나
@@ -255,7 +267,7 @@ class ObstacleJudge:
                 # 앞 주행이 도착·취소 등으로 끝난 뒤의 새 출발 — '한 번만' 기억을 지운다(2026-10-10 수리 B).
                 # 입력은 안내 주행 중에만 받아(CPU ①) 귀가·대기 장소 이동 중 평상 주행으로 지워질 기회가
                 # 없다(10-10 12:12·12:14 새 안내의 장애물이 전부 '묶음'). 일시정지 뒤 재개는 같은 안내라 둔다.
-                self.last_ann = self.calm_start = self.calm_done = None
+                self.last_ann = self.last_ann_xy = self.calm_start = self.calm_done = None
             self.trip_ended = False
             self.goal = {"x": x, "y": y, "loc": loc or ""}
         elif event in GOAL_END:
@@ -318,6 +330,9 @@ class ObstacleJudge:
     def on_cm(self, t: float, what: str) -> None:
         if what in ("slow", "stop") and self.cm_prev == "normal":
             self._onset("CM", t, None, what=what)
+        elif what == "stop" and self.cm_prev == "slow":
+            # 감속하다 서기 시작 — 정지로 따로 센다(감속 문장을 정지로 바꿀지 _try_decide 가 본다)
+            self._onset("CM", t, None, what=what)
         if what in ("slow", "stop", "normal"):
             self.cm_prev = what
 
@@ -338,25 +353,33 @@ class ObstacleJudge:
             return True
         eligible = not item["why"]
         t0, D = item["t"], D_AHEAD[item["kind"]]
-        found = None
-        while item["k"] <= int(round(WINDOW / STEP)) and now >= t0 + item["k"] * STEP + WAIT - 1e-9:
+        found = item["found"]
+        while found is None and item["k"] <= int(round(WINDOW / STEP)) and now >= t0 + item["k"] * STEP + WAIT - 1e-9:
             f = self._front(t0 + item["k"] * STEP, D)
             item["k"] += 1
             if f is not None and (item["best"] is None or f["n"] > item["best"]["n"]):
                 item["best"] = f
             if eligible and f is not None and f["n"] >= N_MIN:
-                found = f
+                found = item["found"] = f
                 break
         window_over = item["k"] > int(round(WINDOW / STEP))
         if found is not None:
+            merged = self._same_obstacle(t0, found)
+            phrase = self._phrase(item)
+            if not merged and phrase == "slow":
+                # 감속은 곧 서는지 STOP_UPGRADE 동안 보고 정한다 — 서면 정지 한 마디(뒤 정지는 '한 번만'에 묶인다)
+                if now < t0 + STOP_UPGRADE - 1e-9:
+                    return False
+                if self._stop_follows(item):
+                    phrase = "stop"
             item.update(found)
-            if self.last_ann is not None and (t0 - self.last_ann < MIN_GAP - 1e-9
-                                              or self.calm_done is None or self.calm_done > t0):
+            if merged:
                 item["decision"] = "merged"
             else:
                 item["decision"] = "announce"
-                item["phrase"] = KIND_PHRASE[item["kind"]]
+                item["phrase"] = phrase
                 self._reset_calm(t0)
+                self.last_ann_xy = found.get("near_xy")
             return True
         if not window_over:
             return False
@@ -376,7 +399,9 @@ class ObstacleJudge:
             if detail.get("after_turn"):
                 why.append("after_turn")
         gd = self._goal_dist(t)
-        if gd < GOAL_QUIET:
+        # 목적지 1 m 안은 말하지 않는다 — 단 실제로 선 것(정지)은 말한다(2026-10-11 사용자 결정: 시연장이 좁다.
+        # 10-11 16:33 목적지 0.7 m 앞 사람 때문에 섰는데 조용했다). 비켜 감·감속은 도착 움직임과 헷갈려 그대로 뺀다.
+        if gd < GOAL_QUIET and not self._is_stop(kind, detail):
             why.append("near_goal")
         if kind == "CM":
             vs = self._vcc_at(t)
@@ -384,6 +409,14 @@ class ObstacleJudge:
             detail["vcc_v"] = None if vs is None else float(vs.get("v", 0.0))
             if vs is None or float(vs.get("v", 0.0)) < CM_MIN_V or vs.get("state") != "TRACK":
                 why.append("cm_not_driving")
+        if kind == "DET":
+            # 이미 서 있는(또는 기는·제자리 도는) 로봇이 돌아갈 길을 정하는 것은 '비켜 감'이 아니다
+            # (10-10 21:21:02 서고 5초 뒤 우회 결정에 "비켜갈게요"). 선 것은 정지 쪽 판정의 몫이다.
+            vs = self._vcc_at(t)
+            detail["vcc_state"] = None if vs is None else vs.get("state")
+            detail["vcc_v"] = None if vs is None else float(vs.get("v", 0.0))
+            if vs is None or float(vs.get("v", 0.0)) < CM_MIN_V or vs.get("state") != "TRACK":
+                why.append("det_not_driving")
         if kind == "DEC" and st is not None and st.get("state") == "TRACK" and abs(float(st.get("target", 0.0))) >= LAT_M:
             why.append("dec_from_lane_shift")
         if st is not None:
@@ -391,9 +424,44 @@ class ObstacleJudge:
                           offset=float(st.get("offset", 0.0)), v=float(st.get("v", 0.0)))
         item = {"t": t, "kind": kind, "why": why, "goal_dist": round(gd, 2), "detail": detail,
                 "decision": None, "phrase": None, "n": 0, "n_scan": 0, "n_depth": 0, "n_wall": 0,
-                "near": None, "lat": None, "mode": None, "k": 0, "best": None}
+                "near": None, "lat": None, "mode": None, "k": 0, "best": None, "found": None}
         ts = [p["t"] for p in self.pending]
         self.pending.insert(bisect.bisect_right(ts, t), item)
+
+    @staticmethod
+    def _is_stop(kind: str, detail: dict) -> bool:
+        """실제로 선 행동인가 — VCC 장애물 정지·충돌감시 정지."""
+        return kind == "HOLD" or (kind == "CM" and detail.get("what") == "stop")
+
+    @classmethod
+    def _phrase(cls, item: dict) -> str:
+        if item["kind"] == "CM":
+            return "stop" if cls._is_stop("CM", item["detail"]) else "slow"
+        return KIND_PHRASE[item["kind"]]
+
+    def _stop_follows(self, item: dict) -> bool:
+        """이 감속과 같은 순간부터 STOP_UPGRADE 안에 뺄 이유 없는 정지(VCC 장애물 정지·충돌감시 정지)가 시작됐나.
+
+        같은 순간도 센다 — VCC 가 '충돌 직전'으로 서면 급감속과 정지가 같은 VCC 줄에서 난다(10-10 21:23:47).
+        """
+        t0 = item["t"]
+        return any(p is not item and t0 - 1e-9 <= p["t"] <= t0 + STOP_UPGRADE + 1e-9 and not p["why"]
+                   and self._phrase(p) == "stop" for p in self.pending)
+
+    def _same_obstacle(self, t0: float, found: dict) -> bool:
+        """'한 번만' — 지난번 말한 것과 같은 장애물이면 True(묶음).
+
+        같은 자리(NEW_OBSTACLE_M 안)면 예전 규칙: MIN_GAP 이 지나고 평상 주행이 CALM_SEC 이어져야 새 장애물.
+        떨어진 자리면 NEW_OBSTACLE_GAP 만 지나면 새 장애물이다 — 장애물이 연달아 있는 곳에서는 평상 주행이
+        없어 두 번째부터 다 묶였다(10-10 21:21:33·37, 진짜 물체를 비켰는데 조용).
+        """
+        if self.last_ann is None:
+            return False
+        here, there = found.get("near_xy"), self.last_ann_xy
+        if here is not None and there is not None and math.dist(here, there) >= NEW_OBSTACLE_M:
+            return t0 - self.last_ann < NEW_OBSTACLE_GAP - 1e-9
+        return (t0 - self.last_ann < MIN_GAP - 1e-9
+                or self.calm_done is None or self.calm_done > t0)
 
     def _turned_within(self, t: float) -> bool:
         """[t-3, t] 의 VCC 표본(그 직전 하나 포함)에 TURN·ALIGN 이 있었나."""
@@ -511,4 +579,5 @@ class ObstacleJudge:
                 if a_new[k] < best_along:
                     best_along = float(a_new[k])
                     res["near"], res["lat"] = round(best_along, 2), round(float(l_new[k]), 2)
+                    res["near_xy"] = (float(X[m][new][k]), float(Y[m][new][k]))   # 지도 좌표 — '같은 장애물' 판단
         return res

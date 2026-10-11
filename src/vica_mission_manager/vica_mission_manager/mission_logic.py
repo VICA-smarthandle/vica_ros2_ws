@@ -337,7 +337,8 @@ Action = Union[
 # 주의: 이 멘트에 HARD_EMERGENCY_KEYWORDS 가 들어가면 안 된다. 상시 긴급어 감시가
 # 스피커로 나간 로봇 자기 목소리를 다시 긴급어로 인식해 E-stop 을 거는 자가 트리거가
 # 생긴다 (/vica/emergency → emergency_estop_bridge → /voice_emergency_stop).
-# test/test_spoken_text.py 가 이를 강제한다.
+# test/test_spoken_text.py 가 이를 강제한다. 예외는 MIC_OFF_MESSAGES 뿐이다 — 그 문장을
+# 말하는 동안은 음성 귀가 마이크를 닫는다(2026-10-10 사용자 결정, 장애물 정지 안내).
 
 
 def josa_euro(word: str) -> str:
@@ -464,11 +465,17 @@ MSG_WAIT_BEACON = "비카가 대기 중입니다."
 MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
 # M7 — 대기 시간 만료(대기 장소가 있든 없든). 말한 뒤 홈으로 간다.
 MSG_WAIT_EXPIRED = "대기 시간이 종료되어 제자리로 돌아갑니다."
-# 주행 중 장애물 안내(2026-10-08 사용자 선택 A1·S1, 10-09 미션에 넣음). 안내 주행 중 앞에 지도에 없는 물체가
-# 있어 크게 비키거나(avoid) 줄이거나 설 때(slow) 한 번. 판정은 obstacle_judge.py(설계서 3절), 말할지는
-# MissionLogic.obstacle_cue(설계서 5절 2단계). 음성 mission_phrases 에 같은 글자의 녹음이 있다.
-MSG_OBSTACLE_AVOID = "앞에 장애물이 있어 피해 갈게요."
-MSG_OBSTACLE_SLOW = "앞에 장애물이 있어 천천히 갈게요."
+# 주행 중 장애물 안내(2026-10-08 사용자 선택, 10-09 미션에 넣음). 안내 주행 중 앞에 지도에 없는 물체가
+# 있어 크게 비키거나(avoid) 줄이거나(slow) 설 때(stop) 한 번. 2026-10-10 사용자 결정으로 셋으로 나누고 문구를
+# 바꿨다(예전엔 선 때도 '천천히 갈게요'). 판정은 obstacle_judge.py(설계서 3절), 말할지는
+# MissionLogic.obstacle_cue(설계서 5절 2단계). 음성 mission_phrases 에 같은 글자의 녹음이 있고, 정지 문장을
+# 말하는 동안은 귀가 마이크를 닫는다('정지'가 긴급어다).
+MSG_OBSTACLE_AVOID = "앞에 장애물이 있어 비켜갈게요."
+MSG_OBSTACLE_SLOW = "앞에 장애물이 있어 감속할게요."
+MSG_OBSTACLE_STOP = "앞에 장애물이 있어 정지합니다."
+# 하드 긴급어가 든 멘트 — 말하는 동안 음성 귀가 마이크를 닫는 것만 허용한다. 음성 wakeword_monitor 의
+# MIC_OFF_PHRASES 와 같은 글자여야 한다(음성 tests/test_mission_phrases 가 대조).
+MIC_OFF_MESSAGES = frozenset({MSG_OBSTACLE_STOP})
 # 행동이 시작되고 이만큼 지난 후보는 버린다 — 늦은 장애물 안내는 지나간 물체 이야기다(1단계 도구와 같은 값).
 OBSTACLE_STALE_SEC = 2.5
 # 대기 중 "다 됐어"(finish) — 다음 목적지를 묻는다(2026-10-07 사용자 결정). 대기는 목적지가
@@ -3836,7 +3843,7 @@ class MissionLogic:
         시작되면 귀가 열린 재청취 창을 접어 사용자 대답이 잘린다. 로봇이 다른 말을 하는 중이면 TTS 가
         버리도록 ambient 로 보낸다. 늦은 후보도 버린다. 버린 안내는 다시 하지 않는다.
         """
-        text = {"avoid": MSG_OBSTACLE_AVOID, "slow": MSG_OBSTACLE_SLOW}.get(phrase)
+        text = {"avoid": MSG_OBSTACLE_AVOID, "slow": MSG_OBSTACLE_SLOW, "stop": MSG_OBSTACLE_STOP}.get(phrase)
         if text is None:
             return [], "unknown_phrase"
         if self.dialog_state != State.NAVIGATING.value:

@@ -277,13 +277,15 @@ class TestSlowAndDetour:
         c.flush()
         assert "dec_from_lane_shift" in c.decisions("DEC")[0]["why"]
 
-    def test_obstacle_hold_says_slow(self):
+    def test_obstacle_hold_says_stop(self):
+        # 10-10 사용자 결정: 실제로 서면 '정지합니다'(예전엔 '천천히 갈게요')
         c = Clock(make())
         c.run(1.0, vcc(v=0.2), points=obstacle(0.9))
         c.run(1.0, vcc(state="HOLD", reason="lanes_blocked", v=0.0), points=obstacle(0.9))
         c.flush()
         hold = c.decisions("HOLD")
-        assert len(hold) == 1 and hold[0]["phrase"] == "slow"
+        assert len(hold) == 1 and hold[0]["phrase"] == "stop"
+        assert c.said() == ["stop"]
 
     def test_turn_blocked_hold_is_not_an_obstacle_stop(self):
         c = Clock(make())
@@ -300,6 +302,77 @@ class TestSlowAndDetour:
         c.flush()
         cm = c.decisions("CM")
         assert len(cm) == 1 and cm[0]["decision"] == "announce" and cm[0]["phrase"] == "slow"
+
+    def test_collision_monitor_stop_says_stop(self):
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.j.on_cm(c.t + 0.05, "stop")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.flush()
+        cm = c.decisions("CM")
+        assert len(cm) == 1 and cm[0]["decision"] == "announce" and cm[0]["phrase"] == "stop"
+
+    def test_collision_monitor_slow_then_stop_is_one_stop(self):
+        # 10-10 감속→정지 7번 중 6번이 0.63초 안 — 감속 문장 대신 정지 한 마디
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.6))
+        c.j.on_cm(c.t + 0.05, "slow")
+        c.run(0.4, vcc(v=0.3), points=obstacle(0.4))
+        c.j.on_cm(c.t + 0.05, "stop")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.flush()
+        assert [d["decision"] for d in c.decisions("CM")] == ["announce", "merged"]
+        assert c.said() == ["stop"]
+
+    def test_slow_then_late_stop_keeps_slow(self):
+        # 정지가 STOP_UPGRADE 넘어 시작되면 감속을 말하고, 정지는 같은 장애물이라 묶인다
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.6))
+        c.j.on_cm(c.t + 0.05, "slow")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.j.on_cm(c.t + 0.05, "stop")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.flush()
+        assert [d["decision"] for d in c.decisions("CM")] == ["announce", "merged"]
+        assert c.said() == ["slow"]
+
+    def test_sudden_slowdown_then_vcc_hold_is_one_stop(self):
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.5), points=obstacle(0.9))
+        c.run(0.3, vcc(v=0.2), points=obstacle(0.9))
+        c.run(1.0, vcc(state="HOLD", reason="collision_imminent", v=0.0), points=obstacle(0.9))
+        c.flush()
+        assert c.said() == ["stop"]
+
+    def test_hold_at_the_same_moment_as_slowdown_says_stop(self):
+        # 10-11 수리 ①: VCC 가 '충돌 직전'으로 서면 급감속·정지가 같은 VCC 줄에서 같은 시각에 생긴다
+        # (10-10 21:23:47 실기 — 정지가 감속 '뒤'만 세어 "감속할게요"가 나갔다)
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.5), points=obstacle(0.9))
+        c.run(1.0, vcc(state="HOLD", reason="collision_imminent", v=0.0), points=obstacle(0.9))
+        c.flush()
+        assert c.decisions("DEC")[0]["t"] == c.decisions("HOLD")[0]["t"]
+        assert c.said() == ["stop"]
+
+    def test_slow_waits_for_the_upgrade_window(self):
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.8))
+        c.j.on_cm(c.t + 0.05, "slow")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.8))
+        d = c.decisions("CM")[0]
+        assert d["phrase"] == "slow" and d["decided_at"] - d["t"] >= oj.STOP_UPGRADE - 1e-9
+
+    def test_excluded_stop_does_not_upgrade(self):
+        # 정지가 뺄 이유가 있는 것(회전 중 충돌감시)이면 감속 문장 그대로
+        c = Clock(make())
+        c.run(1.0, vcc(v=0.5), points=obstacle(0.9))
+        c.run(0.2, vcc(v=0.2), points=obstacle(0.9))
+        c.run(0.2, vcc(state="TURN", v=0.05), points=obstacle(0.9))
+        c.j.on_cm(c.t + 0.05, "stop")
+        c.run(1.0, vcc(state="TURN", v=0.05), points=obstacle(0.9))
+        c.flush()
+        assert c.said() == ["slow"]
+        assert "cm_not_driving" in c.decisions("CM")[0]["why"]
 
     def test_collision_monitor_while_turning_is_excluded(self):
         c = Clock(make())
@@ -318,6 +391,18 @@ class TestSlowAndDetour:
         c.flush()
         det = c.decisions("DET")
         assert len(det) == 1 and det[0]["decision"] == "announce" and det[0]["phrase"] == "avoid"
+
+    @pytest.mark.parametrize("st", [vcc(state="HOLD", reason="turn_blocked", v=0.0), vcc(v=0.05)])
+    def test_detour_while_standing_is_not_said(self, st):
+        # 10-11 수리 ②: 이미 서 있는 로봇이 돌아갈 길을 정할 때 "비켜갈게요"는 틀린 말이다
+        # (10-10 21:21:02 서고 5초 뒤 우회 결정에 그 말이 나갔다)
+        c = Clock(make())
+        c.run(1.0, st, points=obstacle(0.8))
+        c.j.on_bt(c.t + 0.05, "IsRailAheadClear", "FAILURE")
+        c.run(1.0, st, points=obstacle(0.8))
+        c.flush()
+        det = c.decisions("DET")
+        assert det[0]["why"] == ["det_not_driving"] and c.said() == []
 
     def test_other_bt_nodes_are_ignored(self):
         c = Clock(make())
@@ -344,6 +429,30 @@ class TestWhenAndOnce:
         c.run(1.0, vcc(target=0.3), points=obstacle(1.5))
         c.flush()
         assert "near_goal" in c.decisions("LAT")[0]["why"]
+
+    def test_stop_near_the_goal_is_said(self):
+        # 10-11 사용자 결정(시연장이 좁다): 목적지 1 m 안이어도 실제로 서면 "정지합니다"
+        # (10-11 16:33 목적지 0.7 m 앞 사람 때문에 섰는데 조용했다)
+        c = Clock(make(goal=(0.8, 0.0)))
+        c.run(1.0, vcc(v=0.2), points=obstacle(0.5))
+        c.run(1.0, vcc(state="HOLD", reason="collision_imminent", v=0.0), points=obstacle(0.5))
+        c.flush()
+        hold = c.decisions("HOLD")
+        assert hold[0]["why"] == [] and c.said() == ["stop"]
+
+    def test_collision_monitor_stop_near_the_goal_is_said_but_slow_is_not(self):
+        c = Clock(make(goal=(0.8, 0.0)))
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.j.on_cm(c.t + 0.05, "slow")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.j.on_cm(c.t + 0.05, "normal")
+        c.run(8.0, vcc(v=0.3))
+        c.j.on_cm(c.t + 0.05, "stop")
+        c.run(1.0, vcc(v=0.3), points=obstacle(0.4))
+        c.flush()
+        cm = c.decisions("CM")
+        assert "near_goal" in cm[0]["why"] and cm[1]["why"] == []
+        assert c.said() == ["stop"]
 
     def test_no_map_no_words(self):
         j = oj.ObstacleJudge(None)
@@ -385,6 +494,33 @@ class TestWhenAndOnce:
         c.run(2.5, vcc())                                             # 평상 2.5초
         c.run(1.0, vcc(target=0.3), points=obstacle(1.2))             # 6초 안 → 묶임
         c.flush()
+        assert c.said() == ["avoid"]
+
+    def _two_obstacles(self, gap_sec, second_at=3.0):
+        """원점에서 1.2 m 앞 장애물을 비키고(말함), 평상 주행 없이(0.2 m/s) second_at 으로 옮겨 가
+        gap_sec 뒤 또 1.2 m 앞 장애물을 비킨다."""
+        c = Clock(make())
+        c.run(1.0, vcc(), points=obstacle(1.2))
+        c.run(1.0, vcc(target=0.3), points=obstacle(1.2))            # 말함 (t≈1.1)
+        c.run(gap_sec - 1.0, vcc(target=0.0, v=0.2), pose=(second_at, 0.0, 0.0))
+        c.run(1.0, vcc(target=-0.3, v=0.2), points=obstacle(1.2), pose=(second_at, 0.0, 0.0))
+        c.flush()
+        return c
+
+    def test_another_obstacle_elsewhere_is_said_again(self):
+        # 10-11 수리 ③: 지난번 말한 자리에서 1 m 넘게 떨어진 장애물은 새 장애물 — 평상 주행 없이도 말한다
+        # (10-10 21:21:33 진짜 물체를 비켰는데 같은 안내의 앞 멘트에 묶였다)
+        c = self._two_obstacles(gap_sec=4.0)
+        assert c.said() == ["avoid", "avoid"]
+
+    def test_another_obstacle_too_soon_is_merged(self):
+        # 새 장애물도 직전 멘트 뒤 NEW_OBSTACLE_GAP 은 둔다 — 멘트가 붙어 나오지 않게
+        c = self._two_obstacles(gap_sec=2.0)
+        assert c.said() == ["avoid"]
+
+    def test_same_place_is_still_one_obstacle(self):
+        # 1 m 안이면 같은 장애물 — 예전 규칙(6초 + 평상 주행 2초) 그대로
+        c = self._two_obstacles(gap_sec=4.0, second_at=0.5)
         assert c.said() == ["avoid"]
 
     def test_first_action_decides_the_phrase(self):

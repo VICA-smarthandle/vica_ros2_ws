@@ -22,7 +22,8 @@ KIND_KO = {"LAT": "차선 옮김", "DET": "경로 우회", "DEC": "급감속", "
 DECISION_KO = {"announce": "말함", "merged": "묶음(같은 장애물)", "excluded": "뺌", "no_cause": "원인 없음",
                "no_map": "지도 없음"}
 WHY_KO = {"not_guided": "안내 주행 아님", "resync": "유턴 뒤 자리 맞추기", "after_turn": "유턴 직후",
-          "near_goal": "목적지 1 m 안", "cm_not_driving": "회전·정지 중 충돌감시", "dec_from_lane_shift": "차선 옮김 감속"}
+          "near_goal": "목적지 1 m 안", "cm_not_driving": "회전·정지 중 충돌감시", "det_not_driving": "서 있을 때 우회",
+          "dec_from_lane_shift": "차선 옮김 감속"}
 
 
 def scan_points(msg, offset=(0.0, 0.0)):
