@@ -518,3 +518,58 @@ class TestDemoAssumeHeld:
         assert says(out) == [MSG_APPROACH_ONBOARDING]
         assert "tick" not in haptics(out)
         assert not logic._handle_engaged
+
+
+# ── 목적지 1 m 안에서는 손을 놓아도 그대로 도착(2026-10-11 사용자 결정) ─────────────────
+
+def run_near(logic, t0, t1, contact, dist):
+    out, t = [], t0
+    while t < t1 - 1e-9:
+        logic.on_handle_state(contact, True, t)
+        out.extend(logic.on_tick(t, NavStatus.RUNNING, distance_remaining=dist))
+        t = round(t + STEP, 6)
+    return out
+
+
+def active_nav_at(x, y):
+    logic = active_nav()                  # 목적지 (3.0, 2.0)
+    logic.robot_pose = Pose2D(x=x, y=y, yaw_deg=0.0, frame_id="map")
+    return logic
+
+
+class TestReleaseNearGoal:
+    def test_release_within_one_metre_keeps_going_to_arrival(self):
+        # 로봇이 느려져 "다 왔구나" 하고 먼저 손을 뗀다 — 코앞에서 서지 않는다
+        logic = active_nav_at(2.4, 2.0)                       # 0.6 m
+        out = run_near(logic, 6.0, 8.0, contact=False, dist=0.7)
+        assert logic.state == State.NAVIGATING and MSG_HANDLE_LOST not in says(out)
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        assert logic.state in (State.ARRIVED, State.ASKING_NEXT) and not logic.handle_active
+
+    def test_release_beyond_one_metre_still_pauses(self):
+        logic = active_nav_at(1.5, 2.0)                       # 1.5 m
+        out = run_near(logic, 6.0, 7.0, contact=False, dist=1.6)
+        assert logic.state == State.PAUSED and says(out) == [MSG_HANDLE_LOST]
+
+    def test_close_in_a_straight_line_but_long_way_round_pauses(self):
+        # 벽 너머 1 m — 직선은 가깝지만 남은 길이 길다
+        logic = active_nav_at(2.4, 2.0)
+        run_near(logic, 6.0, 7.0, contact=False, dist=3.0)
+        assert logic.state == State.PAUSED
+
+    def test_short_detour_path_far_from_the_goal_pauses(self):
+        # 우회 중 경로는 3 m 앞 당근까지라 남은 길이 짧게 나온다 — 목적지는 멀다
+        logic = active_nav_at(0.5, 2.0)                       # 2.5 m
+        run_near(logic, 6.0, 7.0, contact=False, dist=0.5)
+        assert logic.state == State.PAUSED
+
+    def test_unknown_path_length_uses_the_straight_line(self):
+        logic = active_nav_at(2.4, 2.0)
+        run_near(logic, 6.0, 7.0, contact=False, dist=None)
+        assert logic.state == State.NAVIGATING
+
+    def test_unknown_position_pauses_as_before(self):
+        logic = active_nav()
+        assert logic.robot_pose is None
+        run_near(logic, 6.0, 7.0, contact=False, dist=0.5)
+        assert logic.state == State.PAUSED

@@ -665,6 +665,12 @@ GRIP_DEPART_WINDOW_SEC = 0.5
 # 놓침 안내 반복 간격과 포기 시한(실기 조정값).
 HANDLE_LOST_REPEAT_SEC = 15.0
 HANDLE_LOST_GIVE_UP_SEC = 180.0
+# 목적지 이만큼 안에서는 손을 놓아도 세우지 않고 그대로 도착한다(2026-10-11 사용자 결정). 로봇이 목적지 앞에서
+# 느려지면 시각장애인은 "다 왔구나" 하고 먼저 손을 뗀다 — 0.5초 놓침으로 코앞에서 서면 다시 잡아 몇십 cm 를 더
+# 가야 한다. 거리는 지도 위 직선으로 재고, Nav2 남은 경로를 알면 그것도 짧아야 한다(우회 중 경로는 목적지가
+# 아니라 3 m 앞 당근까지라 혼자 쓰면 중간에 짧게 나오고, 직선만 쓰면 벽 너머 1 m 를 '거의 다 옴'으로 본다).
+HANDLE_ARRIVAL_FREE_M = 1.0
+HANDLE_ARRIVAL_FREE_PATH_M = 1.5
 # 미션 쪽 신선도 시한. SmartHandleState 주기 2 Hz 의 두 배.
 HANDLE_STATE_STALE_SEC = 1.0
 # LLM 상황판(RobotState.dialog_state)에 내는 값(D10, 설계 4.7). 손 놓침으로 선
@@ -3002,7 +3008,7 @@ class MissionLogic:
             return [Haptic(HAPTIC_PATTERN_HANDLE_HINT)]
         return []
 
-    def _handle_nav_tick(self, now: float) -> list:
+    def _handle_nav_tick(self, now: float, distance_remaining: Optional[float] = None) -> list:
         """활성 주행 중 손 놓침·상향 두절을 본다. NAVIGATING·주행 중에만 부른다."""
         if not self._grip.fresh(now):
             # 두절은 놓침이 아니다 — 세우면 다시 잡아도 알 길이 없어 영원히
@@ -3012,6 +3018,8 @@ class MissionLogic:
             return [Say(MSG_HANDLE_UNAVAILABLE, priority="response")]
         if self._grip.released_for(now) < self.grip_release_grace_sec:
             return []
+        if self._release_ok_near_goal(distance_remaining):
+            return []   # 목적지 코앞 — 손을 놓아도 그대로 도착한다(HANDLE_ARRIVAL_FREE_M)
         actions, reason = self._enter_paused(now)
         if reason != GateReason.OK:
             return []
@@ -3021,6 +3029,16 @@ class MissionLogic:
         actions.append(Haptic(HAPTIC_PATTERN_HANDLE_HINT))
         actions.append(Say(MSG_HANDLE_LOST, priority="response"))
         return actions
+
+    def _release_ok_near_goal(self, distance_remaining: Optional[float]) -> bool:
+        """목적지 HANDLE_ARRIVAL_FREE_M 안인가 — 그러면 손 놓침으로 세우지 않는다."""
+        dest, pose = self.active_destination, self.robot_pose
+        if dest is None or pose is None:
+            return False
+        if math.hypot(pose.x - dest.pose.x, pose.y - dest.pose.y) > HANDLE_ARRIVAL_FREE_M:
+            return False
+        return (distance_remaining is None or distance_remaining <= 0.0
+                or distance_remaining <= HANDLE_ARRIVAL_FREE_PATH_M)
 
     def _handle_pause_tick(self, now: float, nav_ready: bool) -> list:
         """손 놓침으로 선 PAUSED. 다시 잡으면 출발, 오래 안 잡으면 끝낸다."""
@@ -4161,7 +4179,7 @@ class MissionLogic:
         if (self.state == State.NAVIGATING and self.handle_active
                 and nav_status not in (NavStatus.SUCCEEDED, NavStatus.FAILED,
                                        NavStatus.CANCELED)):
-            handle_actions = self._handle_nav_tick(now)
+            handle_actions = self._handle_nav_tick(now, distance_remaining)
             if self.state == State.PAUSED:
                 return handle_actions
             actions.extend(handle_actions)
