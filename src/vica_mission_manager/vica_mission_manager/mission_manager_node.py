@@ -741,7 +741,8 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"음성 요청 intent={msg.intent} dest={msg.matched_destination_id or '-'} "
             f"confirm={msg.need_confirm}: {before.value} -> {self.logic.state.value}"
-            + (f" 말={said}" if said else " (말 없음)"))
+            + (f" 말={said}" if said else " (말 없음)")
+            + (f" — {self.logic.voice_note}" if self.logic.voice_note else ""))
 
     def _lookup_destination(self, dest_id: str) -> Optional[Destination]:
         if not dest_id:
@@ -1830,6 +1831,7 @@ class MissionManagerNode(Node):
                 self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
                 if getattr(action, "expects_reply", False):
                     self.pub_listen_request.publish(Bool(data=True))
+                    self.logic.note_question_asked(action.text, self._now())
                     self.get_logger().info("질문 발화 — 재청취 요청 발행")
             elif isinstance(action, StopSpeech):
                 out = String()

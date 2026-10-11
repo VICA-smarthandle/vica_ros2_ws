@@ -538,6 +538,13 @@ RETURN_RESUME_SEC = 15.0
 # 1.3초 뒤 "네, 잠시만…"으로 수락해, 묻고 바로 스스로 답한 꼴이었다.
 EAR_GRACE_SEC = 8.0
 EAR_HOLD_MAX_SEC = 20.0
+# 질문보다 먼저 시작한 예/아니요는 그 질문의 대답이 아니다(2026-10-11 사용자 결정). run90 18:43:35 주행 중 "비카야"
+# →"네?"에 한 "네"(말 시작 36 쯤)가, 그 사이 도착해 39.55 에 물은 "여기서 대기할까요?"의 대답으로 쓰여 "몇 분쯤
+# 걸리실까요?"로 넘어갔다 — 대답도 안 했는데 질문이 이어졌다. 같은 질문을 다시 물은 것(다시 묻기)은 첫 질문 시각을
+# 둔다 — 첫 질문의 늦은 대답을 버리지 않게. 견주는 것은 귀의 말 시작(speech)이다: 닫힘(closed)은 받아쓰기 뒤에
+# 나가 18:43 은 질문 뒤(40.30)였고, 19:12:54 는 Realtime 판정이 제 창의 닫힘보다 0.04 s 먼저 와 진짜 대답을 버렸다.
+STALE_ANSWER_KINDS = ("affirm", "deny")
+SAME_QUESTION_SEC = 60.0
 # LLM '생각 중'(/vica/thinking, 2026-10-10 사용자 결정): LLM 노드가 사용자 말을 판단하는 동안 켜는 신호다
 # (원래 TTS 의 생각 중 운율용, 2026-09-01). 켜져 있으면 귀 유예가 끝나도 다시 묻지 않는다 — 10-10 12:13
 # Realtime 이 9초 걸린 사이 6초 유예가 먼저 끝나 다시 묻고 곧바로 수락했다. 꺼진 뒤 의도가 미션에 닿을
@@ -1492,6 +1499,13 @@ class MissionLogic:
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
         self._ear_grace_until: Optional[float] = None
+        # 귀가 마지막으로 말 시작(speech)을 알린 시각과, 미션이 마지막으로 대답을 청한 질문(노드가
+        # note_question_asked 로 알린다) — 질문보다 먼저 시작한 예/아니요를 가린다(2026-10-11).
+        self._ear_spoke_at: Optional[float] = None
+        self._question_at: Optional[float] = None
+        self._question_text = ""
+        # 마지막 음성 요청을 왜 그렇게 처리했는지 노드 로그에 붙일 한 줄(없으면 "").
+        self.voice_note = ""
         # LLM 생각 중(/vica/thinking) — 켜진 동안·꺼진 뒤 꼬리까지 대답 대기 시계를 잡는다(2026-10-10).
         self._llm_thinking = False
         self._llm_thinking_since: Optional[float] = None
@@ -1577,10 +1591,28 @@ class MissionLogic:
         같은 방식이다. lookup 은 목적지 id → Destination(없으면 None)이다.
         설계: docs/superpowers/specs/2026-10-08-mission-request-reactions-design.md
         """
+        self.voice_note = ""
+        if self._answer_predates_question(intent):
+            # 질문 전에 시작한 예/아니요 — 버린다. 질문은 그대로 기다리고(다시 묻기 시계도 그대로) 사용자가 다시 답한다.
+            self.voice_note = "질문 전에 시작한 말이라 대답으로 안 씀"
+            return []
         reacted = self._react_by_table(intent, now, lookup, bounds, nav_ready)
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def note_question_asked(self, text: str, now: float) -> None:
+        """노드가 대답을 기다리는 말(Say.expects_reply)을 내보낼 때 부른다. 같은 질문을 SAME_QUESTION_SEC 안에
+        다시 물은 것은 첫 질문 시각을 둔다."""
+        if (self._question_at is None or text != self._question_text
+                or now - self._question_at > SAME_QUESTION_SEC):
+            self._question_at, self._question_text = now, text
+
+    def _answer_predates_question(self, intent: IntentData) -> bool:
+        """이 예/아니요의 말이 마지막 질문보다 먼저 시작됐나 — 그러면 그 질문의 대답이 아니다. 말 시작을 못
+        받았으면(귀 신호 없음) 예전처럼 받는다."""
+        return (intent.intent in STALE_ANSWER_KINDS and self._question_at is not None
+                and self._ear_spoke_at is not None and self._ear_spoke_at < self._question_at)
 
     def _react_by_table(
         self,
@@ -3208,6 +3240,7 @@ class MissionLogic:
             if state == "speech":
                 if not self._ear_speaking:
                     self._ear_speech_since = now
+                    self._ear_spoke_at = now
                 self._ear_speaking = True
             else:
                 self._ear_speaking = False
