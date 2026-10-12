@@ -4130,11 +4130,16 @@ class MissionLogic:
         already_estopped = self.state == State.ESTOPPED
         moving = self.state in _GOAL_ACTIVE_STATES
         self._enter_estopped(now)
-        if not already_estopped:
-            # 정지 중 "멈춰"도 침묵 — 움직임이 없으니 알릴 변화가 없다.
-            self._estop_announced = moving
-            if moving:
-                actions.append(Say(MSG_ESTOPPED, priority="emergency"))
+        if moving and not already_estopped:
+            self._estop_announced = True
+            actions.append(Say(MSG_ESTOPPED, priority="emergency"))
+        elif not self._estop_announced:
+            # 서 있을 때(또는 조용히 걸려 있던 중) "멈춰" — 래치는 그대로 걸고 한 마디로 알린다(2026-10-12
+            # 사용자 결정 B). 말한 사람은 들렸는지·로봇이 잠겼는지 볼 수 없다(08-31 엔 침묵이었다). 통신 걸림
+            # (on_estop 만)은 지금도 침묵한다. 알렸으니 해제도 알린다(_estop_announced 짝). emergency 등급 —
+            # 귀가 긴급 확정 때 보내는 말 끊기(tts_stop)에 지워지지 않게.
+            self._estop_announced = True
+            actions.append(Say(MSG_ESTOP_WAKE, priority="emergency"))
         return actions
 
     def on_estop(self, active: bool, now: float) -> list:
