@@ -288,16 +288,33 @@ def test_rail_forecast_defaults_off_in_code():
 
 
 def test_rail_forecast_lookahead_matches_controller():
-    """예고가 쓰는 조준거리 규칙이 실제 컨트롤러(FollowPath)와 같아야 한다.
+    """예고가 쓰는 조준거리 규칙이 실제 컨트롤러(FollowPath)가 코너를 도는 방식과 같아야 한다.
 
-    예고는 '몸이 돌기 시작하는 곳 = 코너 시작 - 조준거리' 로 시점을 잡는다. 컨트롤러
-    값만 바꾸고 여기를 안 바꾸면 "2초 전" 이 조용히 틀어진다(오프라인 계산에서 이 보정이
-    없을 때 0.3초 전이었다).
+    예고는 '몸이 돌기 시작하는 곳 = 코너 시작 - 조준거리' 로 시점을 잡는다.
+    - RPP: 조준점이 코너에 닿는 순간 틀어 조준거리만큼 일찍 돈다 → FollowPath 값과 같아야
+      한다(09-28 오프라인 계산에서 이 보정이 없을 때 "2초 전" 이 0.3초 전이었다).
+    - VCC: 레일 차선을 따라 코너 시작에서 돈다 → 0 이어야 한다. 2026-10-12 녹화 5개에서
+      RPP 값을 쓴 예고가 몸 회전 중앙 5.0 s 전에 켜졌다("좀 이르다").
+    컨트롤러를 바꾸고 여기를 안 바꾸면 "2초 전" 이 조용히 틀어진다.
     """
     guide = load_config()["turn_guide_node"]["ros__parameters"]
     nav = yaml.safe_load(read(
         PKG_ROOT.parent / "vica_nav2" / "config" / "nav2_params.yaml"))
     follow = nav["controller_server"]["ros__parameters"]["FollowPath"]
-    assert guide["controller_lookahead_time_sec"] == follow["lookahead_time"]
-    assert guide["controller_lookahead_min_m"] == follow["min_lookahead_dist"]
-    assert guide["controller_lookahead_max_m"] == follow["max_lookahead_dist"]
+    if "VccController" in follow["plugin"]:
+        assert guide["controller_lookahead_time_sec"] == 0.0
+        assert guide["controller_lookahead_min_m"] == 0.0
+        assert guide["controller_lookahead_max_m"] == 0.0
+    else:
+        assert guide["controller_lookahead_time_sec"] == follow["lookahead_time"]
+        assert guide["controller_lookahead_min_m"] == follow["min_lookahead_dist"]
+        assert guide["controller_lookahead_max_m"] == follow["max_lookahead_dist"]
+
+
+def test_every_turn_guide_yaml_key_is_declared_by_the_node():
+    """yaml 키 오타는 조용히 무시된다(declare 안 된 이름은 기본값으로 돈다). 키가 모두 선언돼야 한다."""
+    import re
+    guide = load_config()["turn_guide_node"]["ros__parameters"]
+    source = read(PKG_ROOT / "vica_user_guidance" / "turn_guide_node.py")
+    declared = set(re.findall(r'declare_parameter\("([a-z_]+)"', source))
+    assert set(guide) <= declared, sorted(set(guide) - declared)
