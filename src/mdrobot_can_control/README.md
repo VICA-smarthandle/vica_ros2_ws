@@ -12,6 +12,16 @@ reset 권한은 이 패키지가 아니라 `vica_safety`가 소유한다.
 ros2 launch mdrobot_can_control motor_bringup.launch.py
 ```
 
+2026-10-12부터 이 launch는 C++ 판(`mdrobot_can_control_cpp`)을 띄운다. 실행 파일·노드
+이름·파라미터·토픽은 이 패키지의 파이썬 판과 같다. 파이썬 판으로 되돌리려면:
+
+```bash
+ros2 launch mdrobot_can_control motor_bringup.launch.py motor_impl:=python
+```
+
+이 패키지의 파이썬 코드는 지우지 않는다. C++ 판의 대조 시험(`mdrobot_can_control_cpp/test/parity`)이
+이 코드를 정답지로 쓴다. 판정·로그를 바꿀 때는 두 판을 함께 고치고 대조 시험을 돌린다.
+
 ## CAN 시작 전 검사
 
 motor node는 SocketCAN 객체를 열거나 모터 명령을 보내기 전에
