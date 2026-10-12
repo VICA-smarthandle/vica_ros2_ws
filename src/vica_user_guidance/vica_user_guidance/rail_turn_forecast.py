@@ -51,6 +51,8 @@ class RailCorner:
     start_s: float          # 꺾이기 시작하는 곳
     end_s: float            # 꺾임이 끝나는 곳
     start_xy: Point         # 코너 신원. 경로가 다시 와도 이 좌표로 같은 코너를 찾는다
+    # 꺾임이 끝나는 곳. 레일이 코너 안에서 다시 잘리면 시작점은 바뀌어도 끝점은 그대로다.
+    end_xy: Point = (float("nan"), float("nan"))
 
 
 @dataclass(frozen=True)
@@ -78,11 +80,19 @@ def project_to_path(
     s_hint: Optional[float] = None,
     hint_back_m: float = 1.0,
     hint_ahead_m: float = 3.0,
+    behind_start_m: float = 0.0,
 ) -> Optional[RailPose]:
     """로봇을 경로 선분에 수선으로 투영한다.
 
     ``s_hint``를 주면 그 근처 구간만 본다. 레일이 고리이거나 복도가 나란히 붙어 있으면
     전역 최근접점이 반대편 차선으로 튈 수 있어서다.
+
+    ``behind_start_m``(> 0)이면 경로 첫 점 **뒤** 그만큼까지는 첫 선분을 뒤로 늘여 본다.
+    이때 ``s`` 는 음수(첫 점까지 남은 거리)이고 ``offtrack_m`` 은 그 연장선까지의 옆 거리다.
+    Route Server 는 레일을 로봇 앞 노드(약 1 m 간격)부터 잘라 1 Hz 로 다시 보낸다. 그래서
+    레일 위를 잘 달리는 로봇도 첫 점 뒤로 최대 1 m 넘게 처지고, 늘이지 않으면 첫 점까지의
+    거리가 '레일 밖 거리'가 돼 0.8 m 를 넘는다 — 2026-10-12 녹화 재생: 켜진 예고 15번 중
+    6번이 이렇게 '레일 벗어남'으로 꺼졌다가 몸이 돌 때 다시 켜졌다(두 번 알림).
     """
     if len(path_xy) < 2:
         return None
@@ -97,12 +107,21 @@ def project_to_path(
         (x0, y0), (x1, y1) = path_xy[i], path_xy[i + 1]
         dx, dy = x1 - x0, y1 - y0
         seg2 = dx * dx + dy * dy
-        t = 0.0 if seg2 <= 0.0 else max(
-            0.0, min(1.0, ((robot_xy[0] - x0) * dx + (robot_xy[1] - y0) * dy) / seg2))
-        px, py = x0 + dx * t, y0 + dy * t
-        d = math.hypot(robot_xy[0] - px, robot_xy[1] - py)
+        raw = 0.0 if seg2 <= 0.0 else (
+            (robot_xy[0] - x0) * dx + (robot_xy[1] - y0) * dy) / seg2
+        seg = math.sqrt(seg2)
+        if cum[i] <= 0.0 and seg > 0.0 and raw < 0.0 and -raw * seg <= behind_start_m:
+            # 첫 점 뒤: 연장선까지 옆 거리, s 는 음수. cum[i] == 0 = 길이 있는 첫 선분
+            # (경로 첫 점이 겹쳐 와도 첫 실제 선분을 늘인다)
+            d = abs((robot_xy[0] - x0) * dy - (robot_xy[1] - y0) * dx) / seg
+            s = raw * seg
+        else:
+            t = max(0.0, min(1.0, raw))
+            px, py = x0 + dx * t, y0 + dy * t
+            d = math.hypot(robot_xy[0] - px, robot_xy[1] - py)
+            s = cum[i] + t * seg
         if best is None or d < best[0]:
-            best = (d, cum[i] + t * math.sqrt(seg2), math.atan2(dy, dx))
+            best = (d, s, math.atan2(dy, dx))
     if best is None:
         return None
     return RailPose(s=best[1], offtrack_m=best[0], remaining_m=cum[-1] - best[1],
@@ -168,13 +187,13 @@ def find_corners(
     deadband = math.radians(deadband_deg)
     threshold = math.radians(threshold_deg)
 
-    runs: List[List] = []   # [sign, acc, start_s, start_xy, end_s]
-    sign, acc, start_s, start_xy, end_s = 0, 0.0, 0.0, (0.0, 0.0), 0.0
+    runs: List[List] = []   # [sign, acc, start_s, start_xy, end_s, end_xy]
+    sign, acc, start_s, start_xy, end_s, end_xy = 0, 0.0, 0.0, (0.0, 0.0), 0.0, (0.0, 0.0)
     last_turn_s = None
 
     def close():
         if sign != 0:
-            runs.append([sign, acc, start_s, start_xy, end_s])
+            runs.append([sign, acc, start_s, start_xy, end_s, end_xy])
 
     for i in range(len(heads) - 1):
         s_b, xy_b, h_to = heads[i + 1]
@@ -187,7 +206,7 @@ def find_corners(
         else:
             close()
             sign, acc, start_s, start_xy = cur, d, s_b, xy_b
-        end_s = s_b
+        end_s, end_xy = s_b, xy_b
         last_turn_s = s_b
     close()
 
@@ -196,12 +215,13 @@ def find_corners(
         if merged and merged[-1][0] == r[0] and r[2] - merged[-1][4] <= merge_gap_m:
             merged[-1][1] += r[1]
             merged[-1][4] = r[4]
+            merged[-1][5] = r[5]
         else:
             merged.append(list(r))
     return [
         RailCorner(direction=DIRECTION_LEFT if a > 0 else DIRECTION_RIGHT,
-                   angle_deg=math.degrees(a), start_s=s0, end_s=s1, start_xy=xy)
-        for _, a, s0, xy, s1 in merged if abs(a) >= threshold
+                   angle_deg=math.degrees(a), start_s=s0, end_s=s1, start_xy=xy, end_xy=xy1)
+        for _, a, s0, xy, s1, xy1 in merged if abs(a) >= threshold
     ]
 
 
@@ -223,6 +243,7 @@ class _Active:
     phase: int = PHASE_IDLE             # IDLE / PREPARE(아직 안 돎) / NOW(돌았거나 도는 중)
     direction: int = DIRECTION_NONE
     corner_xy: Optional[Point] = None   # 이 신호가 묶인 레일 코너. 없으면 레일 밖 회전
+    corner_end_xy: Optional[Point] = None   # 그 코너의 끝점(다시 잘린 레일에서 같은 코너 찾기)
 
 
 @dataclass
@@ -281,6 +302,18 @@ class RailTurnArbiter:
     # 이보다 느리면 제자리 회전(출발 유턴·도착 정렬)이라 위 규칙을 쓰지 않는다 — 20° 에서 바로 켠다.
     minor_turn_min_speed_mps: float = 0.25
 
+    # 코너가 이보다 가까우면 새 예고를 하지 않고 사후 판정에 맡긴다(늦은 예고는 예고 노릇을 못 한다).
+    # 조준거리 보정(위)이 이 일을 겸했는데, VCC 로 보정을 0 으로 두면(2026-10-12) 따로 있어야 한다.
+    # 녹화 재생: 없으면 느릴 때(0.1~0.35 m/s) 코너 0.07~0.39 m 앞 예고가 생기고, U 를 도는 중
+    # 레일이 U 안에서 다시 잘리면 남은 반쪽을 새 코너로 다시 예고했다(같은 U 두 번 알림).
+    min_prepare_dist_m: float = 0.0
+    # 붙잡은 코너를 다시 온 레일에서 시작점으로 못 찾을 때(레일이 코너 안에서 다시 잘려 시작점이
+    # 바뀜), 같은 방향이고 **끝점**이 이 반경 안인 코너를 같은 코너로 다시 잡는다. 0 이면 끈다(옛 동작).
+    # 2026-10-12 녹화 재생: ∩ 의 U(90° 둘 + 사이 직선)를 도는 중 레일이 U 안에서 잘리면 사이 직선에서
+    # 신호가 끝났다가 0.9~2.3 s 뒤 다시 켜졌다(같은 U 두 번 알림, 5번). 끝점으로 보는 이유: 거리
+    # 범위로 찾으면 잘려 사라진 코너 대신 별개의 다음 코너에 붙는다(검토 지적).
+    rehold_end_m: float = 0.0
+
     _seq: int = 0
     _active: _Active = field(default_factory=_Active)
     _announced: List[Point] = field(default_factory=list)
@@ -302,6 +335,20 @@ class RailTurnArbiter:
             return None
         for c in corners:
             if math.dist(c.start_xy, xy) <= self.same_corner_m:
+                return c
+        return None
+
+    def _refind(self, corners, pose, direction, end_xy) -> Optional[RailCorner]:
+        """붙잡은 코너를 시작점으로 못 찾을 때, 끝점이 같은 같은 방향 코너(잘린 레일의 그 코너 나머지)."""
+        if self.rehold_end_m <= 0.0 or pose is None or end_xy is None:
+            return None
+        # 목적지 2 m 안은 다시 잡지 않는다 — 레일 끝 가짜 U턴 코너에 묶이면 멈춘 로봇에서 신호가
+        # 끝나지 않는다(10-08 run69 63~180 s 사건, _claim 과 같은 규칙. 검토 지적).
+        if pose.remaining_m <= self.handoff_m:
+            return None
+        for c in corners:
+            if (c.direction == direction and math.dist(c.end_xy, end_xy) <= self.rehold_end_m
+                    and pose.s <= c.end_s + self.pass_margin_m):
                 return c
         return None
 
@@ -370,7 +417,7 @@ class RailTurnArbiter:
             if c is not None or not self._minor_swerve(decision, speed_mps):
                 self._seq += 1                           # 예고 없던(또는 반대) 회전
                 self._active = _Active(PHASE_NOW, decision.direction,
-                                       c.start_xy if c else None)
+                                       c.start_xy if c else None, c.end_xy if c else None)
                 return RailCue(decision.direction, PHASE_NOW, nan,
                                decision.turn_angle_deg, self._seq, False, "now_new")
             # 달리며 비키는 작은 회전: 새 신호를 켜지 않고 아래(켜진 신호 붙잡기·새 예고)로 간다.
@@ -379,6 +426,13 @@ class RailTurnArbiter:
         # ── 켜진 신호 붙잡기(② 코너 끝까지 · 도는 중) ──
         if a.phase != PHASE_IDLE:
             corner = self._find(corners, a.corner_xy) if near_rail else None
+            if corner is None and near_rail and a.corner_xy is not None:
+                corner = self._refind(corners, pose, a.direction, a.corner_end_xy)
+                if corner is not None:                   # 다시 잘린 레일의 같은 코너
+                    a.corner_xy = corner.start_xy
+                    self._remember(corner.start_xy)
+            if corner is not None:
+                a.corner_end_xy = corner.end_xy
             in_corner = corner is not None and pose.s <= corner.end_s + self.pass_margin_m
             sign = 1 if a.direction == DIRECTION_LEFT else -1
             turning = (not math.isnan(decision.turn_angle_deg)
@@ -428,7 +482,10 @@ class RailTurnArbiter:
         # 아직 코너 한가운데(조준거리 앞 ~ 끝)면 다음 코너를 예고하지 않는다. 몸은 지금
         # 코너를 도는 중이라, 다음 코너가 반대 방향이면 '예고는 오른쪽, 실제는 왼쪽'이
         # 된다(09-28 0630 홈→화장실 0.5 m/s: +132° 헤어핀 안에서 −87° 예고).
-        if any(c.start_s - body_turn_ahead < pose.s < c.end_s + self.pass_margin_m
+        # 보정이 0 이면(VCC) min_prepare_dist_m 이 그 범위를 대신 넓힌다. 그러지 않으면 0.5 m 안
+        # 코너를 건너뛰고 그 너머 코너를 예고한다 — S자에서 반대 방향 예고(검토 지적).
+        near_ahead = max(body_turn_ahead, self.min_prepare_dist_m)
+        if any(c.start_s - near_ahead < pose.s < c.end_s + self.pass_margin_m
                for c in corners):
             return None
         for c in corners:
@@ -438,7 +495,7 @@ class RailTurnArbiter:
                 continue                                 # ③ 알린 코너
             if (c.start_s - body_turn_ahead - pose.s) / v > self.lead_time_sec:
                 return None                              # 가장 가까운 새 코너가 아직 멀다
-            if c.start_s - pose.s < body_turn_ahead:
+            if c.start_s - pose.s < max(body_turn_ahead, self.min_prepare_dist_m):
                 # 이미 조준거리 안에 들어온 코너. 컨트롤러는 코너 너머 조준점을 보고 있어서
                 # 날카로운 코너(헤어핀)를 레일과 **반대쪽으로** 짧게 돌 수 있다(09-28 0630
                 # 안내소 출발 129°, 홈→화장실 132°). 늦은 예고는 예고 노릇도 못 한다.
@@ -451,7 +508,7 @@ class RailTurnArbiter:
 
     def _start_prepare(self, c: RailCorner, pose: RailPose, reason: str) -> RailCue:
         self._seq += 1
-        self._active = _Active(PHASE_PREPARE, c.direction, c.start_xy)
+        self._active = _Active(PHASE_PREPARE, c.direction, c.start_xy, c.end_xy)
         self._remember(c.start_xy)
         return RailCue(c.direction, PHASE_PREPARE, max(0.0, c.start_s - pose.s),
                        c.angle_deg, self._seq, False, reason)

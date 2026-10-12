@@ -59,6 +59,9 @@ class TurnGuideNode(Node):
         self.declare_parameter("rail_handoff_m", 2.0)
         self.declare_parameter("rail_merge_gap_m", 1.2)
         self.declare_parameter("rail_goal_change_m", 0.5)
+        self.declare_parameter("rail_behind_start_m", 0.0)
+        self.declare_parameter("rail_min_prepare_dist_m", 0.0)
+        self.declare_parameter("rail_rehold_end_m", 0.0)
         self.declare_parameter("controller_lookahead_time_sec", 2.5)
         self.declare_parameter("controller_lookahead_min_m", 0.6)
         self.declare_parameter("controller_lookahead_max_m", 1.2)
@@ -119,6 +122,7 @@ class TurnGuideNode(Node):
         self.corner_threshold_deg = float(gp("rail_corner_threshold_deg").value)
         self.merge_gap_m = float(gp("rail_merge_gap_m").value)
         self.goal_change_m = float(gp("rail_goal_change_m").value)
+        self.behind_start_m = float(gp("rail_behind_start_m").value)
         self.arbiter = RailTurnArbiter(
             lead_time_sec=float(gp("rail_lead_time_sec").value),
             max_offtrack_m=float(gp("rail_max_offtrack_m").value),
@@ -129,6 +133,8 @@ class TurnGuideNode(Node):
             controller_lookahead_max_m=float(gp("controller_lookahead_max_m").value),
             minor_turn_deg=float(gp("minor_turn_deg").value),
             minor_turn_min_speed_mps=float(gp("minor_turn_min_speed_mps").value),
+            min_prepare_dist_m=float(gp("rail_min_prepare_dist_m").value),
+            rehold_end_m=float(gp("rail_rehold_end_m").value),
         )
         self.rail_xy = []
         self.rail_cum = []
@@ -194,7 +200,8 @@ class TurnGuideNode(Node):
         if len(self.rail_xy) >= 2:
             robot = self._robot_pose()
             if robot is not None:
-                pose = project_to_path(self.rail_xy, robot[:2], self.rail_cum, self.s_hint)
+                pose = project_to_path(self.rail_xy, robot[:2], self.rail_cum, self.s_hint,
+                                       behind_start_m=self.behind_start_m)
                 if pose is not None:
                     self.s_hint = pose.s
                 yaw = robot[2]
