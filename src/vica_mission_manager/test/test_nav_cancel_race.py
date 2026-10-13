@@ -69,7 +69,7 @@ class _FakeNavigator:
         self.calls.append('cancel')
         self.task_done = True     # 취소 응답 뒤 task 가 끝난다
 
-    def isTaskComplete(self):  # noqa: N802
+    def isTaskComplete(self, timeout_sec=0.10):  # noqa: N802
         return self.task_done
 
 

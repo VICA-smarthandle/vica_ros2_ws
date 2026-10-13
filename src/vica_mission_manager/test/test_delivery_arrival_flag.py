@@ -96,7 +96,7 @@ class _FakeNavigator:
     def goToPose(self, goal, behavior_tree=''):  # noqa: N802 - nav2_simple_commander 이름
         return True
 
-    def isTaskComplete(self):  # noqa: N802
+    def isTaskComplete(self, timeout_sec=0.10):  # noqa: N802
         return True
 
 

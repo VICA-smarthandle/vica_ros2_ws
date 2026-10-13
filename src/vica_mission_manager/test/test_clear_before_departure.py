@@ -92,7 +92,7 @@ class _FakeNavigator:
     def cancelTask(self):  # noqa: N802
         self.calls.append("cancel")
 
-    def isTaskComplete(self):  # noqa: N802
+    def isTaskComplete(self, timeout_sec=0.10):  # noqa: N802
         return self.task_done
 
     def getResult(self):  # noqa: N802
