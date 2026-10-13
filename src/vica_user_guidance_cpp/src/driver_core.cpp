@@ -5,32 +5,12 @@
 #include <utility>
 
 #include "vica_user_guidance_cpp/pyfmt.hpp"
+#include "vica_user_guidance_cpp/rclpy_compat.hpp"
 
 namespace vica_guidance
 {
 namespace
 {
-
-constexpr __int128 INT64_LIMIT = static_cast<__int128>(1) << 63;
-
-// rclpy Node.create_timer(1.0 / rate) 가 받아들이는 주기(ns). 파이썬과 같은 오류로 멈춘다.
-int64_t timer_period_ns(double rate_hz)
-{
-  if (rate_hz == 0.0) {throw PyError("ZeroDivisionError", "float division by zero");}
-  const double x = (1.0 / rate_hz) * 1000000000.0;   // int(float(timer_period_sec) * S_TO_NS)
-  if (std::isnan(x)) {throw PyError("ValueError", "cannot convert float NaN to integer");}
-  if (std::isinf(x)) {throw PyError("OverflowError", "cannot convert float infinity to integer");}
-  const double t = std::trunc(x);
-  if (t < 0) {
-    throw PyError(
-            "RCLError",
-            "failed to create timer: timer period must be non-negative, at ./src/rcl/timer.c:139");
-  }
-  if (t >= 9223372036854775807.0) {
-    throw PyError("TypeError", "__init__(): incompatible constructor arguments (timer period)");
-  }
-  return static_cast<int64_t>(t);
-}
 
 // resolve_channel_fov: 양수 칸은 그 값, 0 이하(NaN 포함) 칸은 공통값. 길이가 다르면 ValueError.
 std::vector<double> resolve_channel_fov(
@@ -44,35 +24,6 @@ std::vector<double> resolve_channel_fov(
   std::vector<double> out;
   for (double v : per_channel) {out.push_back(v > 0 ? v : common);}
   return out;
-}
-
-// (stamp_base - Duration(nanoseconds=delay)).to_msg() 의 검사들 — rclpy 와 같은 순서·문구.
-int64_t stamp_minus_delay(int64_t base_ns, __int128 delay_ns)
-{
-  if (delay_ns >= INT64_LIMIT || delay_ns < -INT64_LIMIT) {
-    throw PyError("OverflowError", "Total nanoseconds value is too large to store in C duration.");
-  }
-  const __int128 r = static_cast<__int128>(base_ns) - delay_ns;
-  if (r < 0) {throw PyError("ValueError", "Subtraction leads to negative time.");}
-  if (r >= INT64_LIMIT) {
-    throw PyError("OverflowError", "Total nanoseconds value is too large to store in C time point.");
-  }
-  const int64_t ns = static_cast<int64_t>(r);
-  if (ns / 1000000000 > 2147483647) {
-    throw PyError("AssertionError", "The 'sec' field must be an integer in [-2147483648, 2147483647]");
-  }
-  return ns;
-}
-
-// rosidl 파이썬 float32 칸의 범위 검사. inf 는 통과, 3.402823466e+38 을 넘는 유한값은 AssertionError.
-float f32_field(const char * name, double v)
-{
-  if ((v < -3.402823466e+38 || v > 3.402823466e+38) && !std::isinf(v)) {
-    throw PyError(
-            "AssertionError", std::string("The '") + name +
-            "' field must be a float in [-3.402823466e+38, 3.402823466e+38]");
-  }
-  return static_cast<float>(v);
 }
 
 std::string rsplit_last(const std::string & s)

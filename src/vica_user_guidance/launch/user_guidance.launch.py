@@ -5,8 +5,9 @@
 하드웨어 없이 로직만 확인하려면:
     ros2 launch vica_user_guidance user_guidance.launch.py enable_serial:=false
 
-손잡이 드라이버를 파이썬 판으로 되돌리려면:
+손잡이 드라이버·방향지시를 파이썬 판으로 되돌리려면(따로따로 고른다):
     ros2 launch vica_user_guidance user_guidance.launch.py driver_impl:=python
+    ros2 launch vica_user_guidance user_guidance.launch.py turn_impl:=python
 """
 
 import os
@@ -22,39 +23,63 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-# 손잡이 드라이버의 두 판. 실행 파일·노드 이름·파라미터·토픽·로그가 같다.
+# 손잡이 드라이버·방향지시의 두 판. 실행 파일·노드 이름·파라미터·토픽·로그가 같다.
 #
-# 2026-10-13 C++ 판(vica_user_guidance_cpp)을 기본으로 바꿨다. 이 노드는 주행·정지와 무관하게
-# 상향 시리얼 20 Hz·전송 10 Hz·진단 2 Hz 를 돌리고 초음파 TF 게이트 때문에 /tf 를 모두 받아,
-# 파이썬에서 코어 하나의 15~23 %를 썼다. 파이썬 원본과 무작위 시나리오의 출력이 글자까지 같다
-# (vica_user_guidance_cpp/test/parity). 되돌리려면 driver_impl:=python.
-DRIVER_PACKAGES = {
+# 2026-10-13 C++ 판(vica_user_guidance_cpp)을 기본으로 바꿨다. 손잡이 드라이버는 주행·정지와 무관하게
+# 상향 시리얼 20 Hz·전송 10 Hz·진단 2 Hz 를 돌리고 초음파 TF 게이트 때문에 /tf 를 모두 받아, 파이썬에서
+# 코어 하나의 15~23 %를 썼다. 방향지시도 레일 예고 때문에 /tf 를 모두 받아 12 % 안팎을 썼다(run94).
+# 파이썬 원본과 무작위 시나리오·실주행 녹화의 출력이 글자까지 같다(vica_user_guidance_cpp/test/parity).
+# 되돌리려면 driver_impl:=python · turn_impl:=python.
+IMPL_PACKAGES = {
     "cpp": "vica_user_guidance_cpp",
     "python": "vica_user_guidance",
 }
 
 
-def _driver_node(context, params_file, enable_serial):
-    impl = LaunchConfiguration("driver_impl").perform(context)
-    if impl not in DRIVER_PACKAGES:
-        # 조용히 아무것도 안 띄우면 손잡이·초음파가 왜 안 되는지 찾기 어렵다.
+def _pick_package(context, arg_name, executable, label):
+    """(패키지, 앞에 둘 경고) — C++ 판 실행 파일이 없으면 파이썬 판으로 바꾸고 크게 알린다."""
+    impl = LaunchConfiguration(arg_name).perform(context)
+    if impl not in IMPL_PACKAGES:
+        # 조용히 아무것도 안 띄우면 손잡이·방향지시가 왜 안 되는지 찾기 어렵다.
         raise RuntimeError(
-            f"driver_impl 은 'cpp' 또는 'python' 이어야 합니다: {impl!r}")
-    actions = []
+            f"{arg_name} 은 'cpp' 또는 'python' 이어야 합니다: {impl!r}")
     if impl == "cpp":
+        package = IMPL_PACKAGES["cpp"]
         try:
-            get_package_prefix(DRIVER_PACKAGES["cpp"])
+            exe = os.path.join(get_package_prefix(package), "lib", package, executable)
         except PackageNotFoundError:
-            # C++ 판을 빌드하지 않은 작업공간(예: vica_user_guidance 만 골라 빌드). 여기서 멈추면
-            # 방향지시(turn_guide_node)까지 함께 안 떠 손잡이 안내가 통째로 꺼진다 — 파이썬 판으로
-            # 띄우고 크게 알린다.
-            impl = "python"
-            actions.append(LogInfo(msg=(
-                "[경고] vica_user_guidance_cpp 가 설치돼 있지 않아 손잡이 드라이버를 파이썬 판으로 "
-                "띄웁니다. C++ 판을 쓰려면 colcon build --packages-up-to vica_user_guidance")))
+            exe = ""
+        # 패키지만 보면 안 된다: 드라이버만 들어 있던 옛 설치본(10-13 b7ceb98 빌드)에는 방향지시 실행
+        # 파일이 없어, launch_ros 가 "executable not found" 로 launch 전체(손잡이까지)를 내린다.
+        if not os.path.isfile(exe):
+            # 예: vica_user_guidance 만 골라 빌드한 작업공간. 여기서 멈추면 손잡이 안내가 통째로
+            # 꺼진다 — 파이썬 판으로 띄우고 크게 알린다.
+            return IMPL_PACKAGES["python"], [LogInfo(msg=(
+                f"[경고] vica_user_guidance_cpp 의 {executable} 가 설치돼 있지 않아 {label}를 파이썬 판으로 "
+                "띄웁니다. C++ 판을 쓰려면 colcon build --packages-up-to vica_user_guidance"))]
+    return IMPL_PACKAGES[impl], []
+
+
+def _turn_node(context, params_file):
+    package, actions = _pick_package(context, "turn_impl", "turn_guide_node", "방향지시")
+    return actions + [
+        # 노드 이름은 YAML 최상위 키와 반드시 일치해야 한다.
+        Node(
+            package=package,
+            executable="turn_guide_node",
+            name="turn_guide_node",
+            output="screen",
+            parameters=[params_file],
+        )
+    ]
+
+
+def _driver_node(context, params_file, enable_serial):
+    package, actions = _pick_package(
+        context, "driver_impl", "user_guidance_driver_node", "손잡이 드라이버")
     return actions + [
         Node(
-            package=DRIVER_PACKAGES[impl],
+            package=package,
             executable="user_guidance_driver_node",
             name="user_guidance_driver_node",
             output="screen",
@@ -96,14 +121,12 @@ def generate_launch_description():
                 default_value="cpp",
                 description="손잡이 드라이버 판: 'cpp'(기본) 또는 'python'(옛 판으로 되돌릴 때)",
             ),
-            # 노드 이름은 YAML 최상위 키와 반드시 일치해야 한다.
-            Node(
-                package="vica_user_guidance",
-                executable="turn_guide_node",
-                name="turn_guide_node",
-                output="screen",
-                parameters=[params_file],
+            DeclareLaunchArgument(
+                "turn_impl",
+                default_value="cpp",
+                description="방향지시 판: 'cpp'(기본) 또는 'python'(옛 판으로 되돌릴 때)",
             ),
+            OpaqueFunction(function=_turn_node, kwargs={"params_file": params_file}),
             OpaqueFunction(
                 function=_driver_node,
                 kwargs={"params_file": params_file, "enable_serial": enable_serial},

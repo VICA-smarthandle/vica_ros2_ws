@@ -4,14 +4,14 @@
   <name>vica_user_guidance_cpp</name>
   <version>0.1.0</version>
   <description>
-    Smart Handle 드라이버(user_guidance_driver_node)의 C++ 판. 파이썬 판(vica_user_guidance)은
-    그대로 남아 있으며 user_guidance.launch.py 의 driver_impl:=python 으로 되돌린다.
+    Smart Handle 안내 계층 두 노드의 C++ 판 — 손잡이 드라이버(user_guidance_driver_node)와
+    방향지시(turn_guide_node). 파이썬 판(vica_user_guidance)은 그대로 남아 있으며
+    user_guidance.launch.py 의 driver_impl:=python · turn_impl:=python 으로 하나씩 되돌린다.
 
-    왜 옮겼나(2026-10-13): 이 노드는 주행·정지와 무관하게 상향 시리얼 20 Hz·상태 전송 10 Hz·
-    진단 2 Hz 를 돌리고, 초음파 TF 게이트 때문에 /tf 를 모두 받는다. 파이썬에서 코어 하나의
-    15~23 % 를 썼다(run89·90·93 자원 기록). 실행 파일 이름(user_guidance_driver_node)과 노드 이름·
-    파라미터·토픽·로그는 파이썬 판과 같다 — 터미네이터 중복 실행 guard(앞 15자
-    user_guidance_d)와 진단 프로브가 이 이름을 본다.
+    왜 옮겼나(2026-10-13): 두 노드 다 주행·정지와 무관하게 늘 돌고, TF 를 쓰느라 /tf 를 모두 받는다.
+    파이썬에서 드라이버가 코어 하나의 15~23 %, 방향지시가 12 % 안팎을 썼다(run89~94 자원 기록).
+    실행 파일 이름과 노드 이름·파라미터·토픽·로그는 파이썬 판과 같다 — 터미네이터 중복 실행 guard
+    (turn_guide_node · 앞 15자 user_guidance_d)와 진단 프로브가 이 이름을 본다.
   </description>
   <maintainer email="mjw41177@gmail.com">ji_w</maintainer>
   <license>MIT</license>
@@ -20,6 +20,8 @@
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <test_depend>geometry_msgs</test_depend>
   <depend>builtin_interfaces</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>

@@ -18,6 +18,7 @@
 
 #include "vica_user_guidance_cpp/frames.hpp"
 #include "vica_user_guidance_cpp/guidance.hpp"
+#include "vica_user_guidance_cpp/rclpy_compat.hpp"
 #include "vica_user_guidance_cpp/serial_link.hpp"
 
 namespace vica_guidance
@@ -59,8 +60,6 @@ struct DriverParams
   bool ultrasonic_tf_gate = true;
   std::string ultrasonic_tf_target_frame = "odom";
 };
-
-enum class LogLevel {Info, Warn, Error};
 
 // sensor_msgs/Range 한 건(float32 칸은 이미 float 로 바꾼 값).
 struct RangeOut

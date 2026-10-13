@@ -15,6 +15,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -29,7 +30,12 @@ add_library(vica_guidance_core STATIC
   src/serial_link.cpp
   src/posix_serial.cpp
   src/custom_baud.cpp
-  src/driver_core.cpp)
+  src/driver_core.cpp
+  src/rclpy_compat.cpp
+  src/pymath.cpp
+  src/turn_detector.cpp
+  src/rail_turn_forecast.cpp
+  src/turn_core.cpp)
 target_include_directories(vica_guidance_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_compile_features(vica_guidance_core PUBLIC cxx_std_17)
@@ -43,7 +49,13 @@ target_compile_options(user_guidance_driver_node PRIVATE -Wno-pedantic)
 ament_target_dependencies(user_guidance_driver_node
   rclcpp std_msgs sensor_msgs builtin_interfaces tf2 tf2_ros vica_interfaces)
 
-install(TARGETS user_guidance_driver_node DESTINATION lib/${PROJECT_NAME})
+# 방향지시 노드(2026-10-13). 실행 파일 이름도 파이썬 판과 같다(turn_guide_node).
+add_executable(turn_guide_node src/turn_guide_node.cpp)
+target_link_libraries(turn_guide_node vica_guidance_core)
+target_compile_options(turn_guide_node PRIVATE -Wno-pedantic)
+ament_target_dependencies(turn_guide_node rclcpp nav_msgs tf2 tf2_ros vica_interfaces)
+
+install(TARGETS user_guidance_driver_node turn_guide_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -62,6 +74,17 @@ if(BUILD_TESTING)
       LAW_CPP=$<TARGET_FILE:law_cpp>
       GUIDANCE_PY_SRC=${CMAKE_CURRENT_SOURCE_DIR}/../vica_user_guidance
     TIMEOUT 1200)
+  # 방향지시(turn_guide_node) 대조 — TF 는 진짜 tf2::BufferCore.
+  find_package(geometry_msgs REQUIRED)
+  add_executable(turn_law_cpp test/parity/turn_law_cpp.cpp)
+  target_link_libraries(turn_law_cpp vica_guidance_core)
+  target_compile_options(turn_law_cpp PRIVATE -Wno-pedantic)
+  ament_target_dependencies(turn_law_cpp tf2 geometry_msgs)
+  ament_add_pytest_test(test_turn_parity test/parity/test_turn_parity.py
+    ENV
+      TURN_LAW_CPP=$<TARGET_FILE:turn_law_cpp>
+      GUIDANCE_PY_SRC=${CMAKE_CURRENT_SOURCE_DIR}/../vica_user_guidance
+    TIMEOUT 1800)
   ament_add_pytest_test(test_source_contract test/test_source_contract.py TIMEOUT 60)
 endif()
 

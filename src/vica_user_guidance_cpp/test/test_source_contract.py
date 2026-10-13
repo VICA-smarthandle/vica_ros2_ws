@@ -1,4 +1,4 @@
-"""C++ 판 소스 계약 — vica_user_guidance/test/test_launch_contract.py 의 안전 경계 검사를 C++ 에도 건다.
+"""C++ 판 소스 계약(손잡이 드라이버·방향지시) — test_launch_contract.py 의 안전 경계 검사를 C++ 에도 건다.
 
 주석을 뺀 실행 코드(문자열 포함 — 토픽 이름이 문자열이다)에 주행 명령·goal·reset 심볼이 없어야 하고,
 /estop_state 는 구독만 한다. 실행 파일 이름은 파이썬 판과 같아야 한다(터미네이터 guard).
@@ -46,5 +46,32 @@ def test_parameter_names_and_order_match_python():
     cpp = (PKG / 'src' / 'user_guidance_driver_node.cpp').read_text(encoding='utf-8')
     py_names = re.findall(r'declare_parameter\(\s*"([a-z_]+)"', py)
     # std::vector<std::string>> 처럼 꺾쇠가 겹치므로 '(' 앞의 마지막 '>' 까지를 형으로 본다.
+    cpp_names = re.findall(r'declare_parameter<[^()]+?>\(\s*"([a-z_]+)"', cpp)
+    assert py_names and cpp_names == py_names
+
+
+# ── 방향지시(turn_guide_node, 2026-10-13) ──
+
+def test_turn_guide_publishes_only_turn_guide():
+    node = (PKG / 'src' / 'turn_guide_node.cpp').read_text(encoding='utf-8')
+    pubs = re.findall(r'create_publisher<[^>]*>\(\s*("[^"]*")', node)
+    assert pubs == ['"/vica/turn_guide"'], pubs
+    # 구독은 파라미터로 받은 /odom 과 레일뿐이다(+ TransformListener 가 만드는 /tf·/tf_static).
+    subs = re.findall(r'create_subscription<([^>]*)>', node)
+    assert sorted(subs) == ['nav_msgs::msg::Odometry', 'nav_msgs::msg::Path'], subs
+
+
+def test_turn_guide_names_match_python():
+    cmake = (PKG / 'CMakeLists.txt').read_text(encoding='utf-8')
+    assert 'add_executable(turn_guide_node ' in cmake
+    node = (PKG / 'src' / 'turn_guide_node.cpp').read_text(encoding='utf-8')
+    assert 'rclcpp::Node("turn_guide_node")' in node
+
+
+def test_turn_guide_parameter_names_and_order_match_python():
+    py = (PKG.parent / 'vica_user_guidance' / 'vica_user_guidance' /
+          'turn_guide_node.py').read_text(encoding='utf-8')
+    cpp = (PKG / 'src' / 'turn_guide_node.cpp').read_text(encoding='utf-8')
+    py_names = re.findall(r'declare_parameter\(\s*"([a-z_]+)"', py)
     cpp_names = re.findall(r'declare_parameter<[^()]+?>\(\s*"([a-z_]+)"', cpp)
     assert py_names and cpp_names == py_names
