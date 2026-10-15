@@ -33,6 +33,26 @@ Safety 결정 사항이다.
 순수 로직 모듈은 `rclpy`에 의존하지 않으며, 시각은 전부 호출자가 정수 나노초로
 주입한다. 하드웨어 없이 pytest로 검증할 수 있다.
 
+### C++ 판 — 손잡이 드라이버·방향지시 (2026-10-13)
+
+`user_guidance.launch.py`는 기본으로 `vica_user_guidance_cpp` 패키지의 두 노드(C++ 판)를 띄운다.
+실행 파일·노드 이름·파라미터·토픽·로그 글자가 파이썬 판과 같다.
+
+- `user_guidance_driver_node`: 파이썬에서 코어 하나의 15~23 %(상향 시리얼 20 Hz·전송 10 Hz·초음파 TF
+  게이트용 `/tf` 수신) → run94 실주행 2.8 %.
+- `turn_guide_node`: 파이썬에서 12 % 안팎(판정 20 Hz·/odom 30 Hz·레일 예고용 `/tf` 수신) → run94 녹화 재생
+  1.9 %(같은 재생에서 파이썬 11.6 %).
+
+```bash
+# 파이썬 판으로 되돌리기(하나씩 고를 수 있다)
+ros2 launch vica_user_guidance user_guidance.launch.py driver_impl:=python
+ros2 launch vica_user_guidance user_guidance.launch.py turn_impl:=python
+```
+
+`user_guidance_driver_node.py`·`turn_guide_node.py`와 그 순수 모듈은 지우지 않는다. C++ 판 대조 시험
+(`vica_user_guidance_cpp/test/parity`)의 정답지다 — 파이썬 판을 고치면 C++ 판도 같이 고치고
+대조 시험으로 맞춘다.
+
 ## 펌웨어
 
 `firmware/smart_handle_firmware/smart_handle_firmware.ino`가 서보·LED·초음파·터치·

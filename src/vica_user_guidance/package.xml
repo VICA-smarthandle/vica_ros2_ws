@@ -20,6 +20,10 @@
        vica_user_guidance/timebase.py에 복제하고 테스트로 동일성을 고정한다. -->
 
   <exec_depend>python3-serial</exec_depend>
+  <!-- launch 기본 driver_impl:=cpp 가 띄우는 C++ 판 드라이버(2026-10-13). colcon 의
+       packages-up-to 로 함께 빌드되게 둔다. vica_user_guidance 만 골라 빌드해 C++ 판이 없으면
+       launch 가 경고를 남기고 파이썬 판으로 띄운다. -->
+  <exec_depend>vica_user_guidance_cpp</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
