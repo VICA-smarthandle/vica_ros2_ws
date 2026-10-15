@@ -13,6 +13,8 @@
   <depend>diagnostic_msgs</depend>
   <depend>diagnostic_updater</depend>
   <exec_depend>python3-can</exec_depend>
+  <!-- motor_bringup.launch.py 의 기본 판(motor_impl:=cpp) -->
+  <exec_depend>mdrobot_can_control_cpp</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
