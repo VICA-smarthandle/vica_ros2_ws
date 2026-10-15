@@ -130,6 +130,16 @@ from .obstacle_judge import ObstacleJudge, cm_what, goal_event, parse_state
 #: _nav_lock_timeout_sec(2.0) 과 같은 크기 — 콜백을 오래 붙잡지 않는다.
 BT_SWITCH_WAIT_SEC = 2.0
 
+#: 주행 중 매 틱(_tick)마다 "Nav2 주행이 끝났나"를 물을 때 Nav2 소식을 기다리는 시간(초).
+#: nav2_simple_commander 의 isTaskComplete 기본 0.1 초는 쉬는 시간 없이 도는 예제 반복문의 쉼 겸
+#: 우편함 확인이다. 미션은 자기 틱이 있어 그 위에 0.1 초가 겹쳤고, 그동안 오는 진행 소식
+#: (bt_loop_duration 10 ms → 최대 100 Hz)을 다 처리하느라 CPU 를 쓰고 _main_group 의 음성·앱 요청이
+#: 줄을 섰다. 결과는 기다리지 않아도 대기열에 남아 다음 틱에 읽힌다. 0 이면 남은 거리(getFeedback)가
+#: 최대 3 초 묵는다. 2026-10-13 격리 벤치(진행 소식 100 Hz): 0.1 초 CPU 19.8 %·0.02 초 10.7 %·
+#: 0.05 초 14.1 %, 남은 거리는 0.02 초 이상이면 신선(중앙 6~8 ms). 사용자 결정 0.03 초.
+#: 트리 전환 기다림·출발 전 확인은 라이브러리 기본 그대로다(test_nav_poll_wait.py).
+NAV_POLL_WAIT_SEC = 0.03
+
 #: 출발 전 costmap(local·global) 비우기의 응답을 기다리는 상한(초). 두 요청을 함께 보내고
 #: 이 시한 하나로 함께 기다린다. 실측은 local 이 BT 한 박자(0.01 s) 안(run81·82 10회),
 #: global 은 요청 뒤 0.03 s 안에 지우기를 마쳤다(10-10 planner_server 로그). 넘으면 그대로 출발한다.
@@ -147,6 +157,26 @@ try:
 except ImportError:  # nav2 미설치 환경(예: CI)에서도 import 에러로 죽지 않게
     BasicNavigator = None
     TaskResult = None
+
+if BasicNavigator is not None:
+    class MissionNavigator(BasicNavigator):
+        """isTaskComplete 의 기다림만 넘겨받을 수 있게 한 BasicNavigator.
+
+        판정은 라이브러리 원본(robot_navigator.py:278)과 같고, 기본값도 원본과 같은 0.1 초다.
+        미션은 주행 중 확인(_poll_nav_status)에서만 NAV_POLL_WAIT_SEC 를 넘긴다.
+        """
+
+        def isTaskComplete(self, timeout_sec: float = 0.10) -> bool:  # noqa: N802 - 원본 이름
+            if not self.result_future:
+                return True  # 취소됐거나 끝난 task
+            rclpy.spin_until_future_complete(self, self.result_future, timeout_sec=timeout_sec)
+            result = self.result_future.result()
+            if not result:
+                return False  # 아직 도는 중
+            self.status = result.status
+            return True
+else:
+    MissionNavigator = None
 
 
 class MissionManagerNode(Node):
@@ -413,7 +443,7 @@ class MissionManagerNode(Node):
         # 호출은 _nav_lock 으로 직렬화 (goToPose/cancelTask/isTaskComplete 는 짧게 끝남).
         if BasicNavigator is None:
             raise RuntimeError("nav2_simple_commander 를 import 할 수 없습니다")
-        self.navigator = BasicNavigator("vica_mission_navigator")
+        self.navigator = MissionNavigator("vica_mission_navigator")
         self._nav_lock = threading.Lock()
         # _cancel_nav_blocking 이 이 lock 을 잡고 Nav2 응답을 기다릴 수 있다.
         # 콜백에서 무한히 기다리면 고치려던 문제가 그대로 돌아오므로 시한을 둔다.
@@ -2168,7 +2198,7 @@ class MissionManagerNode(Node):
         if not self._nav_active:
             return NavStatus.NONE
         with self._nav_lock:
-            if not self.navigator.isTaskComplete():
+            if not self.navigator.isTaskComplete(timeout_sec=NAV_POLL_WAIT_SEC):
                 return NavStatus.RUNNING
             self._nav_active = False
             result = self.navigator.getResult()

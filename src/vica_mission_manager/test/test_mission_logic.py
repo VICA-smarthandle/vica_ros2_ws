@@ -1524,10 +1524,46 @@ class TestEstopStateNarration:
         says = [a.text for a in actions if isinstance(a, Say)]
         assert says == ["비상멈춤이 해제되었습니다."]
 
-    def test_voice_emergency_while_idle_is_silent(self):
+    # 서 있을 때 "멈춰"(2026-10-12 사용자 결정 B): 래치는 그대로 걸고 "지금은 비상 멈춤 상태입니다." 한 마디 —
+    # 말한 사람이 들렸는지·잠겼는지 알게. 08-31 의 정지 중 침묵은 통신 걸림(on_estop)에만 남는다.
+    def test_voice_emergency_while_idle_says_estop_state(self):
         logic = MissionLogic()
         actions = logic.on_emergency("멈춰", 1.0)
-        assert [a for a in actions if isinstance(a, Say)] == []
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == ["지금은 비상 멈춤 상태입니다."]
+        assert says[0].priority == "emergency"          # 귀의 말 끊기(tts_stop)에 지워지지 않게
+        assert logic.state == State.ESTOPPED
+
+    def test_voice_emergency_after_silent_latch_still_says(self):
+        # 래치 신호가 긴급어보다 먼저 와도(조용히 걸린 뒤) "멈춰"를 들었다고 알린다
+        logic = MissionLogic()
+        assert [a for a in logic.on_estop(True, 1.0) if isinstance(a, Say)] == []
+        says = [a.text for a in logic.on_emergency("멈춰", 1.05) if isinstance(a, Say)]
+        assert says == ["지금은 비상 멈춤 상태입니다."]
+
+    def test_second_voice_emergency_is_not_repeated(self):
+        logic = MissionLogic()
+        logic.on_emergency("멈춰", 1.0)
+        assert [a for a in logic.on_emergency("멈춰", 4.0) if isinstance(a, Say)] == []
+        driving = MissionLogic()
+        start_navigation(driving)
+        driving.on_emergency("멈춰", 1.0)                 # "안전을 위해 멈추겠습니다…"
+        assert [a for a in driving.on_emergency("멈춰", 4.0) if isinstance(a, Say)] == []
+
+    def test_idle_voice_emergency_release_is_announced(self):
+        logic = MissionLogic(estop_release_grace_sec=1.0)
+        logic.on_emergency("멈춰", 1.0)
+        logic.on_estop(True, 1.1)
+        logic.on_estop(False, 5.0)
+        says = [a.text for a in logic.on_tick(6.0, NavStatus.NONE) if isinstance(a, Say)]
+        assert says == ["비상멈춤이 해제되었습니다."]
+
+    def test_idle_comm_latch_stays_silent(self):
+        # 통신 걸림(긴급어 없이 래치만) — 08-31 결정 그대로 침묵·해제도 침묵
+        logic = MissionLogic(estop_release_grace_sec=1.0)
+        assert [a for a in logic.on_estop(True, 1.0) if isinstance(a, Say)] == []
+        logic.on_estop(False, 2.0)
+        assert [a for a in logic.on_tick(3.5, NavStatus.NONE) if isinstance(a, Say)] == []
 
     def test_voice_emergency_while_driving_announces(self):
         logic = MissionLogic()
