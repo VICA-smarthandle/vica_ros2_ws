@@ -7,8 +7,8 @@ import uuid
 
 import pytest
 
-from reaction_states import (BOUNDS, ROOM, TOILET, asking, idle, intent, lookup, navigating,
-                             paused, returning, waiting)
+from reaction_states import (BOUNDS, ROOM, SPOT_DEST, TOILET, asking, idle, intent, lookup,
+                             navigating, paused, returning, waiting)
 from vica_mission_manager.mission_logic import (
     HELP_RESEND_SEC,
     MSG_CANCEL_CONFIRM,
@@ -401,3 +401,57 @@ def test_d10_app_cancel_ends_request_when_idle():
     acts, reason = logic.on_app_cancel(t)
     assert reason == GateReason.OK
     assert _helps(acts) == [("help_canceled", help_id)] and logic.help_phase == "none"
+
+
+# ---- 비상 정지가 풀릴 때·관리자 홈 복귀·대기 장소 가보기 (10-16 사용자 결정 검토 2·가) ----------
+def _released(logic, t):
+    """비상 정지를 걸었다 풀고, 해제 유예가 지난 틱까지 돌린다 — 로봇은 안내 없음으로 간다."""
+    logic.on_estop(True, t)
+    logic.on_estop(False, t + 0.5)
+    return logic.on_tick(t + 2.0, NavStatus.NONE)
+
+
+def test_estop_release_ends_request_and_closes_the_popup():
+    """해제는 관리자가 앱에서 한다 — 관리자는 이미 안다. 남겨 두면 안내 없음에서 알림이 끝없이 가고,
+    앱 '주행 취소' 버튼은 주행·일시정지 때만 보여 끌 길이 없다."""
+    logic, t = requested()
+    help_id = logic.help_id
+    acts = _released(logic, t)
+    assert logic.state == State.IDLE
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"
+    assert _helps(logic.on_tick(t + 30.0, NavStatus.NONE)) == []
+
+
+def test_estop_release_after_ack_ends_quietly():
+    logic, t = acknowledged()
+    acts = _released(logic, t)
+    assert _helps(acts) == [] and logic.help_phase == "none"
+    # 이제 사용자 말로 다시 안내받을 수 있다
+    assert any(isinstance(a, Navigate) for a in _voice(logic, "navigate", t + 3.0,
+                                                        matched_destination_id=TOILET.id))
+
+
+def test_help_survives_while_the_estop_is_latched():
+    """비상 정지가 걸려 있는 동안은 끝내지 않는다(D5) — 끝내는 것은 풀릴 때다."""
+    logic, t = requested()
+    logic.on_estop(True, t)
+    logic.on_tick(t + 5.0, NavStatus.NONE)
+    assert logic.state == State.ESTOPPED and logic.help_phase == "requested"
+
+
+def test_admin_return_home_ends_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    logic._to_idle()
+    ok, reason, acts = logic.on_return_home_request(True, t)
+    assert ok is True
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"
+
+
+def test_admin_wait_spot_try_ends_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    logic._to_idle()
+    acts, reason = logic.on_app_wait_spot(SPOT_DEST, BOUNDS, True, t)
+    assert reason == GateReason.OK
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"

@@ -2628,7 +2628,8 @@ class MissionLogic:
             return [], GateReason.POSE_INVALID
         if not nav_ready:
             return [], GateReason.NAV_NOT_READY
-        actions = self._force_clear_all(now)
+        # 관리자가 로봇을 보냈으니 걸린 도움 요청도 끝난다(새 목적지 선점과 같다, 10-16 결정).
+        actions = [*self._end_help(), *self._force_clear_all(now)]
         self.state = State.NAVIGATING
         self.active_destination = wait_dest
         self._nav_from_app = True
@@ -4909,6 +4910,10 @@ class MissionLogic:
                     announced = self._estop_announced
                     self._estop_announced = False
                     self._to_idle()
+                    # 걸린 도움 요청도 여기서 끝낸다(2026-10-16 사용자 결정) — 해제는 관리자가 앱에서
+                    # 하므로 관리자는 이미 안다. 남기면 안내 없음에서 알림이 끝없이 가고, 확인 뒤면 사용자
+                    # 말이 막힌다. 걸려 있는 동안은 끝내지 않는다(D5).
+                    actions.extend(self._end_help())
                     if announced:
                         # 해제를 못 들으면 사용자는 계속 멈춰 있는 줄 안다.
                         # 침묵 걸림(정지 중)은 해제도 침묵 — 짝을 맞춘다.
@@ -4991,7 +4996,8 @@ class MissionLogic:
         # 끊긴 복귀를 잊는다 — 관리자가 지금 직접 복귀를 명령했으니 이번이
         # 그 재개다(on_intent 와 같은 이유).
         self._forget_interrupted_return()
-        return True, reason, self._enter_returning(now, is_home=True)
+        # 관리자가 로봇을 보냈으니 걸린 도움 요청도 끝난다(새 목적지 선점과 같다, 10-16 결정).
+        return True, reason, [*self._end_help(), *self._enter_returning(now, is_home=True)]
 
     def _enter_returning(
         self, now: float, is_home: bool = False, dialog_finish: bool = False
