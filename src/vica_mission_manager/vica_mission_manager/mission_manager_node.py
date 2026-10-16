@@ -10,7 +10,7 @@ mission_logic.py(순수 함수/상태 머신)에 있고, 이 파일은 ROS 배�
 - 모터 정지의 권위는 vica_safety의 /emergency_stop 중앙 래치 체인.
   여기서의 goal 취소는 심층 방어 보조 경로.
 
-구독: /vica/intent, /vica/emergency(전용 callback group), /emergency_stop
+구독: /vica/intent, /vica/emergency·/vica/tipped·/app_estop_state·/emergency_stop(전용 callback group)
 
 `/emergency_stop`은 emergency_stop_node가 물리·앱·음성을 중앙 래치한 권위 상태다.
 입력 펄스가 끝나도 명시적 reset 전까지 true를 유지한다.
@@ -507,6 +507,29 @@ class MissionManagerNode(Node):
             callback_group=self._emergency_group,
         )
         self._estop_active = False
+        # 몸통 넘어짐(2026-10-15)과 앱 원인. 둘 다 /emergency_stop 보다 **먼저** 만든다 —
+        # 같은 콜백 그룹에서 동시에 준비된 콜백은 만든 순서대로 처리된다. 두 신호는
+        # 래치보다 먼저 오므로, 그 순서가 지켜지면 넘어짐은 넘어짐 멘트 하나만,
+        # 앱 버튼은 "관리자를 호출했습니다" 없는 멘트가 나간다(mission_logic.on_tipped).
+        # /vica/tipped 는 바뀔 때만 오므로 transient_local 로 받는다(재기동해도 지금 상태).
+        self.create_subscription(
+            Bool,
+            "/vica/tipped",
+            self._on_tipped,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            callback_group=self._emergency_group,
+        )
+        # 앱 원인은 /app_estop_state(1 Hz JSON)의 app_active 로 받는다. 앱 버튼을 누른 순간
+        # app_emergency_node 가 1 Hz 를 기다리지 않고 한 번 더 낸다. 10 Hz /app_emergency_stop 을
+        # 받던 판은 서 있을 때 CPU 를 약 3 %p 더 썼다(run96, 2026-10-15).
+        self.create_subscription(
+            String,
+            "/app_estop_state",
+            self._on_app_estop_state,
+            10,
+            callback_group=self._emergency_group,
+        )
         self.create_subscription(
             Bool,
             "/emergency_stop",
@@ -1761,6 +1784,28 @@ class MissionManagerNode(Node):
         self.get_logger().warn(f"긴급어 수신: '{msg.keyword}' (원문: {msg.source_text})")
         actions = self.logic.on_emergency(msg.keyword, self._now())
         self._run_actions(actions)
+
+    def _on_tipped(self, msg: Bool) -> None:
+        tipped = bool(msg.data)
+        was_tipped = self.logic.tipped
+        actions = self.logic.on_tipped(tipped, self._now())
+        if tipped and not was_tipped:
+            self.get_logger().error(
+                f"넘어짐 감지 -> state={self.logic.state.value} (세울 때까지 멘트 반복)")
+        elif was_tipped and not tipped:
+            self.get_logger().warn(
+                f"넘어짐 풀림(세움) -> state={self.logic.state.value} (해제는 관리자 앱)")
+        else:
+            # 켤 때 받는 지금 상태(transient_local) — 바뀐 것이 아니다.
+            self.get_logger().info(f"넘어짐 신호: {'넘어짐' if tipped else '서 있음'}(지금 상태)")
+        self._run_actions(actions)
+
+    def _on_app_estop_state(self, msg: String) -> None:
+        try:
+            app_active = bool(json.loads(msg.data).get("app_active", False))
+        except (ValueError, AttributeError):
+            return
+        self.logic.on_app_estop(app_active)
 
     def _on_estop(self, msg: Bool) -> None:
         active = bool(msg.data)

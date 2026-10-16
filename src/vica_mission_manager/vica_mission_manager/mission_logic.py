@@ -419,6 +419,22 @@ MSG_NAV_FAILED = "죄송합니다. 이동에 실패했습니다. 다시 시도�
 # 자동복구 예고 멘트가 그 판별의 유일한 소비자였다.
 MSG_ESTOPPED = "안전을 위해 멈추겠습니다. 관리자를 호출했습니다."
 MSG_ESTOP_RELEASED = "비상멈춤이 해제되었습니다."   # 2026-08-31 사용자 확정(짧게)
+# 관리자가 앱에서 직접 건 비상정지(2026-10-15 어긋남 3 수정). 부른 사람이 관리자
+# 본인이라 "관리자를 호출했습니다"를 뺀다. 음성 replies.EMERGENCY_REPLY 와 같은
+# 글자라 구운 소리(reply_emergency_reply)가 바로 나간다.
+MSG_ESTOPPED_BY_APP = "안전을 위해 멈추겠습니다."
+# 몸통 넘어짐(2026-10-15 사용자 확정). 위 '정지 중 침묵' 규칙의 예외다 — 서 있다가
+# 넘어져도 말한다. 주변 사람에게 알리는 말이라 관리자가 세울 때까지 TIP_REPEAT_SEC
+# 마다 되풀이한다. 음성 assets/baked/mission_msg_tipped.wav 와 글자 하나까지 같아야
+# 구운 소리가 나간다(그 녹음은 높이·빠르기를 손본 판이라 다시 굽지 않는다).
+MSG_TIPPED = "비카가 넘어져 관리자를 호출했습니다. 지나가실 때 주의하세요."
+TIP_REPEAT_SEC = 10.0
+# 넘어짐 멘트를 낸 뒤 이 시간 안의 "비카야"에는 대답 멘트를 붙이지 않는다. 멘트가
+# "비카가…"로 시작하는데 음성 쪽 자기 목소리 무시는 '비카야'가 든 문장에만 켜진다
+# (wakeword_monitor.has_wake_word). 로봇이 제 목소리를 호출로 들으면 "지금은 비상
+# 멈춤 상태입니다."가 덧붙는다. 녹음 4.5 s + 꼬리·판정 지연. 그 사이에 정말 부른
+# 사람도 방금 넘어짐 멘트를 들었다.
+TIP_SELF_WAKE_GUARD_SEC = 7.0
 
 # ---- "비카야" 호출 반응 (2026-10-07, 작업 계획 탭 '"비카야" 반응표') ----------
 # 호출 인사. 예전엔 호출어 노드가 상태와 상관없이 말했고, 이제 미션이 반응표대로
@@ -1435,6 +1451,15 @@ class MissionLogic:
         self._handle_lost_notice_at: Optional[float] = None
         # 걸림을 말로 알렸는가 — 침묵 걸림(정지 중)은 해제도 침묵한다.
         self._estop_announced = False
+        # 몸통 넘어짐(/vica/tipped, 2026-10-15). 넘어져 있는 동안 비상정지를 풀지 않고
+        # 넘어짐 멘트를 되풀이한다. _tip_notice_at = 주변에 비상정지를 마지막으로
+        # 알린 시각 — 넘어짐 멘트와, 그동안의 "비카야"·목적지 대답이 모두 이 시계를
+        # 다시 세워 말이 연달아 붙지 않게 한다.
+        self.tipped = False
+        self._tip_notice_at: Optional[float] = None
+        # 관리자가 앱에서 비상정지를 눌렀는가(/app_emergency_stop). 걸림 멘트에서
+        # "관리자를 호출했습니다"를 뺄지 정하는 데만 쓴다(어긋남 3).
+        self.app_estop_active = False
 
         # 도착 후 대화 (arrival-dialog-flow). 꺼져 있으면 도착 후 기존 dwell→
         # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
@@ -2036,6 +2061,8 @@ class MissionLogic:
         else:
             actions, reason = self.on_resume_request(nav_ready, now)
         if reason != GateReason.OK:
+            if reason == GateReason.ESTOP_ACTIVE:
+                self._note_tip_notice(now)
             msg = _REJECT_MESSAGES.get(reason)
             return [Say(msg, priority="response")] if msg else []
         return actions
@@ -2074,6 +2101,7 @@ class MissionLogic:
             self._grip_pulse_at = None
 
         if self.state == State.ESTOPPED:
+            self._note_tip_notice(now)
             return [Say(MSG_ESTOP_REJECT, priority="response")]
 
         if self.state in _WAIT_MOVING_STATES:
@@ -3442,6 +3470,12 @@ class MissionLogic:
         대답하고 듣는 중이다.
         """
         if self.estop_active or self.state == State.ESTOPPED:
+            # 시각은 한 번만 읽는다 — 비상 콜백 그룹의 on_tipped(False) 가 그 사이 None 으로 비울 수 있다.
+            notice_at = self._tip_notice_at
+            if (self.tipped and notice_at is not None
+                    and now - notice_at < TIP_SELF_WAKE_GUARD_SEC):
+                return [WakeReply(listen=False)]
+            self._note_tip_notice(now)
             return [Say(MSG_ESTOP_WAKE, priority="response"), WakeReply(listen=False)]
         if self.state in _WAKE_IGNORE_STATES:
             return [WakeReply(listen=False)]
@@ -4142,6 +4176,56 @@ class MissionLogic:
             actions.append(Say(MSG_ESTOP_WAKE, priority="emergency"))
         return actions
 
+    def on_app_estop(self, active: bool) -> None:
+        """/app_estop_state 의 app_active (1 Hz, 앱 버튼을 누른 순간에도 한 번 더 온다).
+
+        말을 고르는 데만 쓴다. 래치는 /emergency_stop 이 권위다. 앱 버튼을 누르면
+        app_emergency_node 가 /app_emergency_stop 과 함께 이 상태를 바로 내고, 래치는
+        /app_emergency_stop 을 받은 다음 주기에 걸린다 — 그래서 보통 이 값이 먼저 온다.
+        그래도 순서가 뒤집히면 예전 멘트(MSG_ESTOPPED)가 나갈 뿐이다.
+        """
+        self.app_estop_active = active
+
+    def on_tipped(self, active: bool, now: float) -> list:
+        """/vica/tipped (IMU 어댑터 C++, 바뀔 때만·transient_local). 2026-10-15.
+
+        넘어짐은 이것 하나만 말한다 — "안전을 위해 멈추겠습니다…"는 내지 않는다.
+        이 신호는 래치(/emergency_stop)보다 먼저 온다(래치는 이 신호를 받고 다음
+        주기에 걸린다). 여기서 ESTOPPED 로 들어가 두면 뒤따른 on_estop 이 아무 말도
+        하지 않는다. 노드는 두 구독을 같은 콜백 그룹에, 이 구독을 먼저 만든다.
+
+        세우면(false) 반복만 멈춘다. 비상정지는 관리자가 앱에서 풀고, 그때 해제
+        멘트가 한 번 나간다(_estop_announced 짝).
+
+        한계: 넘어짐 판정은 넘어진 뒤 1초가 걸린다. 그 사이에 다른 일(버튼·"멈춰"·손잡이
+        놓침 안내·장애물 안내)이 먼저 말을 시작했으면, 넘어짐 멘트(emergency)가 그 말을
+        끊고 나간다. 넘어짐이 올지 미리 알 수 없어서다.
+        """
+        if not active:
+            self.tipped = False
+            self._tip_notice_at = None
+            return []
+        if self.tipped:
+            return []
+        actions: list = []
+        if self.state in _GOAL_ACTIVE_STATES:
+            actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
+            actions.append(CancelNav(self.active_destination))
+        if self.state != State.ESTOPPED:
+            self._enter_estopped(now)
+        # 시계를 먼저 세우고 tipped 를 켠다 — 다른 스레드의 on_tick 이 그 사이에
+        # 시계 없는 tipped 를 보고 한 번 더 말하지 않게.
+        self._tip_notice_at = now
+        self.tipped = True
+        self._estop_announced = True
+        actions.append(Say(MSG_TIPPED, priority="emergency"))
+        return actions
+
+    def _note_tip_notice(self, now: float) -> None:
+        """넘어져 있는 동안 비상정지를 말로 알렸다 — 다음 반복을 이때부터 센다."""
+        if self.tipped:
+            self._tip_notice_at = now
+
     def on_estop(self, active: bool, now: float) -> list:
         """/emergency_stop 래치 상태 (emergency_stop_node 가 20Hz 주기 발행)."""
         self.estop_active = active
@@ -4154,11 +4238,13 @@ class MissionLogic:
                     actions.append(CancelNav(self.active_destination))
                 # 움직이는 중에 걸렸을 때만 말한다 — 정지 중 걸림(통신 순단
                 # 자동복구 포함)은 사용자에게 달라지는 게 없어 침묵한다.
-                moving = self.state in _GOAL_ACTIVE_STATES
+                # 넘어짐은 on_tipped 가 따로 말한다(보통 이미 ESTOPPED 라 여기 안 옴).
+                moving = self.state in _GOAL_ACTIVE_STATES and not self.tipped
                 self._enter_estopped(now)
-                self._estop_announced = moving
+                self._estop_announced = moving or self.tipped
                 if moving:
-                    actions.append(Say(MSG_ESTOPPED, priority="emergency"))
+                    text = MSG_ESTOPPED_BY_APP if self.app_estop_active else MSG_ESTOPPED
+                    actions.append(Say(text, priority="emergency"))
                 return actions
         else:
             if self.state == State.ESTOPPED and self._estop_clear_since is None:
@@ -4179,6 +4265,16 @@ class MissionLogic:
         actions: list = []
         self._prune_suppressed(now)
 
+        # 넘어져 있는 동안 10초마다 같은 멘트(2026-10-15 사용자 결정). 상태와 상관없이
+        # 본다 — 넘어지면 ESTOPPED 로 들어가고 세우기 전에는 나오지 않지만, 혹시
+        # 다른 상태여도 주변 알림은 멈추면 안 된다.
+        # 시각은 한 번만 읽는다 — 비상 콜백 그룹의 on_tipped(False) 가 그 사이 None 으로 비울 수 있다.
+        notice_at = self._tip_notice_at
+        if (self.tipped and notice_at is not None
+                and now - notice_at >= TIP_REPEAT_SEC):
+            self._tip_notice_at = now
+            actions.append(Say(MSG_TIPPED, priority="emergency"))
+
         # 활성 주행 중 손 놓침(설계 4.3 (다)). 주행 결과가 이번 tick 에 나왔으면
         # 결과가 먼저다 — 도착한 순간 손을 뗀 것을 놓침으로 세우면 안 된다.
         if (self.state == State.NAVIGATING and self.handle_active
@@ -4186,7 +4282,8 @@ class MissionLogic:
                                        NavStatus.CANCELED)):
             handle_actions = self._handle_nav_tick(now, distance_remaining)
             if self.state == State.PAUSED:
-                return handle_actions
+                # 위에서 쌓은 넘어짐 반복 멘트를 버리지 않는다(넘어짐과 주행이 겹치는 경합).
+                return actions + handle_actions
             actions.extend(handle_actions)
 
         if self.cancel_confirm_pending:
@@ -4554,7 +4651,9 @@ class MissionLogic:
                 self._to_idle()
 
         elif self.state == State.ESTOPPED:
-            if not self.estop_active:
+            # 넘어져 있으면 래치가 풀려 보여도 나가지 않는다 — 비상정지 노드가 tipped 를
+            # 모르는 옛 판이어도 넘어진 채 "해제되었습니다"를 말하지 않게.
+            if not self.estop_active and not self.tipped:
                 # 래치 해제 확인 후 grace 경과 시에만 idle 복귀.
                 # 이전 goal 자동 재개는 금지 — 사용자가 다시 요청해야 한다.
                 t0 = (
