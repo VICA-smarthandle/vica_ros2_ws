@@ -25,6 +25,51 @@ from .logging_utils import log_with_severity
 from .reset_sequence import ResetSequence
 
 
+# 비상정지가 걸릴 때 앱 팝업 본문(2026-10-15, 어긋남 1 수정). 예전에는 앱 버튼만
+# 본문을 새로 썼고, 물리 버튼·음성·통신으로 걸리면 직전 메시지("통신이 복구되어
+# 비상정지를 자동 해제했습니다" 등)가 비상정지 화면에 그대로 남았다.
+# 원인이 여럿이면 앞에 있는 것을 쓴다. 앱 버튼(`app`)은 handle_activate 가 이미
+# 쓰므로 없고, 부팅 대기(`*_waiting`)는 고장이 아니라 없다.
+CAUSE_MESSAGES = (
+    ("tipped", "넘어짐이 감지되어 비상정지되었습니다."),
+    ("physical_f1", "비상정지 버튼이 눌렸습니다."),
+    ("voice", "이용자가 음성으로 멈춤을 요청해 비상정지되었습니다."),
+    ("motor_can", "모터 드라이버 통신이 끊겨 비상정지되었습니다."),
+    ("motor_can_stale", "모터 드라이버 통신이 끊겨 비상정지되었습니다."),
+    ("physical_stale", "모터 드라이버 통신이 끊겨 비상정지되었습니다."),
+)
+
+# 세우기 전에 앱에서 해제를 눌렀을 때(2026-10-15 사용자 승인 문구). 그대로 두면
+# "Safety reset 거부: step=estop_reset, reason=active sources: tipped"가 뜬다.
+TIP_RESET_REJECT_MESSAGE = (
+    "비카가 아직 넘어져 있습니다. 비카를 세운 뒤 다시 해제해 주세요."
+)
+
+RESET_REJECT_PREFIX = "Safety reset 거부:"
+
+
+def primary_cause(sources) -> Optional[str]:
+    """Pick the latch cause the app popup should describe, or None."""
+    names = set(sources)
+    for name, _ in CAUSE_MESSAGES:
+        if name in names:
+            return name
+    return None
+
+
+def cause_message(cause: str) -> str:
+    """Return the operator-facing popup text for one latch cause."""
+    return dict(CAUSE_MESSAGES)[cause]
+
+
+def reset_rejected_by_tip(step: str, reason: str) -> bool:
+    """Report whether the central latch refused reset because the body is down."""
+    if step != "estop_reset" or ":" not in reason:
+        return False
+    names = reason.split(":", 1)[1].strip().split(",")
+    return "tipped" in names
+
+
 def has_active_navigation_goals(statuses) -> bool:
     """Treat accepted, executing, and canceling Nav2 goals as active."""
     active = {
@@ -51,7 +96,7 @@ def build_app_state(
     통로다. 기본값이 False라 기존 호출부는 그대로 동작한다.
 
     `sources`는 지금 래치를 붙들고 있는 원인이다(`physical_f1`·`app`·`voice`·
-    `motor_can`·`*_stale`). `/estop_sources`로도 나가지만 앱이 그것을 따로
+    `tipped`·`motor_can`·`*_stale`). `/estop_sources`로도 나가지만 앱이 그것을 따로
     구독하면 두 토픽의 도착 순서가 어긋나 **원인을 모르는 채 팝업이 먼저 뜨는
     순간**이 생긴다. 같은 메시지에 실어 보내면 그 틈이 없다.
 
@@ -177,6 +222,10 @@ class AppEmergencyNode(Node):
         # 마지막 해제가 관리자 조작이었는지 통신 복구였는지. 앱 표시용이다.
         self.auto_recovered = False
         self.last_estop_sources: tuple = ()
+        # 팝업 본문을 고른 원인과 그 문장. 원인이 바뀔 때만 본문을 새로 쓴다 —
+        # 20 Hz 마다 쓰면 reset 거부 문구가 곧바로 지워진다.
+        self.last_cause: Optional[str] = None
+        self.event_message = ""
         self.auto_recovery = AutoRecoveryPolicy(
             settle_ns=sec_to_ns(self.auto_recover_settle_sec),
         )
@@ -317,6 +366,29 @@ class AppEmergencyNode(Node):
             if sources:
                 self.last_estop_sources = sources
             self.auto_recovery.observe_sources(sources, self.now_ns())
+            self.update_cause_message(sources)
+
+    def update_cause_message(self, sources) -> None:
+        """Describe a new latch cause in the app popup (호출자가 lock 을 쥔다).
+
+        원인이 모두 풀렸는데 본문이 reset 거부 문구면 이번 사건의 원인 문장으로
+        되돌린다. 세운 뒤에도 "아직 넘어져 있습니다"가 남으면 안 된다.
+        """
+        cause = primary_cause(sources)
+        if cause == self.last_cause:
+            return
+        previous = self.last_cause
+        self.last_cause = cause
+        if cause is not None:
+            self.event_message = cause_message(cause)
+            self.last_message = self.event_message
+            return
+        rejected = (
+            self.last_message.startswith(RESET_REJECT_PREFIX)
+            or self.last_message == TIP_RESET_REJECT_MESSAGE
+        )
+        if previous is not None and rejected and self.event_message:
+            self.last_message = self.event_message
 
     def nav_status_callback(self, msg: GoalStatusArray) -> None:
         """Track active Nav2 action states, including canceling goals."""
@@ -330,6 +402,14 @@ class AppEmergencyNode(Node):
         del request
         self.app_active = True
         self.publish_app_estop()
+        # 본문을 Nav2 확인보다 먼저 쓴다. 확인이 길어지는 동안 1 Hz 방송이 직전 문장
+        # ("Safety reset 완료…")을 실어 다른 관리자 화면에 띄우지 않게(2026-10-15).
+        self.last_message = "앱 E-stop이 활성화되었습니다."
+        # 상태를 1 Hz 를 기다리지 않고 바로 낸다. 미션은 이 토픽의 app_active 로 걸림
+        # 멘트에서 "관리자를 호출했습니다"를 뺄지 정한다 — 래치(/emergency_stop)보다 먼저
+        # 닿아야 한다. 미션이 10 Hz /app_emergency_stop 을 받던 것보다 CPU 가 덜 든다
+        # (run96 미션 서 있을 때 7.0 → 10.9 %, 모형 노드 실측 +2.7 %p).
+        self.publish_state()
         nav_goal_clear, note = self.ensure_no_active_nav_goal()
         self.last_message = "앱 E-stop이 활성화되었습니다."
         if nav_goal_clear:
@@ -370,6 +450,8 @@ class AppEmergencyNode(Node):
         self.sequence.begin()
         self.app_active = False
         self.publish_app_estop()
+        # 앱 원인이 내려간 것도 바로 알린다 — 미션의 app_active 가 1초 늦게 남지 않게.
+        self.publish_state()
 
         nav_goal_clear, message = self.ensure_no_active_nav_goal()
         if not nav_goal_clear:
@@ -427,12 +509,21 @@ class AppEmergencyNode(Node):
         """Stop the sequence at the first failed step and report its cause."""
         if sequence_started and self.sequence.next_step == step:
             self.sequence.record(step, False, reason)
-        self.last_message = f"Safety reset 거부: step={step}, reason={reason}"
+        if reset_rejected_by_tip(step, reason):
+            # 관리자에게는 할 일을 말한다. 기술 사유는 아래 로그에 그대로 남긴다.
+            self.last_message = TIP_RESET_REJECT_MESSAGE
+        else:
+            self.last_message = f"{RESET_REJECT_PREFIX} step={step}, reason={reason}"
         severity = "error" if "stale" in reason or "not observed" in reason else "warn"
+        hint = ""
+        if reset_rejected_by_tip(step, reason):
+            # 끊김 감시가 없어(사용자 결정) IMU 어댑터가 넘어진 채 죽으면 원인이 그대로 남는다.
+            hint = (" -- 세웠는데도 계속되면 ⑦ imu 칸(IMU 어댑터)을 다시 켠다: "
+                    "1초 판정 뒤 지금 자세를 다시 낸다")
         log_with_severity(
             self.get_logger(),
             severity,
-            f"[RESET REJECTED] step={step} reason={reason}",
+            f"[RESET REJECTED] step={step} reason={reason}{hint}",
         )
         response.success = False
         response.message = self.last_message

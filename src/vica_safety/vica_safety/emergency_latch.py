@@ -43,6 +43,10 @@ class EmergencyLatch:
             "app": False,
             "voice": False,
             "motor_can": False,
+            # 몸통 넘어짐(2026-10-15). IMU 어댑터가 45°·1초로 판정해 /vica/tipped 로
+            # 낸다. 세우면 false 가 오지만 그것은 입력 해제일 뿐 reset 이 아니다 —
+            # 사람 원인과 같이 관리자가 앱에서 푼다(auto_recovery.HUMAN_SOURCES).
+            "tipped": False,
         }
         # None = 물리 F1을 한 번도 수신하지 않음 (0.0 sentinel 금지).
         self.last_physical_ns: Optional[int] = None
@@ -51,7 +55,7 @@ class EmergencyLatch:
 
     def update_source(self, name: str, active: bool, now: int) -> None:
         del now
-        if name not in ("app", "voice"):
+        if name not in ("app", "voice", "tipped"):
             raise ValueError(f"unsupported source: {name}")
         self.sources[name] = active
         if active:

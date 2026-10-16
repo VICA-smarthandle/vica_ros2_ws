@@ -8,6 +8,9 @@
 
 - **사람이 만든 원인**(`physical_f1`·`app`·`voice`): 누군가 판단해서 눌렀다.
   사람이 푼다. 한 번이라도 섞이면 그 사건 동안 자동 복구는 막힌다.
+  몸통 넘어짐(`tipped`, 2026-10-15)도 여기에 넣는다. 누가 누른 것은 아니지만
+  관리자가 와서 세워야 끝나는 사건이다. 통신 원인과 섞였을 때 이것이 빠져
+  있으면, 서 있다 넘어진 로봇을 세우는 순간 관리자 없이 풀려 버린다.
 - **통신에서 비롯된 원인**(`motor_can`·`*_stale`·`*_waiting`): 지금 판단할 수
   없다는 상태다. 통신이 돌아오면 스스로 풀려도 안전하다 -- 그동안 로봇은
   이미 멈춰 있었다.
@@ -22,7 +25,7 @@ from typing import Iterable, Optional
 
 
 # 사람이 판단해서 만든 원인. 섞이면 자동 복구가 막힌다.
-HUMAN_SOURCES = frozenset({"physical_f1", "app", "voice"})
+HUMAN_SOURCES = frozenset({"physical_f1", "app", "voice", "tipped"})
 
 # 통신 상태에서 비롯된 원인. 이것만으로 걸린 래치가 자동 복구 대상이다.
 COMM_SOURCES = frozenset({
