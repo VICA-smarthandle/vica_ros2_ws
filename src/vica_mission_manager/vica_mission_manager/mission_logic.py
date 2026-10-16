@@ -11,6 +11,7 @@ LLM(VicaIntent)은 어디까지나 제안이다.
 from __future__ import annotations
 
 import math
+import uuid
 
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -255,6 +256,17 @@ class GoalEvent:
     # 앱 팝업의 아래 칸(목업 10·11번). "spot"=대기 장소, "destination"=목적지 앞.
     wait_place: str = ""
     wait_minutes: int = -1
+
+
+@dataclass(frozen=True)
+class HelpEvent:
+    """도움 요청 사건 하나 — 노드가 /vica_goal_event JSON 에 help_id 를 붙여 앱에 낸다.
+
+    help_requested 의 위치 칸(place·robot_x·robot_y)은 보낼 때마다 노드가 그 순간 값으로
+    채운다 — 로직은 위치를 모른다."""
+
+    event: str      # "help_requested" | "help_acknowledged" | "help_canceled"
+    help_id: str
 
 
 @dataclass(frozen=True)
@@ -580,6 +592,19 @@ MSG_NOT_PAUSED = "다시 출발할 안내가 없습니다."
 # 안내 주행 중 "다시 가자" — 이미 가는 중이다(미션 요청 반응표 2026-10-08). 음성
 # replies.ALREADY_GOING 과 같은 글자다 — 음성이 같은 말을 이미 합성해 쓴다.
 MSG_ALREADY_GOING = "지금 {name}{josa} 가는 중이에요."
+# 관리자 호출(도움 요청, 2026-10-15 설계 · 10-16 사용자 결정). 안내 주행 중에만 받는다. 문장은
+# 사용자 확정 — 띄어쓰기·마침표 유무까지 그대로 둔다(음성 mission_phrases 가 같은 글자로 미리
+# 합성한다). 도움 관련 말은 전부 미션이 한다 — LLM 은 help 로 판단만 하고 reply 는 비운다.
+# 설계서: Claude Docs "비카 관리자 호출 설계서".
+MSG_HELP_CONFIRM = "직원의 도움이 필요하신가요?"
+MSG_HELP_SENT = "지금 도움 요청을 보냈습니다"
+MSG_HELP_COMING = "관리자가 오고있습니다. 잠시만 기다려주세요"
+MSG_HELP_CANCEL_CONFIRM = "도움 요청을 취소할까요?"
+MSG_HELP_CANCELED = "도움 요청을 취소했습니다."
+MSG_HELP_UNAVAILABLE = "지금은 도움 요청을 보낼 수 없습니다"
+# 관리자가 앱에서 확인할 때까지 같은 help_id 로 다시 보내는 간격. 상한은 없다 — 앱을
+# 껐다 켜도 다음 재전송에 팝업이 뜬다.
+HELP_RESEND_SEC = 10.0
 # 사람 접근. 질문은 되묻기와 같은 이유로 expects_reply 를 달아 내보낸다.
 # ⚠️ 문구 정본은 voice replies.py·ment_cache (approach-voice-flow.md 확정 흐름).
 # 글자까지 일치해야 사전 녹음이 재생된다 — 바꾸려면 양쪽을 함께 고치고
@@ -1460,6 +1485,19 @@ class MissionLogic:
         # 관리자가 앱에서 비상정지를 눌렀는가(/app_emergency_stop). 걸림 멘트에서
         # "관리자를 호출했습니다"를 뺄지 정하는 데만 쓴다(어긋남 3).
         self.app_estop_active = False
+        # 관리자 호출(도움 요청). help_phase 는 미션 상태와 따로 든다 — none / asking(확인 질문 중,
+        # 주행 그대로) / requested(보냄, 일시정지) / acknowledged(관리자 확인). 끝내는 곳은
+        # _end_help 를 부르는 자리뿐이다 — _to_idle 은 지우지 않는다(설계 5.6절).
+        self.help_phase = "none"
+        self.help_id: Optional[str] = None
+        self._help_last_sent_at: Optional[float] = None
+        self._help_confirm_reask_at: Optional[float] = None
+        self._help_confirm_deadline: Optional[float] = None
+        self._help_confirm_reasked = False
+        self.help_cancel_pending = False
+        self._help_cancel_reask_at: Optional[float] = None
+        self._help_cancel_deadline: Optional[float] = None
+        self._help_cancel_reasked = False
 
         # 도착 후 대화 (arrival-dialog-flow). 꺼져 있으면 도착 후 기존 dwell→
         # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
@@ -1654,6 +1692,10 @@ class MissionLogic:
         nav_ready: bool,
     ) -> Optional[list]:
         """반응표로 새로 정한 칸(2026-10-08). 맡지 않는 칸은 None — 옛 갈래가 처리한다."""
+        # 도움 요청이 걸린 말이 먼저다 — 도움 요청 중의 취소는 안내 취소가 아니다(설계 5.2절).
+        helped = self._react_help(intent, now, lookup, bounds, nav_ready)
+        if helped is not None:
+            return helped
         if self.cancel_confirm_pending and intent.intent in ("affirm", "deny"):
             # "안내를 취소할까요?"의 네·아니요 — 예전엔 접근 질문 배선으로 가서 버려졌다.
             return self.on_cancel_confirm_answer(intent.intent == "affirm", now)
@@ -2549,7 +2591,8 @@ class MissionLogic:
             return [], GateReason.NAV_NOT_READY
         # 끊긴 복귀를 잊는다 — 관리자가 새 목적지로 선점했으니 이번이 그
         # 재개다(on_intent 와 같은 이유). _force_clear_all 이 한다.
-        actions = self._force_clear_all(now)
+        # 관리자가 새로 보냈으니 걸린 도움 요청도 끝난다(D4).
+        actions = [*self._end_help(), *self._force_clear_all(now)]
         self.state = State.NAVIGATING
         # 배송은 입구 방향을 바라보고 선다(입구 화살표 하나를 같이 쓴다, 10-07 결정).
         # 원격 주행은 저장된 pose.yaw 그대로 — 앱이 저장할 때 같은 값을 넣는다.
@@ -2615,16 +2658,21 @@ class MissionLogic:
         """앱(관리자) 취소 — ESTOPPED 만 빼고 어느 상태든 전부 정리하고
         IDLE (2026-08-31 사용자 결정). 음성 취소와 달리 게이트가 없다:
         관리자 버튼은 오인식이 없고, 접근 응대·도착 질문도 끊을 권한이 있다.
-        E-stop 래치만은 못 푼다(reset 경로 보호)."""
+        E-stop 래치만은 못 푼다(reset 경로 보호).
+
+        도움 요청은 맨 먼저, 거절돼도 끝낸다(2026-10-16 사용자 결정 3) — 비상 정지에 들어가면
+        보관한 목적지가 지워져 "다시 출발"이 안 들으므로 이 버튼이 도움 요청의 출구다.
+        거절일 때도 노드가 돌려준 행동(help_canceled)은 실행한다."""
+        ended = self._end_help()
         if self.estop_active or self.state == State.ESTOPPED:
-            return [], GateReason.ESTOP_ACTIVE
+            return ended, GateReason.ESTOP_ACTIVE
         if self.state == State.IDLE:
             # 끊긴 복귀 재개 사다리가 도는 중일 수 있다(2026-09-10 사용자
             # 결정) — 조용히 수락하는 척만 하고 사다리를 그대로 두면 18초
             # 뒤 로봇이 취소를 무시한 것처럼 보인다.
             self._forget_interrupted_return()
-            return [], GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
-        actions = self._force_clear_all(now)
+            return ended, GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
+        actions = [*ended, *self._force_clear_all(now)]
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
 
@@ -2680,6 +2728,14 @@ class MissionLogic:
         return actions, GateReason.OK
 
     def on_resume_request(self, nav_ready: bool, now: float) -> tuple:
+        """다시 출발. 성공하면 걸린 도움 요청을 끝낸다(설계 5.6절) — 음성 "다시 가자"는 관리자 확인
+        전에만 여기 오고(확인 뒤엔 _react_help 가 막는다), 앱 "다시 출발"은 확인 뒤에도 온다."""
+        actions, reason = self._resume_request(nav_ready, now)
+        if reason == GateReason.OK and self.help_phase != "none":
+            actions = [*actions, *self._end_help()]
+        return actions, reason
+
+    def _resume_request(self, nav_ready: bool, now: float) -> tuple:
         """다시 출발. 보관한 목적지로 새 goal 을 만든다.
 
         손 놓침으로 선 뒤의 재개는 두 길이다. 다시 잡아 자동으로(_handle_pause_tick)
@@ -2771,6 +2827,186 @@ class MissionLogic:
         if not affirmative:
             return [Say(MSG_CANCEL_KEPT, priority="response")]
         actions, _ = self.on_cancel_request(now)
+        return actions
+
+    # -- 관리자 호출(도움 요청, 2026-10-15 설계 · 10-16 사용자 결정) ------------------
+    #
+    # 안내 주행 중 LLM 이 help 로 판단 → "직원의 도움이 필요하신가요?" → 네 → 일시정지·앱 알림
+    # (확인까지 10초마다 같은 help_id) → 앱 확인(on_help_ack) → "관리자가 오고있습니다…".
+    # 확인 뒤엔 사용자 말로 움직이지 않는다 — 출발·종료는 관리자가 앱 버튼으로 한다.
+
+    @property
+    def help_active(self) -> bool:
+        """도움 요청을 보낸 뒤인가(관리자 확인 전·후). 확인 질문 중(asking)은 아니다."""
+        return self.help_phase in ("requested", "acknowledged")
+
+    def _react_help(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
+        """도움 요청이 걸린 음성 요청(설계 5.2절 순서 1~7). 맡지 않으면 None — 반응표·옛 갈래가 처리한다."""
+        kind = intent.intent
+        if self.help_phase == "asking" and self.state != State.NAVIGATING:
+            # 확인 질문 중 주행이 끝났다(도착·실패·비상 정지·앱 선점·잠깐) — 질문을 말없이 버린다
+            # (D2, 최소 버전 임시 결정). 이 "네"는 도움 요청을 만들지 않는다.
+            self._drop_help_question()
+        if self.help_cancel_pending:
+            if kind in ("affirm", "cancel", "finish"):       # 두 번째 취소도 "네"다(D6)
+                return [*self._end_help(notify_after_ack=True),
+                        Say(MSG_HELP_CANCELED, priority="response")]
+            if kind == "deny":
+                self._close_help_cancel()
+                return []
+            if kind == "unknown":                            # 한 번 다시 묻고 흘려보낸다(D7)
+                if not self._help_cancel_reasked:
+                    self._help_cancel_reasked = True
+                    return [self._ask(MSG_HELP_CANCEL_CONFIRM)]
+                return []
+        if self.help_phase == "asking":
+            if kind == "affirm":
+                return self._send_help(now)
+            if kind in ("deny", "cancel"):
+                self._drop_help_question()
+                return []
+            if kind == "unknown":
+                if not self._help_confirm_reasked:
+                    self._help_confirm_reasked = True
+                    return [self._ask(MSG_HELP_CONFIRM)]
+                return []
+        if kind == "help":
+            return self._on_help_intent(now)
+        if not self.help_active:
+            return None
+        if kind in ("cancel", "finish"):
+            # 도움 요청 중의 취소는 안내 취소가 아니라 도움 요청 취소다(R11).
+            self.help_cancel_pending = True
+            self._help_cancel_deadline = now + self.confirm_timeout_sec
+            self._help_cancel_reask_at = now + QUESTION_REASK_SEC
+            self._help_cancel_reasked = False
+            return [self._ask(MSG_HELP_CANCEL_CONFIRM)]
+        if kind == "navigate" and intent.need_confirm:
+            # 다른 목적지 제안 — 확인 질문은 음성이 이미 했다. 확인 상태로 넘어가지 않고 일시정지를
+            # 그대로 둔다(10-16 결정 1). 넘어가면 "아니요"·무응답에 _to_idle 이 보관한 목적지를 지워
+            # 관리자 앱의 "다시 출발"이 듣지 않는다.
+            return []
+        if kind in ("resume", "navigate") and self.help_phase == "acknowledged":
+            # 관리자가 오는 중 — 사용자 말로는 움직이지 않는다(R9). 출발·종료는 앱 버튼이 한다.
+            return [Say(MSG_HELP_COMING, priority="response")]
+        if kind == "navigate":
+            # 확인 전의 새 목적지 확정 = 다시 출발과 같다(D3). 못 가는 곳이면 이유만 말하고 일시정지·
+            # 도움 요청을 그대로 둔다 — 옛 길은 거절에 _to_idle 로 보관한 목적지를 지운다.
+            dest = lookup(intent.matched_destination_id)
+            reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
+            if reason != GateReason.OK:
+                msg = _REJECT_MESSAGES.get(reason)
+                return [Say(msg, priority="response")] if msg else []
+            actions = self.on_intent(intent, dest, bounds, nav_ready, now)
+            if self.state == State.NAVIGATING:
+                actions.extend(self._end_help())
+            return actions
+        # 확인 전의 "다시 가자"는 옛 길 그대로 다시 출발한다 — on_resume_request 가 도움 요청을 끝낸다(R10).
+        return None
+
+    def _on_help_intent(self, now: float) -> list:
+        """help 의도(5.3절). 안내 주행 중에만 묻고, 이미 보냈으면 새 요청을 만들지 않는다(D1)."""
+        if self.help_phase == "asking":
+            return []
+        if self.help_phase == "requested":
+            return [Say(MSG_HELP_SENT, priority="response")]
+        if self.help_phase == "acknowledged":
+            return [Say(MSG_HELP_COMING, priority="response")]
+        if self.state != State.NAVIGATING:
+            # 안내 주행이 아니면 일단 막아 둔 것임을 알린다(R2).
+            return [Say(MSG_HELP_UNAVAILABLE, priority="response")]
+        # 질문은 하나만 살린다 — 걸려 있던 "안내를 취소할까요?"는 닫는다. 주행은 그대로 간다(R3).
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
+        self.help_phase = "asking"
+        self._help_confirm_deadline = now + self.confirm_timeout_sec
+        self._help_confirm_reask_at = now + QUESTION_REASK_SEC
+        self._help_confirm_reasked = False
+        return [self._ask(MSG_HELP_CONFIRM)]
+
+    def _send_help(self, now: float) -> list:
+        """확인 질문에 "네"(R4) — 일시정지(목적지 보관, goal_paused) → "보냈습니다" → 첫 알림."""
+        self._drop_help_question()
+        actions, reason = self._enter_paused(now)
+        if reason != GateReason.OK:
+            return []
+        self._clear_handle_pause()
+        self.help_phase = "requested"
+        self.help_id = str(uuid.uuid4())
+        self._help_last_sent_at = now
+        actions.append(Say(MSG_HELP_SENT, priority="response"))
+        actions.append(HelpEvent("help_requested", self.help_id))
+        return actions
+
+    def on_help_ack(self, request_id: str, now: float) -> tuple:
+        """관리자가 앱에서 확인(/vica/mission/help_ack, 5.5절). (actions, 받았는가)를 돌려준다.
+        같은 요청을 두 번 눌러도 받되 말은 한 번만 한다."""
+        if self.help_id is None or request_id != self.help_id:
+            return [], False
+        if self.help_phase == "acknowledged":
+            return [], True
+        if self.help_phase != "requested":
+            return [], False
+        self.help_phase = "acknowledged"
+        self._help_last_sent_at = None
+        return [Say(MSG_HELP_COMING, priority="response"),
+                HelpEvent("help_acknowledged", self.help_id)], True
+
+    def _help_tick(self, now: float) -> list:
+        """도움 요청 시계(5.4절) — 미션 상태와 상관없이 본다. 비상 정지 중에도 재전송한다(D5)."""
+        actions: list = []
+        if self.help_phase == "asking":
+            if self.state != State.NAVIGATING:
+                self._drop_help_question()                   # D2
+            elif (not self._help_confirm_reasked and self._help_confirm_reask_at is not None
+                    and now >= self._help_confirm_reask_at and not self._ear_holds(now)):
+                self._help_confirm_reasked = True
+                self._help_confirm_deadline = max(self._help_confirm_deadline or now,
+                                                  now + QUESTION_REASK_SEC)
+                actions.append(self._ask(MSG_HELP_CONFIRM))
+            elif self._help_confirm_deadline is not None and now >= self._help_confirm_deadline:
+                self._drop_help_question()                   # 답이 없다 — 말없이 하던 일을 계속(R5)
+        elif self.help_phase == "requested" and self.help_id is not None:
+            # 밀린 만큼 몰아 보내지 않는다 — 늦은 틱이어도 한 번만.
+            if self._help_last_sent_at is None or now - self._help_last_sent_at >= HELP_RESEND_SEC:
+                self._help_last_sent_at = now
+                actions.append(HelpEvent("help_requested", self.help_id))
+        if self.help_cancel_pending:
+            if (not self._help_cancel_reasked and self._help_cancel_reask_at is not None
+                    and now >= self._help_cancel_reask_at and not self._ear_holds(now)):
+                self._help_cancel_reasked = True
+                self._help_cancel_deadline = max(self._help_cancel_deadline or now,
+                                                 now + QUESTION_REASK_SEC)
+                actions.append(self._ask(MSG_HELP_CANCEL_CONFIRM))
+            elif self._help_cancel_deadline is not None and now >= self._help_cancel_deadline:
+                self._close_help_cancel()                    # 답이 없으면 도움 요청은 그대로
+        return actions
+
+    def _drop_help_question(self) -> None:
+        """확인 질문(asking)을 말없이 접는다."""
+        self.help_phase = "none"
+        self._help_confirm_reask_at = None
+        self._help_confirm_deadline = None
+        self._help_confirm_reasked = False
+
+    def _close_help_cancel(self) -> None:
+        self.help_cancel_pending = False
+        self._help_cancel_reask_at = None
+        self._help_cancel_deadline = None
+        self._help_cancel_reasked = False
+
+    def _end_help(self, notify_after_ack: bool = False) -> list:
+        """도움 요청을 끝낸다(5.6절). 관리자 확인 전이면 앱 팝업이 닫히게 help_canceled 를 낸다.
+        확인 뒤엔 팝업이 이미 닫혀 있어 사용자가 직접 취소했을 때(notify_after_ack)만 알린다 —
+        오던 관리자가 알아야 한다."""
+        notify = self.help_id is not None and (
+            self.help_phase == "requested"
+            or (notify_after_ack and self.help_phase == "acknowledged"))
+        actions = [HelpEvent("help_canceled", self.help_id)] if notify else []
+        self._drop_help_question()
+        self._close_help_cancel()
+        self.help_id = None
+        self._help_last_sent_at = None
         return actions
 
     # -- 사람 접근 --------------------------------------------------------------
@@ -4274,6 +4510,9 @@ class MissionLogic:
                 and now - notice_at >= TIP_REPEAT_SEC):
             self._tip_notice_at = now
             actions.append(Say(MSG_TIPPED, priority="emergency"))
+
+        # 도움 요청 시계 — 확인 질문 다시 묻기·접기, 관리자 확인까지 10초마다 재전송.
+        actions.extend(self._help_tick(now))
 
         # 활성 주행 중 손 놓침(설계 4.3 (다)). 주행 결과가 이번 tick 에 나왔으면
         # 결과가 먼저다 — 도착한 순간 손을 뗀 것을 놓침으로 세우면 안 된다.

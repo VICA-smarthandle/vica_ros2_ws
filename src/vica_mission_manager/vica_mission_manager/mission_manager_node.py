@@ -60,7 +60,8 @@ from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
-from .ledger import Ledger, LedgerStore, apply_goal_event, confirm_abort_name, state_fields
+from .ledger import (Ledger, LedgerStore, apply_goal_event, confirm_abort_name, place_here,
+                     state_fields)
 from .map_meta import load_map_meta
 from .mission_logic import (
     APPROACH_TURN_YAW_DEG,
@@ -93,6 +94,7 @@ from .mission_logic import (
     WAIT_SPOT_BT_FILE,
     ApproachRequest,
     GoalEvent,
+    HelpEvent,
     CancelNav,
     Destination,
     GateReason,
@@ -679,6 +681,13 @@ class MissionManagerNode(Node):
             self._on_resume_request,
             callback_group=self._main_group,
         )
+        # 관리자 호출(도움 요청, 2026-10-15 설계): 앱 팝업의 "확인". request_id 가 확인할 help_id 다.
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/help_ack",
+            self._on_help_ack,
+            callback_group=self._main_group,
+        )
         # ── 사람 접근 (Phase B, 설계 3·5절) ────────────────────────────────
         # goal 권한의 경계다. person_detector_node 는 요청만 보내고, 좌표를
         # 계산해 Nav2 로 보내는 것은 여기뿐이다.
@@ -1023,6 +1032,9 @@ class MissionManagerNode(Node):
         before = self.logic.state
         actions, reason = self._run_mission_command(command)
         if reason != GateReason.OK:
+            # 거절이어도 로직이 돌려준 행동은 낸다 — 비상 정지 중 앱 취소가 끝낸 도움 요청의
+            # help_canceled(2026-10-16 결정 3). 다른 거절은 행동이 없다.
+            self._run_actions(actions)
             response.accepted = False
             response.message = f"{command} 요청 거부: {reason.value}"
             self.get_logger().warn(
@@ -1036,6 +1048,34 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"{command} 처리: {before.value} -> {self.logic.state.value}"
         )
+        return response
+
+    def _on_help_ack(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """관리자가 앱에서 도움 요청을 확인했다. request_id = 확인할 help_id(uuid4)."""
+        try:
+            request_id = str(UUID(request.request_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+        actions, accepted = self.logic.on_help_ack(request_id, self._now())
+        self._run_actions(actions)
+        response.accepted = accepted
+        if accepted:
+            response.message = "ok"
+        elif self.logic.help_id is None:
+            response.message = "no_active_help"
+        else:
+            response.message = "id_mismatch"
+        self.get_logger().info(f"도움 요청 확인: {request_id} → {response.message}")
         return response
 
     # -- 홈 위치 service (2026-08-26) --------------------------------------------
@@ -1933,11 +1973,29 @@ class MissionManagerNode(Node):
                     extra={"wait_place": action.wait_place,
                            "wait_minutes": action.wait_minutes})
                 self.get_logger().info(f"앱 알림: {action.event} {action.reason}")
+            elif isinstance(action, HelpEvent):
+                self._publish_help_event(action)
             elif isinstance(action, Haptic):
                 out = String()
                 out.data = action.pattern
                 self.pub_haptic.publish(out)
                 self.get_logger().info(f"진동 요청: {action.pattern}")
+
+    def _publish_help_event(self, action: HelpEvent) -> None:
+        """도움 요청 사건을 /vica_goal_event 로 낸다(목적지 칸은 빈 값). help_requested 는 보낼
+        때마다 그 순간의 위치를 싣는다 — place 는 상황판 place_here 와 같은 문장, robot_x·y 는
+        AMCL. 기존 x·y 는 목적지 좌표 칸이라 쓰지 않는다."""
+        extra: dict = {"help_id": action.help_id}
+        if action.event == "help_requested":
+            pose = self._robot_pose
+            place, _ = place_here(pose, self.destinations, self._pose_cov_xy)
+            extra.update({
+                "place": place,
+                "robot_x": pose.x if pose is not None else None,
+                "robot_y": pose.y if pose is not None else None,
+            })
+        self._publish_goal_event(action.event, None, extra=extra)
+        self.get_logger().info(f"앱 알림: {action.event} {action.help_id} {extra.get('place', '')}")
 
     def _publish_nav_speed_limit(self, percent: float) -> None:
         msg = SpeedLimit()
