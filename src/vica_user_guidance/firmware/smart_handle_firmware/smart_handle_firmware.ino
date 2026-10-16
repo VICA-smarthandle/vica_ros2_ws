@@ -34,14 +34,13 @@
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
 //        LED 표시는 모터 정지를 보장하지 않는다. 정지 권한은 Safety 계층에 있다.
 
-// 서보는 Adafruit_TiCoServo(2026-10-05). 표준 <Servo.h> 는 펄스 끝을 Timer1 인터럽트로
-// 내는데, 시계(millis)·시리얼·I2C 인터럽트가 그 순간과 겹치면 펄스가 몇 us 길어져
-// 대기 중에도 가끔 '틱' 했다(10-05 실물: LED 시간 창을 넣은 뒤에도 작게 남음).
-// TiCoServo 는 Timer1 하드웨어 PWM(OC1A = D9)이 펄스를 직접 만들어 인터럽트와 무관하다.
-// 나노에서는 D9·D10 만 쓸 수 있다(라이브러리 known_16bit_timers.h). attach/write 는
-// Servo.h 와 같고, write 값이 544 미만이면 각도로 읽는다.
-// 이것으로도 대기 중 틱이 남으면 원인은 전원·서보 자체 쪽이다 — 메모리 handle-servo-signal-policy.
-#include <Adafruit_TiCoServo.h>
+// 서보는 표준 <Servo.h>(2026-10-16 재배선으로 되돌림). 10-05~10-15 는 Adafruit_TiCoServo
+// (Timer1 하드웨어 PWM)였는데, 나노에서 TiCoServo 는 D9·D10 만 쓸 수 있다(known_16bit_timers.h).
+// 10-16 작업자 재배선으로 서보가 D8 이 되어 Servo.h(Timer1 인터럽트로 펄스 끝을 냄)로 돌아왔다.
+// 그래서 LED 는 아래 시간 창(ledShowSafe)에서만 갱신한다. 10-05 실물: 시간 창만으로는 대기 중
+// 작은 '틱'이 가끔 남았다 — 다시 거슬리면 서보를 D9/D10 으로 옮겨 TiCoServo 로(메모리
+// handle-servo-signal-policy).
+#include <Servo.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 
@@ -52,14 +51,14 @@
 
 // ── 나노 핀 (2026-10-05 하드웨어 인수인계 문서 2장) ─────────────────────────
 // 5V 보드라 서보·LED·터치·I2C 를 시프터 없이 직접 잇는다.
-// D10 은 Servo 라이브러리(Timer1) 때문에 analogWrite 가 꺼지지만, 네오픽셀은 디지털
+// D9·D10 은 Servo 라이브러리(Timer1) 때문에 analogWrite 가 꺼지지만, 네오픽셀은 디지털
 // 비트 신호라 상관없다(인수인계 문서). D0/D1 은 USB 시리얼, D13 은 보드 LED 라 비워 둔다.
-#define SERVO_PIN         9   // 서보 SG90 신호(주황선)
-// 좌우: 코드의 뜻은 A=왼쪽·B=오른쪽이다. 2026-10-05 실물 확인 — "왼쪽"(코드 1)에서 서보는
-// 왼쪽인데 물결이 D12 줄(오른쪽)로 흘렀다. 그래서 핀만 맞바꿨다: D10 = 왼쪽 줄, D12 = 오른쪽 줄.
-// (인수인계 문서의 "A=D12·B=D10" 은 작업자 시험 펌웨어의 이름이고 좌우와 무관하다.)
-#define LED_A_PIN        10   // 네오픽셀 왼쪽 줄 데이터 (330~470Ω 직렬)
-#define LED_B_PIN        12   // 네오픽셀 오른쪽 줄 데이터
+// 2026-10-16 작업자 재배선(사용자 전달): LED 왼쪽 D9·오른쪽 D11, 서보 D8, 진동 D6, 터치 D2.
+// 이전(10-05): 서보 D9, LED 왼쪽 D10·오른쪽 D12, 진동 D7.
+#define SERVO_PIN         8   // 서보 SG90 신호(주황선)
+// 좌우: 코드의 뜻은 A=왼쪽·B=오른쪽이다(10-05 실물 확인한 뜻 그대로).
+#define LED_A_PIN         9   // 네오픽셀 왼쪽 줄 데이터 (330~470Ω 직렬)
+#define LED_B_PIN        11   // 네오픽셀 오른쪽 줄 데이터
 // I2C 는 나노 고정 핀 A4(SDA)·A5(SCL). Wire.begin() 이 알아서 잡는다. 풀업 3.3kΩ 은 버스에 하나.
 // 서보 펄스폭. 나노 Servo.h 기본값과 같은 값을 명시해 각도 해석이 바뀌지 않게 한다.
 #define SERVO_US_MIN    544
@@ -106,7 +105,7 @@
 // ── 워치독: 이 시간 동안 신호 없으면 통신두절로 판단 ──
 #define WATCHDOG_TIMEOUT_MS  1500
 
-Adafruit_TiCoServo myServo;
+Servo myServo;
 Adafruit_NeoPixel ledA(NUM_LEDS_A, LED_A_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel ledB(NUM_LEDS_B, LED_B_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -322,7 +321,7 @@ unsigned long touchSentAt  = 0;
 //
 // 패턴은 논블로킹이다. delay() 를 쓰면 서보·LED·초음파·워치독이 그 시간 동안
 // 멈춘다.
-#define HAPTIC_PIN             7   // 2026-10-05 나노: L9110 A-IA(A-IB=GND, 10kΩ 풀다운). 켜기/끄기만
+#define HAPTIC_PIN             6   // 2026-10-16 재배선 D7→D6: L9110 A-IA(A-IB=GND). 켜기/끄기만
 #define HAPTIC_CMD_SHORT      0x10   // 300ms on/150ms off x3 (도착 패턴)
 #define HAPTIC_CMD_LONG       0x11   // 1200ms x1 (손잡이 찾기·비상 패턴)
 #define HAPTIC_CMD_TICK       0x12   // 300ms x1 (잡음 확인, 2026-09-30)
@@ -657,14 +656,14 @@ void usTask(unsigned long now) {
 // ── LED 갱신 시간 창 (2026-10-05) ──────────────────────────────────────────
 // show() 는 LED 1개당 약 30us 동안 인터럽트를 끈다(줄당 21개 ≈ 0.63ms). 표준 Servo.h 는
 // 서보 펄스를 Timer1 인터럽트로 끝내므로, 그 순간 show() 가 돌고 있으면 펄스가 길어져
-// 서보가 움찔한다. TiCoServo(하드웨어 PWM)로 바꾼 뒤에는 꼭 필요하진 않지만, 기다림이
-// 길어야 약 4ms 라 해가 없고 Servo.h 로 되돌릴 때를 대비해 남겨 둔다. 그래서 서보 펄스가 이미 끝나고 다음 펄스가 시작되기 전 구간에서만
+// 서보가 움찔한다(2026-10-16 서보 D8 재배선으로 다시 Servo.h — 이 창이 다시 필수다).
+// 그래서 서보 펄스가 이미 끝나고 다음 펄스가 시작되기 전 구간에서만
 // show() 한다. Timer1 은 0.5us 단위로 0→40000(20ms) 을 센다(Servo.h·TiCoServo 둘 다 프리스케일 8):
 //   5200 (2.6ms)  = 가장 긴 펄스 2400us 가 끝난 뒤
 //   37600(18.8ms) = 0.6ms 짜리 show() 가 다음 주기 시작(40000) 전에 끝나는 마지막 지점
 // 창은 20ms 중 약 16ms 라 기다림은 길어야 약 4ms — 30ms 주기 물결엔 보이지 않는다.
 // 작업자 touch_test(2026-10-05) 에서 실물 검증된 방식이다. 이것으로도 서보가 움찔하면
-// TiCoServo(하드웨어 PWM, D9 그대로) 로 바꾼다 — 메모리 handle-servo-signal-policy.
+// 서보를 D9/D10 으로 옮겨 TiCoServo(하드웨어 PWM)로 바꾼다 — 메모리 handle-servo-signal-policy.
 #define LED_SAFE_TCNT_MIN   5200
 #define LED_SAFE_TCNT_MAX  37600
 #define LED_SAFE_WAIT_US   25000   // 서보가 안 붙어 Timer1 이 멈춰 있을 때의 안전 탈출
