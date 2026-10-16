@@ -2865,6 +2865,11 @@ class MissionLogic:
             if kind in ("deny", "cancel"):
                 self._drop_help_question()
                 return []
+            if kind == "finish":
+                # "다 됐어"는 아래 옛 갈래가 "안내를 취소할까요?"로 되묻는다 — 질문은 하나만 살린다.
+                # 도움 질문을 남기면 그 취소 질문의 "네"가 도움 요청으로 잡힌다(10-16 검토).
+                self._drop_help_question()
+                return None
             if kind == "unknown":
                 if not self._help_confirm_reasked:
                     self._help_confirm_reasked = True

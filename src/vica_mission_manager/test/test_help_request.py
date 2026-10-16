@@ -118,6 +118,16 @@ def test_t5_silence_reasks_once_then_drops():
     assert logic.help_phase == "none" and logic.state == State.NAVIGATING
 
 
+def test_finish_during_question_drops_it_before_the_cancel_question():
+    """질문은 하나만 살린다 — "다 됐어"에 "안내를 취소할까요?"가 나가면 도움 질문은 접힌다. 안 접으면
+    그 취소 질문의 "네"가 도움 요청으로 잡혀 로봇이 서고 관리자를 부른다(10-16 검토 1)."""
+    logic, t = asking_help()
+    assert _says(_voice(logic, "finish", t)) == [MSG_CANCEL_CONFIRM]
+    assert logic.help_phase == "none"
+    acts = _voice(logic, "affirm", t + 1.0)
+    assert _helps(acts) == [] and logic.state == State.IDLE
+
+
 def test_unknown_answer_reasks_once_then_lets_go():
     logic, t = asking_help()
     assert _voice(logic, "unknown", t) == [Say(MSG_HELP_CONFIRM, priority="response",
