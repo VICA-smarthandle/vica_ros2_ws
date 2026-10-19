@@ -51,7 +51,7 @@ STATE_NAMES = {
 SEND_HZ = 10.0  # ROS 드라이버 노드와 동일한 주기
 
 # 햅틱 수동 명령 (smart_handle_firmware.ino HAPTIC_CMD_* / protocol.py 와 일치).
-# 상태코드가 아니라 applyState() 를 거치지 않는다 — LED·서보는 그대로, D10 의
+# 상태코드가 아니라 applyState() 를 거치지 않는다 — LED·서보는 그대로, D6 의
 # 진동모터만 패턴대로 한 번 떨린다. 드라이버 노드는 이 바이트를 보내지 않는다.
 HAPTIC_CMDS = {
     "short": (0x10, "300ms on/150ms off x3 — 도착 패턴"),

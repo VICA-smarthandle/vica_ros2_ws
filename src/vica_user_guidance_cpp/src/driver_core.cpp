@@ -63,7 +63,7 @@ DriverCore::DriverCore(const DriverParams & params, DriverIo & io, SerialFactory
   us_enabled_ = p_.ultrasonic_enabled;
   if (us_enabled_) {setup_ultrasonic();}
   if (touch_enabled_) {
-    io_.log(LogLevel::Info, "Touch sensor uplink enabled (D11, active-low, firmware 200ms bridge)");
+    io_.log(LogLevel::Info, "Touch sensor uplink enabled (D2, active-low, firmware 200ms bridge)");
   }
   if (us_enabled_ || touch_enabled_) {uplink_period_ns_ = timer_period_ns(p_.uplink_rate_hz);}
 
