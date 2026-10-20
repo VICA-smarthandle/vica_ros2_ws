@@ -34,13 +34,14 @@
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
 //        LED 표시는 모터 정지를 보장하지 않는다. 정지 권한은 Safety 계층에 있다.
 
-// 서보는 표준 <Servo.h>(2026-10-16 재배선으로 되돌림). 10-05~10-15 는 Adafruit_TiCoServo
-// (Timer1 하드웨어 PWM)였는데, 나노에서 TiCoServo 는 D9·D10 만 쓸 수 있다(known_16bit_timers.h).
-// 10-16 작업자 재배선으로 서보가 D8 이 되어 Servo.h(Timer1 인터럽트로 펄스 끝을 냄)로 돌아왔다.
-// 그래서 LED 는 아래 시간 창(ledShowSafe)에서만 갱신한다. 10-05 실물: 시간 창만으로는 대기 중
-// 작은 '틱'이 가끔 남았다 — 다시 거슬리면 서보를 D9/D10 으로 옮겨 TiCoServo 로(메모리
-// handle-servo-signal-policy).
-#include <Servo.h>
+// 서보는 Adafruit_TiCoServo(Timer1 하드웨어 PWM). 표준 <Servo.h> 는 펄스 끝을 Timer1 인터럽트의
+// digitalWrite 로 내서, 시계(millis)·시리얼·I2C 인터럽트가 겹치면 펄스가 몇 us 길어져 대기 중에도
+// 가끔 '틱' 한다. TiCoServo 는 타이머 하드웨어가 펄스를 직접 만들어 인터럽트와 무관하다.
+// 나노에서는 D9(OC1A)·D10(OC1B) 만 쓸 수 있다(라이브러리 known_16bit_timers.h).
+// 이력: 10-05~10-15 TiCoServo(D9) → 10-16 재배선으로 서보 D8 이 되어 Servo.h → 대기 틱 재발(10-20)
+// → 10-20 작업자가 서보를 D10 으로 옮겨 TiCoServo 로 돌아옴. attach/write 는 Servo.h 와 같다.
+// 이것으로도 대기 중 틱이 남으면 원인은 전원·서보 자체 쪽이다 — 메모리 handle-servo-signal-policy.
+#include <Adafruit_TiCoServo.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 
@@ -51,11 +52,13 @@
 
 // ── 나노 핀 (2026-10-05 하드웨어 인수인계 문서 2장) ─────────────────────────
 // 5V 보드라 서보·LED·터치·I2C 를 시프터 없이 직접 잇는다.
-// D9·D10 은 Servo 라이브러리(Timer1) 때문에 analogWrite 가 꺼지지만, 네오픽셀은 디지털
-// 비트 신호라 상관없다(인수인계 문서). D0/D1 은 USB 시리얼, D13 은 보드 LED 라 비워 둔다.
+// D9·D10 은 서보 라이브러리(Timer1) 때문에 analogWrite 가 꺼지지만, 네오픽셀은 디지털
+// 비트 신호라 상관없다(인수인계 문서). TiCoServo 는 붙인 핀(D10 = OC1B)의 출력만 켜므로
+// D9 의 왼쪽 LED 는 보통 핀 그대로다. D0/D1 은 USB 시리얼, D13 은 보드 LED 라 비워 둔다.
 // 2026-10-16 작업자 재배선(사용자 전달): LED 왼쪽 D9·오른쪽 D11, 서보 D8, 진동 D6, 터치 D2.
+// 2026-10-20 서보만 D8 → D10(TiCoServo 하드웨어 PWM 핀, 대기 틱 없애기).
 // 이전(10-05): 서보 D9, LED 왼쪽 D10·오른쪽 D12, 진동 D7.
-#define SERVO_PIN         8   // 서보 SG90 신호(주황선)
+#define SERVO_PIN        10   // 서보 SG90 신호(주황선)
 // 좌우: 코드의 뜻은 A=왼쪽·B=오른쪽이다(10-05 실물 확인한 뜻 그대로).
 #define LED_A_PIN         9   // 네오픽셀 왼쪽 줄 데이터 (330~470Ω 직렬)
 #define LED_B_PIN        11   // 네오픽셀 오른쪽 줄 데이터
@@ -105,7 +108,7 @@
 // ── 워치독: 이 시간 동안 신호 없으면 통신두절로 판단 ──
 #define WATCHDOG_TIMEOUT_MS  1500
 
-Servo myServo;
+Adafruit_TiCoServo myServo;
 Adafruit_NeoPixel ledA(NUM_LEDS_A, LED_A_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel ledB(NUM_LEDS_B, LED_B_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -656,14 +659,14 @@ void usTask(unsigned long now) {
 // ── LED 갱신 시간 창 (2026-10-05) ──────────────────────────────────────────
 // show() 는 LED 1개당 약 30us 동안 인터럽트를 끈다(줄당 21개 ≈ 0.63ms). 표준 Servo.h 는
 // 서보 펄스를 Timer1 인터럽트로 끝내므로, 그 순간 show() 가 돌고 있으면 펄스가 길어져
-// 서보가 움찔한다(2026-10-16 서보 D8 재배선으로 다시 Servo.h — 이 창이 다시 필수다).
-// 그래서 서보 펄스가 이미 끝나고 다음 펄스가 시작되기 전 구간에서만
+// 서보가 움찔한다. TiCoServo(하드웨어 PWM)로는 꼭 필요하진 않지만, 기다림이 길어야 약 4ms 라
+// 해가 없고 Servo.h 로 되돌릴 때를 대비해 남겨 둔다. 그래서 서보 펄스가 이미 끝나고 다음 펄스가 시작되기 전 구간에서만
 // show() 한다. Timer1 은 0.5us 단위로 0→40000(20ms) 을 센다(Servo.h·TiCoServo 둘 다 프리스케일 8):
 //   5200 (2.6ms)  = 가장 긴 펄스 2400us 가 끝난 뒤
 //   37600(18.8ms) = 0.6ms 짜리 show() 가 다음 주기 시작(40000) 전에 끝나는 마지막 지점
 // 창은 20ms 중 약 16ms 라 기다림은 길어야 약 4ms — 30ms 주기 물결엔 보이지 않는다.
 // 작업자 touch_test(2026-10-05) 에서 실물 검증된 방식이다. 이것으로도 서보가 움찔하면
-// 서보를 D9/D10 으로 옮겨 TiCoServo(하드웨어 PWM)로 바꾼다 — 메모리 handle-servo-signal-policy.
+// 서보를 D9/D10 에 두고 TiCoServo(하드웨어 PWM)를 쓴다 — 메모리 handle-servo-signal-policy.
 #define LED_SAFE_TCNT_MIN   5200
 #define LED_SAFE_TCNT_MAX  37600
 #define LED_SAFE_WAIT_US   25000   // 서보가 안 붙어 Timer1 이 멈춰 있을 때의 안전 탈출
