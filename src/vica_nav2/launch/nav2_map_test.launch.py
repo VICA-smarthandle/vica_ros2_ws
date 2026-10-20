@@ -4,16 +4,30 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, SetRemap
 from nav2_common.launch import RewrittenYaml
+
+
+def select_bt_expression(route_bt, active_bt):
+    """use_route:=true **이고 레일 파일이 있을 때만** 레일 트리를 고른다."""
+    return PythonExpression([
+        "'", route_bt, "' if ('", LaunchConfiguration("use_route"),
+        "'.lower() in ('true', '1') and __import__('os').path.isfile(('",
+        LaunchConfiguration("route_graph"),
+        "'.strip()) or __import__('os').path.splitext('",
+        LaunchConfiguration("map"),
+        "')[0] + '_route.geojson')) else '", active_bt, "'",
+    ])
 
 
 def generate_launch_description():
@@ -28,6 +42,12 @@ def generate_launch_description():
         "behavior_trees",
         "vica_navigate_to_pose_no_backup.xml",
     )
+    route_bt = os.path.join(
+        vica_nav2_dir,
+        "behavior_trees",
+        "vica_navigate_to_pose_route.xml",
+    )
+    selected_bt = select_bt_expression(route_bt, active_bt)
     wheel_ekf_launch = os.path.join(
         vica_localization_dir,
         "launch",
@@ -46,9 +66,56 @@ def generate_launch_description():
     configured_params = RewrittenYaml(
         source_file=params_file,
         root_key="",
-        param_rewrites={"default_nav_to_pose_bt_xml": active_bt},
+        param_rewrites={"default_nav_to_pose_bt_xml": selected_bt},
         convert_types=True,
     )
+
+    def route_actions(context):
+        """레일(Route Server)을 띄운다. use_route:=true 이고 파일이 있을 때만."""
+        if LaunchConfiguration("use_route").perform(context).lower() not in (
+            "true", "1",
+        ):
+            return []
+
+        explicit = LaunchConfiguration("route_graph").perform(context).strip()
+        if explicit:
+            graph = explicit
+        else:
+            map_path = LaunchConfiguration("map").perform(context)
+            stem = os.path.splitext(os.path.basename(map_path))[0]
+            graph = os.path.join(os.path.dirname(map_path), f"{stem}_route.geojson")
+
+        if not os.path.isfile(graph):
+            return [
+                LogInfo(msg=f"[route] **레일 파일이 없다**: {graph}"),
+                LogInfo(msg="[route] scripts/vica_route_graph.py <지도> 로 만든다. "
+                            "지금은 레일 없이(자유 주행) 달린다."),
+            ]
+
+        return [
+            LogInfo(msg=f"[route] 레일을 적용한다: {graph}"),
+            Node(
+                package="nav2_route",
+                executable="route_server",
+                name="route_server",
+                output="screen",
+                parameters=[configured_params, {"graph_filepath": graph}],
+                remappings=[("plan", "/rail_plan")],
+                respawn=False,
+            ),
+            Node(
+                package="nav2_lifecycle_manager",
+                executable="lifecycle_manager",
+                name="lifecycle_manager_route",
+                output="screen",
+                parameters=[
+                    {"use_sim_time": use_sim_time},
+                    {"autostart": True},
+                    {"node_names": ["route_server"]},
+                ],
+                respawn=False,
+            ),
+        ]
 
     def keepout_actions(context):
         """금지구역 마스크 서버 두 개를 띄운다. 마스크 파일이 있을 때만 띄운다."""
@@ -71,6 +138,19 @@ def generate_launch_description():
                     )
                 )
             ]
+
+        keepout_rescue_sh = (
+            "for n in keepout_filter_mask_server keepout_costmap_filter_info_server; do "
+            "st=$(ros2 lifecycle get \"/$n\" 2>&1 | head -n 1 | awk '{print $1}'); "
+            "case \"$st\" in "
+            "active) echo \"[keepout] $n: 이미 active, 할 일 없음\";; "
+            "unconfigured) echo \"[keepout] $n: unconfigured, configure+activate 시킨다\"; "
+            "ros2 lifecycle set \"/$n\" configure && ros2 lifecycle set \"/$n\" activate;; "
+            "inactive) echo \"[keepout] $n: inactive, activate 시킨다\"; "
+            "ros2 lifecycle set \"/$n\" activate;; "
+            "*) echo \"[keepout] $n: 상태를 못 읽었다: $st\";; "
+            "esac; done"
+        )
 
         return [
             LogInfo(msg=f"[keepout] 마스크를 적용한다: {keepout_yaml}"),
@@ -107,6 +187,17 @@ def generate_launch_description():
                 ],
                 respawn=False,
             ),
+            TimerAction(
+                period=12.0,
+                actions=[
+                    ExecuteProcess(
+                        cmd=["bash", "-c", keepout_rescue_sh],
+                        name="keepout_rescue",
+                        output="screen",
+                        shell=False,
+                    ),
+                ],
+            ),
         ]
 
     return LaunchDescription([
@@ -117,6 +208,21 @@ def generate_launch_description():
             description=(
                 "금지구역 마스크 YAML. 비우면 map 인자에서 <이름>_keepout.yaml 을 "
                 "찾고, 그 파일이 없으면 금지구역 없이 실행한다."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "use_route",
+            default_value="false",
+            description=(
+                "레일(Route Server)을 쓴다. 켜면 BT 도 레일 트리로 함께 바뀐다. "
+                "레일 파일은 scripts/vica_route_graph.py 로 만든다."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "route_graph",
+            default_value="",
+            description=(
+                "레일 GeoJSON. 비우면 map 인자에서 <이름>_route.geojson 을 찾는다."
             ),
         ),
         DeclareLaunchArgument("params_file", default_value=default_params),
@@ -174,6 +280,7 @@ def generate_launch_description():
             respawn=False,
         ),
         OpaqueFunction(function=keepout_actions),
+        OpaqueFunction(function=route_actions),
         GroupAction(
             actions=[
                 SetRemap(
@@ -211,6 +318,21 @@ def generate_launch_description():
                         {"node_names": ["collision_monitor"]},
                     ],
                     respawn=False,
+                ),
+                TimerAction(
+                    period=12.0,
+                    actions=[
+                        ExecuteProcess(
+                            cmd=[
+                                "ros2", "service", "call",
+                                "/lifecycle_manager_collision_monitor/manage_nodes",
+                                "nav2_msgs/srv/ManageLifecycleNodes",
+                                "{command: 0}",
+                            ],
+                            output="screen",
+                            shell=False,
+                        ),
+                    ],
                 ),
             ],
         ),

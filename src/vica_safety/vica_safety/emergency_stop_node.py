@@ -5,6 +5,7 @@ import rclpy
 from diagnostic_updater import Updater
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
@@ -69,7 +70,7 @@ def describe_latch_transition(old: str, new: str) -> tuple[str, str]:
 
 
 class EmergencyStopNode(Node):
-    """Latch physical, app, and voice E-stop sources into one ROS state."""
+    """Latch physical, app, voice, and tip-over E-stop sources into one ROS state."""
 
     def __init__(self) -> None:
         super().__init__("emergency_stop_node")
@@ -167,6 +168,16 @@ class EmergencyStopNode(Node):
             self.motor_can_callback,
             10,
         )
+        self.create_subscription(
+            Bool,
+            "/vica/tipped",
+            self.tipped_callback,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+        )
         self.create_service(
             Trigger,
             "/vica_safety/internal/estop_reset",
@@ -195,7 +206,7 @@ class EmergencyStopNode(Node):
         )
         self.get_logger().info(
             "Subscribed: /app_emergency_stop, /voice_emergency_stop, "
-            "/motor/can_ok"
+            "/motor/can_ok, /vica/tipped"
         )
         self.get_logger().info(
             "Publishing central latch: /emergency_stop, /estop_state, "
@@ -240,6 +251,10 @@ class EmergencyStopNode(Node):
     def voice_estop_callback(self, msg: Bool) -> None:
         """Update the voice source without granting reset authority to false."""
         self.latch.update_source("voice", bool(msg.data), self.now_ns())
+
+    def tipped_callback(self, msg: Bool) -> None:
+        """Latch on a body tip-over; false (stood up) only releases the input."""
+        self.latch.update_source("tipped", bool(msg.data), self.now_ns())
 
     def test_input_callback(self, msg: Bool) -> None:
         """Use the test topic as the physical source only in explicit test mode."""

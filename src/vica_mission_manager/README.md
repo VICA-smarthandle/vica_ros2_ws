@@ -7,6 +7,7 @@ Nav2 `NavigateToPose` Goal을 생성한다.
 
 - LLM·앱·`vica_goto_goal.py`는 Nav2 Goal을 직접 발행하지 않는다.
 - 공개 요청 서비스는 `/vica/mission/request_destination`이다.
+- 물류 배송 요청은 `/vica/mission/request_delivery`다. 요청 모양은 같고 `private` 목적지만 추가로 허용한다. 접근 가능·지도 경계·Nav2·E-stop 검사는 그대로다.
 - 요청의 `destination_id`는 현재 지도 catalog에 존재하는 UUID v4여야 한다.
 - `authorization != public` 또는 `is_approachable == false`인 목적지는 거부한다.
 - E-stop 해제 뒤 이전 Goal을 자동 재개하지 않는다.
@@ -19,6 +20,7 @@ Nav2 `NavigateToPose` Goal을 생성한다.
 | 구독 | `/vica/emergency` | `vica_interfaces/msg/EmergencyEvent` |
 | 구독 | `/emergency_stop` | `std_msgs/msg/Bool` |
 | 서비스 | `/vica/mission/request_destination` | `vica_interfaces/srv/RequestDestination` |
+| 서비스 | `/vica/mission/request_delivery` | `vica_interfaces/srv/RequestDestination` (물류 배송 전용, `private` 허용) |
 | 서비스 | `/vica/mission/reload_destinations` | `std_srvs/srv/Trigger` |
 | 발행 | `/vica_goal_event` | `std_msgs/msg/String` JSON |
 | 발행 | `/vica/tts_request` | `std_msgs/msg/String` |
@@ -58,9 +60,19 @@ parameter(double 배열, 순번끼리 짝)로 조정한다. 단계 개수도 바
 
 ```text
 ~/vica_data/destinations/<map_id>/destinations.yaml
+~/vica_data/destinations/<map_id>/map.yaml
+~/vica_data/destinations/<map_id>/ledger.json
+~/vica_data/destinations/<map_id>/home.yaml
 ```
 
-파일이 아직 없으면 빈 catalog로 시작한다. 기존 `locations.json`이나
+| 파일 | 역할 |
+|---|---|
+| `destinations.yaml` | 목적지 catalog. 미션이 읽는다 |
+| `map.yaml` | 건물·층 한 줄(`building`, `floor`). 미션이 읽어 `/vica/robot_state` 로 방송. 없으면 층 -1 |
+| `ledger.json` | 로봇 대장(직전 도착·하려다 만 곳). 미션이 쓴다. 손으로 고치지 않는다 |
+| `home.yaml` | 홈 위치. 도착 후 자동 복귀 시 쓴다. 없으면 복귀를 끈다 |
+
+파일이 없으면 빈 catalog로 시작한다(destinations.yaml 제외). 기존 `locations.json`이나
 `vica-voice-llm/config/destinations.yaml`은 자동 이관하지 않는다.
 
 ## 실행

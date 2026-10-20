@@ -6,15 +6,17 @@ import pytest
 from vica_mission_manager.mission_logic import (
     APPROACH_TURN_TIMEOUT_SEC,
     APPROACH_QUESTION_STUCK_SEC,
+    APPROACH_REASK_MAX,
     HAPTIC_PATTERN_HANDLE_HINT,
     Haptic,
     SpinInPlace,
     StopSpeech,
     MSG_APPROACH_QUESTION,
+    MSG_APPROACH_REASK,
     MSG_APPROACH_ACCEPTED,
     MSG_APPROACH_DECLINED,
-    MSG_APPROACH_NO_ANSWER,
     MSG_APPROACH_ONBOARDING,
+    MSG_APPROACH_UNANSWERED,
     MSG_HANDLE_HINT,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -214,8 +216,12 @@ class TestTransitions:
         assert any(isinstance(a, Navigate) for a in actions)
 
     def test_confirm_timeout_30s(self):
+        """15초 조용하면 같은 질문을 한 번 더(2026-10-08 다시 묻기), 30초면 접는다."""
         logic = MissionLogic(confirm_timeout_sec=30.0)
         logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        reask = logic.on_tick(15.0, NavStatus.NONE)
+        assert [a.text for a in reask if isinstance(a, Say)] == [
+            "윤지영 교수님 사무실로 안내해드릴까요?"]
         assert logic.on_tick(29.9, NavStatus.NONE) == []
         assert logic.state == State.CONFIRMING
         actions = logic.on_tick(30.0, NavStatus.NONE)
@@ -264,7 +270,8 @@ class TestTransitions:
         assert logic.state != State.NAVIGATING
         assert not any(isinstance(a, Navigate) for a in actions)
 
-    def test_stale_confirm_different_dest_rejected(self):
+    def test_stale_confirm_different_dest_asks_again(self):
+        """확인 질문 중 다른 목적지를 확정하면 그 목적지로 다시 묻는다(2026-10-08 결정 4)."""
         logic = MissionLogic()
         logic.on_intent(
             make_intent(need_confirm=True, matched_destination_id="restroom"),
@@ -272,17 +279,22 @@ class TestTransitions:
         )
         actions = logic.on_intent(make_intent(matched_destination_id="room_407"),
                                   make_dest(), BOUNDS, True, 5.0)
-        assert logic.state == State.IDLE
-        assert not any(isinstance(a, Say) for a in actions)
+        assert logic.state == State.CONFIRMING and logic.confirming_dest_id == "room_407"
+        assert [a.text for a in actions if isinstance(a, Say)] == [
+            "네, 윤지영 교수님 사무실로 안내해드릴까요?"]
         assert not any(isinstance(a, Navigate) for a in actions)
 
-    def test_navigating_rejects_new_navigate(self):
+    def test_navigating_confirmed_request_stops_and_asks(self):
+        """주행 중 다른 목적지 확정 요청 — 거절(옛 v1 MSG_BUSY) 대신 멈추고 묻는다"""
         logic = MissionLogic()
         start_navigation(logic)
         actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
-                                  make_dest(id="restroom"), BOUNDS, True, 1.0)
-        assert logic.state == State.NAVIGATING
-        assert actions and isinstance(actions[0], Say)
+                                  make_dest(id="restroom", name="화장실"), BOUNDS, True, 1.0)
+        assert logic.state == State.CONFIRMING
+        assert any(isinstance(a, CancelNav) and a.event == "goal_paused" for a in actions)
+        asks = [a for a in actions if isinstance(a, Say)]
+        assert [a.text for a in asks] == ["화장실로 안내해드릴까요?"]
+        assert asks[0].expects_reply and asks[0].priority == "response"
 
     def test_nav_success_arrival_message_then_idle(self):
         logic = MissionLogic(dwell_sec=2.0)
@@ -426,10 +438,11 @@ class TestEmergency:
 
     def test_reject_say_has_response_priority(self):
         logic = MissionLogic()
-        start_navigation(logic)
+        logic.on_app_destination(make_dest(), BOUNDS, True, 0.0)
+        assert logic.state == State.NAVIGATING
         actions = logic.on_intent(make_intent(matched_destination_id="restroom"),
                                   make_dest(id="restroom"), BOUNDS, True, 1.0)
-        assert actions[0].priority == "response"
+        assert actions and actions[0].priority == "response"
 
     def test_start_and_arrival_say_are_narration(self):
         logic = MissionLogic()
@@ -554,6 +567,75 @@ class TestPauseResumeCancel:
         assert reason == GateReason.NOT_PAUSED
 
 
+class TestPauseDuringHomeReturn:
+    """관리자 홈 복귀도 앱 버튼으로 멈췄다 다시 보낼 수 있다 (2026-09-03)."""
+
+    def _start_home_return(self):
+        logic = MissionLogic(return_destination=make_home())
+        accepted, _, _ = logic.on_return_home_request(True, 0.0)
+        assert accepted and logic.state == State.RETURNING
+        return logic
+
+    def test_pause_then_resume_stays_a_home_return(self):
+        logic = self._start_home_return()
+        actions, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.PAUSED
+        assert logic.paused_destination is logic.return_destination
+        cancels = [a for a in actions if isinstance(a, CancelNav)]
+        assert cancels and cancels[0].event == "goal_paused"
+
+        actions, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.RETURNING
+        assert logic._returning_home is True
+        navigate = [a for a in actions if isinstance(a, Navigate)]
+        assert len(navigate) == 1
+        assert navigate[0].destination is logic.return_destination
+        assert logic.paused_destination is None
+        assert not [a for a in actions if isinstance(a, Say)]
+
+        logic.on_tick(3.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        assert logic._suppressed_tracks == {}
+
+    def test_pause_is_refused_for_auto_return_after_approach(self):
+        logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
+        logic._enter_returning(0.0)
+        assert logic.state == State.RETURNING and logic._returning_home is False
+        _, reason = logic.on_pause_request(1.0)
+        assert reason == GateReason.NOT_NAVIGATING
+        assert logic.state == State.RETURNING
+
+    def test_estop_while_paused_drops_the_home_return(self):
+        logic = self._start_home_return()
+        logic.on_pause_request(1.0)
+        logic.on_estop(True, 2.0)
+        assert logic.paused_destination is None
+        assert logic._paused_returning_home is False
+        logic.on_estop(False, 3.0)
+        logic.on_tick(10.0, NavStatus.NONE)
+        _, reason = logic.on_resume_request(True, 11.0)
+        assert reason == GateReason.NOT_PAUSED
+
+    def test_cancel_while_paused_goes_idle_and_forgets_home_return(self):
+        logic = self._start_home_return()
+        logic.on_pause_request(1.0)
+        _, reason = logic.on_app_cancel(2.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert logic._paused_returning_home is False
+        assert logic._returning_home is False
+
+    def test_plain_navigation_pause_is_unchanged(self):
+        logic = MissionLogic()
+        start_navigation(logic)
+        logic.on_pause_request(1.0)
+        assert logic._paused_returning_home is False
+        _, reason = logic.on_resume_request(True, 2.0)
+        assert reason == GateReason.OK and logic.state == State.NAVIGATING
+
+
 class TestVoiceCancelConfirm:
     """음성 취소는 잘못 알아들으면 안내가 끊기므로 되물어 확인한다."""
 
@@ -602,6 +684,8 @@ class TestVoiceCancelConfirm:
         logic = MissionLogic()
         start_navigation(logic)
         logic.on_cancel_confirm_request(1.0)
+        reask = logic.on_tick(16.0, NavStatus.RUNNING)
+        assert [a.text for a in reask if isinstance(a, Say)] == ["안내를 취소할까요?"]
         logic.on_tick(1.0 + logic.confirm_timeout_sec + 0.1, NavStatus.RUNNING)
         assert logic.cancel_confirm_pending is False
         assert logic.state == State.NAVIGATING
@@ -774,7 +858,7 @@ class TestApproachTransitions:
         assert limits and limits[0].percent == 0.0
 
     def test_yes_turns_handle_toward_person(self):
-        """수락하면 180도 돌아 핸들을 사람 쪽으로 낸다 (2026-08-24 범위 확장)."""
+        """수락하면 돌아 핸들을 사람 쪽으로 낸다 (2026-08-24 범위 확장)."""
         logic = MissionLogic()
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
@@ -783,7 +867,7 @@ class TestApproachTransitions:
         assert any(isinstance(a, Say) for a in actions)
         spins = [a for a in actions if isinstance(a, SpinInPlace)]
         assert len(spins) == 1
-        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        assert spins[0].yaw_rad == pytest.approx(math.radians(175.0))
         assert not any(isinstance(a, Navigate) for a in actions)
 
     def test_yes_suppresses_track_before_turn(self):
@@ -861,9 +945,15 @@ class TestApproachTransitions:
         assert logic.on_tick(13.0, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
         assert logic.on_tick(34.9, NavStatus.NONE) == []
-        actions = logic.on_tick(35.1, NavStatus.NONE)
+        t = 35.1
+        for _ in range(APPROACH_REASK_MAX):
+            actions = logic.on_tick(t, NavStatus.NONE)
+            assert logic.state == State.AWAITING_USER
+            assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
+            t += APPROACH_QUESTION_STUCK_SEC + 0.1
+        actions = logic.on_tick(t, NavStatus.NONE)
         assert logic.state == State.RETURNING
-        assert any(isinstance(a, Say) for a in actions)
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_UNANSWERED]
 
     def test_question_as_long_as_window_still_gets_full_8s(self):
         """실기 재현: 질문 재생이 8.0초(응답 창과 같은 길이)여도 재생완료부터"""
@@ -891,8 +981,9 @@ class TestApproachTransitions:
         logic.on_approach_question_spoken(7.0)
         assert logic.on_tick(14.9, NavStatus.NONE) == []
         assert logic.state == State.AWAITING_USER
-        logic.on_tick(15.0, NavStatus.NONE)
-        assert logic.state == State.RETURNING
+        actions = logic.on_tick(15.0, NavStatus.NONE)
+        assert logic.state == State.AWAITING_USER
+        assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
 
     def test_returning_completion_goes_idle(self):
         logic = MissionLogic(return_destination=make_home(), auto_return_home=True)
@@ -1162,16 +1253,17 @@ class TestApproachSafety:
 
 class TestStaleConfirmListens:
     def test_stale_confirm_retry_prompt_expects_a_reply(self):
-        """"다시 말씀해 주세요"는 질문이다 — expects_reply 없이는 말해 놓고"""
+        """엇갈린 확정에 다시 묻는 말은 질문이다 — expects_reply 없이는 말해 놓고"""
         logic = MissionLogic()
         logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS,
                         True, 0.0)
         assert logic.state == State.CONFIRMING
         actions = logic.on_intent(
-            make_intent(matched_destination_id="다른_목적지"), make_dest(),
-            BOUNDS, True, 1.0)
-        assert not any(isinstance(a, Say) for a in actions)
-        assert logic.state == State.IDLE
+            make_intent(matched_destination_id="다른_목적지"),
+            make_dest(id="다른_목적지"), BOUNDS, True, 1.0)
+        says = [a for a in actions if isinstance(a, Say)]
+        assert len(says) == 1 and says[0].expects_reply
+        assert logic.state == State.CONFIRMING
 class TestApproachVoiceHooks:
     """계획 문서(voice docs/approach-voice-flow.md)의 남은 두 조각."""
 
@@ -1181,8 +1273,8 @@ class TestApproachVoiceHooks:
         logic.on_approach_answer(True, 6.0)
         assert logic.state == State.TURNING
 
-    def test_question_is_the_recorded_long_greeting(self):
-        assert MSG_APPROACH_QUESTION.startswith("안녕하세요? 저는 시각장애인")
+    def test_question_is_the_recorded_short_greeting(self):
+        assert MSG_APPROACH_QUESTION.startswith("안녕하세요? 시각장애인")
         assert MSG_APPROACH_QUESTION.endswith("안내를 받으시겠어요?")
 
     def test_accept_speaks_turn_notice(self):
@@ -1229,33 +1321,21 @@ class TestApproachVoiceHooks:
 
         assert hint_idx < onboarding_idx
         assert actions[hint_idx].expects_reply is False
-        assert not any(isinstance(a, Haptic) for a in actions)
 
     @pytest.mark.parametrize("status", [NavStatus.SUCCEEDED, NavStatus.FAILED,
                                          NavStatus.CANCELED])
-    def test_turn_completion_defers_haptic_until_hint_spoken(self, status):
-        """I-2 (2026-09-11): `Haptic` 을 그 자리에서 내면 1200ms 진동이"""
+    def test_turn_completion_vibrates_with_the_hint(self, status):
+        """2026-09-28 문구 "손잡이가 진동하고 있습니다"(D7): 진동은 힌트와 **같은"""
         logic = MissionLogic()
         self._accept_with_turn(logic)
-        logic.on_tick(7.0, status)
-        spoken_actions = logic.on_handle_hint_spoken(7.1)
-        haptics = [a for a in spoken_actions if isinstance(a, Haptic)]
+        actions = logic.on_tick(7.0, status)
+        haptics = [i for i, a in enumerate(actions) if isinstance(a, Haptic)]
+        hint_idx = next(i for i, a in enumerate(actions)
+                        if isinstance(a, Say) and a.text == MSG_HANDLE_HINT)
         assert len(haptics) == 1
-        assert haptics[0].pattern == "long"
-
-    def test_handle_hint_spoken_without_pending_hint_is_noop(self):
-        """엉뚱한 시점(힌트를 낸 적 없음)에 신호가 와도 진동이 나가면 안"""
-        logic = MissionLogic()
-        assert logic.on_handle_hint_spoken(1.0) == []
-
-    def test_handle_hint_spoken_fires_haptic_only_once(self):
-        logic = MissionLogic()
-        self._accept_with_turn(logic)
-        logic.on_tick(7.0, NavStatus.SUCCEEDED)
-        first = logic.on_handle_hint_spoken(7.1)
-        assert len(first) == 1
-        second = logic.on_handle_hint_spoken(7.2)
-        assert second == []
+        assert actions[haptics[0]].pattern == "long"
+        assert haptics[0] < hint_idx
+        assert not hasattr(logic, "on_handle_hint_spoken")
 
     def test_decline_gives_no_handle_hint_or_haptic(self):
         """거절("아니요")에는 손잡이 안내도 진동도 나가면 안 된다 — 아직"""
@@ -1272,10 +1352,8 @@ class TestApproachVoiceHooks:
         assert HAPTIC_PATTERN_HANDLE_HINT == "long"
 
     def test_handle_hint_message_matches_approved_text(self):
-        """사용자 승인 문구 글자 그대로(2026-09-10)."""
-        assert MSG_HANDLE_HINT == (
-            "손잡이는 지금 계신 쪽에 있습니다. 진동이 나는 곳을 잡아주세요."
-        )
+        """사용자 문구 글자 그대로(2026-09-28, 설계 D7)."""
+        assert MSG_HANDLE_HINT == "손잡이가 진동하고 있습니다. 잡아주세요."
 
 
 class TestEstopStateNarration:
@@ -1310,10 +1388,42 @@ class TestEstopStateNarration:
         says = [a.text for a in actions if isinstance(a, Say)]
         assert says == ["비상멈춤이 해제되었습니다."]
 
-    def test_voice_emergency_while_idle_is_silent(self):
+    def test_voice_emergency_while_idle_says_estop_state(self):
         logic = MissionLogic()
         actions = logic.on_emergency("멈춰", 1.0)
-        assert [a for a in actions if isinstance(a, Say)] == []
+        says = [a for a in actions if isinstance(a, Say)]
+        assert [s.text for s in says] == ["지금은 비상 멈춤 상태입니다."]
+        assert says[0].priority == "emergency"
+        assert logic.state == State.ESTOPPED
+
+    def test_voice_emergency_after_silent_latch_still_says(self):
+        logic = MissionLogic()
+        assert [a for a in logic.on_estop(True, 1.0) if isinstance(a, Say)] == []
+        says = [a.text for a in logic.on_emergency("멈춰", 1.05) if isinstance(a, Say)]
+        assert says == ["지금은 비상 멈춤 상태입니다."]
+
+    def test_second_voice_emergency_is_not_repeated(self):
+        logic = MissionLogic()
+        logic.on_emergency("멈춰", 1.0)
+        assert [a for a in logic.on_emergency("멈춰", 4.0) if isinstance(a, Say)] == []
+        driving = MissionLogic()
+        start_navigation(driving)
+        driving.on_emergency("멈춰", 1.0)
+        assert [a for a in driving.on_emergency("멈춰", 4.0) if isinstance(a, Say)] == []
+
+    def test_idle_voice_emergency_release_is_announced(self):
+        logic = MissionLogic(estop_release_grace_sec=1.0)
+        logic.on_emergency("멈춰", 1.0)
+        logic.on_estop(True, 1.1)
+        logic.on_estop(False, 5.0)
+        says = [a.text for a in logic.on_tick(6.0, NavStatus.NONE) if isinstance(a, Say)]
+        assert says == ["비상멈춤이 해제되었습니다."]
+
+    def test_idle_comm_latch_stays_silent(self):
+        logic = MissionLogic(estop_release_grace_sec=1.0)
+        assert [a for a in logic.on_estop(True, 1.0) if isinstance(a, Say)] == []
+        logic.on_estop(False, 2.0)
+        assert [a for a in logic.on_tick(3.5, NavStatus.NONE) if isinstance(a, Say)] == []
 
     def test_voice_emergency_while_driving_announces(self):
         logic = MissionLogic()
@@ -1359,21 +1469,23 @@ class TestWakeFoldsStaleQuestions:
         assert logic.on_confirm_answer(True, make_dest(), BOUNDS, True, 2.0) == []
         assert logic.state == State.IDLE
 
-    def test_wake_folds_approach_question_and_stays_put(self):
+    def test_wake_keeps_the_approach_question(self):
+        """2026-10-09 사용자 결정 — 접근 질문은 '비카야'에 접지 않는다(옛 동작: 접고 제자리 IDLE,"""
         logic = MissionLogic(return_destination=make_home())
         start_approach(logic)
         arrive_and_ask(logic, 5.0)
         assert logic.on_wake(6.0) == []
-        assert logic.state == State.IDLE
-        assert logic.on_approach_answer(True, 7.0) == []
+        assert logic.state == State.AWAITING_USER
+        assert any(isinstance(a, Say) for a in logic.on_approach_answer(True, 7.0))
+        assert logic.state == State.TURNING
 
 
 class TestWakeConsumedGuardsWakeDoa:
     """wake·wake_doa 는 같은 콜백 그룹이라 wake 가 먼저 상태를"""
 
-    def test_wake_doa_right_after_waiting_wake_does_not_open_seeking(self):
+    def test_wake_doa_right_after_confirming_wake_does_not_open_seeking(self):
         logic = MissionLogic()
-        logic.state = State.WAITING
+        logic.state = State.CONFIRMING
         logic.on_wake(10.0)
         assert logic.state == State.IDLE
         actions = logic.on_wake_doa(90.0, True, 10.001)
@@ -1386,15 +1498,15 @@ class TestWakeConsumedGuardsWakeDoa:
         logic.on_tick(1.0, NavStatus.SUCCEEDED)
         assert logic.state == State.ASKING_NEXT
         logic.on_wake(1.001)
-        assert logic.state == State.IDLE
+        assert logic.state == State.ASKING_NEXT
         actions = logic.on_wake_doa(90.0, True, 1.002)
         assert not any(isinstance(a, SpinInPlace) for a in actions)
-        assert logic.state == State.IDLE
+        assert logic.state == State.ASKING_NEXT
 
     def test_old_on_wake_behavior_is_unchanged(self):
         """on_wake 자체(답-대기 상태를 IDLE 로 접기)는 그대로다 — 막히는 것은"""
         logic = MissionLogic()
-        logic.state = State.WAITING
+        logic.state = State.CONFIRMING
         assert logic.on_wake(1.0) == []
         assert logic.state == State.IDLE
 
@@ -1408,7 +1520,7 @@ class TestWakeConsumedGuardsWakeDoa:
     def test_guard_expires_and_a_real_new_call_opens_seeking(self):
         """2초가 지난 뒤는 진짜 새 호출이다 — 과도한 봉쇄가 아니다."""
         logic = MissionLogic()
-        logic.state = State.WAITING
+        logic.state = State.CONFIRMING
         logic.on_wake(1.0)
         assert logic.state == State.IDLE
         actions = logic.on_wake_doa(
@@ -1675,10 +1787,10 @@ class TestAwaitingUserWakeGuardsWakeDoa:
         logic.state = State.AWAITING_USER
         logic.approach_track_id = 7
         logic.on_wake(10.0)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
         actions = logic.on_wake_doa(90.0, True, 10.001)
         assert not any(isinstance(a, SpinInPlace) for a in actions)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
 
 
 class TestConfirmReproposalIsAnswer:
@@ -1706,6 +1818,82 @@ class TestConfirmReproposalIsAnswer:
         assert not any(isinstance(a, Navigate) for a in actions)
 
 
+class TestDeliveryStartMent:
+    """배송 출발 멘트는 "배달을 시작합니다" (2026-09-03 사용자 승인)."""
+
+    def _say(self, actions):
+        return next(a.text for a in actions if isinstance(a, Say))
+
+    def test_delivery_says_delivery(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_destination(
+            make_dest(name="407호"), BOUNDS, True, 0.0,
+            allow_private=True, is_delivery=True)
+        assert reason == GateReason.OK
+        assert self._say(actions) == "407호로 배달을 시작합니다."
+
+    def test_plain_app_request_still_says_guide(self):
+        """원격 주행은 그대로 "안내를 시작합니다" — 이 경계가 무너지면"""
+        logic = MissionLogic()
+        actions, _ = logic.on_app_destination(
+            make_dest(name="407호"), BOUNDS, True, 0.0)
+        assert self._say(actions) == "407호로 안내를 시작합니다."
+
+    def test_voice_path_is_untouched(self):
+        """음성(LLM) 경로도 "안내" 그대로다 — 배송 표시가 닿지 않는 길이다."""
+        logic = MissionLogic()
+        actions = logic.on_intent(make_intent(), make_dest(name="407호"),
+                                  BOUNDS, True, 0.0)
+        assert self._say(actions) == "407호로 안내를 시작합니다."
+
+    def test_josa_follows_the_name(self):
+        """조사는 이름이 정한다 — 받침 있으면 '으로'."""
+        logic = MissionLogic()
+        actions, _ = logic.on_app_destination(
+            make_dest(name="식당"), BOUNDS, True, 0.0, is_delivery=True)
+        assert self._say(actions) == "식당으로 배달을 시작합니다."
+
+
+class TestDeliveryAllowsPrivate:
+    """물류 배송(`/vica/mission/request_delivery`)만 private 목적지를 허용한다"""
+
+    def test_plain_app_request_still_rejects_private(self):
+        logic = MissionLogic()
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0)
+        assert reason == GateReason.PRIVATE_DESTINATION
+
+    def test_delivery_accepts_private(self):
+        logic = MissionLogic()
+        actions, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0,
+            allow_private=True)
+        assert reason == GateReason.OK
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic.state == State.NAVIGATING
+
+    def test_delivery_still_rejects_unapproachable(self):
+        logic = MissionLogic()
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private", is_approachable=False),
+            BOUNDS, True, 0.0, allow_private=True)
+        assert reason == GateReason.NOT_APPROACHABLE
+
+    def test_delivery_still_rejects_out_of_map(self):
+        logic = MissionLogic()
+        dest = make_dest(authorization="private",
+                         pose=Pose2D(x=99.0, y=99.0, yaw_deg=0.0, frame_id="map"))
+        _, reason = logic.on_app_destination(
+            dest, BOUNDS, True, 0.0, allow_private=True)
+        assert reason == GateReason.POSE_INVALID
+
+    def test_delivery_still_rejects_estop(self):
+        logic = MissionLogic()
+        logic.estop_active = True
+        _, reason = logic.on_app_destination(
+            make_dest(authorization="private"), BOUNDS, True, 0.0,
+            allow_private=True)
+        assert reason == GateReason.ESTOP_ACTIVE
 class TestDoaToSpinYaw:
     """마이크 각도(0~359°, 정면 0) -> SpinInPlace 회전량(rad, 양수=반시계)."""
 
@@ -1937,7 +2125,7 @@ class TestNearCallApproach:
         assert says[0].expects_reply is True
 
     def test_near_person_accept_turns_then_onboards(self):
-        """1.0~1.5 m: 걸어가지 않고 질문 -> 수락 시 180도 회전 -> 온보딩."""
+        """1.0~1.5 m: 걸어가지 않고 질문 -> 수락 시 손잡이 회전(명령 175°) -> 온보딩."""
         logic = MissionLogic()
         seek_and_finish_turn(logic, t0=1.0)
         logic.on_person_detection(
@@ -1946,13 +2134,12 @@ class TestNearCallApproach:
         assert logic.state == State.TURNING
         spins = [a for a in actions if isinstance(a, SpinInPlace)]
         assert len(spins) == 1
-        assert spins[0].yaw_rad == pytest.approx(math.pi)
+        assert spins[0].yaw_rad == pytest.approx(math.radians(175.0))
         onboarding_actions = logic.on_tick(6.0, NavStatus.SUCCEEDED)
         assert logic.state == State.IDLE
         says = [a for a in onboarding_actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert not any(isinstance(a, Haptic) for a in onboarding_actions)
-        haptics = [a for a in logic.on_handle_hint_spoken(6.1) if isinstance(a, Haptic)]
+        haptics = [a for a in onboarding_actions if isinstance(a, Haptic)]
         assert len(haptics) == 1 and haptics[0].pattern == "long"
 
     def test_very_near_person_accept_skips_spin(self):
@@ -1966,8 +2153,7 @@ class TestNearCallApproach:
         assert not any(isinstance(a, SpinInPlace) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert not any(isinstance(a, Haptic) for a in actions)
-        haptics = [a for a in logic.on_handle_hint_spoken(4.1) if isinstance(a, Haptic)]
+        haptics = [a for a in actions if isinstance(a, Haptic)]
         assert len(haptics) == 1 and haptics[0].pattern == "long"
 
     def test_approachable_person_not_handled_here(self):
@@ -2075,16 +2261,21 @@ class TestNearCallApproach:
         assert reason == GateReason.TRACK_SUPPRESSED
 
     def test_no_answer_still_works(self):
-        """무응답 사다리는 기존 그대로 재사용된다."""
+        """무응답 사다리는 정상 접근과 같다 — 2026-10-09 부터 세 번까지 다시 묻고, 그래도 답이 없으면 물러난다."""
         logic = MissionLogic(return_destination=make_home(),
                              approach_response_timeout_sec=8.0)
         seek_and_finish_turn(logic, t0=1.0)
         logic.on_person_detection(
             track_id=7, distance_m=1.2, stable=True, approachable=False, now=3.0)
-        actions = logic.on_tick(3.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        t = 3.0 + APPROACH_QUESTION_STUCK_SEC
+        for _ in range(APPROACH_REASK_MAX):
+            actions = logic.on_tick(t, NavStatus.NONE)
+            assert [a.text for a in actions if isinstance(a, Say)] == [MSG_APPROACH_REASK]
+            t += APPROACH_QUESTION_STUCK_SEC + 0.1
+        actions = logic.on_tick(t, NavStatus.NONE)
         assert logic.state == State.RETURNING
         says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+        assert says and says[0].text == MSG_APPROACH_UNANSWERED
 
     def test_custom_thresholds(self):
         logic = MissionLogic(near_call_max_m=2.0, near_call_no_spin_m=1.5)
@@ -2163,9 +2354,8 @@ class TestHandleSideCall:
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert not any(isinstance(a, Haptic) for a in actions)
         assert actions.index(says[0]) < actions.index(says[-1])
-        haptics = [a for a in logic.on_handle_hint_spoken(2.1) if isinstance(a, Haptic)]
+        haptics = [a for a in actions if isinstance(a, Haptic)]
         assert len(haptics) == 1
         assert haptics[0].pattern == "long"
 
@@ -2187,7 +2377,7 @@ class TestHandleSideCall:
         assert not any(isinstance(a, Haptic) for a in actions)
         assert not any(isinstance(a, Say) and a.text == MSG_HANDLE_HINT
                        for a in actions)
-        assert logic.on_handle_hint_spoken(2.1) == []
+        assert logic.dialog_state != "grip_wait"
 
     def test_decline_ends_in_place_even_with_home_configured(self):
         """실기 기본 설정(return_destination + auto_return_home=True)이어도"""
@@ -2206,11 +2396,15 @@ class TestHandleSideCall:
                               auto_return_home=True,
                               approach_response_timeout_sec=8.0)
         logic.on_wake_doa(175.0, True, 1.0)
-        actions = logic.on_tick(1.0 + APPROACH_QUESTION_STUCK_SEC, NavStatus.NONE)
+        t = 1.0 + APPROACH_QUESTION_STUCK_SEC
+        for _ in range(APPROACH_REASK_MAX):
+            logic.on_tick(t, NavStatus.NONE)
+            t += APPROACH_QUESTION_STUCK_SEC + 0.1
+        actions = logic.on_tick(t, NavStatus.NONE)
         assert logic.state == State.IDLE
         assert not any(isinstance(a, Navigate) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
-        assert says and says[0].text == MSG_APPROACH_NO_ANSWER
+        assert says and says[0].text == MSG_APPROACH_UNANSWERED
 
     def test_existing_gates_still_block_handle_side_calls(self):
         """E-stop 이 걸려 있으면 핸들 쪽 호출도 여전히 거절된다 — 관문 순서가"""
@@ -2251,24 +2445,24 @@ class TestHandleSideCallWakeSiblingGuard:
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
         assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
-        assert any(isinstance(a, Haptic) for a in logic.on_handle_hint_spoken(2.1))
+        assert any(isinstance(a, Haptic) for a in actions)
 
-    def test_wake_more_than_guard_sec_later_still_closes_question(self):
-        """3초가 지난 뒤는 진짜 새 "비카야" 다 — 기존대로 옛 질문을 접는다."""
+    def test_wake_more_than_guard_sec_later_also_keeps_question(self):
+        """2026-10-09: 3초가 지난 진짜 새 "비카야"도 접근 질문을 접지 않는다(옛 동작: 접었다)."""
         logic = MissionLogic(wake_doa_sign=1.0)
         logic.on_wake_doa(175.0, True, 1.0)
         assert logic.state == State.AWAITING_USER
         logic.on_wake(1.0 + WAKE_CONSUMED_GUARD_SEC + 0.01)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
 
-    def test_wake_still_closes_normal_approach_question_without_stamp(self):
-        """정상 접근(track 있음)으로 들어간 AWAITING_USER 는 도장이 없으니"""
+    def test_normal_approach_question_also_survives_wake(self):
+        """2026-10-09: 정상 접근(track 있음)의 질문도 "비카야"에 접히지 않는다(옛 동작: 접혔다)."""
         logic = MissionLogic()
         start_approach(logic)
         arrive_and_ask(logic, t=1.0)
         assert logic.state == State.AWAITING_USER
         logic.on_wake(1.001)
-        assert logic.state == State.IDLE
+        assert logic.state == State.AWAITING_USER
 
 
 class TestOnboardingDestPrompt:
@@ -2480,3 +2674,77 @@ class TestOnboardingDestPrompt:
         )
         assert logic.state == State.IDLE
         assert logic._dest_prompt_stage is None
+
+
+class TestReturnLadderWaitsForConversation:
+    """2026-10-06 실기(15:20): 복귀 중 호출로 멈춘 뒤 로봇이 되물어(clarify)"""
+
+    def braked(self):
+        logic = MissionLogic(return_destination=make_home())
+        logic.state = State.RETURNING
+        logic.active_destination = make_home()
+        logic.on_return_brake(0.0)
+        return logic
+
+    @staticmethod
+    def said_notice(actions):
+        return any(isinstance(a, Say) and a.text == MSG_LEAVING_NOTICE for a in actions)
+
+    def test_conversation_intent_restarts_the_clock(self):
+        logic = self.braked()
+        logic.on_intent(make_intent(intent="clarify", matched_destination_id=""),
+                        None, None, True, 8.0)
+        assert not self.said_notice(logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE))
+        assert self.said_notice(logic.on_tick(8.0 + RETURN_RESUME_SEC, NavStatus.NONE))
+
+    def test_open_ear_holds_the_notice_until_it_closes_empty(self):
+        logic = self.braked()
+        logic.on_listen_state("open", 12.0)
+        assert not self.said_notice(logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE))
+        logic.on_listen_state("empty:ghost", 18.0)
+        assert self.said_notice(logic.on_tick(18.0, NavStatus.NONE))
+
+    def test_call_during_leaving_grace_holds_departure(self):
+        logic = self.braked()
+        assert self.said_notice(logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE))
+        logic.on_listen_state("open", RETURN_RESUME_SEC + 1.0)
+        logic.on_tick(RETURN_RESUME_SEC + LEAVING_GRACE_SEC, NavStatus.NONE)
+        assert logic.state == State.IDLE
+        logic.on_listen_state("empty:ghost", 22.0)
+        logic.on_tick(22.0, NavStatus.NONE)
+        assert logic.state == State.RETURNING
+
+    def test_destination_said_during_grace_starts_guidance(self):
+        logic = self.braked()
+        logic.on_tick(RETURN_RESUME_SEC, NavStatus.NONE)
+        logic.on_listen_state("open", 16.0)
+        logic.on_listen_state("closed", 17.0)
+        actions = logic.on_intent(make_intent(), make_dest(), None, True, 17.5)
+        assert logic.state == State.NAVIGATING
+        assert any(isinstance(a, Navigate) for a in actions)
+        assert logic._return_interrupted is False
+
+
+class TestApproachGreeting:
+    """2026-10-07 사용자 결정: 시각장애인에게 다가가기 시작할 때 한 번"""
+
+    def test_first_approval_greets_once_before_moving(self):
+        from vica_mission_manager.mission_logic import MSG_APPROACH_COMING
+        actions = start_approach(MissionLogic())
+        says = [a.text for a in actions if isinstance(a, Say)]
+        assert says == [MSG_APPROACH_COMING]
+        say_at = next(i for i, a in enumerate(actions) if isinstance(a, Say))
+        nav_at = next(i for i, a in enumerate(actions) if isinstance(a, Navigate))
+        assert say_at < nav_at
+
+    def test_goal_update_while_approaching_does_not_repeat(self):
+        logic = MissionLogic()
+        start_approach(logic)
+        moved = make_approach(goal=Pose2D(x=1.8, y=0.5, yaw_deg=30.0))
+        actions, reason = logic.on_approach_request(moved, BOUNDS, True, 1.0)
+        assert reason == GateReason.OK
+        assert not any(isinstance(a, Say) for a in actions)
+
+    def test_greeting_text_is_the_decided_wording(self):
+        from vica_mission_manager.mission_logic import MSG_APPROACH_COMING
+        assert MSG_APPROACH_COMING == "동행로봇 비카가 다가가고 있어요."

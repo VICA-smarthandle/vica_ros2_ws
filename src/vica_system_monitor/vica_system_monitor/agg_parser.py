@@ -3,6 +3,7 @@
 from typing import NamedTuple
 
 from .fault_catalog import COMPONENTS
+from .freshness import is_fresh_ns
 
 
 DIAG_OK = 0
@@ -13,6 +14,11 @@ DIAG_STALE = 3
 DIAG_FAULT_THRESHOLD = DIAG_WARN
 
 FALLBACK_COMPONENT = 'monitor'
+
+EXTERNAL_ADAPTER_STATUS = 'external adapter'
+EXTERNAL_ADAPTER_NODE = 'external_diagnostics_node'
+
+_ABSENCE_MESSAGES = ('missing', 'stale', 'node starting up')
 
 _NAME_HINTS = (
     ('mdrobot', 'motor'),
@@ -63,6 +69,7 @@ _AGG_MESSAGES = {
     'ok': '정상입니다.',
     'no events recorded.': '아직 한 건도 수신하지 못했습니다.',
     'no events recorded': '아직 한 건도 수신하지 못했습니다.',
+    'node starting up': '진단이 아직 오지 않았습니다.',
 }
 
 
@@ -85,6 +92,53 @@ def is_ignored(name: str) -> bool:
         return False
     lowered = name.lower()
     return any(frag in lowered for frag in IGNORED_NAME_FRAGMENTS)
+
+
+def is_external_adapter_status(name: str) -> bool:
+    """Report whether this is the adapter's own self-diagnostic item."""
+    return bool(name) and EXTERNAL_ADAPTER_STATUS in name.lower()
+
+
+def is_from_external_adapter(name: str) -> bool:
+    """Report whether this item came from (or stands in for) the adapter."""
+    return bool(name) and EXTERNAL_ADAPTER_NODE in name.lower()
+
+
+def is_group_item(name: str) -> bool:
+    """Report whether this is an aggregator group (path) item."""
+    if not name:
+        return False
+    return ':' not in name.rstrip('/').rsplit('/', 1)[-1]
+
+
+def adapter_reporting(items, now_ns: int, timeout_ns: int) -> bool:
+    """Report whether the adapter is alive and publishing its own status."""
+    for name, (item, seen_ns) in items.items():
+        if not is_external_adapter_status(name):
+            continue
+        if not is_fresh_ns(seen_ns, now_ns=now_ns, timeout_ns=timeout_ns):
+            continue
+        if item.level >= DIAG_STALE:
+            return False
+        return (item.message or '').strip().lower() not in _ABSENCE_MESSAGES
+    return False
+
+
+def worst_by_component(
+    items, now_ns: int, timeout_ns: int, exclude_adapter: bool = False
+) -> dict:
+    """Pick the most severe fresh item per component."""
+    worst: dict = {}
+    for name, (item, seen_ns) in items.items():
+        if not is_fresh_ns(seen_ns, now_ns=now_ns, timeout_ns=timeout_ns):
+            continue
+        if exclude_adapter and (is_from_external_adapter(name) or is_group_item(name)):
+            continue
+        component = item.component
+        current = worst.get(component)
+        if current is None or item.level > current[0].level:
+            worst[component] = (item, seen_ns)
+    return worst
 
 
 def parse_name(name: str) -> str:

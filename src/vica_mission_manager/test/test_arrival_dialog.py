@@ -6,7 +6,8 @@ from vica_mission_manager.mission_logic import (
     Pose2D, Say, State,
     MSG_ASK_RESTROOM, MSG_ASK_ENTRANCE, MSG_ASK_GENERIC, MSG_ASK_WAIT_TIME,
     MSG_WAIT_DEFAULT, MSG_FINISH, MSG_LEAVING_NOTICE,
-    MSG_ARRIVAL_RETRY,
+    MSG_ARRIVAL_RETRY, MSG_WAIT_EXPIRED, GoalEvent, MSG_WAIT_FINISH_ASK,
+    WAIT_FINISH_REPEAT_SEC, Haptic, HAPTIC_PATTERN_WAKE_LOCATE,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -127,60 +128,145 @@ class TestFinishAndNext:
         acts = logic.on_arrival_answer(
             _intent("navigate", matched_destination_id="d2"), 3.0, next_dest=nxt)
         assert logic.state == State.NAVIGATING
+        assert _say(acts) == ["안내소로 안내를 시작합니다."]
+        kinds = [type(a).__name__ for a in acts]
+        assert kinds.index("Say") < kinds.index("Navigate")
 
 
 class TestNoAnswerLadder:
     def test_unknown_retries_once_then_leaves(self):
+        """못 알아들은 답에는 질문 자체를 한 번 더 묻는다(2026-10-08 다시 묻기 — 옛 문장은"""
         logic = arrive("restroom")
         acts = logic.on_arrival_answer(_intent("unknown"), 3.0)
-        assert MSG_ARRIVAL_RETRY in _say(acts)
+        assert _say(acts) == [MSG_ASK_RESTROOM]
         assert logic.state == State.ASKING_NEXT
         logic.on_arrival_question_spoken(4.0)
         acts2 = logic.on_arrival_answer(_intent("unknown"), 5.0)
         assert MSG_LEAVING_NOTICE in _say(acts2)
 
-    def test_silence_8s_then_leaving_notice(self):
+    def test_silence_8s_reasks_same_question_then_leaving_notice(self):
         logic = arrive("restroom")
         assert _say(logic.on_tick(9.0, NavStatus.NONE)) == []
         acts = logic.on_tick(10.5, NavStatus.NONE)
-        assert MSG_LEAVING_NOTICE in _say(acts)
+        assert _say(acts) == [MSG_ASK_RESTROOM] and logic.state == State.ASKING_NEXT
+        logic.on_arrival_question_spoken(11.0)
+        assert _say(logic.on_tick(18.0, NavStatus.NONE)) == []
+        assert MSG_LEAVING_NOTICE in _say(logic.on_tick(19.5, NavStatus.NONE))
+
+    def test_reask_answered_wait_survives(self):
+        logic = arrive("restroom")
+        logic.on_tick(10.5, NavStatus.NONE)
+        acts = logic.on_arrival_answer(_intent("affirm"), 12.0)
+        assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
+
+    def _leaving(self, logic):
+        logic.on_tick(10.5, NavStatus.NONE)
+        logic.on_arrival_question_spoken(11.0)
+        logic.on_tick(19.5, NavStatus.NONE)
 
     def test_leaving_grace_then_goes_home(self):
         logic = arrive("restroom")
-        logic.on_tick(10.5, NavStatus.NONE)
-        acts = logic.on_tick(14.0, NavStatus.NONE)
+        self._leaving(logic)
+        acts = logic.on_tick(23.0, NavStatus.NONE)
         assert not _say(acts)
         assert logic.state == State.RETURNING
 
     def test_grace_interrupt_returns_to_dialog(self):
         logic = arrive("restroom")
-        logic.on_tick(10.5, NavStatus.NONE)
-        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=10), 11.0)
+        self._leaving(logic)
+        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=10), 20.0)
         assert logic.state == State.WAITING
 
+    def test_unknown_then_silence_leaves_without_second_reask(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("unknown"), 3.0)
+        logic.on_arrival_question_spoken(4.0)
+        assert MSG_LEAVING_NOTICE in _say(logic.on_tick(12.5, NavStatus.NONE))
 
-class TestWakeFoldsArrivalQuestion:
-    def test_wake_folds_asking_and_stray_answer_is_dead(self):
-        """"비카야"는 도착 질문을 접는다(9/1) — 이후 답은 무시."""
+
+class TestDenyReconfirm:
+    """대기형 질문의 '아니오'는 종료형으로 한 번 더 묻는다 (2026-09-20 사용자 결정)."""
+
+    def test_deny_on_wait_question_asks_finish_question(self):
+        logic = arrive("restroom")
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert _say(acts) == [MSG_ASK_ENTRANCE] and logic.state == State.ASKING_NEXT
+
+    def test_second_deny_means_wait(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("deny"), 3.0)
+        acts = logic.on_arrival_answer(_intent("deny"), 5.0)
+        assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
+
+    def test_affirm_after_reconfirm_finishes(self):
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("deny"), 3.0)
+        acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
+        assert MSG_FINISH in _say(acts) and logic.state == State.RETURNING
+
+    def test_generic_question_deny_also_reconfirms(self):
+        logic = arrive("")
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert _say(acts) == [MSG_ASK_ENTRANCE]
+
+    def test_entrance_deny_still_waits_without_reconfirm(self):
+        logic = arrive("entrance")
+        acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert logic.state == State.WAITING and MSG_WAIT_DEFAULT in _say(acts)
+
+
+class TestWakeKeepsArrivalQuestion:
+    """"비카야"는 도착 질문을 접지 않는다(2026-10-07 사용자 결정, 호출 반응표)."""
+
+    def test_wake_keeps_question_and_wait_answer_still_works(self):
         logic = arrive("restroom")
         assert logic.on_wake(3.0) == []
-        assert logic.state == State.IDLE
-        assert logic.on_arrival_answer(_intent("affirm"), 4.0) == []
+        assert logic.state == State.ASKING_NEXT
+        acts = logic.on_arrival_answer(_intent("wait", wait_minutes=5), 4.0)
+        assert logic.state == State.WAITING
+        assert any("5분" in t for t in _say(acts))
+
+    def test_wake_keeps_wait_time_question(self):
+        logic = arrive("reception")
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        assert logic.state == State.ASKING_WAIT_TIME
+        logic.on_wake(4.0)
+        assert logic.state == State.ASKING_WAIT_TIME
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 5.0)
+        assert logic.state == State.WAITING
+
+    def test_wake_withdraws_leaving_notice(self):
+        """떠나기 예고 유예 중 불렀으면 떠나지 않는다 — 사용자가 곁에 있다."""
+        logic = arrive("restroom")
+        logic.on_arrival_answer(_intent("unknown"), 3.0)
+        acts = logic.on_arrival_answer(_intent("unknown"), 5.0)
+        assert MSG_LEAVING_NOTICE in _say(acts)
+        logic.on_wake(6.0)
+        assert logic.state == State.ASKING_NEXT
+        assert not any(isinstance(a, Navigate) for a in logic.on_tick(20.0, NavStatus.NONE))
+        assert logic.state == State.ASKING_NEXT
+        logic.on_arrival_question_spoken(21.0)
+        acts = logic.on_tick(30.0, NavStatus.NONE)
+        assert logic.state == State.ASKING_NEXT
+        assert any(MSG_ASK_RESTROOM in t for t in _say(acts))
 
 
 class TestWaitingState:
-    def test_wake_folds_waiting_quietly(self):
-        """WAITING 중 "비카야" → 각성 질문 없이 접고 새 대화(9/1 A안)."""
+    def test_wake_keeps_waiting(self):
+        """WAITING 중 "비카야" → 대기를 이어 가며 새 대화(2026-10-07 호출 반응표)."""
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("affirm"), 3.0)
-        assert logic.on_wake(20.0) == []
-        assert logic.state == State.IDLE
+        left = logic.wait_left_sec(20.0)
+        assert logic.on_wake(20.0) == [Haptic(HAPTIC_PATTERN_WAKE_LOCATE)]
+        assert logic.state == State.WAITING
+        assert logic.wait_left_sec(20.0) == left
 
     def test_wait_timeout_leaves(self):
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("wait", wait_minutes=1), 3.0)
         acts = logic.on_tick(3.0 + 61.0, NavStatus.NONE)
-        assert not _say(acts)
+        assert _say(acts) == [MSG_WAIT_EXPIRED]
+        assert [a.event for a in acts if isinstance(a, GoalEvent)] == ["wait_expired"]
         assert logic.state == State.RETURNING
 
 
@@ -225,8 +311,7 @@ class TestArrivalNavigateConfirm:
         logic = arrive("restroom")
         logic.on_arrival_answer(_intent("affirm"), 3.0)
         logic.on_wake(10.0)
-        logic.exit_arrival_dialog()
-        assert logic.state == State.IDLE
+        assert logic.state == State.WAITING
         nxt = _dest("", id="d2", name="입구")
         acts = logic.on_intent(_intent("navigate", matched_destination_id="d2",
                                        need_confirm=True), nxt, BOUNDS, True, 11.0)
@@ -272,21 +357,33 @@ class TestEarHold:
         assert _say(logic.on_tick(12.0, NavStatus.NONE)) == []
 
     def test_closed_grants_grace_for_llm(self):
-        """전사 성공(closed) 후에도 LLM 처리 시간(6초)을 기다린다."""
+        """전사 성공(closed) 후에도 LLM 처리 시간(8초, 2026-10-10 6 -> 8)을 기다린다."""
         logic = arrive("restroom")
         logic.on_listen_state("open", 3.0)
         logic.on_listen_state("speech", 7.0)
         logic.on_listen_state("closed", 9.5)
         assert _say(logic.on_tick(10.5, NavStatus.NONE)) == []
-        acts = logic.on_tick(16.0, NavStatus.NONE)
-        assert any("돌아가겠습니다" in t for t in _say(acts))
+        assert _say(logic.on_tick(17.0, NavStatus.NONE)) == []
+        acts = logic.on_tick(18.0, NavStatus.NONE)
+        assert _say(acts) == [MSG_ASK_RESTROOM]
+
+    def test_llm_thinking_holds_the_arrival_clock(self):
+        """LLM 이 생각 중(/vica/thinking)이면 도착 질문도 다시 묻지 않는다(2026-10-10)."""
+        logic = arrive("restroom")
+        logic.on_listen_state("open", 3.0)
+        logic.on_listen_state("closed", 9.5)
+        logic.on_llm_thinking(True, 8.0)
+        assert _say(logic.on_tick(19.0, NavStatus.NONE)) == []
+        logic.on_llm_thinking(False, 19.5)
+        acts = logic.on_tick(21.0, NavStatus.NONE)
+        assert _say(acts) == [MSG_ASK_RESTROOM]
 
     def test_empty_fires_promptly(self):
         logic = arrive("restroom")
         logic.on_listen_state("open", 3.0)
         logic.on_listen_state("empty", 8.5)
         acts = logic.on_tick(10.5, NavStatus.NONE)
-        assert any("돌아가겠습니다" in t for t in _say(acts))
+        assert _say(acts) == [MSG_ASK_RESTROOM]
 
     def test_stuck_open_ear_has_failsafe_cap(self):
         """닫힘 신호를 영영 못 받아도 20초 상한 뒤엔 떠난다 (무한 대기 방지)."""
@@ -294,7 +391,7 @@ class TestEarHold:
         logic.on_listen_state("open", 3.0)
         assert _say(logic.on_tick(15.0, NavStatus.NONE)) == []
         acts = logic.on_tick(24.0, NavStatus.NONE)
-        assert any("돌아가겠습니다" in t for t in _say(acts))
+        assert _say(acts) == [MSG_ASK_RESTROOM]
 
 
 class TestReturnNet:
@@ -343,9 +440,11 @@ class TestGenericIsWaitStyle:
         assert logic.state == State.ASKING_WAIT_TIME
         assert MSG_ASK_WAIT_TIME in _say(acts)
 
-    def test_generic_deny_finishes(self):
+    def test_generic_deny_reconfirms_then_finishes(self):
         logic = arrive("reception")
         acts = logic.on_arrival_answer(_intent("deny"), 3.0)
+        assert logic.state == State.ASKING_NEXT and _say(acts) == [MSG_ASK_ENTRANCE]
+        acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
         assert logic.state == State.RETURNING
         assert MSG_FINISH in _say(acts)
 
@@ -375,13 +474,14 @@ class TestAskWaitTimeRejectsYesNo:
         logic = self._to_wait_time()
         acts = logic.on_arrival_answer(_intent("affirm"), 5.0)
         assert logic.state == State.ASKING_WAIT_TIME
-        assert MSG_ARRIVAL_RETRY in _say(acts)
+        assert _say(acts) == [MSG_ASK_WAIT_TIME]
 
     def test_deny_reasks(self):
+        """이 경로(on_arrival_answer 직접)는 옛 그물이다 — 음성 요청은 on_voice_intent 가"""
         logic = self._to_wait_time()
         acts = logic.on_arrival_answer(_intent("deny"), 5.0)
         assert logic.state == State.ASKING_WAIT_TIME
-        assert MSG_ARRIVAL_RETRY in _say(acts)
+        assert _say(acts) == [MSG_ASK_WAIT_TIME]
 
 
 class TestAskingStuckFallback:
@@ -506,3 +606,80 @@ class TestAppCancelAll:
         logic.on_estop(True, 0.0)
         _, reason = logic.on_app_cancel(1.0)
         assert reason != GateReason.OK
+
+
+class TestLedgerAccessors:
+    """대장(P1)이 읽는 대기 접근자 — 판단이 아니라 값 노출."""
+
+    def test_wait_minutes_and_left(self):
+        logic = arrive("")
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
+        assert logic.state == State.WAITING
+        assert logic.wait_minutes_requested() == 10
+        assert logic.wait_left_sec(63.0) == 540
+        assert logic.wait_left_sec(3.0 + 601.0) == 0
+
+    def test_not_waiting_is_minus_one(self):
+        logic = MissionLogic()
+        assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(0.0) == -1
+        logic = arrive("")
+        logic.on_arrival_answer(_intent("wait", wait_minutes=10), 3.0)
+        nxt = _dest("", id="d2", name="입구")
+        logic.on_intent(_intent("navigate", matched_destination_id="d2"),
+                        nxt, BOUNDS, True, 10.0)
+        assert logic.state == State.NAVIGATING
+        assert logic.wait_minutes_requested() == -1 and logic.wait_left_sec(10.0) == -1
+
+
+class TestQuestionDuringArrivalDialog:
+    """도착 질문 중 정보 질문 — LLM 이 답했으니 미션은 사다리를 쓰지 않는다(2026-10-07 검토)."""
+
+    def test_question_keeps_the_dialog_without_the_retry_line(self):
+        logic = arrive("restroom")
+        assert logic.on_arrival_answer(_intent("question"), 3.0) == []
+        assert logic.state == State.ASKING_NEXT
+        assert logic._arrival_retried is False
+        logic.on_arrival_question_spoken(4.0)
+        acts = logic.on_tick(13.0, NavStatus.NONE)
+        assert any(MSG_ASK_RESTROOM in t for t in _say(acts))
+
+
+class TestFinishWhileWaiting:
+    """대기 중 돌아와 "다 됐어" — 다음 목적지를 묻는다(2026-10-07 사용자 결정)."""
+
+    def waiting(self):
+        logic = arrive("restroom", home=HOME)
+        logic.on_arrival_answer(_intent("affirm"), 3.0)
+        assert logic.state == State.WAITING
+        return logic
+
+    def test_asks_where_to_and_keeps_waiting(self):
+        logic = self.waiting()
+        acts = logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        says = [a for a in acts if isinstance(a, Say)]
+        assert [s.text for s in says] == [MSG_WAIT_FINISH_ASK]
+        assert says[0].expects_reply and says[0].priority == "response"
+        assert logic.state == State.WAITING
+
+    def test_destination_after_the_question_goes(self):
+        logic = self.waiting()
+        logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        logic.on_intent(_intent(matched_destination_id="d2"), _dest("reception", id="d2", name="안내소"),
+                        BOUNDS, True, 25.0)
+        assert logic.state == State.NAVIGATING
+
+    def test_second_finish_ends_the_guide(self):
+        """갈 곳이 없다는 뜻 — 같은 질문을 되풀이하지 않고 안내를 끝낸다."""
+        logic = self.waiting()
+        logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        acts = logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 30.0)
+        assert MSG_FINISH in _say(acts)
+        assert logic.state == State.RETURNING
+
+    def test_finish_much_later_asks_again(self):
+        logic = self.waiting()
+        logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True, 20.0)
+        acts = logic.on_intent(_intent("finish", matched_destination_id=""), None, BOUNDS, True,
+                               20.0 + WAIT_FINISH_REPEAT_SEC + 1.0)
+        assert _say(acts) == [MSG_WAIT_FINISH_ASK]
+        assert logic.state == State.WAITING

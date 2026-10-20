@@ -4,6 +4,9 @@
 <xacro:include filename="$(find vica_description)/urdf/materials.xacro" />
 <xacro:property name="body_center_z" value="0.041" />
 <xacro:property name="base_link_height" value="0.19" />
+
+<xacro:property name="axle_offset_x" value="0.154" />
+
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
@@ -30,19 +33,19 @@
 
 <link name="base_link">
   <inertial>
-    <origin xyz="0.004031215194176557 3.002726997808124e-17 0.03506562657816282" rpy="0 0 0"/>
+    <origin xyz="${0.004031215194176557 - axle_offset_x} 3.002726997808124e-17 0.03506562657816282" rpy="0 0 0"/>
     <mass value="90.84709962539795"/>
     <inertia ixx="2.402108" iyy="3.622523" izz="4.166828" ixy="0.0" iyz="-0.0" ixz="0.343284"/>
   </inertial>
   <visual>
-    <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
+    <origin xyz="${-axle_offset_x} 0 -${body_center_z}" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://vica_description/meshes/base_link_mast.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="body_blue"/>
   </visual>
   <collision>
-    <origin xyz="0 0 -${body_center_z}" rpy="0 0 0"/>
+    <origin xyz="${-axle_offset_x} 0 -${body_center_z}" rpy="0 0 0"/>
     <geometry>
       <mesh filename="package://vica_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
@@ -207,14 +210,14 @@
 </link>
 
 <joint name="left_wheel_joint" type="continuous">
-  <origin xyz="0.154 ${wheel_y} -0.125" rpy="0 0 0"/>
+  <origin xyz="${0.154 - axle_offset_x} ${wheel_y} -0.125" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="left_wheel_1"/>
   <axis xyz="0.0 1.0 0.0"/>
 </joint>
 
 <joint name="right_wheel_joint" type="continuous">
-  <origin xyz="0.154 ${-wheel_y} -0.125" rpy="0 0 0"/>
+  <origin xyz="${0.154 - axle_offset_x} ${-wheel_y} -0.125" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="right_wheel_1"/>
   <axis xyz="0.0 1.0 0.0"/>
@@ -235,21 +238,21 @@
 </joint>
 
 <joint name="front_right_caster_steer_joint" type="continuous">
-  <origin xyz="-0.222 ${-caster_steer_y} -0.0825" rpy="0 0 0"/>
+  <origin xyz="${-0.222 - axle_offset_x} ${-caster_steer_y} -0.0825" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="front_right_caster_steer_1"/>
   <axis xyz="0.0 0.0 -1.0"/>
 </joint>
 
 <joint name="front_left_caster_steer_joint" type="continuous">
-  <origin xyz="-0.222 ${caster_steer_y} -0.0825" rpy="0 0 0"/>
+  <origin xyz="${-0.222 - axle_offset_x} ${caster_steer_y} -0.0825" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="front_left_caster_steer_1"/>
   <axis xyz="0.0 0.0 -1.0"/>
 </joint>
 
 <joint name="laser_joint" type="fixed">
-  <origin xyz="${laser_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
+  <origin xyz="${laser_x - axle_offset_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
 </joint>
@@ -271,7 +274,7 @@
   <xacro:usonic_visual/>
 </link>
 <joint name="usonic_front_left_joint" type="fixed">
-  <origin xyz="${usonic_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <origin xyz="${usonic_x - axle_offset_x} ${usonic_y} ${usonic_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="usonic_front_left"/>
 </joint>
@@ -280,13 +283,36 @@
   <xacro:usonic_visual/>
 </link>
 <joint name="usonic_front_right_joint" type="fixed">
-  <origin xyz="${usonic_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
+  <origin xyz="${usonic_x - axle_offset_x} ${-usonic_y} ${usonic_z}" rpy="0 0 0"/>
   <parent link="base_link"/>
   <child link="usonic_front_right"/>
 </joint>
 
+<xacro:property name="usonic_side_x"       value="0.154" />
+<xacro:property name="usonic_side_y"       value="0.225" />
+<xacro:property name="usonic_rear_wheel_x" value="-0.252" />
+<xacro:property name="usonic_rear_x"       value="-0.305" />
+
+<xacro:macro name="usonic_link" params="name x y yaw">
+  <link name="${name}">
+    <xacro:usonic_visual/>
+  </link>
+  <joint name="${name}_joint" type="fixed">
+    <origin xyz="${x - axle_offset_x} ${y} ${usonic_z}" rpy="0 0 ${yaw}"/>
+    <parent link="base_link"/>
+    <child link="${name}"/>
+  </joint>
+</xacro:macro>
+
+<xacro:usonic_link name="usonic_left_wheel"       x="${usonic_side_x}"       y="${usonic_side_y}"  yaw="${pi/2}"/>
+<xacro:usonic_link name="usonic_right_wheel"      x="${usonic_side_x}"       y="${-usonic_side_y}" yaw="${-pi/2}"/>
+<xacro:usonic_link name="usonic_right_rear_wheel" x="${usonic_rear_wheel_x}" y="${-usonic_side_y}" yaw="${-pi/2}"/>
+<xacro:usonic_link name="usonic_rear_right"       x="${usonic_rear_x}"       y="${-usonic_y}"      yaw="${pi}"/>
+<xacro:usonic_link name="usonic_rear_left"        x="${usonic_rear_x}"       y="${usonic_y}"       yaw="${pi}"/>
+<xacro:usonic_link name="usonic_left_rear_wheel"  x="${usonic_rear_wheel_x}" y="${usonic_side_y}"  yaw="${pi/2}"/>
+
 <joint name="camera_joint" type="fixed">
-  <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 ${camera_pitch} 0"/>
+  <origin xyz="${camera_x - axle_offset_x} ${camera_y} ${camera_z}" rpy="0 ${camera_pitch} 0"/>
   <parent link="base_link"/>
   <child link="camera_link"/>
 </joint>

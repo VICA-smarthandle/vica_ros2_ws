@@ -1,0 +1,352 @@
+"""반응표 칸 밖의 세부 — 시간·문장 대조·이어지는 동작 (미션 요청 반응표, 2026-10-08)."""
+from reaction_states import (BOUNDS, ELEV, ROOM, SPOT_DEST, asking, asking_wait_time,
+                             awaiting_user, confirming, idle_braked, intent, lookup, navigating,
+                             paused, returning, returning_late, turning, waiting,
+                             waiting_asked, waiting_release)
+from vica_mission_manager.mission_logic import (
+    MSG_ALREADY_GOING,
+    MSG_APPROACH_ONBOARDING,
+    MSG_ASK_ENTRANCE,
+    MSG_ASK_WAIT_TIME,
+    MSG_CONFIRM_PROMPT_FALLBACK,
+    MSG_CONFIRM_SWITCH,
+    MSG_CANCEL_KEPT,
+    MSG_CANCEL_CONFIRM,
+    MSG_CANCELED,
+    MSG_FINISH,
+    MSG_PRIVATE_DEST,
+    MSG_START,
+    MSG_WAIT_DEFAULT,
+    MSG_WAIT_FINISH_ASK,
+    MSG_WAIT_NEED_ASK,
+    MSG_WAIT_SPOT_CONFIRM,
+    MSG_WAIT_SPOT_DEFAULT,
+    CancelNav,
+    Navigate,
+    NavStatus,
+    Say,
+    State,
+    say_destination,
+)
+
+
+def _says(actions):
+    return [a.text for a in actions if isinstance(a, Say)]
+
+
+def test_waiting_wait_with_minutes_restarts_the_clock():
+    logic, t = waiting()
+    acts = logic.on_voice_intent(intent("wait", wait_minutes=20), t, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_SPOT_CONFIRM.format(minutes=20, place="입구 오른쪽")]
+    assert logic.state == State.WAITING
+    assert logic._wait_until == t + 20 * 60.0
+
+
+def test_waiting_wait_caps_at_30_minutes():
+    logic, t = waiting()
+    acts = logic.on_voice_intent(intent("wait", wait_minutes=45), t, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_SPOT_CONFIRM.format(minutes=30, place="입구 오른쪽")]
+    assert logic._wait_until == t + 30 * 60.0
+
+
+def test_release_waits_for_the_new_wait_sentence():
+    """손 놓기 기다림에서 시간을 바꾸면 새 안내를 다 말한 뒤에야 대기 장소로 떠난다."""
+    logic, t = waiting_release()
+    old = logic._release_text
+    acts = logic.on_voice_intent(intent("wait", wait_minutes=20), t, lookup, BOUNDS, True)
+    new = _says(acts)[0]
+    logic.on_wait_speech_spoken(old, t + 1.0)
+    assert logic.on_tick(t + 1.1, NavStatus.NONE) == []
+    assert logic.state == State.WAITING_RELEASE
+    logic.on_wait_speech_spoken(new, t + 6.0)
+    logic.on_tick(t + 6.1, NavStatus.NONE)
+    assert logic.state == State.MOVING_TO_WAIT_SPOT
+
+
+def test_navigating_finish_twice_cancels_like_cancel_twice():
+    """안내 주행 중 "다 됐어"는 "취소"와 같은 길 — 되물은 뒤 한 번 더 말하면 취소한다."""
+    logic, t = navigating()
+    first = logic.on_voice_intent(intent("finish"), t, lookup, BOUNDS, True)
+    assert _says(first) == [MSG_CANCEL_CONFIRM]
+    second = logic.on_voice_intent(intent("finish"), t + 2.0, lookup, BOUNDS, True)
+    assert MSG_CANCELED in _says(second)
+    assert logic.state == State.IDLE
+
+
+def test_already_going_matches_the_voice_sentence():
+    """음성 replies.ALREADY_GOING("지금 {cur}{cur_josa} 가는 중이에요.")과 같은 글자."""
+    assert say_destination(MSG_ALREADY_GOING, "409호") == "지금 409호로 가는 중이에요."
+    assert say_destination(MSG_ALREADY_GOING, "식당") == "지금 식당으로 가는 중이에요."
+
+
+def test_asking_where_answers():
+    """도착 뒤 "다시 가자" → "네, 어디로 모실까요?" 다음의 답: 목적지 = 출발, 아니요 = 종료."""
+    logic, t = asking()
+    assert _says(logic.on_voice_intent(intent("resume"), t, lookup, BOUNDS, True)) == [
+        MSG_WAIT_FINISH_ASK]
+    acts = logic.on_voice_intent(intent(matched_destination_id=ELEV.id), t + 2, lookup,
+                                 BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+    assert logic.state == State.NAVIGATING
+
+    logic, t = asking()
+    logic.on_voice_intent(intent("resume"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_FINISH]
+    assert logic.state == State.RETURNING
+
+
+def test_waiting_resume_twice_never_ends_the_guidance():
+    """대기 중 "다시 가자"는 몇 번이든 묻기만 한다 — 끝내기는 "다 됐어" 두 번뿐이다."""
+    logic, t = waiting()
+    for k in range(2):
+        acts = logic.on_voice_intent(intent("resume"), t + k, lookup, BOUNDS, True)
+        assert _says(acts) == [MSG_WAIT_FINISH_ASK]
+    assert logic.state == State.WAITING
+
+
+def test_release_no_then_answers():
+    """M2 직후 "아니(기다리지 마)" → "마칠까요?" → 네 = 종료·홈, 아니요 = 하던 대기 그대로."""
+    logic, t = waiting_release(minutes=10)
+    assert _says(logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)) == [
+        MSG_ASK_ENTRANCE]
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_FINISH]
+    assert logic.state == State.RETURNING
+
+    logic, t = waiting_release(minutes=10)
+    logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_SPOT_CONFIRM.format(minutes=10, place="입구 오른쪽")]
+    assert logic.state == State.WAITING_RELEASE
+
+
+def test_wait_time_no_then_answers():
+    logic, t = asking_wait_time()
+    assert _says(logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)) == [
+        MSG_ASK_ENTRANCE]
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_DEFAULT]
+    assert logic.state == State.WAITING
+
+
+def test_cancel_question_yes_and_no():
+    """"안내를 취소할까요?"의 네·아니요 — 예전엔 둘 다 버려졌다."""
+    logic, t = navigating()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_CANCEL_KEPT]
+    assert logic.state == State.NAVIGATING and not logic.cancel_confirm_pending
+
+    logic, t = navigating()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert MSG_CANCELED in _says(acts)
+    assert logic.state == State.IDLE
+
+
+def test_waiting_no_after_the_window_is_not_an_answer():
+    logic, t = waiting_asked()
+    acts = logic.on_voice_intent(intent("deny"), t + 31.0, lookup, BOUNDS, True)
+    assert _says(acts) == []
+    assert logic.state == State.WAITING
+
+
+def test_need_question_is_the_users_sentence():
+    assert MSG_WAIT_NEED_ASK == "안내가 필요 없으신가요?"
+
+
+def test_need_question_answers():
+    """부정 질문: 네(필요 없다)·다 됐어·두 번째 취소 = 종료·홈, 아니요(필요하다) = 계속 대기."""
+    for answer in ("affirm", "finish", "cancel"):
+        logic, t = waiting()
+        assert _says(logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)) == [
+            MSG_WAIT_NEED_ASK]
+        acts = logic.on_voice_intent(intent(answer), t + 2, lookup, BOUNDS, True)
+        assert _says(acts) == [MSG_FINISH], answer
+        assert logic.state == State.RETURNING, answer
+
+    logic, t = waiting()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_CANCEL_KEPT]
+    assert logic.state == State.WAITING
+
+
+def test_returning_wait_goes_back_to_the_wait_spot():
+    """대기 장소가 있는 목적지에서 안내를 마치고 홈 가는 중 "기다려" → 복귀를 멈추고 M2′ →"""
+    logic, t = returning(SPOT_DEST)
+    acts = logic.on_voice_intent(intent("wait"), t, lookup, BOUNDS, True)
+    assert any(isinstance(a, CancelNav) for a in acts)
+    assert _says(acts) == [MSG_WAIT_SPOT_DEFAULT.format(place="입구 오른쪽")]
+    assert logic.state == State.WAITING_RELEASE
+    logic.on_wait_speech_spoken(_says(acts)[0], t + 5.0)
+    acts = logic.on_tick(t + 5.1, NavStatus.NONE)
+    assert logic.state == State.MOVING_TO_WAIT_SPOT
+    assert [a.destination.id for a in acts if isinstance(a, Navigate)] == ["wait_spot:d1"]
+
+
+def test_returning_wait_without_spot_goes_to_the_entrance():
+    logic, t = returning()
+    acts = logic.on_voice_intent(intent("wait", wait_minutes=10), t, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_SPOT_CONFIRM.format(minutes=10, place="입구 앞")]
+    assert [a.destination.id for a in acts if isinstance(a, Navigate)] == ["wait_back:wc"]
+    assert logic.state == State.MOVING_BACK_TO_DEST
+    logic.on_tick(t + 20.0, NavStatus.SUCCEEDED)
+    assert logic.state == State.WAITING
+    assert logic.wait_place == "입구 앞"
+
+
+def test_braked_idle_wait_stops_the_return_ladder():
+    logic, t = idle_braked()
+    logic.on_voice_intent(intent("wait"), t, lookup, BOUNDS, True)
+    assert not logic.return_interrupted
+    logic.on_tick(t + 30.0, NavStatus.SUCCEEDED)
+    assert logic.state == State.WAITING
+
+
+def test_after_home_wait_is_plain_idle_again():
+    """홈에 도착하면 직전 목적지를 잊는다 — 그 뒤의 "기다려"는 그냥 쉬는 중의 말이다."""
+    logic, t = returning()
+    logic.on_tick(t + 20.0, NavStatus.SUCCEEDED)
+    assert logic.state == State.IDLE
+    acts = logic.on_voice_intent(intent("wait"), t + 21.0, lookup, BOUNDS, True)
+    assert _says(acts) == ["지금은 안내 중이 아닙니다."]
+
+
+def test_late_answer_meaning_follows_the_question():
+    """대기형 질문("기다릴까요?")에 답이 없어 떠난 뒤: 네 = 대기, 아니요 = 그대로 홈."""
+    logic, t = returning_late()
+    acts = logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_FINISH]
+    assert logic.state == State.RETURNING
+    assert logic.on_voice_intent(intent("affirm"), t + 1, lookup, BOUNDS, True) == []
+
+
+def test_wait_time_yes_twice_waits_30_minutes():
+    logic, t = asking_wait_time()
+    assert _says(logic.on_voice_intent(intent("affirm"), t, lookup, BOUNDS, True)) == [
+        MSG_ASK_WAIT_TIME]
+    acts = logic.on_voice_intent(intent("affirm"), t + 3, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_WAIT_DEFAULT]
+    assert logic.state == State.WAITING
+
+
+def test_switch_question_is_the_users_sentence():
+    assert MSG_CONFIRM_SWITCH.format(prompt="엘리베이터로 안내해드릴까요?") == (
+        "네, 엘리베이터로 안내해드릴까요?")
+
+
+def test_switch_then_yes_goes_to_the_new_place():
+    logic, t = confirming()
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id), t, lookup, BOUNDS, True)
+    assert logic.confirming_dest_id == ELEV.id
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+    assert logic.state == State.NAVIGATING
+
+
+def test_switch_to_a_closed_place_keeps_the_question():
+    closed = ROOM.__class__(**{**ROOM.__dict__, "id": "vip", "name": "원장실",
+                               "authorization": "private"})
+    logic, t = confirming()
+    acts = logic.on_voice_intent(intent(matched_destination_id="vip"), t,
+                                 lambda i: closed if i == "vip" else lookup(i), BOUNDS, True)
+    assert _says(acts) == [MSG_PRIVATE_DEST]
+    assert logic.state == State.CONFIRMING and logic.confirming_dest_id == "wc"
+
+
+def _after_turn(logic, t):
+    """회전이 끝났다 — 손잡이 안내 뒤(시험 로봇은 터치 센서가 없어 바로) 다음 질문이 나온다."""
+    return _says(logic.on_tick(t, NavStatus.SUCCEEDED))
+
+
+def test_destination_answer_is_accepted_and_asked_after_the_turn():
+    logic, t = awaiting_user()
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id, need_confirm=True), t,
+                          lookup, BOUNDS, True)
+    assert logic.state == State.TURNING
+    says = _after_turn(logic, t + 4.0)
+    assert says[-1] == say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")
+    assert logic.state == State.CONFIRMING and logic.confirming_dest_id == ELEV.id
+    acts = logic.on_voice_intent(intent("affirm"), t + 6.0, lookup, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+
+
+def test_destination_said_while_turning_is_remembered():
+    logic, t = turning()
+    assert logic.on_voice_intent(intent(matched_destination_id=ELEV.id), t, lookup,
+                                 BOUNDS, True) == []
+    says = _after_turn(logic, t + 3.0)
+    assert says[-1] == say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")
+
+
+def test_unknown_destination_falls_back_to_onboarding():
+    logic, t = awaiting_user()
+    logic.on_voice_intent(intent(matched_destination_id="nowhere", need_confirm=True), t,
+                          lookup, BOUNDS, True)
+    assert logic.state == State.TURNING
+    assert _after_turn(logic, t + 4.0)[-1] == MSG_APPROACH_ONBOARDING
+
+
+def test_confirm_strange_answer_reasks_once():
+    logic, t = confirming()
+    ask = say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "화장실")
+    assert _says(logic.on_voice_intent(intent("unknown"), t, lookup, BOUNDS, True)) == [ask]
+    assert logic.on_voice_intent(intent("clarify"), t + 3, lookup, BOUNDS, True) == []
+    assert logic.state == State.CONFIRMING
+    assert _says(logic.on_tick(t + 16, NavStatus.NONE)) == []
+
+
+def test_cancel_question_strange_answer_reasks_once():
+    logic, t = navigating()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    assert _says(logic.on_voice_intent(intent("unknown"), t + 2, lookup, BOUNDS, True)) == [
+        MSG_CANCEL_CONFIRM]
+    assert logic.on_voice_intent(intent("unknown"), t + 4, lookup, BOUNDS, True) == []
+    assert logic.cancel_confirm_pending
+
+
+def test_cancel_question_while_paused_now_times_out():
+    """예전엔 안내 주행 중에만 취소 확인 시계를 봐서 일시정지 중에 물은 확인이 끝나지 않았다."""
+    logic, t = paused()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    assert _says(logic.on_tick(t + 15, NavStatus.NONE)) == [MSG_CANCEL_CONFIRM]
+    logic.on_tick(t + 31, NavStatus.NONE)
+    assert not logic.cancel_confirm_pending and logic.state == State.PAUSED
+
+
+def test_where_question_reasks_once_then_keeps_waiting():
+    logic, t = waiting_asked()
+    assert _says(logic.on_tick(t + 14.5, NavStatus.NONE)) == [MSG_WAIT_FINISH_ASK]
+    later = logic.on_tick(t + 40, NavStatus.NONE)
+    assert MSG_WAIT_FINISH_ASK not in _says(later)
+    assert logic.state == State.WAITING
+
+
+def test_need_question_silence_reasks_then_keeps_waiting():
+    logic, t = waiting()
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    assert _says(logic.on_tick(t + 15, NavStatus.NONE)) == [MSG_WAIT_NEED_ASK]
+    assert _says(logic.on_tick(t + 30, NavStatus.NONE)) == [MSG_CANCEL_KEPT]
+    assert logic.state == State.WAITING
+
+
+def test_late_tick_still_reasks_before_folding():
+    """틱이 늦게 와 다시 묻기 시각과 마감이 한 틱에 겹쳐도 먼저 다시 묻고 답할 시간을 남긴다."""
+    logic, t = confirming()
+    acts = logic.on_tick(t + 40, NavStatus.NONE)
+    assert _says(acts) == [say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "화장실")]
+    assert logic.state == State.CONFIRMING
+    logic.on_tick(t + 40 + 15, NavStatus.NONE)
+    assert logic.state == State.IDLE
+
+
+def test_llm_clarify_is_not_a_strange_answer():
+    """LLM 이 되묻는 중(clarify)이면 미션은 끼어들지 않는다 — 두 목소리 방지. 못 알아들은"""
+    logic, t = asking()
+    assert logic.on_voice_intent(intent("clarify"), t, lookup, BOUNDS, True) == []
+    assert logic.state == State.ASKING_NEXT
+    logic, t = confirming()
+    assert logic.on_voice_intent(intent("clarify"), t, lookup, BOUNDS, True) == []
+    assert logic.state == State.CONFIRMING

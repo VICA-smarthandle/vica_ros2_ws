@@ -6,6 +6,7 @@ import yaml
 
 from vica_destination_manager.storage import (
     DestinationStorage,
+    normalize_contact_phone,
     normalize_destination,
     validate_map_id,
 )
@@ -61,3 +62,97 @@ def test_rejects_non_uuid_destination_id() -> None:
 def test_rejects_unsafe_map_id(map_id: str) -> None:
     with pytest.raises(ValueError):
         validate_map_id(map_id)
+
+
+def test_contact_phone_survives_round_trip(tmp_path: Path) -> None:
+    destination = make_destination()
+    destination["contact_phone"] = "010-1234-5678"
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    assert storage.read("map_1")[0]["contact_phone"] == "01012345678"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("01012345678", "01012345678"),
+        ("010-1234-5678", "01012345678"),
+        ("010 1234 5678", "01012345678"),
+        ("011-123-4567", "0111234567"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_contact_phone_is_normalized_to_digits(raw, expected) -> None:
+    assert normalize_contact_phone(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["02-123-4567", "1234", "0101234567890", "abc"])
+def test_rejects_non_mobile_contact_phone(raw: str) -> None:
+    with pytest.raises(ValueError, match="contact_phone"):
+        normalize_contact_phone(raw)
+
+
+def test_missing_contact_phone_defaults_to_empty() -> None:
+    assert normalize_destination(make_destination())["contact_phone"] == ""
+
+
+def test_door_yaw_and_wait_spot_survive_round_trip(tmp_path: Path) -> None:
+    destination = make_destination()
+    destination["door_yaw"] = -90.0
+    destination["wait_spot"] = {"x": 1.97, "y": -1.42, "yaw": 360.0, "side": "Right"}
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    saved = storage.read("map_1")[0]
+    assert saved["door_yaw"] == 270.0
+    assert saved["wait_spot"] == {"x": 1.97, "y": -1.42, "yaw": 0.0, "side": "right"}
+
+
+def test_old_destination_has_no_door_yaw_or_wait_spot_keys() -> None:
+    normalized = normalize_destination(make_destination())
+    assert "door_yaw" not in normalized
+    assert "wait_spot" not in normalized
+
+
+def test_removing_wait_spot_drops_the_key(tmp_path: Path) -> None:
+    destination = make_destination()
+    destination["wait_spot"] = {"x": 1.0, "y": 1.0, "yaw": 0.0, "side": "left"}
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    del destination["wait_spot"]
+    storage.upsert("map_1", destination)
+    assert "wait_spot" not in storage.read("map_1")[0]
+
+
+@pytest.mark.parametrize(
+    "wait_spot",
+    [
+        {"x": 1.0, "y": 1.0, "yaw": 0.0, "side": "up"},
+        {"x": 1.0, "y": 1.0, "yaw": 0.0},
+        {"x": "a", "y": 1.0, "side": "left"},
+        {"y": 1.0, "side": "left"},
+        {"x": float("nan"), "y": 1.0, "side": "left"},
+        [1.0, 1.0],
+    ],
+)
+def test_rejects_bad_wait_spot(wait_spot) -> None:
+    destination = make_destination()
+    destination["wait_spot"] = wait_spot
+    with pytest.raises(ValueError, match="wait_spot"):
+        normalize_destination(destination)
+
+
+@pytest.mark.parametrize("door_yaw", ["east", float("inf")])
+def test_rejects_bad_door_yaw(door_yaw) -> None:
+    destination = make_destination()
+    destination["door_yaw"] = door_yaw
+    with pytest.raises(ValueError, match="door_yaw"):
+        normalize_destination(destination)
+
+
+def test_deleting_destination_deletes_its_wait_spot(tmp_path: Path) -> None:
+    destination = make_destination()
+    destination["wait_spot"] = {"x": 1.0, "y": 1.0, "yaw": 0.0, "side": "across"}
+    storage = DestinationStorage(tmp_path)
+    storage.upsert("map_1", destination)
+    assert storage.delete("map_1", destination["id"]) == []

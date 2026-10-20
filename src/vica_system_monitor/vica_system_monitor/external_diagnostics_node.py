@@ -11,14 +11,20 @@ from diagnostic_updater import (
     HeaderlessTopicDiagnostic,
     Updater,
 )
+from rcl_interfaces.msg import ParameterDescriptor
 import rclpy
 from rclpy.clock import Clock, ClockType
+from rclpy.exceptions import (
+    InvalidParameterTypeException,
+    ParameterAlreadyDeclaredException,
+)
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default
 
 from .probe_config import (
     classify_zero_message,
+    parse_link_probe,
     parse_process_probe,
     parse_topic_probe,
     QOS_SENSOR_DATA,
@@ -39,9 +45,16 @@ _TOPIC_FIELDS = (
     ('fault_code', ''),
     ('optional', False),
 )
+_LINK_FIELDS = (
+    ('component', ''),
+    ('topic', ''),
+    ('min_publishers', 1),
+    ('fault_code', ''),
+)
 _PROCESS_FIELDS = (
     ('component', ''),
     ('cmdline_pattern', ''),
+    ('required', False),
     ('warn_percent', 0.0),
 )
 
@@ -56,6 +69,7 @@ class ExternalDiagnosticsNode(Node):
         self.declare_parameter('diagnostic_period_sec', 1.0)
         self.declare_parameter('process_scan_period_sec', 5.0)
         self.declare_parameter('topic_probe_names', [''])
+        self.declare_parameter('link_probe_names', [''])
         self.declare_parameter('process_probe_names', [''])
 
         self.config_problems: list = []
@@ -71,6 +85,7 @@ class ExternalDiagnosticsNode(Node):
         self.skipped_probes: list = []
 
         self._build_topic_probes()
+        self._build_link_probes()
         self._build_process_probes()
 
         period = float(self.get_parameter('process_scan_period_sec').value)
@@ -86,14 +101,27 @@ class ExternalDiagnosticsNode(Node):
         for problem in self.config_problems:
             self.get_logger().error(f'probe 설정 오류: {problem}')
 
-    def _read_probe_values(self, name: str, fields) -> dict:
+    def _read_probe_values(self, name: str, fields):
         """Declare and read one probe's dotted parameters."""
         values = {}
         for field, default in fields:
             key = f'{name}.{field}'
-            if not self.has_parameter(key):
-                self.declare_parameter(key, default)
-            values[field] = self.get_parameter(key).value
+            try:
+                if not self.has_parameter(key):
+                    self.declare_parameter(
+                        key, default, ParameterDescriptor(dynamic_typing=True)
+                    )
+                values[field] = self.get_parameter(key).value
+            except (
+                InvalidParameterTypeException,
+                ParameterAlreadyDeclaredException,
+                TypeError,
+                ValueError,
+            ) as exc:
+                self.config_problems.append(
+                    f"'{key}': 파라미터를 읽지 못했습니다 ({exc})"
+                )
+                return None
         return values
 
     def _build_topic_probes(self) -> None:
@@ -102,6 +130,8 @@ class ExternalDiagnosticsNode(Node):
 
         for name in names:
             values = self._read_probe_values(name, _TOPIC_FIELDS)
+            if values is None:
+                continue
             spec, problems = parse_topic_probe(name, values)
             if problems:
                 self.config_problems.extend(problems)
@@ -122,7 +152,7 @@ class ExternalDiagnosticsNode(Node):
             param = FrequencyStatusParam(
                 {'min': spec.min_hz, 'max': spec.max_hz},
                 tolerance=0.2,
-                window_size=5,
+                window_size=10,
             )
             label = f'{spec.component}: {spec.topic} frequency'
             diagnostic = HeaderlessTopicDiagnostic(label, self.updater, param)
@@ -142,6 +172,44 @@ class ExternalDiagnosticsNode(Node):
                 qos,
             )
 
+    def _build_link_probes(self) -> None:
+        """Register publisher-presence probes. 구독하지 않고 그래프만 본다."""
+        self.link_specs = []
+        names = [n for n in self.get_parameter('link_probe_names').value if n]
+
+        for name in names:
+            values = self._read_probe_values(name, _LINK_FIELDS)
+            if values is None:
+                continue
+            spec, problems = parse_link_probe(name, values)
+            if problems:
+                self.config_problems.extend(problems)
+                continue
+            self.link_specs.append(spec)
+            self.updater.add(
+                f'{spec.component}: {spec.name} link',
+                self._make_link_task(spec),
+            )
+
+    def _make_link_task(self, spec):
+        """Build a diagnostic task reporting whether the topic has a publisher."""
+
+        def task(stat: DiagnosticStatusWrapper) -> DiagnosticStatusWrapper:
+            count = self.count_publishers(spec.topic)
+            stat.add('topic', spec.topic)
+            stat.add('publishers', str(count))
+            stat.add('required', str(spec.min_publishers))
+            if count >= spec.min_publishers:
+                stat.summary(DiagnosticStatus.OK, f'발행자 {count}개')
+            else:
+                stat.summary(
+                    DiagnosticStatus.ERROR,
+                    f'발행자가 없습니다 (필요 {spec.min_publishers}개)',
+                )
+            return stat
+
+        return task
+
     def _build_process_probes(self) -> None:
         """Parse process probe specs. Sampling happens on a timer."""
         self.process_specs = []
@@ -149,6 +217,8 @@ class ExternalDiagnosticsNode(Node):
 
         for name in names:
             values = self._read_probe_values(name, _PROCESS_FIELDS)
+            if values is None:
+                continue
             spec, problems = parse_process_probe(name, values)
             if problems:
                 self.config_problems.extend(problems)
@@ -271,6 +341,13 @@ class ExternalDiagnosticsNode(Node):
             pid = self.cpu_pid.get(spec.name)
 
             if pid is None:
+                if spec.required:
+                    stat.summary(
+                        DiagnosticStatus.ERROR,
+                        '노드가 실행되지 않고 있습니다',
+                    )
+                    stat.add('pattern', spec.cmdline_pattern)
+                    return stat
                 stat.summary(
                     DiagnosticStatus.OK,
                     '프로세스를 찾지 못했습니다 (미구성 또는 미실행)',

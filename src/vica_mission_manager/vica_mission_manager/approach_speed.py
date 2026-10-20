@@ -66,6 +66,7 @@ class ApproachSpeedLadder:
             DEFAULT_APPROACH_STAGES if stages is None else stages
         )
         self._index = -1
+        self._farthest_seen = 0.0
 
     @property
     def stages(self) -> StageList:
@@ -85,9 +86,12 @@ class ApproachSpeedLadder:
     def reset(self) -> None:
         """새 Goal 용 초기화. 다음 접근에서 다시 처음 단계부터 내려간다."""
         self._index = -1
+        self._farthest_seen = 0.0
 
     def update(self, distance_remaining: Optional[float]) -> Optional[float]:
         """이번 tick 에 새로 진입한 단계의 제한율. 바뀐 것이 없으면 None."""
+        if distance_remaining is not None and distance_remaining > self._farthest_seen:
+            self._farthest_seen = float(distance_remaining)
         target = self._stage_index_for(distance_remaining)
         if target <= self._index:
             return None
@@ -101,6 +105,6 @@ class ApproachSpeedLadder:
 
         index = -1
         for i, (threshold, _) in enumerate(self._stages):
-            if distance_remaining <= threshold:
+            if distance_remaining <= threshold and self._farthest_seen >= threshold:
                 index = i
         return index

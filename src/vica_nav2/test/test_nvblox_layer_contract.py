@@ -164,11 +164,15 @@ def test_ghost_clears_within_the_maneuver_budget():
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
 def test_inflation_layer_runs_after_nvblox(costmap):
     """nvblox는 binary(lethal/free)만 찍는다. 팽창은 inflation_layer가 한다."""
-    plugins = _costmap(costmap)['plugins']
+    cm = _costmap(costmap)
+    plugins = cm['plugins']
+    inflations = [n for n in plugins
+                  if cm.get(n, {}).get('plugin') == 'nav2_costmap_2d::InflationLayer']
+    assert inflations, f'{costmap} 에 InflationLayer 가 없다: {plugins}'
     if 'nvblox_layer' in plugins:
-        assert plugins.index('inflation_layer') > plugins.index('nvblox_layer'), (
+        assert plugins.index(inflations[-1]) > plugins.index('nvblox_layer'), (
             f'{costmap} plugins 순서가 잘못됐다: {plugins}'
         )
-    assert plugins[-1] == 'inflation_layer', (
-        f'{costmap} plugins 마지막이 inflation_layer가 아니다: {plugins}'
+    assert plugins[-1] == inflations[-1], (
+        f'{costmap} plugins 마지막이 InflationLayer 가 아니다: {plugins}'
     )

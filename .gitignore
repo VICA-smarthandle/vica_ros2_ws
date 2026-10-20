@@ -7,6 +7,10 @@ log/
 # maps/ 자체는 추적하므로 이것만 따로 제외한다.
 maps/_live/
 maps/CURRENT_MAP
+# 정렬해서 저장한 지도의 숨김 원본(2026-10-07, B안). 커밋하지 않는다(사용자 결정).
+# 저장 도중 잠깐 생기는 임시 파일도 함께 뺀다.
+maps/.original/
+maps/*.align-tmp
 
 
 # Runtime generated TF trees

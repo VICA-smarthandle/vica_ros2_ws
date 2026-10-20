@@ -1,0 +1,5 @@
+string map_id
+string display_name
+---
+bool accepted
+string message

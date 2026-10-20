@@ -214,3 +214,34 @@ def test_touch_state_is_initialised_before_any_enable_branch():
     setup_body = text.split("def _setup_touch(self)")[1].split("def ")[0]
     assert "self.touch_contact" not in setup_body
     assert "self.touch_last_frame_ns" not in setup_body
+
+
+def test_rail_forecast_defaults_off_in_code():
+    """`ros2 run` 으로 띄우면(YAML 없이) 레일 예고는 꺼져 있어야 한다."""
+    source = read(NODE_DIR / "turn_guide_node.py")
+    assert 'declare_parameter("enable_rail_forecast", False)' in source
+
+
+def test_rail_forecast_lookahead_matches_controller():
+    """예고가 쓰는 조준거리 규칙이 실제 컨트롤러(FollowPath)가 코너를 도는 방식과 같아야 한다."""
+    guide = load_config()["turn_guide_node"]["ros__parameters"]
+    nav = yaml.safe_load(read(
+        PKG_ROOT.parent / "vica_nav2" / "config" / "nav2_params.yaml"))
+    follow = nav["controller_server"]["ros__parameters"]["FollowPath"]
+    if "VccController" in follow["plugin"]:
+        assert guide["controller_lookahead_time_sec"] == 0.0
+        assert guide["controller_lookahead_min_m"] == 0.0
+        assert guide["controller_lookahead_max_m"] == 0.0
+    else:
+        assert guide["controller_lookahead_time_sec"] == follow["lookahead_time"]
+        assert guide["controller_lookahead_min_m"] == follow["min_lookahead_dist"]
+        assert guide["controller_lookahead_max_m"] == follow["max_lookahead_dist"]
+
+
+def test_every_turn_guide_yaml_key_is_declared_by_the_node():
+    """yaml 키 오타는 조용히 무시된다(declare 안 된 이름은 기본값으로 돈다). 키가 모두 선언돼야 한다."""
+    import re
+    guide = load_config()["turn_guide_node"]["ros__parameters"]
+    source = read(PKG_ROOT / "vica_user_guidance" / "turn_guide_node.py")
+    declared = set(re.findall(r'declare_parameter\("([a-z_]+)"', source))
+    assert set(guide) <= declared, sorted(set(guide) - declared)

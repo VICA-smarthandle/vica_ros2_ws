@@ -14,6 +14,7 @@
   <depend>tf2_ros</depend>
 
   <exec_depend>python3-serial</exec_depend>
+  <exec_depend>vica_user_guidance_cpp</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>

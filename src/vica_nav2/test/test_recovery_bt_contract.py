@@ -1,5 +1,6 @@
 """복구 동작이 로봇을 움직이지 않는지 감시한다."""
 import importlib.util
+import os
 import re
 from pathlib import Path
 
@@ -140,7 +141,10 @@ def test_custom_bt_only_removes_backup_from_the_nav2_default():
         ]
 
     default = lines(NAV2_DEFAULT_BT.read_text(encoding='utf-8'))
-    ours = lines(_bt_path().read_text(encoding='utf-8'))
+    ours = [
+        line.replace(' goal_checker_id="general_goal_checker"', '')
+        for line in lines(_bt_path().read_text(encoding='utf-8'))
+    ]
 
     removed = [line for line in default if line not in ours]
     added = [line for line in ours if line not in default]
@@ -244,6 +248,9 @@ def test_bt_navigator_declares_the_key_so_launch_can_rewrite_it():
     )
 
 
+ROUTE_BT = 'vica_navigate_to_pose_route.xml'
+
+
 def test_launch_rewrites_the_bt_path_to_the_installed_tree(monkeypatch, tmp_path):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
 
@@ -273,11 +280,26 @@ def test_launch_rewrites_the_bt_path_to_the_installed_tree(monkeypatch, tmp_path
     assert 'default_nav_to_pose_bt_xml' in rewrites
 
     value = rewrites['default_nav_to_pose_bt_xml']
-    if not isinstance(value, str):
-        value = perform_substitutions(context, value)
-    assert value.endswith(f'behavior_trees/{ACTIVE_BT}'), (
-        f'BT 경로가 활성 트리({ACTIVE_BT})를 가리키지 않는다: {value}'
+
+    def _resolve(use_route):
+        if isinstance(value, str):
+            return value
+        ctx = LaunchContext()
+        ctx.launch_configurations['use_route'] = use_route
+        return perform_substitutions(ctx, value)
+
+    off = _resolve('false')
+    assert off.endswith(f'behavior_trees/{ACTIVE_BT}'), (
+        f'레일을 끄면 활성 트리({ACTIVE_BT})여야 한다: {off}'
     )
+    on = _resolve('true')
+    assert on.endswith(f'behavior_trees/{ROUTE_BT}'), (
+        f'레일을 켜면 레일 트리({ROUTE_BT})여야 한다: {on}'
+    )
+    assert _bt_path(ROUTE_BT).is_file(), (
+        f'레일 트리 {ROUTE_BT} 가 설치본에 없다. setup.py 의 behavior_trees 확인'
+    )
+    value = off
     other = BT_NAME if ACTIVE_BT != BT_NAME else CLEARING_ONLY_BT
     assert _bt_path(other).is_file(), (
         f'되돌릴 트리 {other}가 사라졌다. launch 한 줄로 복구를 되살릴 수 없다'
@@ -289,4 +311,32 @@ def test_installed_bt_is_shipped_by_setup_py():
     setup_py = (_pkg_dir() / 'setup.py').read_text(encoding='utf-8')
     assert 'behavior_trees' in setup_py, (
         'setup.py data_files에 behavior_trees가 없어 share에 설치되지 않는다'
+    )
+
+
+def test_bt_plugin_libraries_exist():
+    """plugin_lib_names 에 적은 이름이 실제 .so 로 존재해야 한다."""
+    params = _params()
+    names = params['bt_navigator']['ros__parameters']['plugin_lib_names']
+    assert names, 'plugin_lib_names 가 비었다'
+
+    roots = []
+    for var in ('LD_LIBRARY_PATH', 'AMENT_PREFIX_PATH'):
+        for chunk in os.environ.get(var, '').split(':'):
+            if not chunk:
+                continue
+            roots.append(Path(chunk))
+            roots.append(Path(chunk) / 'lib')
+    roots = [r for r in dict.fromkeys(roots) if r.is_dir()]
+    if not roots:
+        pytest.skip('라이브러리 경로를 못 찾았다. source 후 실행한다')
+
+    missing = []
+    for name in names:
+        if not any((r / f'lib{name}.so').is_file() for r in roots):
+            missing.append(name)
+    assert not missing, (
+        'plugin_lib_names 에 있으나 실제 라이브러리가 없다: '
+        f'{missing}. bt_navigator 가 configure 에서 멈추고 주행 요청을 받을 '
+        '노드가 사라진다. 이름을 ls /opt/ros/humble/lib 로 대조할 것'
     )

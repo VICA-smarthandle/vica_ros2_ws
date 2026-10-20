@@ -65,7 +65,7 @@ class SafetySupervisorNode(Node):
 
         self.declare_parameter("publish_hz", 30.0)
         self.declare_parameter("cmd_timeout_sec", 0.5)
-        self.declare_parameter("estop_timeout_sec", 0.5)
+        self.declare_parameter("estop_timeout_sec", 2.0)
         self.declare_parameter("max_linear_mps", 1.0)
         self.declare_parameter("max_angular_radps", 2.0)
 

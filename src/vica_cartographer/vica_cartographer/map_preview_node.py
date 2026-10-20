@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -19,7 +20,9 @@ from rclpy.qos import (
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from .map_preview import grid_to_png
+from .map_align import tilt_of_occupancy
+from .map_preview import POSE_MAX_AGE_SEC, grid_to_png, quaternion_to_yaw_degrees
+from .map_preview import robot_pose_fields, tilt_fields
 
 PREVIEW_DIRNAME = '_live'
 PREVIEW_FILENAME = 'preview.png'
@@ -37,6 +40,8 @@ class MapPreviewNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('period_sec', 2.0)
         self.declare_parameter('compress_level', 6)
+        self.declare_parameter('pose_topic', '/tracked_pose')
+        self.declare_parameter('pose_max_age_sec', POSE_MAX_AGE_SEC)
 
         self.period_sec = float(self.get_parameter('period_sec').value)
         self.compress_level = int(self.get_parameter('compress_level').value)
@@ -44,6 +49,9 @@ class MapPreviewNode(Node):
 
         self.seq = 0
         self.last_written_ns = None
+        self.robot_pose = None
+        self.robot_pose_ns = None
+        self.pose_max_age_sec = float(self.get_parameter('pose_max_age_sec').value)
 
         self.create_subscription(
             OccupancyGrid,
@@ -52,6 +60,18 @@ class MapPreviewNode(Node):
             QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            ),
+        )
+
+        self.create_subscription(
+            PoseStamped,
+            str(self.get_parameter('pose_topic').value),
+            self.handle_pose,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
                 durability=DurabilityPolicy.VOLATILE,
                 history=HistoryPolicy.KEEP_LAST,
             ),
@@ -118,8 +138,32 @@ class MapPreviewNode(Node):
             self.get_logger().warn(f'미리보기를 저장하지 못했습니다: {error}')
             return
 
+        try:
+            tilt = tilt_of_occupancy(msg.data, info.width, info.height)
+        except Exception as error:  # noqa: BLE001 - 덤 계산이 노드를 죽이면 안 된다
+            self.get_logger().warn(f'지도 기울기를 재지 못했습니다: {error}')
+            tilt = None
+
         self.seq += 1
-        self._announce(info, len(png))
+        self._announce(info, len(png), tilt)
+
+    def handle_pose(self, msg: PoseStamped) -> None:
+        """Remember the latest map-frame pose. 저장만 하고 아무것도 계산하지 않는다."""
+        position = msg.pose.position
+        orientation = msg.pose.orientation
+        self.robot_pose = (
+            float(position.x),
+            float(position.y),
+            quaternion_to_yaw_degrees(
+                orientation.x, orientation.y, orientation.z, orientation.w
+            ),
+        )
+        self.robot_pose_ns = self.get_clock().now().nanoseconds
+
+    def _robot_pose_age_sec(self):
+        if self.robot_pose_ns is None:
+            return None
+        return (self.get_clock().now().nanoseconds - self.robot_pose_ns) / 1e9
 
     def _write_atomically(self, png: bytes) -> None:
         """Write a temp file then rename."""
@@ -129,23 +173,27 @@ class MapPreviewNode(Node):
         temp.write_bytes(png)
         os.replace(temp, target)
 
-    def _announce(self, info, size_bytes: int) -> None:
+    def _announce(self, info, size_bytes: int, tilt_deg=None) -> None:
         """Publish the metadata the app needs."""
-        message = String()
-        message.data = json.dumps(
-            {
-                'image_url': PREVIEW_URL_PREFIX + PREVIEW_FILENAME,
-                'seq': self.seq,
-                'width': int(info.width),
-                'height': int(info.height),
-                'resolution': float(info.resolution),
-                'origin_x': float(info.origin.position.x),
-                'origin_y': float(info.origin.position.y),
-                'bytes': size_bytes,
-                'timestamp': datetime.now().isoformat(timespec='seconds'),
-            },
-            ensure_ascii=False,
+        payload = {
+            'image_url': PREVIEW_URL_PREFIX + PREVIEW_FILENAME,
+            'seq': self.seq,
+            'width': int(info.width),
+            'height': int(info.height),
+            'resolution': float(info.resolution),
+            'origin_x': float(info.origin.position.x),
+            'origin_y': float(info.origin.position.y),
+            'bytes': size_bytes,
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+        }
+        payload.update(
+            robot_pose_fields(
+                self.robot_pose, self._robot_pose_age_sec(), self.pose_max_age_sec
+            )
         )
+        payload.update(tilt_fields(tilt_deg))
+        message = String()
+        message.data = json.dumps(payload, ensure_ascii=False)
         self.publisher.publish(message)
 
     def handle_clear(self, _request, response):
@@ -168,6 +216,8 @@ class MapPreviewNode(Node):
                 return response
         self.seq = 0
         self.last_written_ns = None
+        self.robot_pose = None
+        self.robot_pose_ns = None
         response.success = True
         response.message = f'미리보기 {removed}개를 지웠습니다.'
         self.get_logger().info(response.message)

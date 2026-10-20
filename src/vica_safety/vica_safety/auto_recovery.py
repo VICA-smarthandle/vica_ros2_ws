@@ -3,7 +3,7 @@
 from typing import Iterable, Optional
 
 
-HUMAN_SOURCES = frozenset({"physical_f1", "app", "voice"})
+HUMAN_SOURCES = frozenset({"physical_f1", "app", "voice", "tipped"})
 
 COMM_SOURCES = frozenset({
     "motor_can",

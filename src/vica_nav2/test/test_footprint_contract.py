@@ -1,4 +1,6 @@
 """costmap footprint가 실제 차체(vica_description/meshes/base_link.stl)를 덮는지 감시한다."""
+import math
+import re
 import struct
 from pathlib import Path
 
@@ -7,11 +9,12 @@ import yaml
 
 
 STL_SCALE = 0.001
+AXLE_OFFSET_X = 0.154
 MEASURED_REAR = -0.415
 MEASURED_HALF_WIDTH = 0.225
 STL_TOLERANCE = 0.01
 LASER_X = 0.185
-CAMERA_X = 0.28683
+CAMERA_X = -0.225
 
 
 def _load_params():
@@ -23,6 +26,27 @@ def _footprint(costmap_name):
     params = _load_params()
     raw = params[costmap_name][costmap_name]['ros__parameters']['footprint']
     return yaml.safe_load(raw)
+
+
+def _padded(points, padding):
+    """Nav2 의 padFootprint 와 같은 규칙으로 여유를 더한다."""
+    def shift(v):
+        return 0.0 if v == 0 else (padding if v > 0 else -padding)
+    return [(p[0] + shift(p[0]), p[1] + shift(p[1])) for p in points]
+
+
+def _inscribed(points):
+    """원점에서 가장 가까운 변까지의 거리."""
+    best = float('inf')
+    n = len(points)
+    for i in range(n):
+        ax, ay = points[i]
+        bx, by = points[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len_sq = dx * dx + dy * dy
+        t = 0.0 if len_sq == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / len_sq))
+        best = min(best, math.hypot(ax + t * dx, ay + t * dy))
+    return best
 
 
 def _stl_path():
@@ -60,14 +84,18 @@ def test_footprint_covers_the_real_chassis(costmap):
     rear = min(p[0] for p in points)
     half_width = max(abs(p[1]) for p in points)
 
-    assert front >= max_x, (
-        f'{costmap} footprint 전방 {front}이 실제 차체 {max_x:.3f}보다 짧다'
+    stl_front = max_x - AXLE_OFFSET_X
+    assert front >= stl_front, (
+        f'{costmap} footprint 전방 {front}이 실제 차체 {stl_front:.3f}보다 짧다'
+        f' (STL 차체중심 {max_x:.3f} - 축 오프셋 {AXLE_OFFSET_X})'
     )
     assert half_width >= MEASURED_HALF_WIDTH, (
         f'{costmap} footprint 반폭 {half_width}이 실측 {MEASURED_HALF_WIDTH}보다 좁다'
     )
-    assert rear <= MEASURED_REAR, (
-        f'{costmap} footprint 후방 {rear}이 실측 차체 {MEASURED_REAR}보다 짧다'
+    measured_rear = MEASURED_REAR - AXLE_OFFSET_X
+    assert rear <= measured_rear, (
+        f'{costmap} footprint 후방 {rear}이 실측 차체 {measured_rear:.3f}보다 짧다'
+        f' (줄자 차체중심 {MEASURED_REAR} - 축 오프셋 {AXLE_OFFSET_X})'
     )
     assert max_abs_y - half_width <= STL_TOLERANCE, (
         f'{costmap} 반폭 실측 {half_width}이 STL {max_abs_y:.4f}보다 '
@@ -79,8 +107,8 @@ def test_footprint_covers_the_real_chassis(costmap):
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
 def test_footprint_contains_forward_mounted_sensors(costmap):
     front = max(p[0] for p in _footprint(costmap))
-    assert front >= LASER_X
-    assert front >= CAMERA_X
+    assert front >= LASER_X - AXLE_OFFSET_X
+    assert front >= CAMERA_X - AXLE_OFFSET_X
 
 
 @pytest.mark.parametrize('costmap', ['local_costmap', 'global_costmap'])
@@ -109,8 +137,7 @@ def test_inflation_radius_keeps_the_path_off_the_wall(costmap):
     params = _load_params()
     cm = params[costmap][costmap]['ros__parameters']
     padding = cm['footprint_padding']
-    half_width = max(abs(p[1]) for p in _footprint(costmap))
-    inscribed = half_width + padding
+    inscribed = _inscribed(_padded(_footprint(costmap), padding))
     inflation_radius = cm['inflation_layer']['inflation_radius']
 
     assert inflation_radius - inscribed >= PATH_TRACKING_ERROR_P95, (
@@ -139,3 +166,40 @@ def test_local_and_global_costmap_use_the_same_footprint():
     local = params['local_costmap']['local_costmap']['ros__parameters']
     global_ = params['global_costmap']['global_costmap']['ros__parameters']
     assert local['footprint_padding'] == global_['footprint_padding']
+
+
+def test_urdf_axle_offset_matches_this_contract():
+    """URDF 의 axle_offset_x 와 이 파일의 AXLE_OFFSET_X 는 같아야 한다."""
+    xacro_path = (
+        Path(__file__).parents[2] / 'vica_description' / 'urdf' / 'VICA.xacro'
+    )
+    if not xacro_path.exists():
+        pytest.skip('vica_description/urdf/VICA.xacro 없음')
+
+    text = xacro_path.read_text(encoding='utf-8')
+    found = re.search(
+        r'<xacro:property\s+name="axle_offset_x"\s+value="([-0-9.]+)"', text
+    )
+    assert found, (
+        'VICA.xacro 에 axle_offset_x 속성이 없다. base_link 원점을 차체 중심으로'
+        ' 되돌렸다면 이 시험과 footprint 좌표도 함께 되돌려야 한다'
+    )
+    assert float(found.group(1)) == pytest.approx(AXLE_OFFSET_X, abs=1e-9), (
+        f'URDF axle_offset_x {found.group(1)} 와 이 시험의 {AXLE_OFFSET_X} 가 다르다.'
+        ' 한쪽만 고치면 footprint 가 차체와 어긋난다'
+    )
+
+
+def test_global_costmap_inflates_walls_and_new_obstacles_separately():
+    """2026-10-01: global 인플레이션을 벽(지도)·새 물체(라이다)로 나눈다."""
+    gc = _load_params()['global_costmap']['global_costmap']['ros__parameters']
+    plugins = gc['plugins']
+    assert plugins.index('static_layer') < plugins.index('inflation_layer') < \
+        plugins.index('obstacle_layer') < plugins.index('obstacle_inflation_layer'), plugins
+    wall = gc['inflation_layer']
+    obst = gc['obstacle_inflation_layer']
+    assert obst['plugin'] == wall['plugin'] == 'nav2_costmap_2d::InflationLayer'
+    assert obst['cost_scaling_factor'] == wall['cost_scaling_factor']
+    inscribed = 0.227 + gc['footprint_padding']
+    assert inscribed < obst['inflation_radius'] < wall['inflation_radius'], (
+        '물체용 띠는 몸 기준 못 들어가는 거리(내접)보다 커야 하고, 벽용보다 얇아야 한다')

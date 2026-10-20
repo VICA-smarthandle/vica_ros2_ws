@@ -11,6 +11,9 @@ external_diagnostics_node:
       - camera_color
       - odom
       - wheel_odom
+      - handle_state
+      - handle_uplink
+      - app_bridge
 
     lidar_scan:
       component: lidar
@@ -72,12 +75,72 @@ external_diagnostics_node:
       fault_code: LOCALIZATION_WHEEL_ODOM_STALE
       optional: false
 
+    link_probe_names:
+      - cmd_vel_req_link
+
+    cmd_vel_req_link:
+      component: navigation
+      topic: /cmd_vel_req
+      min_publishers: 1
+      fault_code: NAV2_CMD_PATH_DOWN
+
+    handle_state:
+      component: guidance
+      topic: /vica/smart_handle_state
+      msg_type: vica_interfaces/msg/SmartHandleState
+      qos: default
+      min_hz: 1.0
+      max_hz: 4.0
+      fault_code: GUIDANCE_NODE_SILENT
+      optional: true
+
+    handle_uplink:
+      component: guidance
+      topic: /ultrasonic/front_right
+      msg_type: sensor_msgs/msg/Range
+      qos: sensor_data
+      min_hz: 2.0
+      max_hz: 8.0
+      fault_code: GUIDANCE_UPLINK_STALE
+      optional: true
+
+    app_bridge:
+      component: app
+      topic: /robot_status
+      msg_type: std_msgs/msg/String
+      qos: default
+      min_hz: 1.0
+      max_hz: 4.0
+      fault_code: APP_BRIDGE_SILENT
+      optional: true
+
     process_probe_names:
       - imu_adapter
       - ekf_node
       - controller_server
       - motor_node
       - realsense_node
+      - voice_wakeword
+      - voice_tts
+      - voice_llm
+
+    voice_wakeword:
+      component: voice
+      cmdline_pattern: src.ros_wakeword_node
+      required: true
+      warn_percent: 90.0
+
+    voice_tts:
+      component: voice
+      cmdline_pattern: src.ros_tts_node
+      required: true
+      warn_percent: 90.0
+
+    voice_llm:
+      component: voice
+      cmdline_pattern: src.ros_node
+      required: true
+      warn_percent: 90.0
 
     imu_adapter:
       component: localization

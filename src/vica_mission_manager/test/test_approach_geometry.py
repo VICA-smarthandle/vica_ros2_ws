@@ -28,9 +28,9 @@ def angular_diff_deg(a: float, b: float) -> float:
     return abs(normalize_yaw_deg(a - b))
 
 
-def test_default_distance_is_the_agreed_1_1_m():
-    """2026-08-23 설계 6.2 절 확정값."""
-    assert DEFAULT_APPROACH_DISTANCE_M == 1.1
+def test_default_distance_is_the_agreed_value():
+    """2026-08-23 설계 6.2 절 1.1 → 2026-10-10 사용자 결정 1.0."""
+    assert DEFAULT_APPROACH_DISTANCE_M == 1.0
 
 
 def test_default_distance_clears_geometry_lower_bound():
@@ -39,38 +39,44 @@ def test_default_distance_clears_geometry_lower_bound():
         CIRCUMSCRIBED_RADIUS_M + PERSON_BODY_RADIUS_M + APPROACH_GOAL_TOLERANCE_M
     )
     assert DEFAULT_APPROACH_DISTANCE_M > lower_bound
-    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.2538)
+    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.08)
 
 
 def test_default_distance_also_clears_driving_tolerance():
-    """접근 전용 tolerance 를 못 걸어도(0.25 유지) 여유 10.4 cm 는 남는다."""
+    """지금 접근 도착 판정(general_goal_checker xy 0.15)으로 쳐도 여유가 남는다 — 3 cm."""
     lower_bound = (
         CIRCUMSCRIBED_RADIUS_M + PERSON_BODY_RADIUS_M + DRIVING_GOAL_TOLERANCE_M
     )
-    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.1038)
+    assert DEFAULT_APPROACH_DISTANCE_M - lower_bound == pytest.approx(0.03)
+
+
+def test_default_distance_clears_the_spin_sweep():
+    """"네" 뒤 180° 회전의 실제 충돌 검사 원(외접 + padding 0.05 = 0.62)과 사람 몸 사이 여유."""
+    sweep = CIRCUMSCRIBED_RADIUS_M + 0.05
+    assert DEFAULT_APPROACH_DISTANCE_M - (sweep + PERSON_BODY_RADIUS_M) == pytest.approx(0.13)
 
 
 def test_robot_due_east_of_person():
-    """P(0,0) 동쪽 3 m 에 로봇 -> goal 은 (1.1, 0), 서쪽(180도)을 본다."""
+    """P(0,0) 동쪽 3 m 에 로봇 -> goal 은 (1.0, 0), 서쪽(180도)을 본다."""
     goal = approach_goal(person=pose(0.0, 0.0), robot=pose(3.0, 0.0))
-    assert goal.x == pytest.approx(1.1)
+    assert goal.x == pytest.approx(1.0)
     assert goal.y == pytest.approx(0.0)
     assert goal.yaw_deg == pytest.approx(180.0)
 
 
 def test_robot_due_north_of_person():
-    """P(0,0) 북쪽 3 m 에 로봇 -> goal 은 (0, 1.1), 남쪽(-90도)을 본다."""
+    """P(0,0) 북쪽 3 m 에 로봇 -> goal 은 (0, 1.0), 남쪽(-90도)을 본다."""
     goal = approach_goal(person=pose(0.0, 0.0), robot=pose(0.0, 3.0))
     assert goal.x == pytest.approx(0.0)
-    assert goal.y == pytest.approx(1.1)
+    assert goal.y == pytest.approx(1.0)
     assert goal.yaw_deg == pytest.approx(-90.0)
 
 
 def test_three_four_five_triangle():
     """P(1,1) - R(4,5) 는 3-4-5 삼각형이라 |R-P| = 5, 단위벡터 (0.6, 0.8) 이다."""
     goal = approach_goal(person=pose(1.0, 1.0), robot=pose(4.0, 5.0))
-    assert goal.x == pytest.approx(1.66)
-    assert goal.y == pytest.approx(1.88)
+    assert goal.x == pytest.approx(1.6)
+    assert goal.y == pytest.approx(1.8)
     assert goal.yaw_deg == pytest.approx(-126.8699, abs=1e-3)
 
 
@@ -182,10 +188,10 @@ def test_close_range_goal_never_moves_backward():
 
 
 def test_exactly_at_safety_distance_is_the_same_point():
-    """정확히 1.1 m 면 두 갈래(수식·제자리)가 같은 답을 낸다 - 불연속이 없다."""
-    robot = pose(1.1, 0.0)
+    """정확히 안전거리(1.0 m)면 두 갈래(수식·제자리)가 같은 답을 낸다 - 불연속이 없다."""
+    robot = pose(1.0, 0.0)
     goal = approach_goal(person=pose(0.0, 0.0), robot=robot)
-    assert goal.x == pytest.approx(1.1)
+    assert goal.x == pytest.approx(1.0)
     assert goal.y == pytest.approx(0.0)
 
 

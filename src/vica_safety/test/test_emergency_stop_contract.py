@@ -67,6 +67,11 @@ def test_pressed_button_is_reported_as_estop_active():
     assert classify_latch_state(snapshot(["physical_f1"])) == "ESTOP_ACTIVE"
 
 
+def test_tip_over_is_reported_as_estop_active():
+    """넘어짐은 원인이 알려진 정지다. 관리자가 와서 세운 뒤 앱에서 푼다."""
+    assert classify_latch_state(snapshot(["tipped"])) == "ESTOP_ACTIVE"
+
+
 def test_reported_motor_can_failure_is_estop_active_not_fault():
     """보고가 도착하는 한 원인은 알려져 있으므로 FAULT가 아니다."""
     assert classify_latch_state(snapshot(["motor_can"])) == "ESTOP_ACTIVE"

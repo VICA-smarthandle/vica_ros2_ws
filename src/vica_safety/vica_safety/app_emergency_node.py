@@ -25,6 +25,44 @@ from .logging_utils import log_with_severity
 from .reset_sequence import ResetSequence
 
 
+CAUSE_MESSAGES = (
+    ("tipped", "넘어짐이 감지되어 비상정지되었습니다."),
+    ("physical_f1", "비상정지 버튼이 눌렸습니다."),
+    ("voice", "이용자가 음성으로 멈춤을 요청해 비상정지되었습니다."),
+    ("motor_can", "모터 드라이버 통신이 끊겨 비상정지되었습니다."),
+    ("motor_can_stale", "모터 드라이버 통신이 끊겨 비상정지되었습니다."),
+    ("physical_stale", "모터 드라이버 통신이 끊겨 비상정지되었습니다."),
+)
+
+TIP_RESET_REJECT_MESSAGE = (
+    "비카가 아직 넘어져 있습니다. 비카를 세운 뒤 다시 해제해 주세요."
+)
+
+RESET_REJECT_PREFIX = "Safety reset 거부:"
+
+
+def primary_cause(sources) -> Optional[str]:
+    """Pick the latch cause the app popup should describe, or None."""
+    names = set(sources)
+    for name, _ in CAUSE_MESSAGES:
+        if name in names:
+            return name
+    return None
+
+
+def cause_message(cause: str) -> str:
+    """Return the operator-facing popup text for one latch cause."""
+    return dict(CAUSE_MESSAGES)[cause]
+
+
+def reset_rejected_by_tip(step: str, reason: str) -> bool:
+    """Report whether the central latch refused reset because the body is down."""
+    if step != "estop_reset" or ":" not in reason:
+        return False
+    names = reason.split(":", 1)[1].strip().split(",")
+    return "tipped" in names
+
+
 def has_active_navigation_goals(statuses) -> bool:
     """Treat accepted, executing, and canceling Nav2 goals as active."""
     active = {
@@ -155,6 +193,8 @@ class AppEmergencyNode(Node):
         self.last_message = "Safety 상태 확인 대기 중"
         self.auto_recovered = False
         self.last_estop_sources: tuple = ()
+        self.last_cause: Optional[str] = None
+        self.event_message = ""
         self.auto_recovery = AutoRecoveryPolicy(
             settle_ns=sec_to_ns(self.auto_recover_settle_sec),
         )
@@ -290,6 +330,25 @@ class AppEmergencyNode(Node):
             if sources:
                 self.last_estop_sources = sources
             self.auto_recovery.observe_sources(sources, self.now_ns())
+            self.update_cause_message(sources)
+
+    def update_cause_message(self, sources) -> None:
+        """Describe a new latch cause in the app popup (호출자가 lock 을 쥔다)."""
+        cause = primary_cause(sources)
+        if cause == self.last_cause:
+            return
+        previous = self.last_cause
+        self.last_cause = cause
+        if cause is not None:
+            self.event_message = cause_message(cause)
+            self.last_message = self.event_message
+            return
+        rejected = (
+            self.last_message.startswith(RESET_REJECT_PREFIX)
+            or self.last_message == TIP_RESET_REJECT_MESSAGE
+        )
+        if previous is not None and rejected and self.event_message:
+            self.last_message = self.event_message
 
     def nav_status_callback(self, msg: GoalStatusArray) -> None:
         """Track active Nav2 action states, including canceling goals."""
@@ -303,6 +362,8 @@ class AppEmergencyNode(Node):
         del request
         self.app_active = True
         self.publish_app_estop()
+        self.last_message = "앱 E-stop이 활성화되었습니다."
+        self.publish_state()
         nav_goal_clear, note = self.ensure_no_active_nav_goal()
         self.last_message = "앱 E-stop이 활성화되었습니다."
         if nav_goal_clear:
@@ -341,6 +402,7 @@ class AppEmergencyNode(Node):
         self.sequence.begin()
         self.app_active = False
         self.publish_app_estop()
+        self.publish_state()
 
         nav_goal_clear, message = self.ensure_no_active_nav_goal()
         if not nav_goal_clear:
@@ -398,12 +460,19 @@ class AppEmergencyNode(Node):
         """Stop the sequence at the first failed step and report its cause."""
         if sequence_started and self.sequence.next_step == step:
             self.sequence.record(step, False, reason)
-        self.last_message = f"Safety reset 거부: step={step}, reason={reason}"
+        if reset_rejected_by_tip(step, reason):
+            self.last_message = TIP_RESET_REJECT_MESSAGE
+        else:
+            self.last_message = f"{RESET_REJECT_PREFIX} step={step}, reason={reason}"
         severity = "error" if "stale" in reason or "not observed" in reason else "warn"
+        hint = ""
+        if reset_rejected_by_tip(step, reason):
+            hint = (" -- 세웠는데도 계속되면 ⑦ imu 칸(IMU 어댑터)을 다시 켠다: "
+                    "1초 판정 뒤 지금 자세를 다시 낸다")
         log_with_severity(
             self.get_logger(),
             severity,
-            f"[RESET REJECTED] step={step} reason={reason}",
+            f"[RESET REJECTED] step={step} reason={reason}{hint}",
         )
         response.success = False
         response.message = self.last_message

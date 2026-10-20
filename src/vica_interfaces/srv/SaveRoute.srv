@@ -1,0 +1,20 @@
+string map_id
+string sketch_json
+
+bool preview_only
+
+bool apply_now
+
+string base_version
+bool overwrite
+---
+bool accepted
+
+string reason
+string message
+string preview_json
+string checks_json
+
+string version
+
+bool applied

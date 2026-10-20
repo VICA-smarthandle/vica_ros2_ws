@@ -1,0 +1,438 @@
+"""관리자 호출(도움 요청) — 순수 로직 시험 (설계 2026-10-15, 10-16 사용자 결정 D8~D10)."""
+import uuid
+
+import pytest
+
+from reaction_states import (BOUNDS, ROOM, SPOT_DEST, TOILET, asking, idle, intent, lookup,
+                             navigating, paused, returning, waiting)
+from vica_mission_manager.mission_logic import (
+    HELP_RESEND_SEC,
+    MSG_CANCEL_CONFIRM,
+    MSG_HELP_CANCEL_CONFIRM,
+    MSG_HELP_CANCELED,
+    MSG_HELP_COMING,
+    MSG_HELP_CONFIRM,
+    MSG_HELP_SENT,
+    MSG_HELP_UNAVAILABLE,
+    CancelNav,
+    GateReason,
+    HelpEvent,
+    Navigate,
+    NavStatus,
+    Say,
+    State,
+)
+
+
+def _says(actions):
+    return [a.text for a in actions if isinstance(a, Say)]
+
+
+def _helps(actions):
+    return [(a.event, a.help_id) for a in actions if isinstance(a, HelpEvent)]
+
+
+def _voice(logic, kind, t, **kw):
+    return logic.on_voice_intent(intent(kind, **kw), t, lookup, BOUNDS, True)
+
+
+def asking_help():
+    """T2 — 안내 주행 중 help → 확인 질문을 하고 답을 기다리는 중."""
+    logic, t = navigating()
+    _voice(logic, "help", t)
+    return logic, t + 1.0
+
+
+def requested():
+    """T3 — 확인 질문에 "네" → 일시정지·도움 요청 보냄(관리자 확인 전)."""
+    logic, t = asking_help()
+    _voice(logic, "affirm", t)
+    return logic, t + 1.0
+
+
+def acknowledged():
+    """T7 — 관리자가 앱에서 확인함."""
+    logic, t = requested()
+    logic.on_help_ack(logic.help_id, t)
+    return logic, t + 1.0
+
+
+@pytest.mark.parametrize("make", [idle, waiting, returning, paused, asking])
+def test_t1_help_outside_navigation_is_refused(make):
+    logic, t = make()
+    before = logic.state
+    acts = _voice(logic, "help", t)
+    assert acts == [Say(MSG_HELP_UNAVAILABLE, priority="response")]
+    assert logic.state == before and logic.help_phase == "none"
+
+
+def test_t2_help_while_navigating_asks_and_keeps_driving():
+    logic, t = navigating()
+    acts = _voice(logic, "help", t)
+    assert acts == [Say(MSG_HELP_CONFIRM, priority="response", expects_reply=True)]
+    assert logic.state == State.NAVIGATING and logic.help_phase == "asking"
+    assert not any(isinstance(a, CancelNav) for a in acts)
+
+
+def test_help_closes_a_pending_guide_cancel_question():
+    """질문은 하나만 살린다 — "안내를 취소할까요?"를 묻던 중의 help 는 그 질문을 닫는다."""
+    logic, t = navigating()
+    assert _says(_voice(logic, "cancel", t)) == [MSG_CANCEL_CONFIRM]
+    acts = _voice(logic, "help", t + 1.0)
+    assert _says(acts) == [MSG_HELP_CONFIRM]
+    assert logic.cancel_confirm_pending is False
+
+
+def test_t3_yes_pauses_says_sent_and_sends_request():
+    logic, t = asking_help()
+    acts = _voice(logic, "affirm", t)
+    assert CancelNav(ROOM, event="goal_paused") in acts
+    assert logic.state == State.PAUSED and logic.paused_destination == ROOM
+    assert _says(acts) == [MSG_HELP_SENT]
+    [(event, help_id)] = _helps(acts)
+    assert event == "help_requested" and help_id == logic.help_id
+    assert uuid.UUID(help_id).version == 4
+    assert logic.help_phase == "requested"
+
+
+def test_t4_no_keeps_driving_silently():
+    logic, t = asking_help()
+    assert _voice(logic, "deny", t) == []
+    assert logic.state == State.NAVIGATING and logic.help_phase == "none"
+
+
+def test_t5_silence_reasks_once_then_drops():
+    logic, t0 = navigating()
+    _voice(logic, "help", t0)
+    assert MSG_HELP_CONFIRM not in _says(logic.on_tick(t0 + 14.9, NavStatus.NONE))
+    assert _says(logic.on_tick(t0 + 15.0, NavStatus.NONE)) == [MSG_HELP_CONFIRM]
+    assert MSG_HELP_CONFIRM not in _says(logic.on_tick(t0 + 20.0, NavStatus.NONE))
+    acts = logic.on_tick(t0 + 30.0, NavStatus.NONE)
+    assert MSG_HELP_CONFIRM not in _says(acts) and _helps(acts) == []
+    assert logic.help_phase == "none" and logic.state == State.NAVIGATING
+
+
+def test_finish_during_question_drops_it_before_the_cancel_question():
+    """질문은 하나만 살린다 — "다 됐어"에 "안내를 취소할까요?"가 나가면 도움 질문은 접힌다. 안 접으면"""
+    logic, t = asking_help()
+    assert _says(_voice(logic, "finish", t)) == [MSG_CANCEL_CONFIRM]
+    assert logic.help_phase == "none"
+    acts = _voice(logic, "affirm", t + 1.0)
+    assert _helps(acts) == [] and logic.state == State.IDLE
+
+
+def test_unknown_answer_reasks_once_then_lets_go():
+    logic, t = asking_help()
+    assert _voice(logic, "unknown", t) == [Say(MSG_HELP_CONFIRM, priority="response",
+                                                expects_reply=True)]
+    assert _voice(logic, "unknown", t + 1.0) == []
+    assert logic.help_phase == "asking"
+
+
+def test_t6_resends_same_id_every_10_seconds():
+    logic, t = asking_help()
+    _voice(logic, "affirm", t)
+    help_id = logic.help_id
+    assert _helps(logic.on_tick(t + 9.9, NavStatus.NONE)) == []
+    for k in (1, 2, 3):
+        assert _helps(logic.on_tick(t + HELP_RESEND_SEC * k, NavStatus.NONE)) == [
+            ("help_requested", help_id)]
+
+
+def test_t6_late_tick_sends_once_not_the_backlog():
+    logic, t = asking_help()
+    _voice(logic, "affirm", t)
+    assert len(_helps(logic.on_tick(t + 35.0, NavStatus.NONE))) == 1
+    assert _helps(logic.on_tick(t + 44.0, NavStatus.NONE)) == []
+
+
+def test_t7_ack_says_coming_and_stops_resend():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts, ok = logic.on_help_ack(help_id, t)
+    assert ok is True
+    assert _says(acts) == [MSG_HELP_COMING]
+    assert _helps(acts) == [("help_acknowledged", help_id)]
+    assert logic.help_phase == "acknowledged"
+    assert _helps(logic.on_tick(t + 30.0, NavStatus.NONE)) == []
+
+
+def test_t7_second_ack_is_quietly_accepted():
+    logic, t = acknowledged()
+    assert logic.on_help_ack(logic.help_id, t) == ([], True)
+
+
+def test_t8_ack_without_request_or_with_other_id_is_refused():
+    logic, t = navigating()
+    assert logic.on_help_ack(str(uuid.uuid4()), t) == ([], False)
+    logic, t = requested()
+    assert logic.on_help_ack(str(uuid.uuid4()), t) == ([], False)
+    assert logic.help_phase == "requested"
+
+
+def test_t9_after_ack_voice_resume_does_not_move():
+    logic, t = acknowledged()
+    acts = _voice(logic, "resume", t)
+    assert acts == [Say(MSG_HELP_COMING, priority="response")]
+    assert logic.state == State.PAUSED
+    assert not any(isinstance(a, Navigate) for a in acts)
+
+
+def test_t10_after_ack_app_resume_departs_without_event():
+    logic, t = acknowledged()
+    acts, reason = logic.on_resume_request(True, t)
+    assert reason == GateReason.OK
+    assert any(isinstance(a, Navigate) for a in acts)
+    assert _helps(acts) == [] and logic.help_phase == "none" and logic.help_id is None
+
+
+def test_t11_before_ack_voice_resume_departs_and_cancels_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts = _voice(logic, "resume", t)
+    assert any(isinstance(a, Navigate) for a in acts)
+    assert _helps(acts) == [("help_canceled", help_id)]
+    assert logic.help_phase == "none" and logic.help_id is None
+    assert _helps(logic.on_tick(t + 30.0, NavStatus.NONE)) == []
+
+
+def test_before_ack_app_resume_departs_and_cancels_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts, reason = logic.on_resume_request(True, t)
+    assert reason == GateReason.OK and any(isinstance(a, Navigate) for a in acts)
+    assert _helps(acts) == [("help_canceled", help_id)]
+
+
+def test_t12_cancel_asks_to_cancel_the_help_request():
+    logic, t = requested()
+    acts = _voice(logic, "cancel", t)
+    assert acts == [Say(MSG_HELP_CANCEL_CONFIRM, priority="response", expects_reply=True)]
+    assert MSG_CANCEL_CONFIRM not in _says(acts)
+    assert logic.help_cancel_pending is True and logic.cancel_confirm_pending is False
+
+
+@pytest.mark.parametrize("answer", ["affirm", "cancel", "finish"])
+def test_t13_yes_cancels_and_stays_paused(answer):
+    logic, t = requested()
+    help_id = logic.help_id
+    _voice(logic, "cancel", t)
+    acts = _voice(logic, answer, t + 1.0)
+    assert _helps(acts) == [("help_canceled", help_id)]
+    assert _says(acts) == [MSG_HELP_CANCELED]
+    assert logic.state == State.PAUSED and logic.paused_destination == ROOM
+    assert logic.help_phase == "none" and logic.help_cancel_pending is False
+
+
+def test_t13_after_cancel_resume_departs():
+    logic, t = requested()
+    _voice(logic, "cancel", t)
+    _voice(logic, "affirm", t + 1.0)
+    acts = _voice(logic, "resume", t + 2.0)
+    assert any(isinstance(a, Navigate) for a in acts) and _helps(acts) == []
+
+
+def test_t14_no_keeps_the_request_and_resend():
+    logic, t = requested()
+    help_id = logic.help_id
+    _voice(logic, "cancel", t)
+    assert _voice(logic, "deny", t + 1.0) == []
+    assert logic.help_phase == "requested" and logic.help_cancel_pending is False
+    assert _helps(logic.on_tick(t + 10.0, NavStatus.NONE)) == [("help_requested", help_id)]
+
+
+def test_cancel_question_silence_reasks_then_keeps_request():
+    logic, t = requested()
+    _voice(logic, "cancel", t)
+    assert MSG_HELP_CANCEL_CONFIRM in _says(logic.on_tick(t + 15.0, NavStatus.NONE))
+    logic.on_tick(t + 30.0, NavStatus.NONE)
+    assert logic.help_cancel_pending is False and logic.help_phase == "requested"
+
+
+def test_cancel_in_acknowledged_also_asks():
+    logic, t = acknowledged()
+    assert _says(_voice(logic, "cancel", t)) == [MSG_HELP_CANCEL_CONFIRM]
+
+
+def test_user_cancel_after_ack_still_tells_the_app():
+    """설계 5.6절 "사용자 취소 확정 — 확인 뒤도 같음": 오던 관리자가 알아야 한다."""
+    logic, t = acknowledged()
+    help_id = logic.help_id
+    _voice(logic, "cancel", t)
+    acts = _voice(logic, "affirm", t + 1.0)
+    assert _helps(acts) == [("help_canceled", help_id)] and _says(acts) == [MSG_HELP_CANCELED]
+
+
+def test_t15_arrival_during_question_drops_it():
+    logic, t = asking_help()
+    logic.on_tick(t, NavStatus.SUCCEEDED)
+    acts = _voice(logic, "affirm", t + 1.0)
+    assert _helps(acts) == [] and logic.help_phase == "none"
+
+
+def test_t16_app_cancel_cancels_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts, reason = logic.on_app_cancel(t)
+    assert reason == GateReason.OK
+    assert ("help_canceled", help_id) in _helps(acts)
+    assert logic.help_phase == "none" and logic.help_id is None
+
+
+def test_t17_estop_keeps_resending():
+    logic, t = requested()
+    help_id = logic.help_id
+    logic.on_estop(True, t)
+    assert _helps(logic.on_tick(t + 10.0, NavStatus.NONE)) == [("help_requested", help_id)]
+
+
+def test_help_again_while_asking_is_ignored():
+    logic, t = asking_help()
+    assert _voice(logic, "help", t) == []
+
+
+def test_help_again_after_sending_repeats_sent():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts = _voice(logic, "help", t)
+    assert acts == [Say(MSG_HELP_SENT, priority="response")]
+    assert logic.help_id == help_id
+
+
+def test_help_again_after_ack_repeats_coming():
+    logic, t = acknowledged()
+    assert _voice(logic, "help", t) == [Say(MSG_HELP_COMING, priority="response")]
+
+
+@pytest.mark.parametrize("make", [requested, acknowledged])
+def test_d8_destination_proposal_keeps_pause(make):
+    """음성이 "화장실로 안내해드릴까요?"를 물어도 미션은 확인 상태로 넘어가지 않는다 — "아니요"·무응답이면"""
+    logic, t = make()
+    phase = logic.help_phase
+    acts = _voice(logic, "navigate", t, matched_destination_id=TOILET.id, need_confirm=True)
+    assert acts == []
+    assert logic.state == State.PAUSED and logic.paused_destination == ROOM
+    _voice(logic, "deny", t + 1.0)
+    logic.on_tick(t + 40.0, NavStatus.NONE)
+    assert logic.state == State.PAUSED and logic.paused_destination == ROOM
+    assert logic.help_phase == phase
+    _, reason = logic.on_resume_request(True, t + 41.0)
+    assert reason == GateReason.OK
+
+
+def test_d3_confirmed_destination_before_ack_departs_and_cancels():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts = _voice(logic, "navigate", t, matched_destination_id=TOILET.id)
+    assert Navigate in {type(a) for a in acts}
+    assert logic.state == State.NAVIGATING and logic.active_destination == TOILET
+    assert _helps(acts) == [("help_canceled", help_id)]
+    assert logic.help_phase == "none"
+
+
+def test_d3_refused_destination_keeps_pause_and_request():
+    logic, t = requested()
+    acts = _voice(logic, "navigate", t, matched_destination_id="nowhere")
+    assert _helps(acts) == [] and _says(acts)
+    assert logic.state == State.PAUSED and logic.paused_destination == ROOM
+    assert logic.help_phase == "requested"
+
+
+def test_confirmed_destination_after_ack_does_not_move():
+    logic, t = acknowledged()
+    acts = _voice(logic, "navigate", t, matched_destination_id=TOILET.id)
+    assert acts == [Say(MSG_HELP_COMING, priority="response")]
+    assert logic.state == State.PAUSED
+
+
+def test_d4_app_destination_before_ack_cancels_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    acts, reason = logic.on_app_destination(TOILET, BOUNDS, True, t)
+    assert reason == GateReason.OK
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"
+
+
+def test_d4_app_destination_after_ack_ends_quietly():
+    logic, t = acknowledged()
+    acts, reason = logic.on_app_destination(TOILET, BOUNDS, True, t)
+    assert reason == GateReason.OK and _helps(acts) == [] and logic.help_phase == "none"
+
+
+def test_d4_app_cancel_after_ack_ends_quietly():
+    logic, t = acknowledged()
+    acts, _ = logic.on_app_cancel(t)
+    assert _helps(acts) == [] and logic.help_phase == "none"
+
+
+def test_d10_app_cancel_ends_request_even_during_estop():
+    """비상 정지에 들어가면 보관한 목적지가 지워져 "다시 출발"이 안 듣는다 — 앱 "안내 취소"가"""
+    logic, t = requested()
+    help_id = logic.help_id
+    logic.on_estop(True, t)
+    acts, reason = logic.on_app_cancel(t + 1.0)
+    assert reason == GateReason.ESTOP_ACTIVE
+    assert _helps(acts) == [("help_canceled", help_id)]
+    assert logic.help_phase == "none"
+    assert _helps(logic.on_tick(t + 20.0, NavStatus.NONE)) == []
+
+
+def test_d10_app_cancel_ends_request_when_idle():
+    logic, t = requested()
+    help_id = logic.help_id
+    logic._to_idle()
+    assert logic.help_phase == "requested"
+    acts, reason = logic.on_app_cancel(t)
+    assert reason == GateReason.OK
+    assert _helps(acts) == [("help_canceled", help_id)] and logic.help_phase == "none"
+
+
+def _released(logic, t):
+    """비상 정지를 걸었다 풀고, 해제 유예가 지난 틱까지 돌린다 — 로봇은 안내 없음으로 간다."""
+    logic.on_estop(True, t)
+    logic.on_estop(False, t + 0.5)
+    return logic.on_tick(t + 2.0, NavStatus.NONE)
+
+
+def test_estop_release_ends_request_and_closes_the_popup():
+    """해제는 관리자가 앱에서 한다 — 관리자는 이미 안다. 남겨 두면 안내 없음에서 알림이 끝없이 가고,"""
+    logic, t = requested()
+    help_id = logic.help_id
+    acts = _released(logic, t)
+    assert logic.state == State.IDLE
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"
+    assert _helps(logic.on_tick(t + 30.0, NavStatus.NONE)) == []
+
+
+def test_estop_release_after_ack_ends_quietly():
+    logic, t = acknowledged()
+    acts = _released(logic, t)
+    assert _helps(acts) == [] and logic.help_phase == "none"
+    assert any(isinstance(a, Navigate) for a in _voice(logic, "navigate", t + 3.0,
+                                                        matched_destination_id=TOILET.id))
+
+
+def test_help_survives_while_the_estop_is_latched():
+    """비상 정지가 걸려 있는 동안은 끝내지 않는다(D5) — 끝내는 것은 풀릴 때다."""
+    logic, t = requested()
+    logic.on_estop(True, t)
+    logic.on_tick(t + 5.0, NavStatus.NONE)
+    assert logic.state == State.ESTOPPED and logic.help_phase == "requested"
+
+
+def test_admin_return_home_ends_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    logic._to_idle()
+    ok, reason, acts = logic.on_return_home_request(True, t)
+    assert ok is True
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"
+
+
+def test_admin_wait_spot_try_ends_request():
+    logic, t = requested()
+    help_id = logic.help_id
+    logic._to_idle()
+    acts, reason = logic.on_app_wait_spot(SPOT_DEST, BOUNDS, True, t)
+    assert reason == GateReason.OK
+    assert ("help_canceled", help_id) in _helps(acts) and logic.help_phase == "none"

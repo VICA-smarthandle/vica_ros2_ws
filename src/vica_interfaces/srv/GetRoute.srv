@@ -1,0 +1,13 @@
+string map_id
+---
+bool found
+string reason
+string message
+
+string sketch_json
+
+string checks_json
+
+string version
+
+string status

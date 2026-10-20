@@ -19,11 +19,11 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vica_interfaces.msg import RobotEvent, RobotFault, RobotHealth, RobotState
 
-from .agg_parser import from_status, is_ignored
+from .agg_parser import adapter_reporting, from_status, is_ignored, worst_by_component
 from .event_deduplicator import EventDeduplicator, Observation
 from .fault_catalog import describe
 from .freshness import is_fresh_ns, sec_to_ns
-from .health_logic import ComponentProbe, evaluate, SafetyInput, UNKNOWN
+from .health_logic import ComponentProbe, evaluate, Fault, SafetyInput, UNKNOWN
 from .nav2_liveness import (
     decide_poll_action,
     is_nav2_active,
@@ -64,6 +64,7 @@ class RobotHealthMonitorNode(Node):
         self.declare_parameter('reminder_interval_sec', 300.0)
         self.declare_parameter('latched_reminder_interval_sec', 10.0)
         self.declare_parameter('clear_confirm_ticks', 2)
+        self.declare_parameter('raise_confirm_ticks', 1)
         self.declare_parameter('nav2_state_poll_period_sec', 2.0)
         self.declare_parameter('nav2_lifecycle_node', '/bt_navigator')
         self.declare_parameter('nav2_call_timeout_sec', 5.0)
@@ -72,6 +73,7 @@ class RobotHealthMonitorNode(Node):
         self.declare_parameter('tf_timeout_sec', 3.0)
         self.declare_parameter('robot_state_timeout_sec', 3.0)
         self.declare_parameter('diagnostics_timeout_sec', 5.0)
+        self.declare_parameter('adapter_grace_sec', 30.0)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('component_names', [''])
@@ -87,6 +89,7 @@ class RobotHealthMonitorNode(Node):
         self.tf_timeout_ns = self._timeout_ns('tf_timeout_sec')
         self.robot_state_timeout_ns = self._timeout_ns('robot_state_timeout_sec')
         self.diagnostics_timeout_ns = self._timeout_ns('diagnostics_timeout_sec')
+        self.adapter_grace_ns = self._timeout_ns('adapter_grace_sec')
         self.nav2_call_timeout_ns = self._timeout_ns('nav2_call_timeout_sec')
 
         self.policies = self._read_component_policies()
@@ -97,13 +100,19 @@ class RobotHealthMonitorNode(Node):
             ),
             clear_confirm_ticks=int(
                 self.get_parameter('clear_confirm_ticks').value
-            )
+            ),
+            raise_confirm_ticks=int(
+                self.get_parameter('raise_confirm_ticks').value
+            ),
         )
 
         self.diag_items: dict = {}
         self.last_diag_ns = None
 
         self.ever_ok: set = set()
+
+        self.adapter_ever_ok = False
+        self.last_adapter_ok_ns = None
 
         self.estop_latched = False
         self.last_estop_ns = None
@@ -280,7 +289,8 @@ class RobotHealthMonitorNode(Node):
         now_ns = self.steady_clock.now().nanoseconds
         wall_sec = self.get_clock().now().nanoseconds / 1e9
 
-        probes = self._build_probes(now_ns)
+        adapter_alive = self._refresh_adapter_state(now_ns)
+        probes = self._build_probes(now_ns, adapter_alive)
         safety = SafetyInput(
             state=self.safety_state,
             estop_latched=self.estop_latched,
@@ -291,7 +301,13 @@ class RobotHealthMonitorNode(Node):
             ever_fresh=self.last_safety_ns is not None,
         )
 
-        snapshot = evaluate(probes, safety, now_ns=now_ns, started_ns=self.started_ns)
+        snapshot = evaluate(
+            probes,
+            safety,
+            now_ns=now_ns,
+            started_ns=self.started_ns,
+            extra_faults=self._adapter_faults(now_ns, adapter_alive),
+        )
         self.last_snapshot = snapshot
 
         observations = [
@@ -312,9 +328,59 @@ class RobotHealthMonitorNode(Node):
 
         self.pub_health.publish(self._to_health_msg(snapshot, active))
 
-    def _build_probes(self, now_ns: int) -> list:
+    def _refresh_adapter_state(self, now_ns: int) -> bool:
+        """어댑터가 지금 진단을 내고 있는지 보고, 살아 있으면 마지막 정상 시각을 적는다."""
+        alive = adapter_reporting(
+            self.diag_items, now_ns, self.diagnostics_timeout_ns
+        )
+        if alive:
+            self.adapter_ever_ok = True
+            self.last_adapter_ok_ns = now_ns
+        return alive
+
+    def _adapter_faults(self, now_ns: int, adapter_alive: bool) -> list:
+        """어댑터 사망을 결함 한 건으로 만든다."""
+        if adapter_alive:
+            return []
+        if not self.adapter_ever_ok and now_ns - self.started_ns < self.adapter_grace_ns:
+            return []
+        since_ns = (
+            self.last_adapter_ok_ns
+            if self.last_adapter_ok_ns is not None
+            else self.started_ns
+        )
+        age = self._age_sec(since_ns, now_ns) or 0.0
+        description = describe(
+            'MONITOR_DIAG_INPUT_STALE',
+            source='external_diagnostics_node',
+            age_sec=f'{age:.0f}',
+        )
+        return [
+            Fault(
+                component=description.component,
+                fault_code='MONITOR_DIAG_INPUT_STALE',
+                severity=description.severity,
+                detail=description.detail,
+                suggested_action=description.suggested_action,
+                latched=False,
+            )
+        ]
+
+    def _build_probes(self, now_ns: int, adapter_alive: bool) -> list:
         """Turn diagnostics and direct inputs into ComponentProbe records."""
-        worst = self._worst_diag_by_component(now_ns)
+        worst = worst_by_component(
+            self.diag_items, now_ns, self.diagnostics_timeout_ns
+        )
+        worst_without_adapter = (
+            worst
+            if adapter_alive
+            else worst_by_component(
+                self.diag_items,
+                now_ns,
+                self.diagnostics_timeout_ns,
+                exclude_adapter=True,
+            )
+        )
         probes = []
 
         for name, policy in self.policies.items():
@@ -322,9 +388,18 @@ class RobotHealthMonitorNode(Node):
             severity = int(policy['severity'])
             grace_ns = sec_to_ns(float(policy['grace_sec']))
 
+            if name in worst_without_adapter:
+                source = worst_without_adapter
+                adapter_only = False
+            else:
+                source = worst
+                adapter_only = (not adapter_alive) and name in worst
+
             last_seen_ns, ok, fault_code, detail = self._probe_inputs(
-                name, worst, now_ns
+                name, source, now_ns
             )
+            if adapter_only and fault_code.startswith('DIAG_COMPONENT_'):
+                observable = False
 
             if ok and observable and last_seen_ns is not None:
                 self.ever_ok.add(name)
@@ -394,22 +469,6 @@ class RobotHealthMonitorNode(Node):
         if name == 'localization':
             return max(self.diagnostics_timeout_ns, self.tf_timeout_ns)
         return self.diagnostics_timeout_ns
-
-    def _worst_diag_by_component(self, now_ns: int) -> dict:
-        """Pick the most severe fresh diagnostic item per component."""
-        worst: dict = {}
-
-        for _name, (item, seen_ns) in self.diag_items.items():
-            if not is_fresh_ns(
-                seen_ns, now_ns=now_ns, timeout_ns=self.diagnostics_timeout_ns
-            ):
-                continue
-            component = item.component
-            current = worst.get(component)
-            if current is None or item.level > current[0].level:
-                worst[component] = (item, seen_ns)
-
-        return worst
 
     def _to_fault_msg(self, fault) -> RobotFault:
         """Convert an ActiveFault into a RobotFault message."""
@@ -481,6 +540,7 @@ class RobotHealthMonitorNode(Node):
         stat.add('safety_state', self.safety_state)
         stat.add('estop_latched', 'true' if self.estop_latched else 'false')
         stat.add('nav2_state', self.nav2_state)
+        stat.add('adapter_alive', 'true' if self.last_adapter_ok_ns == now_ns else 'false')
 
         if self.last_snapshot is not None:
             stat.add('health_state', str(self.last_snapshot.state))

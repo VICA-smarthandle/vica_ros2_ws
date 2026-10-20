@@ -45,6 +45,10 @@ def generate_launch_description() -> LaunchDescription:
                 "approach_speed_limit_percents",
                 default_value="[80.0, 60.0]",
             ),
+            DeclareLaunchArgument("approach_bt_xml", default_value="auto"),
+            DeclareLaunchArgument("guided_bt_xml", default_value="auto"),
+            DeclareLaunchArgument("guided_no_rail_bt_xml", default_value="auto"),
+            DeclareLaunchArgument("wait_spot_bt_xml", default_value="auto"),
             DeclareLaunchArgument("current_floor", default_value="-1"),
             DeclareLaunchArgument("current_building", default_value=""),
             DeclareLaunchArgument("estop_pulse_sec", default_value="3.0"),
@@ -56,6 +60,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("handle_side_min_yaw_deg", default_value="135.0"),
             DeclareLaunchArgument("return_resume_sec", default_value="15.0"),
             DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
+            DeclareLaunchArgument("grip_release_grace_sec", default_value="0.5"),
+            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="5.0"),
+            DeclareLaunchArgument("grip_assume_held", default_value="true"),
+            DeclareLaunchArgument("obstacle_narration", default_value="true"),
             Node(
                 package="vica_mission_manager",
                 executable="mission_manager",
@@ -81,6 +89,14 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("approach_speed_limit_percents"),
                             value_type=List[float],
                         ),
+                        "approach_bt_xml": ParameterValue(
+                            LaunchConfiguration("approach_bt_xml"), value_type=str),
+                        "guided_bt_xml": ParameterValue(
+                            LaunchConfiguration("guided_bt_xml"), value_type=str),
+                        "guided_no_rail_bt_xml": ParameterValue(
+                            LaunchConfiguration("guided_no_rail_bt_xml"), value_type=str),
+                        "wait_spot_bt_xml": ParameterValue(
+                            LaunchConfiguration("wait_spot_bt_xml"), value_type=str),
                         "current_floor": LaunchConfiguration("current_floor"),
                         "current_building": LaunchConfiguration("current_building"),
                         "auto_return_home": ParameterValue(
@@ -114,6 +130,22 @@ def generate_launch_description() -> LaunchDescription:
                         "dest_retry_return_sec": ParameterValue(
                             LaunchConfiguration("dest_retry_return_sec"),
                             value_type=float,
+                        ),
+                        "grip_release_grace_sec": ParameterValue(
+                            LaunchConfiguration("grip_release_grace_sec"),
+                            value_type=float,
+                        ),
+                        "grip_wait_timeout_sec": ParameterValue(
+                            LaunchConfiguration("grip_wait_timeout_sec"),
+                            value_type=float,
+                        ),
+                        "grip_assume_held": ParameterValue(
+                            LaunchConfiguration("grip_assume_held"),
+                            value_type=bool,
+                        ),
+                        "obstacle_narration": ParameterValue(
+                            LaunchConfiguration("obstacle_narration"),
+                            value_type=bool,
                         ),
                     }
                 ],

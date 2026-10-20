@@ -366,6 +366,126 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 0; 200; 255
+      Enabled: true
+      Name: US 2 앞 왼쪽
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/front_left
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 0; 200; 255
+      Enabled: true
+      Name: US 3 앞 오른쪽
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/front_right
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 80; 220; 120
+      Enabled: true
+      Name: US 1 왼쪽 바퀴 옆
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/left_wheel
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 80; 220; 120
+      Enabled: true
+      Name: US 4 오른쪽 바퀴 옆
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/right_wheel
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 80; 220; 120
+      Enabled: true
+      Name: US 8 왼쪽 뒷바퀴 옆
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/left_rear_wheel
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 80; 220; 120
+      Enabled: true
+      Name: US 5 오른쪽 뒷바퀴 옆
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/right_rear_wheel
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 255; 140; 0
+      Enabled: true
+      Name: US 7 후방 왼쪽
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/rear_left
+      Value: true
+    - Alpha: 0.4
+      Buffer Length: 1
+      Class: rviz_default_plugins/Range
+      Color: 255; 140; 0
+      Enabled: true
+      Name: US 6 후방 오른쪽
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ultrasonic/rear_right
+      Value: true
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path

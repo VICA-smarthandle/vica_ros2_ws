@@ -1,9 +1,11 @@
 """TurnGuide cue와 Safety 상태를 병합해 Smart Handle로 상태코드를 전송한다."""
 
+import math
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, String
@@ -23,6 +25,13 @@ from .serial_link import SerialLink
 from .timebase import is_fresh_ns, sec_to_ns
 from .touch_frame import TouchFrameAccumulator, resolve_contact
 from .ultrasonic_frame import FrameAccumulator
+from .ultrasonic_fov import resolve_channel_fov
+from .ultrasonic_stats import (
+    ConfigFrameAccumulator,
+    StatFrameAccumulator,
+    format_config_line,
+    format_stat_line,
+)
 
 
 class UserGuidanceDriverNode(Node):
@@ -56,8 +65,11 @@ class UserGuidanceDriverNode(Node):
             "ultrasonic_frame_ids", ["usonic_front_left", "usonic_front_right"]
         )
         self.declare_parameter("ultrasonic_fov_rad", 0.524)
+        self.declare_parameter("ultrasonic_fov_rad_per_channel", [-1.0] * protocol.US_CHANNELS)
         self.declare_parameter("ultrasonic_min_range_m", 0.02)
         self.declare_parameter("ultrasonic_max_range_m", 0.30)
+        self.declare_parameter("ultrasonic_max_range_m_per_channel", [-1.0] * protocol.US_CHANNELS)
+        self.declare_parameter("ultrasonic_channel_enabled", [True] * protocol.US_CHANNELS)
         self.declare_parameter("ultrasonic_measurement_delay_ms", [210, 105])
         self.declare_parameter("ultrasonic_stale_warn_sec", 2.0)
         self.declare_parameter("ultrasonic_tf_gate", True)
@@ -253,6 +265,8 @@ class UserGuidanceDriverNode(Node):
     HAPTIC_PATTERNS = {
         "short": protocol.HAPTIC_CMD_SHORT,
         "long": protocol.HAPTIC_CMD_LONG,
+        "tick": protocol.HAPTIC_CMD_TICK,
+        "locate": protocol.HAPTIC_CMD_LOCATE,
     }
 
     def cb_haptic_request(self, msg: String) -> None:
@@ -291,15 +305,37 @@ class UserGuidanceDriverNode(Node):
             )
 
         self.us_fov = float(self.get_parameter("ultrasonic_fov_rad").value)
+        self.us_fov_ch = resolve_channel_fov(
+            self.us_fov,
+            [float(v) for v in self.get_parameter("ultrasonic_fov_rad_per_channel").value],
+            protocol.US_CHANNELS,
+        )
         self.us_min_range = float(self.get_parameter("ultrasonic_min_range_m").value)
         self.us_max_range = float(self.get_parameter("ultrasonic_max_range_m").value)
+        self.us_max_range_ch = resolve_channel_fov(
+            self.us_max_range,
+            [float(v) for v in self.get_parameter("ultrasonic_max_range_m_per_channel").value],
+            protocol.US_CHANNELS,
+            name="ultrasonic_max_range_m_per_channel",
+        )
         self.us_delay_ns = [ms * 1_000_000 for ms in delays]
         self.us_stale_warn_ns = sec_to_ns(
             float(self.get_parameter("ultrasonic_stale_warn_sec").value)
         )
 
         self.us_acc = FrameAccumulator()
-        self.us_pubs = [self.create_publisher(Range, t, 10) for t in topics]
+        self.us_stat_acc = StatFrameAccumulator()
+        self.us_cfg_acc = ConfigFrameAccumulator()
+        self.us_stat_names = [t.rsplit("/", 1)[-1] for t in topics]
+        self.us_on = [bool(v) for v in self.get_parameter("ultrasonic_channel_enabled").value]
+        if len(self.us_on) != protocol.US_CHANNELS:
+            raise ValueError(
+                f"ultrasonic_channel_enabled 는 {protocol.US_CHANNELS}칸이어야 합니다: {len(self.us_on)}"
+            )
+        self.us_pubs = [
+            self.create_publisher(Range, t, 10) if on else None
+            for t, on in zip(topics, self.us_on)
+        ]
         self.us_last_frame_ns = None
         self.us_stale_warned = False
 
@@ -316,14 +352,17 @@ class UserGuidanceDriverNode(Node):
 
         self.get_logger().info(
             f"Ultrasonic Range publishing: {topics} "
-            f"(TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
+            f"(칠하는 폭 도 {[round(math.degrees(v)) for v in self.us_fov_ch]}, "
+            f"최대 거리 m {self.us_max_range_ch}, "
+            f"켜진 채널 {[t for t, on in zip(topics, self.us_on) if on]}, "
+            f"TF 게이트 {'켬' if self.us_tf_gate_enabled else '끔'}"
             f", 기준 프레임 {self.us_tf_target})"
         )
 
     def _setup_touch(self) -> None:
         self.touch_acc = TouchFrameAccumulator()
         self.get_logger().info(
-            "Touch sensor uplink enabled (D11, active-low, firmware 200ms bridge)"
+            "Touch sensor uplink enabled (D2, active-low, firmware 200ms bridge)"
         )
 
     def _uplink_fresh(self, now_ns: int) -> bool:
@@ -342,6 +381,10 @@ class UserGuidanceDriverNode(Node):
                 self.us_last_frame_ns = now
                 self.us_stale_warned = False
                 self._publish_ranges(frame)
+            for sframe in self.us_stat_acc.feed(data):
+                self.get_logger().info(format_stat_line(sframe, self.us_stat_names))
+            for cframe in self.us_cfg_acc.feed(data):
+                self.get_logger().info(format_config_line(cframe, self.us_stat_names))
             self._warn_if_ultrasonic_stale(now)
 
         if self.touch_enabled:
@@ -390,6 +433,8 @@ class UserGuidanceDriverNode(Node):
     def _publish_ranges(self, frame) -> None:
         stamp_base = self.get_clock().now()
         for ch, mm in enumerate(frame.distances_mm):
+            if not self.us_on[ch]:
+                continue
             if mm == protocol.US_DIST_INVALID:
                 continue
             stamp = (
@@ -403,11 +448,12 @@ class UserGuidanceDriverNode(Node):
             msg.header.stamp = stamp
             msg.header.frame_id = self.us_frame_ids[ch]
             msg.radiation_type = Range.ULTRASOUND
-            msg.field_of_view = self.us_fov
+            msg.field_of_view = self.us_fov_ch[ch]
             msg.min_range = self.us_min_range
-            msg.max_range = self.us_max_range
-            if mm == protocol.US_CLEAR_MM or mm / 1000.0 > self.us_max_range:
-                msg.range = self.us_max_range
+            max_range = self.us_max_range_ch[ch]
+            msg.max_range = max_range
+            if mm == protocol.US_CLEAR_MM or mm / 1000.0 > max_range:
+                msg.range = max_range
             else:
                 msg.range = mm / 1000.0
             self.us_pubs[ch].publish(msg)
@@ -435,11 +481,14 @@ def main(args=None) -> None:
     """Run the VICA Smart Handle guidance driver."""
     rclpy.init(args=args)
     node = UserGuidanceDriverNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.remove_node(node)
         try:
             node.shutdown_to_neutral()
         except Exception:
