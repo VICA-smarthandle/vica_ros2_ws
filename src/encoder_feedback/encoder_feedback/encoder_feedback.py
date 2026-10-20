@@ -9,11 +9,15 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 from tf2_ros import TransformBroadcaster
 
 
 PID_PNT_VEL_CMD = 0xCF
 PID_POSI_DATA = 0xC5
+
+# CAN 수신 시각 간격이 이보다 길면 끊겼다가 돌아온 것으로 보고 타이머 시각을 씁니다.
+MAX_FRAME_GAP_SEC = 0.5
 
 
 def normalize_angle(angle: float) -> float:
@@ -50,6 +54,22 @@ def int32_delta(current: int, previous: int) -> int:
     elif delta < -0x80000000:
         delta += 0x100000000
     return delta
+
+
+def pick_dt(frame_t, prev_frame_t, timer_dt, max_gap=MAX_FRAME_GAP_SEC):
+    """Return (dt, from_frames) for one position pair.
+
+    속도의 분모는 C5 위치 프레임이 도착한 커널 시각 사이의 간격입니다.
+    타이머(50 ms)가 돈 시각을 쓰면 67 ms 마다 오는 응답이 50 ms·100 ms 칸으로
+    나뉘어 칸마다 속도가 들쭉날쭉하고, EKF 가 그 표본을 같은 무게로 받아
+    직진 거리를 약 10 % 길게 셉니다(2026-10-20 감사, run98·99).
+    프레임 시각이 없거나 역행·긴 공백이면 timer_dt 로 대신합니다.
+    """
+    if frame_t and prev_frame_t:
+        gap = frame_t - prev_frame_t
+        if 0.0 < gap <= max_gap:
+            return gap, True
+    return timer_dt, False
 
 
 class EncoderFeedbackNode(Node):
@@ -123,6 +143,9 @@ class EncoderFeedbackNode(Node):
         self.left_pos = None
         self.right_updated = False
         self.left_updated = False
+        # 좌우 C5 프레임이 도착한 커널 시각(python-can SO_TIMESTAMPNS, 초)
+        self.right_frame_t = 0.0
+        self.left_frame_t = 0.0
 
         self.prev_right_pos = None
         self.prev_left_pos = None
@@ -132,6 +155,9 @@ class EncoderFeedbackNode(Node):
         self.theta = 0.0
 
         self.last_odom_time = None
+        self.prev_frame_t = None
+        self.last_stamp_ns = 0
+        self.warned_timer_dt = False
 
         self.wheel_circumference = 2.0 * math.pi * self.wheel_radius_m
 
@@ -230,9 +256,11 @@ class EncoderFeedbackNode(Node):
 
             if motor_index == 0:
                 self.right_pos = pos
+                self.right_frame_t = msg.timestamp
                 self.right_updated = True
             elif motor_index == 1:
                 self.left_pos = pos
+                self.left_frame_t = msg.timestamp
                 self.left_updated = True
 
         return self.right_updated and self.left_updated
@@ -251,22 +279,45 @@ class EncoderFeedbackNode(Node):
         # 들어오기 전에는 이전 값을 재사용해 odometry를 발행하지 않습니다.
         self.right_updated = False
         self.left_updated = False
+        # 한 쌍의 시각은 두 프레임 중 늦게 도착한 쪽입니다.
+        frame_t = max(self.right_frame_t, self.left_frame_t)
 
         if self.prev_right_pos is None or self.prev_left_pos is None:
             self.prev_right_pos = self.right_pos
             self.prev_left_pos = self.left_pos
             self.last_odom_time = now
+            self.prev_frame_t = frame_t
             self.get_logger().info(
                 f'Initial position set: right={self.right_pos}, left={self.left_pos}'
             )
             return
 
-        dt = 0.0
+        timer_dt = 0.0
         if self.last_odom_time is not None:
-            dt = (now - self.last_odom_time).nanoseconds / 1e9
+            timer_dt = (now - self.last_odom_time).nanoseconds / 1e9
 
-        if dt <= 0.0:
-            dt = 1.0 / self.request_hz
+        if timer_dt <= 0.0:
+            timer_dt = 1.0 / self.request_hz
+
+        dt, from_frames = pick_dt(frame_t, self.prev_frame_t, timer_dt)
+        self.prev_frame_t = frame_t
+
+        stamp = now
+        if from_frames:
+            frame_stamp = Time(
+                nanoseconds=int(frame_t * 1e9),
+                clock_type=now.clock_type,
+            )
+            # 발행 시각은 앞으로만 갑니다. 역행하면 타이머 시각을 둡니다.
+            if frame_stamp.nanoseconds > self.last_stamp_ns:
+                stamp = frame_stamp
+        elif not self.warned_timer_dt:
+            self.warned_timer_dt = True
+            self.get_logger().warning(
+                'C5 프레임 수신 시각을 쓸 수 없어 타이머 시각으로 속도를 계산합니다 '
+                f'(frame_t={frame_t:.3f}, dt={dt:.3f}s). 이 경고는 한 번만 냅니다.'
+            )
+        self.last_stamp_ns = stamp.nanoseconds
 
         delta_right_count = int32_delta(
             self.right_pos,
@@ -301,7 +352,7 @@ class EncoderFeedbackNode(Node):
         vx = d_center / dt
         vth = d_theta / dt
 
-        self.publish_odom(now, vx, vth)
+        self.publish_odom(stamp, vx, vth)
 
     def publish_odom(self, stamp, vx, vth):
         qx, qy, qz, qw = yaw_to_quaternion(self.theta)
