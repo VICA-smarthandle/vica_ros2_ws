@@ -13,6 +13,7 @@ import yaml
 
 _MAP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _AUTHORIZATIONS = {"public", "private"}
+_CONTACT_PHONE_PATTERN = re.compile(r"^01[016789][0-9]{7,8}$")
 
 
 def validate_map_id(map_id: str) -> str:
@@ -33,6 +34,17 @@ def validate_destination_id(destination_id: str) -> str:
     if parsed.version != 4 or str(parsed) != value:
         raise ValueError("목적지 id는 canonical UUID v4여야 합니다")
     return value
+
+
+def normalize_contact_phone(raw: Any) -> str:
+    """도착 문자를 받을 연락처를 숫자만 남긴 문자열로 정규화한다."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    digits = re.sub(r"[^0-9]", "", text)
+    if not _CONTACT_PHONE_PATTERN.fullmatch(digits):
+        raise ValueError("contact_phone은 010 등으로 시작하는 휴대폰 번호여야 합니다")
+    return digits
 
 
 def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
@@ -76,7 +88,11 @@ def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
     if not all(math.isfinite(value) for value in (x, y, yaw)):
         raise ValueError("pose.x/y/yaw는 유한한 숫자여야 합니다")
 
-    return {
+    contact_phone = normalize_contact_phone(raw.get("contact_phone"))
+    door_yaw = normalize_door_yaw(raw.get("door_yaw"))
+    wait_spot = normalize_wait_spot(raw.get("wait_spot"))
+
+    normalized = {
         "id": destination_id,
         "name": name,
         "aliases": aliases,
@@ -96,7 +112,49 @@ def normalize_destination(raw: dict[str, Any]) -> dict[str, Any]:
         },
         "confirm_prompt": str(raw.get("confirm_prompt", "") or "").strip(),
         "arrival_message": str(raw.get("arrival_message", "") or "").strip(),
+        "contact_phone": contact_phone,
     }
+    if door_yaw is not None:
+        normalized["door_yaw"] = door_yaw
+    if wait_spot is not None:
+        normalized["wait_spot"] = wait_spot
+    return normalized
+
+
+WAIT_SPOT_SIDES = ("right", "left", "across")
+
+
+def normalize_door_yaw(raw: Any) -> float | None:
+    """입구 방향(도, 지도 기준). 비어 있으면 None — 옛 목적지는 이 칸이 없다."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("door_yaw는 숫자여야 합니다") from exc
+    if not math.isfinite(value):
+        raise ValueError("door_yaw는 유한한 숫자여야 합니다")
+    return value % 360.0
+
+
+def normalize_wait_spot(raw: Any) -> dict[str, Any] | None:
+    """대기 장소 {x, y, yaw, side}. 없으면 None(= 목적지에서 그대로 대기)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("wait_spot은 객체여야 합니다")
+    try:
+        x = float(raw["x"])
+        y = float(raw["y"])
+        yaw = float(raw.get("yaw", 0.0))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("wait_spot.x/y/yaw는 숫자여야 합니다") from exc
+    if not all(math.isfinite(value) for value in (x, y, yaw)):
+        raise ValueError("wait_spot.x/y/yaw는 유한한 숫자여야 합니다")
+    side = str(raw.get("side", "")).strip().lower()
+    if side not in WAIT_SPOT_SIDES:
+        raise ValueError("wait_spot.side는 right, left, across 중 하나여야 합니다")
+    return {"x": x, "y": y, "yaw": yaw % 360.0, "side": side}
 
 
 class DestinationStorage:

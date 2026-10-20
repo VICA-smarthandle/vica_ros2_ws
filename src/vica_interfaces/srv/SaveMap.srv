@@ -1,4 +1,5 @@
 string name
+bool align
 ---
 bool accepted
 string message

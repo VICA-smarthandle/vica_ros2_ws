@@ -6,9 +6,14 @@ from action_msgs.srv import CancelGoal
 
 from vica_safety.app_emergency_node import (
     AppEmergencyNode,
+    TIP_RESET_REJECT_MESSAGE,
     build_app_state,
     has_active_navigation_goals,
+    primary_cause,
+    reset_rejected_by_tip,
 )
+from vica_safety.auto_recovery import AutoRecoveryPolicy
+from vica_safety.reset_sequence import ResetSequence
 
 NOW_NS = 1_000_000_000_000
 OLD_NS = NOW_NS - 60_000_000_000
@@ -266,3 +271,161 @@ def test_app_state_defaults_to_manual_recovery():
     )
 
     assert payload["auto_recovered"] is False
+
+
+class _Logger:
+    def info(self, text):
+        del text
+
+    warn = warning = error = info
+
+
+class PopupHarness:
+    """The real popup-message methods over the minimum node state."""
+
+    estop_sources_callback = AppEmergencyNode.estop_sources_callback
+    update_cause_message = AppEmergencyNode.update_cause_message
+    reject_reset = AppEmergencyNode.reject_reset
+
+    def __init__(self, last_message="Safety 상태 확인 대기 중"):
+        self.state_condition = threading.Condition()
+        self.auto_recovery = AutoRecoveryPolicy(settle_ns=1_000_000_000)
+        self.last_estop_sources = ()
+        self.last_cause = None
+        self.event_message = ""
+        self.last_message = last_message
+        self.sequence = ResetSequence()
+
+    def now_ns(self):
+        return NOW_NS
+
+    def get_logger(self):
+        return _Logger()
+
+    def sources(self, text):
+        self.estop_sources_callback(SimpleNamespace(data=text))
+
+
+AUTO_RECOVERED = "통신이 복구되어 비상정지를 자동 해제했습니다 (원인: motor_can_waiting)"
+
+
+def test_physical_button_replaces_the_previous_message():
+    h = PopupHarness(last_message=AUTO_RECOVERED)
+    h.sources("physical_f1")
+    assert h.last_message == "비상정지 버튼이 눌렸습니다."
+
+
+def test_voice_and_comm_causes_have_their_own_line():
+    h = PopupHarness()
+    h.sources("voice")
+    assert h.last_message == "이용자가 음성으로 멈춤을 요청해 비상정지되었습니다."
+    h = PopupHarness()
+    h.sources("motor_can_stale")
+    assert h.last_message == "모터 드라이버 통신이 끊겨 비상정지되었습니다."
+    h = PopupHarness()
+    h.sources("physical_stale")
+    assert h.last_message == "모터 드라이버 통신이 끊겨 비상정지되었습니다."
+
+
+def test_tip_over_message_wins_over_other_causes():
+    h = PopupHarness()
+    h.sources("motor_can_stale")
+    h.sources("motor_can_stale,tipped")
+    assert h.last_message == "넘어짐이 감지되어 비상정지되었습니다."
+    assert primary_cause(("physical_f1", "tipped", "voice")) == "tipped"
+
+
+def test_app_button_and_boot_wait_keep_their_message():
+    h = PopupHarness(last_message="앱 E-stop이 활성화되었습니다.")
+    h.sources("app")
+    assert h.last_message == "앱 E-stop이 활성화되었습니다."
+    h = PopupHarness()
+    h.sources("motor_can_waiting,physical_waiting")
+    assert h.last_message == "Safety 상태 확인 대기 중"
+
+
+def test_reset_rejection_is_not_overwritten_by_the_same_cause():
+    h = PopupHarness()
+    h.sources("physical_f1")
+    h.reject_reset(SimpleNamespace(), "estop_reset", "active sources: physical_f1")
+    rejected = h.last_message
+    assert rejected.startswith("Safety reset 거부:")
+    h.sources("physical_f1")
+    assert h.last_message == rejected
+
+
+def test_reset_before_standing_up_says_what_to_do():
+    h = PopupHarness()
+    h.sources("tipped")
+    response = h.reject_reset(
+        SimpleNamespace(), "estop_reset", "active sources: tipped")
+    assert response.success is False
+    assert response.message == TIP_RESET_REJECT_MESSAGE
+    assert h.last_message == TIP_RESET_REJECT_MESSAGE
+
+
+def test_tip_rejection_text_goes_back_after_standing_up():
+    h = PopupHarness()
+    h.sources("tipped")
+    h.reject_reset(SimpleNamespace(), "estop_reset", "active sources: tipped")
+    h.sources("")
+    assert h.last_message == "넘어짐이 감지되어 비상정지되었습니다."
+
+
+def test_released_button_after_rejection_shows_the_cause_again():
+    h = PopupHarness()
+    h.sources("physical_f1")
+    h.reject_reset(SimpleNamespace(), "estop_reset", "active sources: physical_f1")
+    h.sources("")
+    assert h.last_message == "비상정지 버튼이 눌렸습니다."
+
+
+def test_reset_success_message_is_kept_when_sources_stay_empty():
+    h = PopupHarness()
+    h.sources("physical_f1")
+    h.sources("")
+    h.last_message = "Safety reset 완료: Nav2 Goal 없음, 중앙 래치 해제, Supervisor READY_TO_GO 확인"
+    h.sources("")
+    assert h.last_message.startswith("Safety reset 완료")
+
+
+def test_tip_rejection_is_recognised_only_for_the_latch_step():
+    assert reset_rejected_by_tip("estop_reset", "active sources: tipped") is True
+    assert reset_rejected_by_tip(
+        "estop_reset", "active sources: physical_waiting,tipped") is True
+    assert reset_rejected_by_tip("estop_reset", "active sources: physical_f1") is False
+    assert reset_rejected_by_tip("nav_goal_check", "tipped") is False
+    assert reset_rejected_by_tip("estop_reset", "estop_reset service is unavailable") is False
+
+
+class ActivateHarness:
+    """handle_activate 의 순서만 본다: 앱 원인 → 본문 → 상태 즉시 발행 → Nav2 확인."""
+
+    handle_activate = AppEmergencyNode.handle_activate
+
+    def __init__(self):
+        self.app_active = False
+        self.last_message = "Safety reset 완료: 옛 문장"
+        self.calls = []
+
+    def publish_app_estop(self):
+        self.calls.append(("app_estop", self.app_active))
+
+    def publish_state(self):
+        self.calls.append(("state", self.app_active, self.last_message))
+
+    def ensure_no_active_nav_goal(self):
+        self.calls.append(("nav_check",))
+        return True, "no active Nav2 goal"
+
+    def get_logger(self):
+        return _Logger()
+
+
+def test_app_button_state_goes_out_before_the_nav2_check():
+    h = ActivateHarness()
+    response = h.handle_activate(None, SimpleNamespace())
+    assert h.calls[0] == ("app_estop", True)
+    assert h.calls[1] == ("state", True, "앱 E-stop이 활성화되었습니다.")
+    assert h.calls[2] == ("nav_check",)
+    assert response.success is True

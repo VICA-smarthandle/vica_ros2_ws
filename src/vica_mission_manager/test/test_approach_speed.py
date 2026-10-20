@@ -55,6 +55,7 @@ def test_stages_engage_in_order():
 def test_skipping_stages_jumps_to_deepest():
     """한 tick 에 여러 단계를 건너뛰면 중간 단계를 거치지 않고 가장 깊은 단계로 간다."""
     ladder = ApproachSpeedLadder()
+    assert ladder.update(2.0) is None
     assert ladder.update(0.3) == 60.0
     assert ladder.index == 1
 
@@ -62,6 +63,7 @@ def test_skipping_stages_jumps_to_deepest():
 def test_limit_holds_when_distance_grows_again():
     """재계획으로 잔여거리가 늘어도 제한은 유지된다."""
     ladder = ApproachSpeedLadder()
+    assert ladder.update(2.0) is None
     assert ladder.update(0.9) == 80.0
     assert ladder.update(3.0) is None
     assert ladder.update(9.0) is None
@@ -71,6 +73,7 @@ def test_limit_holds_when_distance_grows_again():
 def test_backward_motion_does_not_raise_limit():
     """역주행(뒤로 밀림)으로 거리가 계속 늘어도 마지막 단계를 유지한다."""
     ladder = ApproachSpeedLadder()
+    ladder.update(2.0)
     ladder.update(0.4)
     for distance in (0.6, 0.9, 1.2, 1.6, 4.0):
         assert ladder.update(distance) is None
@@ -79,12 +82,38 @@ def test_backward_motion_does_not_raise_limit():
 
 def test_reset_starts_over_for_new_goal():
     ladder = ApproachSpeedLadder()
+    ladder.update(2.0)
     ladder.update(0.4)
     ladder.reset()
 
     assert ladder.index == -1
     assert ladder.percent == NO_SPEED_LIMIT
     assert ladder.update(2.0) is None
+    assert ladder.update(1.0) == 80.0
+
+
+def test_stale_small_distance_at_goal_start_does_not_arm_the_ladder():
+    """Nav2 1.1.20 은 새 goal 때 blackboard 경로를 안 지운다. 첫 feedback 잔여거리는"""
+    ladder = ApproachSpeedLadder()
+    assert ladder.update(0.12) is None
+    assert ladder.percent == NO_SPEED_LIMIT
+    assert ladder.update(13.4) is None
+    assert ladder.update(5.0) is None
+    assert ladder.update(1.0) == 80.0
+    assert ladder.update(0.5) == 60.0
+
+
+def test_short_leg_skips_stages_it_never_approached_from():
+    """구간이 첫 단계 거리보다 짧으면 그 단계는 건너뛰고 다음 단계부터 건다."""
+    ladder = ApproachSpeedLadder(stages=[(3.0, 80.0), (1.5, 60.0)])
+    assert ladder.update(2.0) is None
+    assert ladder.update(1.4) == 60.0
+    assert ladder.percent == 60.0
+
+
+def test_stale_distance_equal_to_boundary_still_enters():
+    """경계값 포함 규칙은 유지된다(정확히 단계 거리면 들어간다)."""
+    ladder = ApproachSpeedLadder()
     assert ladder.update(1.0) == 80.0
 
 
@@ -100,6 +129,7 @@ def test_missing_distance_changes_nothing():
 
 def test_missing_distance_keeps_current_stage():
     ladder = ApproachSpeedLadder()
+    ladder.update(2.0)
     ladder.update(0.9)
     assert ladder.update(None) is None
     assert ladder.update(0.0) is None

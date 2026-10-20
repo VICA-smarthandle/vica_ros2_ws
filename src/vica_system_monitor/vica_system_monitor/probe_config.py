@@ -32,6 +32,61 @@ class ProcessProbeSpec(NamedTuple):
     component: str
     cmdline_pattern: str
     warn_percent: float
+    required: bool = False
+
+
+class LinkProbeSpec(NamedTuple):
+    """One "is anyone publishing this topic" probe."""
+
+    name: str
+    component: str
+    topic: str
+    min_publishers: int
+    fault_code: str
+
+
+def parse_link_probe(
+    name: str,
+    values: Dict[str, object],
+) -> Tuple[Optional[LinkProbeSpec], List[str]]:
+    """Parse and validate one publisher-presence probe."""
+    problems: List[str] = []
+
+    component = _as_str(values.get('component'))
+    topic = _as_str(values.get('topic'))
+    fault_code = _as_str(values.get('fault_code'))
+    min_publishers = int(_as_float(values.get('min_publishers')) or 0)
+
+    problem = validate_component(component)
+    if problem:
+        problems.append(problem)
+
+    if not topic:
+        problems.append(f"'{name}': topic이 비어 있습니다.")
+
+    if min_publishers < 1:
+        problems.append(
+            f"'{name}': min_publishers는 1 이상이어야 합니다. "
+            '0이면 언제나 통과해 아무것도 못 잡습니다.'
+        )
+
+    problem = validate_fault_code(fault_code)
+    if problem:
+        problems.append(problem)
+
+    if problems:
+        return None, problems
+
+    return (
+        LinkProbeSpec(
+            name=name,
+            component=component,
+            topic=topic,
+            min_publishers=min_publishers,
+            fault_code=fault_code,
+        ),
+        [],
+    )
 
 
 def validate_component(component: str) -> Optional[str]:
@@ -137,6 +192,7 @@ def parse_process_probe(
     component = _as_str(values.get('component'))
     pattern = _as_str(values.get('cmdline_pattern'))
     warn_percent = _as_float(values.get('warn_percent'))
+    required = bool(values.get('required', False))
 
     problem = validate_component(component)
     if problem:
@@ -163,6 +219,7 @@ def parse_process_probe(
             component=component,
             cmdline_pattern=pattern,
             warn_percent=warn_percent,
+            required=required,
         ),
         [],
     )

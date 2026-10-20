@@ -20,6 +20,7 @@ motor node는 E-stop 래치, `/estop_reset`, reset 오케스트레이션을 소�
 | `physical_f1` | 사람 개입 | CAN F1 물리 버튼 활성 |
 | `app` | 사람 개입 | `/app_emergency_stop=true` |
 | `voice` | 사람 개입 | `/voice_emergency_stop=true` |
+| `tipped` | 사람이 풂 | `/vica/tipped=true` — IMU 어댑터(C++)가 몸통 45°·1초로 판정(2026-10-15). 세우면 false 지만 reset 은 관리자 앱만 |
 | `motor_can` | 통신 | motor node가 CAN 소켓 예외를 직접 받음 (`/motor/can_ok=false`) |
 | `motor_can_stale` | 통신 | motor node의 보고 자체가 timeout으로 끊김 (사망·지연) |
 | `physical_stale` | 통신 | F1 방송이 timeout으로 끊김 (드라이버 무응답) |
@@ -50,7 +51,12 @@ F1 방송을 켜는 주체는 motor node다(`CMD_PNT_IO_MON_ON`). 안전 노드�
 원인이 비어 있고 (4) 수동 reset과 경합하지 않을 때, `app_emergency_node`가 아래
 공개 reset 절차를 **그대로** 한 번 대신 호출한다. 절차·순서·fail-closed 성질은
 바뀌지 않으며, 바뀌는 것은 누가 시작하느냐뿐이다. 사람 개입 원인이 한 번이라도
-섞이면 그 사건 동안 자동 복구는 막힌다.
+섞이면 그 사건 동안 자동 복구는 막힌다. 몸통 넘어짐(`tipped`, 2026-10-15)도 같다 —
+세웠다고 스스로 풀리지 않는다.
+
+`tipped`는 끊김 감시를 하지 않는다(사용자 결정). IMU 어댑터가 넘어진 채 죽으면 세워도
+원인이 true 로 남아 reset 이 계속 거부된다. 그때는 ⑦ imu 칸(IMU 어댑터)을 다시 켠다 —
+1초 판정 뒤 지금 자세(false)를 다시 낸다.
 
 ## 공개 reset 절차
 

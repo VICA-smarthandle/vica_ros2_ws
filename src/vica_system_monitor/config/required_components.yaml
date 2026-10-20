@@ -9,6 +9,7 @@ robot_health_monitor_node:
     latched_reminder_interval_sec: 10.0
 
     clear_confirm_ticks: 2
+    raise_confirm_ticks: 3
 
     nav2_state_poll_period_sec: 2.0
     nav2_lifecycle_node: /bt_navigator
@@ -21,6 +22,7 @@ robot_health_monitor_node:
     robot_state_timeout_sec: 3.0
 
     diagnostics_timeout_sec: 5.0
+    adapter_grace_sec: 30.0
 
     map_frame: map
     base_frame: base_footprint
@@ -74,18 +76,18 @@ robot_health_monitor_node:
 
     guidance:
       required: false
-      observable: false
-      severity: 3
+      observable: true
+      severity: 2
       grace_sec: 20.0
 
     voice:
       required: false
-      observable: false
+      observable: true
       severity: 2
       grace_sec: 60.0
 
     app:
       required: false
-      observable: false
+      observable: true
       severity: 1
       grace_sec: 30.0

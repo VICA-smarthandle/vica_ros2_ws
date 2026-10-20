@@ -1,23 +1,29 @@
-# VICA Smart Handle — 아두이노 나노 (FTDI FT232R) 고정 장치 이름
+# VICA Smart Handle — 아두이노 나노(FTDI FT232RL USB-UART) 고정 장치 이름
 #
 # /dev/ttyUSB* 의 번호는 USB 재열거 순서에 따라 바뀐다. 다른 USB-시리얼 장치를
 # 먼저 꽂으면 스마트핸들이 ttyUSB1이 되어 config 기본값이 어긋난다.
 # SYMLINK 로 /dev/vica_smart_handle 을 고정 부여한다.
 #
-# [주의] idVendor/idProduct 0403:6001 은 FTDI FT232R 계열 전체가 공유하는 값이라
-# 이것만으로는 장치를 특정하지 못한다. 다른 FTDI 장치에도 같은 링크가 걸려
-# 엉뚱한 포트를 열게 된다. serial 까지 조건에 넣어야 한다.
+# [2026-10-05 보드 복귀] ESP32U(CP2102) 에서 다시 아두이노 나노로 돌아왔다. 09-22 이전과
+# 같은 나노다(FTDI 0403:6001, serial B003UMKG — 실측). FT232RL 은 칩마다 serial 이
+# 달라 라이다(CP2102, serial "0001")와 USB 속성만으로 갈린다 — ESP32 시절처럼 물리
+# 포트 경로(ID_PATH)로 가를 필요가 없다. 나노를 바꾸면 serial 을 새로 적는다.
+#   확인: udevadm info -a -n /dev/ttyUSB1 | grep 'ATTRS{serial}'
 #
-# [갱신 필요] 아두이노 보드를 교체하면 serial 이 바뀌므로 이 파일도 함께 고친다.
-#   확인: udevadm info -a -n /dev/ttyUSB0 | grep 'ATTRS{serial}'
+# rplidar.rules(패키지 동봉) 는 CP2102 전부에 /dev/rplidar 를 붙인다. 지금 CP2102 는
+# 라이다 하나뿐이지만, ESP32 보드를 다시 꽂으면 그 보드도 같은 링크를 다투므로 라이다
+# 자리에 link_priority 10 을 주는 줄은 남겨 둔다.
 #
 # ID_MM_DEVICE_IGNORE — ModemManager 가 시리얼 포트를 모뎀으로 오인해 AT 명령을
-# 탐침하면 DTR 토글로 나노가 리셋되고 수신 바이트가 오염된다. 증상이 간헐적이라
-# 원인 파악이 어려우므로 미리 차단한다. (2026-07-29 확인: ModemManager active)
+# 탐침하면 DTR 토글로 나노가 리셋되고 수신 바이트가 오염된다. 그래서 차단한다.
 #
 # 설치:
-#   sudo cp 99-vica-smart-handle.rules /etc/udev/rules.d/
+#   sudo cp udev/99-vica-smart-handle.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
-#   ls -l /dev/vica_smart_handle
+#   ls -l /dev/vica_smart_handle /dev/rplidar
 
+# 라이다: 자기 링크(/dev/rplidar)를 우선 차지한다
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.3:1.0", OPTIONS+="link_priority=10"
+
+# 스마트핸들: 아두이노 나노(FT232RL)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="B003UMKG", SYMLINK+="vica_smart_handle", MODE="0660", GROUP="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"

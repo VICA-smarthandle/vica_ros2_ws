@@ -2,7 +2,7 @@
 import re
 
 from vica_mission_manager import mission_logic
-from vica_mission_manager.mission_logic import HARD_EMERGENCY_KEYWORDS
+from vica_mission_manager.mission_logic import HARD_EMERGENCY_KEYWORDS, MIC_OFF_MESSAGES, MSG_OBSTACLE_STOP
 
 
 def _spoken_messages() -> dict:
@@ -17,6 +17,8 @@ def _spoken_messages() -> dict:
 def test_messages_have_no_hard_emergency_keyword():
     offenders = []
     for name, text in sorted(_spoken_messages().items()):
+        if text in MIC_OFF_MESSAGES:
+            continue
         norm = re.sub(r"\s+", "", text)
         for keyword in sorted(HARD_EMERGENCY_KEYWORDS):
             if keyword in norm:
@@ -26,6 +28,11 @@ def test_messages_have_no_hard_emergency_keyword():
         "로봇 멘트에 하드 긴급어가 있어 자가 E-stop 이 발생한다:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_only_the_obstacle_stop_message_may_carry_a_keyword():
+    """예외는 장애물 정지 안내 하나뿐이다(2026-10-10 사용자 결정 — "…정지합니다." + 그동안 마이크 끄기)."""
+    assert MIC_OFF_MESSAGES == {MSG_OBSTACLE_STOP}
 
 
 def test_message_collection_is_not_empty():

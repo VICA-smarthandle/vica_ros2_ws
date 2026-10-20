@@ -53,6 +53,24 @@ def test_voice_estop_blocks_recovery():
     assert p.should_recover(T0 + sec_to_ns(5.0)) is False
 
 
+def test_tip_over_blocks_recovery_even_after_standing_up():
+    p = policy()
+    p.observe_sources(("tipped",), T0)
+    p.observe_sources((), T0 + sec_to_ns(0.1))
+
+    assert p.should_recover(T0 + sec_to_ns(5.0)) is False
+
+
+def test_tip_over_mixed_with_comm_cause_blocks_recovery():
+    p = policy()
+    p.observe_sources(("motor_can_stale",), T0)
+    p.observe_sources(("motor_can_stale", "tipped"), T0 + sec_to_ns(0.5))
+    p.observe_sources(("tipped",), T0 + sec_to_ns(1.0))
+    p.observe_sources((), T0 + sec_to_ns(2.0))
+
+    assert p.should_recover(T0 + sec_to_ns(10.0)) is False
+
+
 def test_comm_cause_mixed_with_button_blocks_recovery():
     p = policy()
     p.observe_sources(("motor_can_stale", "physical_f1"), T0)

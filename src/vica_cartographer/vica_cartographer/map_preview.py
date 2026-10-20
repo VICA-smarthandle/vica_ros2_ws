@@ -1,5 +1,6 @@
 """Turn an OccupancyGrid into a PNG the app can display."""
 
+import math
 import struct
 import zlib
 
@@ -68,3 +69,32 @@ def grid_to_png(data, width: int, height: int, level: int = 6) -> bytes:
     return encode_png_gray(
         occupancy_to_gray(data, width, height), width, height, level
     )
+
+
+POSE_MAX_AGE_SEC = 5.0
+
+
+def quaternion_to_yaw_degrees(x: float, y: float, z: float, w: float) -> float:
+    """Return the heading (rotation about Z) in degrees, counter-clockwise positive."""
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.degrees(math.atan2(siny_cosp, cosy_cosp))
+
+
+def robot_pose_fields(pose, age_sec, max_age_sec: float = POSE_MAX_AGE_SEC) -> dict:
+    """Return the preview JSON fields for the robot pose, or {} when unknown."""
+    if pose is None or age_sec is None or age_sec > max_age_sec:
+        return {}
+    x, y, yaw = pose
+    return {
+        'robot_x': round(float(x), 3),
+        'robot_y': round(float(y), 3),
+        'robot_yaw': round(float(yaw), 2),
+    }
+
+
+def tilt_fields(tilt_deg) -> dict:
+    """Return the preview JSON field for the map tilt, or {} when unknown."""
+    if tilt_deg is None:
+        return {}
+    return {'tilt_deg': round(float(tilt_deg), 1)}

@@ -27,23 +27,57 @@ Safety 결정 사항이다.
 | `serial_link.py` | 시리얼 전송 래퍼 |
 | `turn_guide_node.py` | `/odom` → `/vica/turn_guide` |
 | `user_guidance_driver_node.py` | cue 병합 → 시리얼 전송 + 진단 발행 |
-| `firmware/` | 아두이노 나노 펌웨어와 bench 시험 도구 |
+| `firmware/` | 스마트핸들 보드(ESP32U) 펌웨어와 bench 시험 도구 |
 | `udev/` | Smart Handle 고정 장치 이름 규칙 |
 
 순수 로직 모듈은 `rclpy`에 의존하지 않으며, 시각은 전부 호출자가 정수 나노초로
 주입한다. 하드웨어 없이 pytest로 검증할 수 있다.
 
-## 펌웨어
+### C++ 판 — 손잡이 드라이버·방향지시 (2026-10-13)
 
-`firmware/smart_handle_firmware/smart_handle_firmware.ino`가 서보·LED를 구동한다.
-**ROS와 1바이트 상태코드 프로토콜을 공유**하므로 같은 패키지에 둔다. `protocol.py`의
-상수를 바꾸면 펌웨어도 함께 바꿔야 하며, `test_protocol.py`가 두 값의 일치를
-자동으로 검사한다.
+`user_guidance.launch.py`는 기본으로 `vica_user_guidance_cpp` 패키지의 두 노드(C++ 판)를 띄운다.
+실행 파일·노드 이름·파라미터·토픽·로그 글자가 파이썬 판과 같다.
+
+- `user_guidance_driver_node`: 파이썬에서 코어 하나의 15~23 %(상향 시리얼 20 Hz·전송 10 Hz·초음파 TF
+  게이트용 `/tf` 수신) → run94 실주행 2.8 %.
+- `turn_guide_node`: 파이썬에서 12 % 안팎(판정 20 Hz·/odom 30 Hz·레일 예고용 `/tf` 수신) → run94 녹화 재생
+  1.9 %(같은 재생에서 파이썬 11.6 %).
 
 ```bash
-export PATH="$HOME/bin:$PATH"
-arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
-arduino-cli upload -p /dev/vica_smart_handle --fqbn arduino:avr:nano \
+# 파이썬 판으로 되돌리기(하나씩 고를 수 있다)
+ros2 launch vica_user_guidance user_guidance.launch.py driver_impl:=python
+ros2 launch vica_user_guidance user_guidance.launch.py turn_impl:=python
+```
+
+`user_guidance_driver_node.py`·`turn_guide_node.py`와 그 순수 모듈은 지우지 않는다. C++ 판 대조 시험
+(`vica_user_guidance_cpp/test/parity`)의 정답지다 — 파이썬 판을 고치면 C++ 판도 같이 고치고
+대조 시험으로 맞춘다.
+
+## 펌웨어
+
+`firmware/smart_handle_firmware/smart_handle_firmware.ino`가 서보·LED·초음파·터치·
+진동모터를 구동한다. **ROS와 1바이트 상태코드 프로토콜을 공유**하므로 같은 패키지에
+둔다. `protocol.py`의 상수를 바꾸면 펌웨어도 함께 바꿔야 하며, `test_protocol.py`가
+두 값의 일치를 자동으로 검사한다.
+
+보드는 **ESP32U(ESP32-WROOM-32U, CP2102 USB)** 다. 2026-09-22에 아두이노 나노에서
+바꿨고, 시나리오·프로토콜은 그대로 두고 핀·서보 라이브러리·I2C 호출만 손봤다
+(`devlog/2026-09-22-esp32-스마트핸들-이식.md`).
+
+| 부품 | ESP32U 핀 | 비고 |
+| --- | --- | --- |
+| 서보 신호 | GPIO19 | 5V 레벨시프터 A1 |
+| LED 왼쪽 줄(A) | GPIO17 | 5V 레벨시프터 A4, 31개 (09-22 실물 확인) |
+| LED 오른쪽 줄(B) | GPIO18 | 5V 레벨시프터 A2, 31개 |
+| 레벨시프터 OE | GPIO16 | HIGH=출력 켜짐. 펌웨어가 setup() 첫 줄에서 올린다 |
+| 초음파 I2C | SDA GPIO22 / SCL GPIO21 | 5V I2C 레벨시프터 경유. ESP32 기본과 반대(스캔 실측). 센서 8개(0x68~0x6F)를 서로 등진 2개씩 4라운드로 읽는다(채널당 약 2.4 Hz). 자리↔주소 표는 `.ino` 초음파 절 |
+| 진동모터(MOSFET 게이트) | GPIO4 | |
+| 터치센서 | GPIO14 | INPUT_PULLUP, active-low |
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+arduino-cli compile --fqbn esp32:esp32:esp32 firmware/smart_handle_firmware
+arduino-cli upload -p /dev/vica_smart_handle --fqbn esp32:esp32:esp32 \
     firmware/smart_handle_firmware
 
 # 로봇과 분리한 상태에서 상태코드를 수동 전송해 표시를 확인한다
@@ -51,7 +85,20 @@ python3 firmware/bench_test.py --list
 python3 firmware/bench_test.py --all
 ```
 
-필요 라이브러리: `Adafruit NeoPixel`, `Servo` (Servo는 AVR 코어에 미포함).
+필요 코어·라이브러리(젯슨에 설치됨, 2026-09-22):
+
+```bash
+arduino-cli core install esp32:esp32 \
+    --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+arduino-cli lib install "Adafruit NeoPixel" ESP32Servo
+```
+
+AVR 의 `Servo` 라이브러리는 ESP32 를 지원하지 않는다. `ESP32Servo` 는 같은 API 에
+기본 펄스폭(544~2400 µs)도 같아 각도 값이 바뀌지 않는다.
+
+업로드 전에 `user_guidance_driver_node`가 포트를 잡고 있지 않은지 확인한다. 포트를
+여는 순간 ESP32 는 DTR/RTS 로 리셋되고 ROM 부팅 문구를 115200 으로 찍는다 — 드라이버의
+프레임 누적기가 헤더(AA 55 / AA 56)로 재동기하므로 무시된다.
 
 > 아두이노 IDE는 스케치 폴더명과 `.ino` 파일명이 같아야 하므로 `smart_handle_firmware/`
 > 하위 디렉터리 구조를 유지한다.
@@ -99,9 +146,11 @@ ls -l /dev/vica_smart_handle
 **링크를 확인한 뒤에** `config/user_guidance.yaml`의 `serial_port`를 바꾼다. 규칙 없이
 먼저 바꾸면 모든 실행이 `FAULT_PORT_OPEN`이 된다.
 
-규칙은 보드 시리얼(`B003UMKG`)까지 조건에 넣는다. FTDI `0403:6001`은 흔한 값이라
-이것만으로는 다른 USB-시리얼 장치에도 링크가 걸린다. **보드를 교체하면 규칙도 함께
-갱신해야 한다.**
+ESP32U 의 USB 칩(CP2102 `10c4:ea60`, serial `0001`)은 **라이다 어댑터와 완전히
+같아서** USB 속성으로는 구분되지 않는다. 규칙은 라이다가 꽂힌 물리 포트 경로
+(`ID_PATH`)를 기준으로 "그 자리가 아닌 CP2102 = 핸들"로 가르고, `/dev/rplidar` 는
+`link_priority` 로 라이다가 우선 차지하게 한다. **라이다 USB 자리를 옮기거나 보드를
+교체하면 규칙도 함께 갱신해야 한다.** 자세한 근거는 규칙 파일 주석에 있다.
 
 ## `timebase.py`가 `vica_safety/freshness.py`의 복제인 이유
 

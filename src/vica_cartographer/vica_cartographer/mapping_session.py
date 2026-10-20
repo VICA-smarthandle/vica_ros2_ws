@@ -1,8 +1,10 @@
 """Pure decision logic for one mapping session."""
 
 from enum import Enum
+import json
 import re
 import signal
+import unicodedata
 
 
 class MappingState(str, Enum):
@@ -143,3 +145,67 @@ def normalise_map_name(raw: str, date_suffix: str):
     if len(name) > MAP_NAME_MAX:
         return None, f'지도 이름이 너무 깁니다({len(name)}자). {MAP_NAME_MAX}자 이내로 해주세요.'
     return name, ''
+
+
+DISPLAY_NAME_MAX = 40
+_DISPLAY_NAME_FORBIDDEN = re.compile(r'[\x00-\x1f/\\]')
+
+
+def plan_map_save(raw: str, date_suffix: str, time_suffix: str):
+    """Decide the machine id and the human name for one save request."""
+    name = unicodedata.normalize('NFC', raw or '').strip()
+    if not name:
+        return None, None, '지도 이름을 입력해 주세요.'
+    if MAP_NAME_PATTERN.match(name):
+        map_id, error = normalise_map_name(name, date_suffix)
+        if map_id is None:
+            return None, None, error
+        return map_id, map_id, ''
+    if _DISPLAY_NAME_FORBIDDEN.search(name):
+        return None, None, '지도 이름에 슬래시(/, \\)나 제어 문자는 쓸 수 없습니다.'
+    if len(name) > DISPLAY_NAME_MAX:
+        return None, None, (
+            f'지도 이름이 너무 깁니다({len(name)}자). {DISPLAY_NAME_MAX}자 이내로 해주세요.'
+        )
+    return f'map_{date_suffix}_{time_suffix}', name, ''
+
+
+def save_label(map_id: str, display_name) -> str:
+    """사람에게 보이는 저장 문구용 이름. 표시 이름이 따로 있으면 id 를 괄호에 붙인다."""
+    if not display_name or display_name == map_id:
+        return map_id
+    return f'{display_name} ({map_id})'
+
+
+def map_meta_document(map_id: str, display_name: str, saved_at: str) -> dict:
+    """maps/<id>.meta.json 의 내용. map_list_node 와 scripts/vica_map_resolve.py 가 읽는다."""
+    return {'map_id': map_id, 'display_name': display_name, 'saved_at': saved_at}
+
+
+ALIGN_RESULT_PREFIX = 'VICA_ALIGN '
+
+ALIGN_RESULTS = ('rotated', 'small', 'no_walls', 'not_requested', 'failed')
+
+
+def save_script_command(script: str, map_id: str, align: bool) -> list:
+    """Command line for scripts/vica_map_save.sh. 정렬은 둘째 인자로만 켠다."""
+    command = ['bash', script, map_id]
+    if align:
+        command.append('--align')
+    return command
+
+
+def parse_align_result(output: str) -> dict:
+    """Pick the VICA_ALIGN line out of the save script output. 없으면 {}."""
+    found = {}
+    for line in (output or '').splitlines():
+        line = line.strip()
+        if not line.startswith(ALIGN_RESULT_PREFIX):
+            continue
+        try:
+            document = json.loads(line[len(ALIGN_RESULT_PREFIX):])
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get('result') in ALIGN_RESULTS:
+            found = document
+    return found

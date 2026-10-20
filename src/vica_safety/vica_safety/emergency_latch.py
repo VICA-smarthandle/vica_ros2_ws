@@ -37,13 +37,14 @@ class EmergencyLatch:
             "app": False,
             "voice": False,
             "motor_can": False,
+            "tipped": False,
         }
         self.last_physical_ns: Optional[int] = None
         self.last_motor_can_ns: Optional[int] = None
 
     def update_source(self, name: str, active: bool, now: int) -> None:
         del now
-        if name not in ("app", "voice"):
+        if name not in ("app", "voice", "tipped"):
             raise ValueError(f"unsupported source: {name}")
         self.sources[name] = active
         if active:

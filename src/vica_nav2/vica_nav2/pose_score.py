@@ -45,7 +45,7 @@ YAW_EDGE_WARN = math.radians(40.0)
 
 SUPPRESS_YAW = math.radians(30.0)
 
-MIN_SCORE = 70.0
+MIN_SCORE = 55.0
 WARN_SCORE = 50.0
 MIN_BEAMS = 60
 MIN_MARGIN = 10.0

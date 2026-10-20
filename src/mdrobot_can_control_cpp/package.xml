@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mdrobot_can_control_cpp</name>
+  <version>0.1.0</version>
+  <description>
+    MDROBOT CAN 모터 노드(keyboard_knob)의 C++ 판. 파이썬 판(mdrobot_can_control)은
+    그대로 남아 있으며 motor_bringup.launch.py 의 motor_impl:=python 으로 되돌린다.
+
+    왜 옮겼나(2026-10-12 실측): 이 노드는 주행·정지와 무관하게 30 Hz 타이머와
+    30 Hz /cmd_vel_safe 를 돌린다. 기록 25회차에서 코어 하나의 평균 8.7 %
+    (6.2~11.6 %)를 썼고, 격리 벤치에서 같은 일을 C++ 가 약 1/5 로 했다.
+    실행 파일 이름(keyboard_knob)과 노드 이름은 파이썬 판과 같다 — 터미네이터
+    중복 실행 guard·진단 프로브·매핑 감독이 이 이름을 본다.
+  </description>
+  <maintainer email="mjw41177@gmail.com">ji_w</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>diagnostic_updater</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-can</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

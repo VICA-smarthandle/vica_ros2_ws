@@ -2,14 +2,37 @@ turn_guide_node:
   ros__parameters:
     odom_topic: /odom
 
-    window_sec: 1.5
-    enter_threshold_deg: 20.0
+    window_sec: 1.0
+    enter_threshold_deg: 15.0
     exit_threshold_deg: 10.0
     min_duration_sec: 0.6
 
     odom_timeout_sec: 0.5
     publish_rate_hz: 20.0
     cue_valid_sec: 2.0
+
+    enable_rail_forecast: true
+    rail_topic: /rail_plan
+    rail_timeout_sec: 2.5
+    map_frame: map
+    base_frame: base_footprint
+
+    rail_corner_threshold_deg: 45.0
+    rail_lead_time_sec: 2.0
+    rail_max_offtrack_m: 0.8
+    rail_handoff_m: 2.0
+    rail_merge_gap_m: 1.2
+    rail_goal_change_m: 0.5
+    rail_behind_start_m: 1.5
+
+    controller_lookahead_time_sec: 0.0
+    controller_lookahead_min_m: 0.0
+    controller_lookahead_max_m: 0.0
+    rail_min_prepare_dist_m: 0.5
+    rail_rehold_end_m: 0.5
+
+    minor_turn_deg: 25.0
+    minor_turn_min_speed_mps: 0.25
 
 user_guidance_driver_node:
   ros__parameters:
@@ -37,15 +60,34 @@ user_guidance_driver_node:
 
     uplink_rate_hz: 20.0
 
-    touch_enabled: false
+    touch_enabled: true
 
     touch_stale_sec: 0.5
 
     touch_publish_min_interval_sec: 0.1
-    ultrasonic_topics: [/ultrasonic/front_left, /ultrasonic/front_right]
-    ultrasonic_frame_ids: [usonic_front_left, usonic_front_right]
+    ultrasonic_topics:
+      - /ultrasonic/left_wheel
+      - /ultrasonic/front_left
+      - /ultrasonic/front_right
+      - /ultrasonic/right_wheel
+      - /ultrasonic/right_rear_wheel
+      - /ultrasonic/rear_right
+      - /ultrasonic/rear_left
+      - /ultrasonic/left_rear_wheel
+    ultrasonic_frame_ids:
+      - usonic_left_wheel
+      - usonic_front_left
+      - usonic_front_right
+      - usonic_right_wheel
+      - usonic_right_rear_wheel
+      - usonic_rear_right
+      - usonic_rear_left
+      - usonic_left_rear_wheel
     ultrasonic_fov_rad: 0.524
+    ultrasonic_fov_rad_per_channel: [-1.0, 0.349, 0.349, -1.0, -1.0, -1.0, -1.0, -1.0]
     ultrasonic_min_range_m: 0.02
     ultrasonic_max_range_m: 1.50
-    ultrasonic_measurement_delay_ms: [210, 105]
+    ultrasonic_max_range_m_per_channel: [0.40, -1.0, -1.0, 0.40, -1.0, -1.0, -1.0, -1.0]
+    ultrasonic_measurement_delay_ms: [210, 210, 105, 210, 105, 420, 315, 105]
+    ultrasonic_channel_enabled: [false, true, true, false, false, false, false, false]
     ultrasonic_stale_warn_sec: 2.0

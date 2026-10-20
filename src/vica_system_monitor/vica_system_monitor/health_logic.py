@@ -1,6 +1,6 @@
 """Pure readiness and overall-state computation."""
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from .fault_catalog import (
     describe,
@@ -16,6 +16,8 @@ from .freshness import is_fresh_ns
 UNKNOWN = 0
 NOT_READY = 1
 READY = 2
+
+WARN_PASSTHROUGH_CODE = 'DIAG_COMPONENT_WARN'
 
 STATE_STARTING = 0
 STATE_READY = 1
@@ -89,6 +91,7 @@ def evaluate(
     safety: SafetyInput,
     now_ns: int,
     started_ns: int,
+    extra_faults: Iterable[Fault] = (),
 ) -> HealthSnapshot:
     """Compute readiness, faults and the overall state for this tick."""
     in_grace_globally = False
@@ -111,6 +114,7 @@ def evaluate(
     )
     if safety_fault is not None:
         faults.append(safety_fault)
+    faults.extend(extra_faults)
 
     faults.sort(key=lambda f: (-f.severity, f.component, f.fault_code))
 
@@ -150,6 +154,9 @@ def _judge_probe(
     if healthy:
         return READY, _no_fault()
 
+    if fresh and item.fault_code == WARN_PASSTHROUGH_CODE:
+        return READY, _build_fault(item, severity=SEVERITY_WARN)
+
     if not item.ever_ok and _in_grace(now_ns, started_ns, item.grace_ns):
         return UNKNOWN, None
 
@@ -171,13 +178,13 @@ def _in_grace(now_ns: int, started_ns: int, grace_ns: int) -> bool:
     return elapsed < grace_ns
 
 
-def _build_fault(item: ComponentProbe) -> Fault:
+def _build_fault(item: ComponentProbe, severity: Optional[int] = None) -> Fault:
     """Turn a failing probe into a Fault using the catalog."""
     code = item.fault_code or _default_fault_code(item.name)
     description = describe(
         code,
         component=item.name,
-        severity=item.severity,
+        severity=item.severity if severity is None else severity,
         name=item.name,
         message=item.detail,
     )
@@ -258,6 +265,17 @@ def _judge_safety(
             detail=description.detail,
             suggested_action=description.suggested_action,
             latched=True,
+        )
+
+    if safety.state == 'FAULT':
+        description = describe('SAFETY_SUPERVISOR_FAULT')
+        return Fault(
+            component='safety',
+            fault_code='SAFETY_SUPERVISOR_FAULT',
+            severity=SEVERITY_STOP,
+            detail=description.detail,
+            suggested_action=description.suggested_action,
+            latched=False,
         )
 
     if safety.state == 'ESTOP_RELEASED_WAIT_RESET':

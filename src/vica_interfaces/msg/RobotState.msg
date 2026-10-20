@@ -2,3 +2,15 @@ int32 current_floor
 string current_building
 bool is_moving
 bool is_paused
+string dialog_state
+string place_here
+float32 place_here_dist_m
+string active_destination
+string last_destination
+int32 last_arrived_age_sec
+string aborted_destination
+int32 wait_minutes
+int32 wait_left_sec
+int32 battery_pct
+string door_side
+string wait_place

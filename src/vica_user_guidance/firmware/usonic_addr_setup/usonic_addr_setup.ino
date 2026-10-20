@@ -1,5 +1,8 @@
 #include <Wire.h>
 
+#define I2C_SDA_PIN 22
+#define I2C_SCL_PIN 21
+
 #define DO_BURN_ADDR 0
 
 #define ADDR7_DEFAULT 0x74
@@ -47,9 +50,9 @@ bool rd16(uint8_t addr7, uint8_t reg, uint16_t *out) {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin();
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(50000);
-  Wire.setWireTimeout(25000, true);
+  Wire.setTimeOut(25);
   delay(1000);
 
   scan("before");

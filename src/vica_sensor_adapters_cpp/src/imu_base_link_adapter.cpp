@@ -8,10 +8,12 @@
 #include <geometry_msgs/msg/vector3.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
 #include "vica_sensor_adapters_cpp/gyro_bias.hpp"
+#include "vica_sensor_adapters_cpp/tilt_detector.hpp"
 
 namespace vica_sensor_adapters_cpp
 {
@@ -96,6 +98,23 @@ public:
     bias_ = std::make_unique<GyroBiasEstimator>(
       sample_count, max_rate, refresh_count, refresh_alpha, max_dev, max_jump);
 
+    const double tip_angle = declare_parameter<double>("tip_angle_deg", 45.0);
+    const double tip_release = declare_parameter<double>("tip_release_angle_deg", 30.0);
+    const double tip_hold = declare_parameter<double>("tip_hold_sec", 1.0);
+    const auto tipped_topic = declare_parameter<std::string>("tipped_topic", "/vica/tipped");
+    if (tip_angle > 0.0) {
+      tilt_ = std::make_unique<TiltDetector>(tip_angle, tip_release, tip_hold);
+      rclcpp::QoS tipped_qos(rclcpp::KeepLast(1));
+      tipped_qos.reliable().transient_local();
+      tipped_pub_ = create_publisher<std_msgs::msg::Bool>(tipped_topic, tipped_qos);
+      RCLCPP_INFO(
+        get_logger(), "Tip detection: %.1f deg held %.1f s -> %s (release below %.1f deg)",
+        tilt_->tip_angle_deg(), tilt_->hold_sec(), tipped_topic.c_str(),
+        tilt_->release_angle_deg());
+    } else {
+      RCLCPP_WARN(get_logger(), "Tip detection disabled (tip_angle_deg <= 0)");
+    }
+
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
@@ -169,6 +188,42 @@ private:
     rotate_covariance(matrix, out.linear_acceleration_covariance);
 
     pub_->publish(out);
+    check_tip(out.linear_acceleration);
+  }
+
+  /// 발행한 몸 기준 가속도(평균값)로 넘어짐을 판정한다. 바뀔 때만 낸다.
+  void check_tip(const geometry_msgs::msg::Vector3 & acc)
+  {
+    if (!tilt_) {
+      return;
+    }
+    const double tilt = TiltDetector::tilt_deg(acc.x, acc.y, acc.z);
+    const double now = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool was_known = tilt_->known();
+    if (!tilt_->update(tilt, now)) {
+      return;
+    }
+    publish_tipped(tilt_->tipped());
+    if (tilt_->tipped()) {
+      RCLCPP_ERROR(
+        get_logger(), "[TIPPED] tilt %.1f deg held %.1f s -> /vica/tipped=true",
+        tilt, tilt_->hold_sec());
+    } else if (was_known) {
+      RCLCPP_WARN(
+        get_logger(), "[UPRIGHT] tilt %.1f deg held %.1f s -> /vica/tipped=false",
+        tilt, tilt_->hold_sec());
+    } else {
+      RCLCPP_INFO(
+        get_logger(), "Tip state: upright (tilt %.1f deg) -> /vica/tipped=false", tilt);
+    }
+  }
+
+  void publish_tipped(bool tipped)
+  {
+    std_msgs::msg::Bool msg;
+    msg.data = tipped;
+    tipped_pub_->publish(msg);
   }
 
   /// 캐시된 회전 행렬을 준다. frame_id 가 바뀌면 다시 조회한다.
@@ -262,6 +317,9 @@ private:
   std::unique_ptr<GyroBiasEstimator> bias_;
   bool bias_reported_{false};
   int bias_refresh_seen_{0};
+
+  std::unique_ptr<TiltDetector> tilt_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr tipped_pub_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

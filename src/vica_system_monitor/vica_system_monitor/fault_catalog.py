@@ -72,6 +72,12 @@ CATALOG: Dict[str, FaultSpec] = {
         'Safety 상태가 {age_sec}초 동안 갱신되지 않았습니다.',
         'safety_supervisor_node 실행 상태를 확인해 주세요.',
     ),
+    'SAFETY_SUPERVISOR_FAULT': FaultSpec(
+        'safety',
+        SEVERITY_STOP,
+        '비상정지 신호 갱신이 늦어 FAULT 상태입니다.',
+        '앱에서 비상정지를 걸었다 풀어주세요.',
+    ),
     'SAFETY_RESET_REQUIRED': FaultSpec(
         'safety',
         SEVERITY_STOP,
@@ -127,6 +133,12 @@ CATALOG: Dict[str, FaultSpec] = {
         'color 카메라 데이터가 {age_sec}초 동안 수신되지 않았습니다.',
         'D455 연결 상태를 확인해 주세요.',
     ),
+    'NAV2_CMD_PATH_DOWN': FaultSpec(
+        'navigation',
+        SEVERITY_STOP,
+        '주행 명령이 나갈 길이 열리지 않았습니다. 목적지를 보내도 로봇이 움직이지 않습니다.',
+        'Nav2 를 다시 띄워 주세요. collision_monitor 가 활성화되지 않은 상태입니다.',
+    ),
     'GUIDANCE_HANDLE_DISCONNECTED': FaultSpec(
         'guidance',
         SEVERITY_STOP,
@@ -135,28 +147,32 @@ CATALOG: Dict[str, FaultSpec] = {
     ),
     'GUIDANCE_UPLINK_STALE': FaultSpec(
         'guidance',
-        SEVERITY_STOP,
-        '핸들에서 오는 신호가 {age_sec}초 동안 수신되지 않았습니다. '
-        '터치 상태를 확인할 수 없습니다.',
-        '핸들 USB 연결과 아두이노 전원을 확인해 주세요.',
+        SEVERITY_DEGRADED,
+        '핸들 아두이노에서 오는 신호가 {age_sec}초 동안 없습니다. '
+        '주행은 계속할 수 있습니다.',
+        '핸들 USB 연결과 아두이노 전원을 확인해 주세요. 드라이버는 살아 있으나 '
+        '핸들 LED·서보와 초음파 거리 감지가 함께 멈춥니다.',
     ),
     'GUIDANCE_NODE_SILENT': FaultSpec(
         'guidance',
         SEVERITY_DEGRADED,
-        '안내 장치 진단이 수신되지 않습니다.',
-        'user_guidance_driver_node 실행 상태를 확인해 주세요.',
+        '스마트 핸들 드라이버가 상태를 보내지 않습니다. 주행은 계속할 수 있습니다.',
+        'user_guidance 드라이버 노드 실행 상태를 확인해 주세요. '
+        '방향 안내와 초음파 거리 감지가 함께 멈춘 상태입니다.',
     ),
     'VOICE_NODE_SILENT': FaultSpec(
         'voice',
         SEVERITY_DEGRADED,
-        '음성 기능 노드가 실행되지 않고 있습니다.',
-        '음성 파이프라인 실행 상태를 확인해 주세요. 주행에는 영향이 없습니다.',
+        '음성 노드가 실행되지 않고 있습니다. 주행은 계속할 수 있습니다.',
+        '음성 파이프라인 실행 상태를 확인해 주세요. '
+        '(이 항목은 노드 실행 여부만 확인합니다 — 마이크가 실제로 들리는지는 '
+        '확인하지 못합니다.)',
     ),
     'APP_BRIDGE_SILENT': FaultSpec(
         'app',
         SEVERITY_WARN,
-        '앱 상태 브리지 노드가 실행되지 않고 있습니다.',
-        'rosbridge와 상태 노드 실행 상태를 확인해 주세요.',
+        '앱 브리지가 로봇 상태를 보내지 않습니다. 로봇은 정상 주행 중일 수 있습니다.',
+        '앱 브리지 연결 상태를 확인해 주세요. 화면의 위치·주행 표시만 멈춘 것입니다.',
     ),
     'DIAG_COMPONENT_ERROR': FaultSpec(
         '',
@@ -178,9 +194,11 @@ CATALOG: Dict[str, FaultSpec] = {
     ),
     'MONITOR_DIAG_INPUT_STALE': FaultSpec(
         'monitor',
-        SEVERITY_WARN,
-        '진단 입력이 {age_sec}초 동안 수신되지 않았습니다. 상태 감시가 제한됩니다.',
-        'diagnostic aggregator 실행 상태를 확인해 주세요. 모터 안전 정지는 유지됩니다.',
+        SEVERITY_DEGRADED,
+        '{source} 진단이 {age_sec}초째 오지 않습니다. 그 진단에 기대는 부품'
+        '(라이다·위치추정·인지·안내·음성·앱)은 관측 불가로 표시합니다.',
+        'monitor 칸(⑪-1)에서 external_diagnostics_node 실행 상태를 확인해 주세요. '
+        '주행과 모터 안전 정지에는 영향이 없습니다.',
     ),
 }
 

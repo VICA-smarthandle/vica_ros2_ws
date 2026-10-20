@@ -1,0 +1,40 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="10" name="WaitSpotRecovery">
+      <PipelineSequence name="WaitSpotWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputeWaitSpotPath">
+            <Fallback name="NearGoalKeepPath">
+              <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+              <Sequence name="WaitSpotPathAlignedEnd">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                    output_path="{path}"/>
+              </Sequence>
+            </Fallback>
+            <ClearEntireCostmap name="ClearGlobalCostmap-WaitSpot"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowWaitSpot">
+          <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-WaitSpot"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Wait wait_duration="3"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

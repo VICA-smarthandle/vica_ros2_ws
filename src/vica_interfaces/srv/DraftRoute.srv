@@ -1,0 +1,16 @@
+string map_id
+
+string shape
+---
+bool accepted
+
+string reason
+string message
+
+string shape
+
+string sketch_json
+
+string preview_json
+
+string checks_json

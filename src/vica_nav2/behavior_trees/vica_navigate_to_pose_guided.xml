@@ -1,0 +1,114 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="20" name="NavigateRecovery">
+      <Sequence name="RailThenLastMile">
+
+        <PipelineSequence name="RailWithReplanning">
+          <RateController hz="1.0">
+            <RecoveryNode number_of_retries="1" name="ComputeRailPath">
+              <Fallback name="RouteThenFreespace">
+                <Sequence name="RouteCarrot">
+                  <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
+                                path="{rail_path}" server_name="compute_route"/>
+                  <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
+                                     max_dist_from_path="1.5" handoff_dist_to_goal="2.0"
+                                     global_frame="map" robot_base_frame="base_footprint"
+                                     transform_tolerance="0.2"/>
+                  <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead}"
+                                     distance_forward="3.0" distance_backward="0.0"
+                                     robot_frame="base_footprint" transform_tolerance="0.2"/>
+                  <Fallback name="RailIfClearElseCarrot">
+                    <Sequence name="RailDirect">
+                      <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
+                                         max_dist_from_path="0.8" rejoin_dist_from_path="0.5" handoff_dist_to_goal="2.0"
+                                         global_frame="map" robot_base_frame="base_footprint"
+                                         transform_tolerance="0.2" name="NearRailGate"/>
+                      <IsRailAheadClear path="{rail_ahead}" skip_distance="0.5" confirm_ticks="2"
+                                        body_footprint="[[0.151, 0.225], [0.151, -0.225], [-0.459, -0.225], [-0.459, 0.225]]"
+                                        footprint_padding="0.05"/>
+                      <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
+                                    path="{path}" server_name="compute_route"/>
+                    </Sequence>
+                    <Sequence name="RejoinCarrot">
+                      <IsRailAheadClear path="{rail_ahead}" skip_distance="0.5" confirm_ticks="2"
+                                        body_footprint="[[0.151, 0.225], [0.151, -0.225], [-0.459, -0.225], [-0.459, 0.225]]"
+                                        footprint_padding="0.05"/>
+                      <GetPoseFromPath path="{rail_ahead}" index="-1" pose="{carrot_near}"/>
+                      <Fallback name="RejoinOrRail">
+                        <ComputePathToPose goal="{carrot_near}" path="{path}" planner_id="GridBased"/>
+                        <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
+                                      path="{path}" server_name="compute_route"/>
+                      </Fallback>
+                    </Sequence>
+                    <Sequence name="CarrotBeyond">
+                      <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead_far}"
+                                         distance_forward="3.0" distance_backward="0.0"
+                                         robot_frame="base_footprint" transform_tolerance="0.2"/>
+                      <GetPoseFromPath path="{rail_ahead_far}" index="-1" pose="{carrot}"/>
+                      <Fallback name="CarrotOrRail">
+                        <ComputePathToPose goal="{carrot}" path="{path}" planner_id="GridBased"/>
+                        <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
+                                      path="{path}" server_name="compute_route"/>
+                      </Fallback>
+                    </Sequence>
+                  </Fallback>
+                </Sequence>
+                <Fallback name="NearGoalKeepPath">
+                  <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+                  <Sequence name="GoalPathAlignedEnd">
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                    <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                        output_path="{path}"/>
+                  </Sequence>
+                </Fallback>
+              </Fallback>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Rail"
+                                  service_name="global_costmap/clear_entirely_global_costmap"/>
+            </RecoveryNode>
+          </RateController>
+          <RecoveryNode number_of_retries="1" name="FollowRail">
+            <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="position_goal_checker"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Rail"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+          </RecoveryNode>
+        </PipelineSequence>
+
+        <Fallback name="LastMileIfNeeded">
+          <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+          <PipelineSequence name="LastMileWithReplanning">
+            <RateController hz="1.0">
+              <RecoveryNode number_of_retries="1" name="ComputeLastMilePath">
+                <Sequence name="LastMilePathAlignedEnd">
+                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                  <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                      output_path="{path}"/>
+                </Sequence>
+                <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"
+                                    service_name="global_costmap/clear_entirely_global_costmap"/>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="1" name="FollowLastMile">
+              <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="position_goal_checker"/>
+              <ClearEntireCostmap name="ClearLocalCostmap-LastMile"
+                                  service_name="local_costmap/clear_entirely_local_costmap"/>
+            </RecoveryNode>
+          </PipelineSequence>
+        </Fallback>
+
+      </Sequence>
+
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Wait wait_duration="1"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

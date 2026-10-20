@@ -36,7 +36,7 @@ MESSAGES = {
     'no_scan': '라이다 값이 안 들어옵니다. 라이다가 켜져 있는지 확인하세요.',
     'no_tf': '로봇과 라이다의 위치 관계를 못 읽었습니다. 잠시 뒤 다시 시도하세요.',
     'few_beams': '라이다가 보는 것이 너무 적습니다. 벽이 보이는 곳으로 옮기세요.',
-    'low_score': '지도의 다른 자리 같습니다. 다시 짚어 보세요.',
+    'low_score': '다른 위치입니다. 다시 선택해 주세요.',
     'ambiguous': '앞뒤가 비슷해 구분이 안 됩니다. 문이나 교차로가 보이는 곳에서 다시 잡으세요.',
 }
 YAW_EDGE_NOTE = ' 고른 방향의 끝자락입니다. 옆 방향으로도 확인해 보세요.'
@@ -60,6 +60,7 @@ class PoseBootstrapNode(Node):
         self.declare_parameter('yaw_sigma_deg', 10.0)
         self.declare_parameter('nomotion_delay_sec', 0.5)
         self.declare_parameter('settle_sec', 2.0)
+        self.declare_parameter('session_idle_timeout_sec', 300.0)
 
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.min_score = float(self.get_parameter('min_score').value)
@@ -77,8 +78,10 @@ class PoseBootstrapNode(Node):
         self._scan = None
         self._amcl_pose = None
 
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_buffer = None
+        self.tf_listener = None
+        self._scan_sub = None
+        self._last_session_at = None
 
         map_topic = str(self.get_parameter('map_topic').value)
         for durability in (DurabilityPolicy.TRANSIENT_LOCAL, DurabilityPolicy.VOLATILE):
@@ -92,18 +95,14 @@ class PoseBootstrapNode(Node):
                 ),
             )
 
-        self.create_subscription(
-            LaserScan, str(self.get_parameter('scan_topic').value), self._on_scan,
-            QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.BEST_EFFORT,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
-            ),
+        self._scan_topic = str(self.get_parameter('scan_topic').value)
+        self._scan_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
         )
-        self.create_subscription(
-            PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl_pose, 10,
-        )
+        self._amcl_sub = None
 
         self.initial_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10,
@@ -120,9 +119,60 @@ class PoseBootstrapNode(Node):
             Empty, '/request_nomotion_update', callback_group=ReentrantCallbackGroup(),
         )
 
+        self.create_timer(30.0, self._maybe_disarm)
+
         self.get_logger().info(
-            'pose_bootstrap_node 준비. 합격선 점수 %.0f · 빔 %d · 격차 %.0f'
+            'pose_bootstrap_node 준비(대기 모드 — 첫 요청 때 scan·TF 를 연다). '
+            '합격선 점수 %.0f · 빔 %d · 격차 %.0f'
             % (self.min_score, self.min_beams, self.min_margin)
+        )
+
+    def _ensure_ready(self) -> None:
+        """서비스 진입점. 귀가 닫혀 있으면 열고, 첫 스캔을 잠깐 기다린다."""
+        self._last_session_at = time.monotonic()
+        if self._scan_sub is None:
+            self._arm()
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if self._scan is not None:
+                        break
+                time.sleep(0.05)
+
+    def _arm(self) -> None:
+        """scan 구독과 TF 청취기를 연다. TF 의 라이다 오프셋은 /tf_static"""
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self._scan_sub = self.create_subscription(
+            LaserScan, self._scan_topic, self._on_scan, self._scan_qos,
+        )
+        self._amcl_sub = self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl_pose, 10,
+        )
+        self.get_logger().info('세션 시작 — scan·TF·amcl_pose 수신을 연다.')
+
+    def _maybe_disarm(self) -> None:
+        if self._scan_sub is None or self._last_session_at is None:
+            return
+        idle = time.monotonic() - self._last_session_at
+        if idle < float(self.get_parameter('session_idle_timeout_sec').value):
+            return
+        self.destroy_subscription(self._scan_sub)
+        self._scan_sub = None
+        if self._amcl_sub is not None:
+            self.destroy_subscription(self._amcl_sub)
+            self._amcl_sub = None
+        try:
+            self.tf_listener.unregister()
+        except AttributeError:
+            pass
+        self.tf_listener = None
+        self.tf_buffer = None
+        with self._lock:
+            self._scan = None
+            self._amcl_pose = None
+        self.get_logger().info(
+            '세션 종료(%.0f초 무사용) — scan·TF 수신을 닫는다.' % idle
         )
 
     def _on_map(self, msg: OccupancyGrid) -> None:
@@ -148,7 +198,9 @@ class PoseBootstrapNode(Node):
             self._amcl_pose = msg
 
     def _sensor_offset(self, frame_id: str):
-        """base_footprint 에서 본 라이다 위치. 18.5 cm 앞이라 빼먹으면 그만큼 밀린다."""
+        """base_footprint 에서 본 라이다 위치. 빼먹으면 그만큼 밀린다."""
+        if self.tf_buffer is None:
+            return None
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.base_frame, frame_id, rclpy.time.Time(),
@@ -175,6 +227,7 @@ class PoseBootstrapNode(Node):
         return (grid, field, beams, sensor), ''
 
     def _on_check(self, request, response):
+        self._ensure_ready()
         bundle, reason = self._inputs()
         if bundle is None:
             response.ok = False
@@ -220,6 +273,7 @@ class PoseBootstrapNode(Node):
         return response
 
     def _on_commit(self, request, response):
+        self._ensure_ready()
         bundle, reason = self._inputs()
         if bundle is None:
             response.accepted = False
@@ -308,7 +362,7 @@ def main(args=None) -> None:
     """Spin the node on a multi-threaded executor."""
     rclpy.init(args=args)
     node = PoseBootstrapNode()
-    executor = MultiThreadedExecutor()
+    executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
     try:
         executor.spin()
