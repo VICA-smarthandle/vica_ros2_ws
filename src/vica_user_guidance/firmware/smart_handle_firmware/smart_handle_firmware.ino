@@ -295,17 +295,32 @@ enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US
 // HIGH 가 끼어들어도 200ms 안에 다음 LOW 가 오면 끊기지 않는다. 채터링을
 // 필터링하는 게 아니라 무시하는 구조다. 이것도 판정이 아니라 신호 정리다 —
 // 사람 손의 3초·0.5초와는 자릿수가 다르다.
-#define TOUCH_PIN         2   // 2026-10-05 나노: LTK-01 OUT. 평소 HIGH·누르면 LOW, 내부 풀업
+//
+// [2026-10-21 모듈 교체 LTK-01 → TTP223] LTK-01 은 주행 장비를 켜면 손을 안 대도 '잡음'이
+// 39 %(최장 6.8 s) 나왔다. TTP223 은 패드 A 납땜(AB=10: 누르는 동안만, 터치 = LOW) — 위 극성
+// 그대로라 판정은 같다. 바꿔 단 뒤 손 안 댄 30 s 에 0.2 s 짜리 '잡음' 1번(= LOW 한 번 + 아래
+// HOLD) — 1.2 m 선에 들어온 잡음 바늘로 본다. TTP223 출력은 터치 동안 LOW 를 계속 유지하는
+// push-pull 이라(반응 60~220 ms), '안 잡힘 → 잡힘'은 LOW 가 TOUCH_MIN_LOW_MS 넘게 이어질 때만
+// 센다(사용자: 모터 잡음을 막게 200 ms — 잡기는 0.2 s 늦어도 되고 놓침이 빨라야 한다). **이미 잡힌
+// 동안은 TOUCH_REFRESH_LOW_MS(20 ms)만 이어지면 이어 붙인다** — 200 ms 를 걸면 쥔 채 HIGH 로 잠깐
+// 튈 때마다 다시 200 ms 를 기다리는 사이 '놓음'이 끼어 헛정지가 되고, 반대로 LOW 한 번으로 이어
+// 붙이면 손을 뗀 뒤 잡음 바늘 하나하나가 '잡음'을 0.2 s 씩 늘려 놓침을 못 알아챈다. 놓침 쪽(HOLD)은 그대로다.
+// **터치 중 출력이 튀는 LTK-01 로 되돌리면 TOUCH_MIN_LOW_MS 를 0 으로**(위 [시간 브리지]).
+#define TOUCH_PIN         2   // 2026-10-21 TTP223 OUT(패드 A 납땜 = 터치 LOW). 10-05~10-20 LTK-01. 내부 풀업
 #define TOUCH_FRAME_H1   0xAA
 #define TOUCH_FRAME_H2   0x56
 #define TOUCH_FLAG_ON    0x01
-#define TOUCH_PERIOD_MS  50    // 20Hz. 판정 유예 0.5초에 10프레임
+#define TOUCH_PERIOD_MS  50    // 20Hz. 미션 놓침 유예(0.1 s, 10-21)에 2프레임
 #define TOUCH_HOLD_MS    200   // LOW 본 뒤 '잡음' 유지. 터치 중 끊기면 올린다
+#define TOUCH_MIN_LOW_MS 200   // 2026-10-21 '안 잡힘 → 잡힘'은 LOW 가 이만큼 이어져야(모터 잡음 거르기, 사용자). 0 = 끔
+#define TOUCH_REFRESH_LOW_MS 20 // 2026-10-21 잡힌 동안 이어 붙이기도 LOW 가 이만큼 이어져야(잡음 바늘이 놓침을 늦추지 않게)
 
-uint8_t       touchSeq     = 0;
-unsigned long touchLastLow = 0;      // 마지막으로 LOW(터치)를 본 시각
-bool          touchSeenLow = false;  // 부팅 후 LOW 를 한 번이라도 봤나
-unsigned long touchSentAt  = 0;
+uint8_t       touchSeq      = 0;
+unsigned long touchLastLow  = 0;      // 마지막으로 (인정된) LOW(터치)를 본 시각
+bool          touchSeenLow  = false;  // 부팅 후 LOW 를 한 번이라도 봤나
+unsigned long touchSentAt   = 0;
+unsigned long touchLowSince = 0;      // 지금 이어지는 LOW 가 시작된 시각
+bool          touchLowRun   = false;  // 지금 LOW 가 이어지는 중인가
 
 // ── 진동모터 (ESP32 GPIO16 · 09-22~09-30 GPIO4 · 나노 시절 D10) ──────────────────────
 // MOSFET 드라이버 게이트에 물려 있다(7/28 계획서 6.3절 회로). MCU GPIO 로 모터를
@@ -567,9 +582,20 @@ void usSendLegacyFrame() {
 void touchPoll() {
   unsigned long now = millis();
 
+  const bool heldNow = touchSeenLow && (now - touchLastLow < TOUCH_HOLD_MS);
   if (digitalRead(TOUCH_PIN) == LOW) {   // active-low: LOW = 잡음
-    touchLastLow = now;
-    touchSeenLow = true;
+    if (!touchLowRun) {
+      touchLowRun = true;
+      touchLowSince = now;
+    }
+    // 새로 잡힐 때는 TOUCH_MIN_LOW_MS, 이미 잡힌 동안 이어 붙일 때는 TOUCH_REFRESH_LOW_MS 를 요구한다.
+    const unsigned long needMs = heldNow ? TOUCH_REFRESH_LOW_MS : TOUCH_MIN_LOW_MS;
+    if (now - touchLowSince >= needMs) {
+      touchLastLow = now;
+      touchSeenLow = true;
+    }
+  } else {
+    touchLowRun = false;
   }
   // 부팅 직후 touchLastLow 가 0 이면 now-0 < HOLD 가 잠깐 참이 되어 "잡음"으로
   // 시작한다. LOW 를 한 번이라도 본 뒤에만 브리지를 적용한다.
