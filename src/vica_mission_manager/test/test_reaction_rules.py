@@ -7,6 +7,7 @@ from reaction_states import (BOUNDS, ELEV, ROOM, SPOT_DEST, asking, asking_wait_
                              paused, returning, returning_late, turning, waiting,
                              waiting_asked, waiting_release)
 from vica_mission_manager.mission_logic import (
+    WAIT_DEPART_AFTER_SPEECH_SEC,
     MSG_ALREADY_GOING,
     MSG_APPROACH_ONBOARDING,
     MSG_ASK_ENTRANCE,
@@ -17,6 +18,7 @@ from vica_mission_manager.mission_logic import (
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
     MSG_FINISH,
+    MSG_HANDLE_HEIGHT,
     MSG_PRIVATE_DEST,
     MSG_START,
     MSG_WAIT_DEFAULT,
@@ -60,10 +62,10 @@ def test_release_waits_for_the_new_wait_sentence():
     acts = logic.on_voice_intent(intent("wait", wait_minutes=20), t, lookup, BOUNDS, True)
     new = _says(acts)[0]
     logic.on_wait_speech_spoken(old, t + 1.0)
-    assert logic.on_tick(t + 1.1, NavStatus.NONE) == []
+    assert logic.on_tick(t + 1.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE) == []   # 옛 문장은 안 셈
     assert logic.state == State.WAITING_RELEASE
     logic.on_wait_speech_spoken(new, t + 6.0)
-    logic.on_tick(t + 6.1, NavStatus.NONE)
+    logic.on_tick(t + 6.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)
     assert logic.state == State.MOVING_TO_WAIT_SPOT
 
 
@@ -191,7 +193,7 @@ def test_returning_wait_goes_back_to_the_wait_spot():
     assert _says(acts) == [MSG_WAIT_SPOT_DEFAULT.format(place="입구 오른쪽")]
     assert logic.state == State.WAITING_RELEASE
     logic.on_wait_speech_spoken(_says(acts)[0], t + 5.0)
-    acts = logic.on_tick(t + 5.1, NavStatus.NONE)
+    acts = logic.on_tick(t + 5.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)
     assert logic.state == State.MOVING_TO_WAIT_SPOT
     assert [a.destination.id for a in acts if isinstance(a, Navigate)] == ["wait_spot:d1"]
 
@@ -284,6 +286,16 @@ def test_destination_answer_is_accepted_and_asked_after_the_turn():
     assert logic.state == State.CONFIRMING and logic.confirming_dest_id == ELEV.id
     acts = logic.on_voice_intent(intent("affirm"), t + 6.0, lookup, BOUNDS, True)
     assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+
+
+def test_handle_height_is_told_before_the_destination_question():
+    """접근 질문에 목적지로 답한 길에서도 손잡이 높이 안내(2026-10-20)가 확인 질문 바로 앞에 나간다."""
+    logic, t = awaiting_user()
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id, need_confirm=True), t,
+                          lookup, BOUNDS, True)
+    says = _after_turn(logic, t + 4.0)
+    assert says[-2:] == [MSG_HANDLE_HEIGHT,
+                         say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")]
 
 
 def test_destination_said_while_turning_is_remembered():

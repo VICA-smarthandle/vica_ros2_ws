@@ -296,6 +296,8 @@ class MissionManagerNode(Node):
         # 시연 스위치(2026-10-05): 잡기 대기 시간이 다 되면 잡은 것으로 넘어가고
         # 손 놓침 정지를 쓰지 않는다. 터치 모듈 고장 중 시연용.
         self.declare_parameter("grip_assume_held", False)
+        # 주행 중 손 놓침 정지(2026-10-21 사용자 결정으로 기본 꺼짐) — 터치는 처음 잡기에만 쓴다.
+        self.declare_parameter("grip_release_stop", False)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
@@ -400,6 +402,7 @@ class MissionManagerNode(Node):
                 "grip_resume_window_sec", "handle_lost_repeat_sec",
                 "handle_lost_give_up_sec", "handle_state_stale_sec")},
             grip_assume_held=bool(self.get_parameter("grip_assume_held").value),
+            grip_release_stop=bool(self.get_parameter("grip_release_stop").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
         )
@@ -407,7 +410,8 @@ class MissionManagerNode(Node):
             "손잡이: 잡기 "
             f"{self.logic.grip_enter_window_sec:.1f}s 중 {self.logic.grip_ratio:.0%} · "
             f"대기 {self.logic.grip_wait_timeout_sec:.0f}s · "
-            f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지")
+            + (f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지" if self.logic.grip_release_stop
+               else "주행 중 놓침 정지 꺼짐(터치는 처음 잡기만)"))
         if self.logic.grip_assume_held:
             self.get_logger().warn(
                 f"손잡이 시연 스위치 켜짐: 대기 {self.logic.grip_wait_timeout_sec:.0f}s 뒤 "

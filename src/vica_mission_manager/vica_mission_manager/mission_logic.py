@@ -534,9 +534,11 @@ WAIT_BEACON_INTERVAL_SEC = 10.0
 # 바꾸고 0 이면 끈다.
 HOME_BEACON_INTERVAL_SEC = 60.0
 HOME_BEACON_RADIUS_M = 0.5
-# 손잡이를 이만큼 계속 놓고 있으면 대기 장소로 떠난다(터치 센서가 살아 있을 때).
-# 센서가 없거나 끊겼거나 시연 스위치(grip_assume_held)면 M2 가 끝나자마자 떠난다.
-WAIT_RELEASE_SEC = 5.0
+# M2 가 끝나고 이만큼 뒤에 대기 장소로 떠난다(2026-10-21 사용자). 터치 센서로 '손을 놓았나'를 보지
+# 않는다 — 이 손잡이의 터치 칩(TTP223 계열)은 8.4 s 넘게 쥐면 혼자 '놓음'이 되고 그 뒤로는 손이 있어도
+# 못 본다(10-21 실측). 예전(10-07)엔 센서가 살아 있으면 '손 놓은 지 5 s'를 기다렸는데, 10-21
+# 레일테스트2 사회복지에서 센서 헛접촉으로 8분 넘게 못 떠났다.
+WAIT_DEPART_AFTER_SPEECH_SEC = 2.0
 # M2 재생 완료(tts_done)를 끝내 못 받았을 때의 보험 — 영영 서 있지 않게 한다.
 WAIT_RELEASE_SPEECH_FALLBACK_SEC = 30.0
 # 대기 중 "다 됐어"에 "어디로 모실까요?"를 물은 뒤 이 시간 안에 또 끝말(finish)이 오면
@@ -680,6 +682,11 @@ MSG_HANDLE_LOST = "안전을 위해 손잡이를 다시 잡아주세요"
 # (구운 음성 reply_handle_unavailable.wav 있음). 끊기면 다시 잡아도 알 길이 없어
 # 세우지 않고 비활성으로 계속 간다(설계 4.3 (라)).
 MSG_HANDLE_UNAVAILABLE = "손잡이 연결에 문제가 있어 일반 안내로 진행합니다."
+# 손잡이 높이 안내(2026-10-20 사용자 문구 그대로). 손잡이 앞쪽 검지가 닿는 곳에 토글
+# 스위치가 있다 — 올리고 있는 동안 올라가고, 내리고 있는 동안 내려가며, 손을 떼면
+# 가운데로 돌아온다. 로봇은 스위치·높이를 모른다(10-13 결정, 사용법만 알린다).
+# 잡기 대기가 끝난 때(잡았든 시간이 다 됐든) 다음 질문 앞에 한 번 말한다.
+MSG_HANDLE_HEIGHT = "검지손가락으로 스위치를 위아래로 움직이시면 스마트핸들 높이를 조절하실 수 있습니다."
 # 손잡이를 찾는 신호. 짧은 진동은 지나치기 쉬워 긴 진동을 쓴다.
 HAPTIC_PATTERN_HANDLE_HINT = "long"
 # "잡은 걸 알아챘다"(D5). 도착(짧게 ×3)과 횟수로 구별된다. 진행 중인 긴 진동을
@@ -1318,6 +1325,7 @@ class MissionLogic:
         handle_lost_give_up_sec: float = HANDLE_LOST_GIVE_UP_SEC,
         handle_state_stale_sec: float = HANDLE_STATE_STALE_SEC,
         grip_assume_held: bool = False,
+        grip_release_stop: bool = True,
         home_beacon_interval_sec: float = HOME_BEACON_INTERVAL_SEC,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
@@ -1456,6 +1464,11 @@ class MissionLogic:
         # 쓰지 않는다 — 선이 빠져 늘 "놓음"이라 켜 두면 출발 0.5 s 만에 선다.
         # 터치 모듈을 고치면 launch 의 grip_assume_held 를 false 로 되돌린다.
         self.grip_assume_held = grip_assume_held
+        # [2026-10-21 사용자] 주행 중 손 놓침 정지(활성 모드)를 쓰는가. 끄면 터치는 처음 잡기(잡기 대기)에만
+        # 쓰고, 출발 때 활성 모드를 켜지 않아 주행 중 손을 놓아도 서지 않는다 — 이 손잡이의 터치 칩은
+        # 8.4 s 넘게 쥐면 혼자 '놓음'이 되어 걷는 동안 8초마다 서게 된다(10-21 실측). 노드·launch 기본은
+        # 꺼짐, 여기 기본값(켜짐)은 설계서 동작을 지키는 시험용이다.
+        self.grip_release_stop = grip_release_stop
         # 접촉 사실은 노드가 /vica/smart_handle_state 로 넣어 준다(on_handle_state).
         self._grip = GripMeter(stale_sec=handle_state_stale_sec)
         # 지금 주행이 활성 모드(손을 놓으면 섬)인가. 출발 순간에 정한다.
@@ -3209,8 +3222,8 @@ class MissionLogic:
         말할 뿐, 시각장애인을 두고 떠나지 않는다. 대기를 거치지 않았으면
         출발 순간 쥐고 있는지만 본다. 센서가 끊겨 있으면 늘 비활성이다.
         """
-        if self.grip_assume_held:
-            return False   # 시연 스위치: 터치로 세우지 않는다(위 __init__ 주석)
+        if self.grip_assume_held or not self.grip_release_stop:
+            return False   # 시연 스위치·놓침 정지 끔: 터치로 세우지 않는다(위 __init__ 주석)
         if not self._grip.fresh(now):
             return False
         if self._handle_engaged and self.user_attached_guard_active(now):
@@ -3244,6 +3257,7 @@ class MissionLogic:
         actions: list = []
         if engaged:
             actions.append(Haptic(HAPTIC_PATTERN_GRIP_ACK))
+        actions.append(Say(MSG_HANDLE_HEIGHT, priority="response"))
         approach_dest = self._approach_dest
         self._approach_dest = None
         if approach_dest is not None:
@@ -4078,16 +4092,11 @@ class MissionLogic:
         return []
 
     def _wait_release_tick(self, now: float) -> list:
-        """WAITING_RELEASE: M2 가 끝나고 손을 놓았으면 대기 장소로 떠난다."""
-        spoken = self._release_spoken_at is not None or (
-            self._release_entered_at is not None
-            and now - self._release_entered_at >= WAIT_RELEASE_SPEECH_FALLBACK_SEC)
-        if not spoken:
-            return []
-        # 터치 센서가 살아 있으면 손을 놓은 지 WAIT_RELEASE_SEC 를 기다린다. 센서가
-        # 없거나 끊겼거나 시연 스위치면 놓았는지 알 수 없으니 M2 가 끝나자마자 떠난다.
-        sensor = (not self.grip_assume_held) and self._grip.fresh(now)
-        if sensor and self._grip.released_for(now) < WAIT_RELEASE_SEC:
+        """WAITING_RELEASE: M2 가 끝나고 WAIT_DEPART_AFTER_SPEECH_SEC 뒤 대기 장소로 떠난다(터치 안 봄)."""
+        spoken_at = self._release_spoken_at
+        if spoken_at is None and self._release_entered_at is not None:
+            spoken_at = self._release_entered_at + WAIT_RELEASE_SPEECH_FALLBACK_SEC   # 재생 완료 보험
+        if spoken_at is None or now - spoken_at < WAIT_DEPART_AFTER_SPEECH_SEC:
             return []
         # 대화 중("비카야" 뒤 듣는 중 등)이면 떠나지 않는다 — 사용자가 옆에서 말하는
         # 중이다. 떠나면 뒤이어 온 목적지는 이동 중이라 버려진다.

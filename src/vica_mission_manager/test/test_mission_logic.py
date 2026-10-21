@@ -17,6 +17,7 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_UNANSWERED,
+    MSG_HANDLE_HEIGHT,
     MSG_HANDLE_HINT,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -1412,7 +1413,7 @@ class TestApproachVoiceHooks:
         actions = logic.on_tick(7.0, NavStatus.SUCCEEDED)
         says = [a for a in actions if isinstance(a, Say)]
         # 손잡이 안내(2026-09-10)가 온보딩 앞에 새로 낀다.
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert says[-1].expects_reply is True        # 온보딩 끝 = 재청취 창
         assert logic.state == State.IDLE
 
@@ -1423,7 +1424,7 @@ class TestApproachVoiceHooks:
         self._accept_with_turn(logic)
         actions = logic.on_tick(7.0, NavStatus.FAILED)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert says[-1].expects_reply is True
         assert logic.state == State.IDLE
 
@@ -2381,7 +2382,7 @@ class TestNearCallApproach:
         assert logic.state == State.IDLE
         says = [a for a in onboarding_actions if isinstance(a, Say)]
         # 손잡이 안내(2026-09-10)가 온보딩보다 먼저 나간다.
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         # 진동은 힌트와 같은 순간(2026-09-28 문구 "진동하고 있습니다").
         haptics = [a for a in onboarding_actions if isinstance(a, Haptic)]
         assert len(haptics) == 1 and haptics[0].pattern == "long"
@@ -2398,7 +2399,7 @@ class TestNearCallApproach:
         assert logic.state == State.IDLE
         assert not any(isinstance(a, SpinInPlace) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         haptics = [a for a in actions if isinstance(a, Haptic)]
         assert len(haptics) == 1 and haptics[0].pattern == "long"
 
@@ -2607,7 +2608,7 @@ class TestHandleSideCall:
         logic.on_wake_doa(175.0, True, 1.0)
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         # 손잡이 안내가 온보딩보다 먼저다.
         assert actions.index(says[0]) < actions.index(says[-1])
         haptics = [a for a in actions if isinstance(a, Haptic)]
@@ -2713,7 +2714,7 @@ class TestHandleSideCallWakeSiblingGuard:
         logic.on_wake(1.001)
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert any(isinstance(a, Haptic) for a in actions)
 
     def test_wake_more_than_guard_sec_later_also_keeps_question(self):
