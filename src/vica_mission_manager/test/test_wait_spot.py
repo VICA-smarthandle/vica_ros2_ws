@@ -14,7 +14,7 @@ from vica_mission_manager.mission_logic import (
     WAIT_BACK_DESTINATION_PREFIX, WAIT_BEACON_INTERVAL_SEC,
     WAIT_DEPART_AFTER_SPEECH_SEC, WAIT_RELEASE_SPEECH_FALLBACK_SEC,
     WAIT_SPOT_DESTINATION_PREFIX, door_side_word, josa_eun_neun,
-    Haptic, HAPTIC_PATTERN_WAKE_LOCATE, MSG_WAKE_GREETING,
+    Haptic, HAPTIC_PATTERN_WAKE_LOCATE, MSG_WAKE_GREETING, MSG_WAIT_LOCATE, WakeReply,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -298,20 +298,56 @@ class TestTalkingWhileWaiting:
         assert logic.state == State.WAITING
         assert logic.wait_left_sec(20.0) == left
 
-    def test_wake_call_while_waiting_answers_and_vibrates_once(self):
-        """일반 호출(on_wake_call)은 "네?"와 진동 한 번. 창 안에서 건진 호출은 노드가
-        on_wake 만 부르므로 위 시험이 그 길이다 — 어느 길이든 호출 한 번에 한 번 떤다."""
+    def test_first_wake_call_while_waiting_only_tells_where(self):
+        """대기 중 첫 호출(2026-10-21 사용자): 듣기 창 없이 진동 + "비카가 여기 있어요"로 자리만 알린다."""
         logic = self._waiting()
         acts = logic.on_wake_call(20.0)
-        assert _say(acts) == [MSG_WAKE_GREETING]
+        assert MSG_WAIT_LOCATE == "비카가 여기 있어요"
+        assert _say(acts) == [MSG_WAIT_LOCATE]
         assert self._haptics(acts) == ["locate"]
+        assert [a for a in acts if isinstance(a, WakeReply)] == [WakeReply(listen=False)]
         assert logic.state == State.WAITING
 
-    def test_every_wake_while_waiting_vibrates_again(self):
+    def test_first_wake_call_restarts_beacon_count(self):
+        """첫 호출 뒤 M3 가 곧바로 겹치지 않게(2026-10-22 사용자) — M3 박자를 그 호출 시각부터 다시 10초로 센다."""
         logic = self._waiting()
-        assert self._haptics(logic.on_wake_call(20.0)) == ["locate"]
-        assert self._haptics(logic.on_wake_call(40.0)) == ["locate"]
+        first = 3.0 + DEPART + WAIT_BEACON_INTERVAL_SEC          # 출발 시각부터 10초 박자
+        assert _say(logic.on_tick(first, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+        call = first + 7.9                                       # 다음 박자 2.1초 전에 부른다
+        logic.on_wake_call(call)
+        logic.on_listen_state("open", call)                      # 음성 쪽이 연 호출 창 — ignore 로 곧 닫힌다
+        logic.on_listen_state("empty:wake-ignored", call + 0.3)
+        assert logic.on_tick(first + WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE) == []   # 옛 박자는 버린다
+        assert logic.on_tick(call + WAIT_BEACON_INTERVAL_SEC - 0.1, NavStatus.NONE) == []
+        assert _say(logic.on_tick(call + WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+        assert _say(logic.on_tick(call + 2 * WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+
+    def test_first_wake_call_keeps_quiet_wait_quiet(self):
+        """대기 장소가 없는 대기(M3 없음)는 첫 호출 뒤에도 M3 가 없다."""
+        logic, _ = arrive(_dest(wait_spot=None))
+        wait_minutes(logic, 10, 3.0)
         assert logic.state == State.WAITING
+        assert _say(logic.on_wake_call(20.0)) == [MSG_WAIT_LOCATE]
+        assert logic.on_tick(100.0, NavStatus.NONE) == []
+
+    def test_later_wake_calls_listen_without_vibration(self):
+        """두 번째 호출부터는 그 대기가 끝날 때까지 "네?"로 듣고 진동은 없다 — 진동이 터치 신호를 흔든다."""
+        logic = self._waiting()
+        logic.on_wake_call(20.0)
+        for t in (40.0, 60.0):
+            acts = logic.on_wake_call(t)
+            assert _say(acts) == [MSG_WAKE_GREETING]
+            assert self._haptics(acts) == []
+            assert [a for a in acts if isinstance(a, WakeReply)] == [WakeReply(listen=True)]
+        assert logic.state == State.WAITING
+
+    def test_a_new_wait_tells_where_again(self):
+        """새 대기가 시작되면(다음 목적지의 대기) 첫 호출은 다시 자리 알림이다."""
+        logic = self._waiting()
+        logic.on_wake_call(20.0)
+        logic._enter_waiting(5, 30.0)
+        logic.state = State.WAITING
+        assert _say(logic.on_wake_call(40.0)) == [MSG_WAIT_LOCATE]
 
     def test_no_vibration_outside_waiting(self):
         # 손 놓기 기다림 — 사용자가 아직 손잡이 곁이라 떨지 않는다.

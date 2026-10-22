@@ -83,6 +83,9 @@ def test_approach_question_ignores_the_call_but_keeps_listening(state):
 def test_listen_states_greet_and_listen(state):
     logic = MissionLogic()
     logic.state = state
+    if state == State.WAITING:
+        # 대기 중 첫 호출은 자리 알림만 한다(2026-10-21, test_wait_spot) — 여기서는 그 뒤의 호출이다.
+        logic._wait_located = True
     actions = logic.on_wake_call(1.0)
     assert _replies(actions) == [WakeReply(listen=True)]
     # 하던 말을 끊고 그 뒤에 "네?" — 같은 토픽 순서(09-01 순서 뒤집힘 사고).
@@ -133,6 +136,8 @@ def test_waiting_keeps_wait_and_listens():
                                        need_confirm=False, safety_flag="normal"), 3.0)
     assert logic.state == State.WAITING
     left = logic.wait_left_sec(10.0)
+    # 첫 호출은 자리만 알리고 듣지 않는다(2026-10-21) — 두 번째부터 듣는다. 어느 쪽이든 대기는 그대로.
+    assert _replies(logic.on_wake_call(10.0)) == [WakeReply(listen=False)]
     actions = logic.on_wake_call(10.0)
     assert _replies(actions) == [WakeReply(listen=True)]
     assert logic.state == State.WAITING

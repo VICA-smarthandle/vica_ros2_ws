@@ -489,6 +489,10 @@ MSG_WAIT_SPOT_DEFAULT = (
 # M3 — 대기 중 10초마다(대기 장소가 있는 목적지만). 사용자가 소리를 따라 로봇을 찾는다.
 # 홈에서 쉴 때도 1분마다 같은 말을 한다(HOME_BEACON_*, 2026-10-08).
 MSG_WAIT_BEACON = "비카가 대기 중입니다."
+# 대기 중 첫 "비카야"에는 듣기 창을 열지 않고 이 한 마디 + 손잡이 진동으로 자리만 알린다(2026-10-21 사용자 문구
+# 그대로). 사용자가 로봇에게 와서 다시 부르면 그때부터 그 대기가 끝날 때까지 "네?"로 듣고, 진동은 빼다 —
+# 진동이 손잡이 터치 신호를 흔든다.
+MSG_WAIT_LOCATE = "비카가 여기 있어요"
 # M6 — 대기 장소로 가다 실패(Nav2 실패 신호). 말한 뒤 목적지로 돌아간다.
 MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
 # M7 — 대기 시간 만료(대기 장소가 있든 없든). 말한 뒤 홈으로 간다.
@@ -527,6 +531,7 @@ MSG_LEAVING_NOTICE = "응답이 없어 안내를 마치고 제자리로 돌아�
 
 WAIT_MINUTES_CAP = 30
 # M3 간격. 대기 장소로 출발한 순간부터 대기가 끝날 때까지, 상태가 바뀌어도 박자를 잇는다.
+# 예외: 대기 중 첫 "비카야"(자리 알림)는 그 시각부터 박자를 다시 센다(on_wake_call, 2026-10-22).
 WAIT_BEACON_INTERVAL_SEC = 10.0
 # 홈 알림(2026-10-08 사용자 요청) — 홈에서 쉬는(IDLE) 동안 1분마다 M3 를 말해 "여기
 # 있다"를 알린다. 홈인지는 실제 위치(/amcl_pose)로 본다 — 복귀가 실패해도 RETURNING 은
@@ -1528,6 +1533,7 @@ class MissionLogic:
         self._leaving_deadline: Optional[float] = None   # 떠나기 예고 유예
         self._wait_until: Optional[float] = None         # WAITING 만료 시각
         self._wait_minutes_requested = -1    # 대장(P1): 대기 요청 분. WAITING 밖에서는 -1
+        self._wait_located = False           # 이번 대기에서 "비카가 여기 있어요"로 자리를 알렸나(2026-10-21)
         # ── 대기 장소 (2026-10-07) ─────────────────────────────────────────
         # 로봇의 지금 방향(도, map). 노드가 /amcl_pose 로 넣어 준다. 도착 멘트 M1 계산용.
         self.robot_yaw_deg: Optional[float] = None
@@ -3741,6 +3747,17 @@ class MissionLogic:
             # 귀도 이 단계에서는 호출을 확정하지 않으므로 이것은 새어 들어온 호출의 이중 장치다.
             # (2026-10-07: 같은 호출의 wake_doa 가 질문을 막 연 경우만 이렇게 했다.)
             return [WakeReply(listen=True)]
+        if self.state == State.WAITING and not self._wait_located:
+            # 대기 중 첫 호출(2026-10-21 사용자 결정): 멀리서 로봇을 찾는 부름이다 — 듣기 창은 열지 않고
+            # 손잡이 진동(on_wake) + "비카가 여기 있어요"로 자리만 알린다. 다음 호출부터 "네?"로 듣는다.
+            actions = [StopSpeech(), Say(MSG_WAIT_LOCATE, priority="response"), WakeReply(listen=False),
+                       *self.on_wake(now)]
+            self._wait_located = True
+            if self._beacon_next_at is not None:
+                # M3 박자를 이 호출부터 다시 센다(2026-10-22 사용자) — 옛 박자대로면 자리 알림 직후 M3 가 곧바로
+                # 이어질 수 있다. 두 번째 호출부터는 열린 청취 창·닫힘 뒤 유예(_ear_holds)가 M3 를 미룬다.
+                self._beacon_next_at = now + WAIT_BEACON_INTERVAL_SEC
+            return actions
         # 판정은 "네?" 바로 뒤 — 상태 정리(재출발 등)보다 먼저 음성 쪽에 닿게 한다.
         actions: list = [StopSpeech(), Say(MSG_WAKE_GREETING, priority="response"),
                          WakeReply(listen=True)]
@@ -3771,8 +3788,9 @@ class MissionLogic:
             # (옛 동작: 대기를 접고 IDLE. 각성 질문은 2026-09-01 삭제 그대로다.)
             # on_wake_doa 가 이 시각을 봐 이 소비를 새 호출로 오인하지 않는다.
             self._wake_consumed_at = now
-            if self.state == State.WAITING:
-                # 손잡이 위치 알림(2026-10-09 사용자) — WAITING 에서만. 손 놓기 기다림
+            if self.state == State.WAITING and not self._wait_located:
+                # 손잡이 위치 알림(2026-10-09 사용자) — WAITING 에서만. 2026-10-21: 자리를 알린 첫 호출에만 떤다
+                # (두 번째부터는 사용자가 이미 로봇 곁이고, 진동이 손잡이 터치 신호를 흔든다). 손 놓기 기다림
                 # (WAITING_RELEASE)은 사용자가 아직 손잡이 곁이라 떨지 않는다. 일반 호출
                 # (on_wake_call)과 창 안에서 건진 호출(노드가 on_wake 만 부름) 모두 여기를
                 # 지나므로 호출 한 번에 한 번 떤다. 비상 정지면 상태가 ESTOPPED 로 바뀌어
@@ -4034,6 +4052,7 @@ class MissionLogic:
         """
         self._wait_until = now + minutes * 60.0
         self._wait_minutes_requested = int(minutes)
+        self._wait_located = False
         self._response_deadline = None
         self._leaving_deadline = None
         dest = self._arrived_destination
