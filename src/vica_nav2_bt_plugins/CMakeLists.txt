@@ -16,7 +16,8 @@ find_package(tf2_ros REQUIRED)
 find_package(nav2_msgs REQUIRED)
 
 # 순수 판정은 ROS 에 의존하지 않는다 — 시험이 노드·TF 없이 돈다.
-add_library(route_path_check src/route_path_check.cpp src/path_end_align.cpp src/rail_clear_check.cpp)
+add_library(route_path_check src/route_path_check.cpp src/path_end_align.cpp src/rail_clear_check.cpp
+  src/straight_path.cpp)
 target_include_directories(route_path_check PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -51,8 +52,17 @@ ament_target_dependencies(vica_is_rail_ahead_clear_condition_bt_node
   rclcpp behaviortree_cpp_v3 nav_msgs nav2_msgs)
 target_compile_definitions(vica_is_rail_ahead_clear_condition_bt_node PRIVATE BT_PLUGIN_EXPORT)
 
+# 2026-10-28: 사용자 안내 트리의 마지막 2 m 를 곧은 경로로(저장 yaw 로 휘어 들어가던 것). 이름 규칙은 위와 같다.
+add_library(vica_straight_path_to_goal_action_bt_node SHARED
+  src/straight_path_to_goal_action.cpp)
+target_link_libraries(vica_straight_path_to_goal_action_bt_node route_path_check)
+ament_target_dependencies(vica_straight_path_to_goal_action_bt_node
+  rclcpp behaviortree_cpp_v3 nav2_util nav_msgs geometry_msgs tf2_ros)
+target_compile_definitions(vica_straight_path_to_goal_action_bt_node PRIVATE BT_PLUGIN_EXPORT)
+
 install(TARGETS route_path_check vica_is_route_path_usable_condition_bt_node
   vica_align_path_end_to_goal_action_bt_node vica_is_rail_ahead_clear_condition_bt_node
+  vica_straight_path_to_goal_action_bt_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
@@ -69,6 +79,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_rail_clear_check test/test_rail_clear_check.cpp)
   target_link_libraries(test_rail_clear_check route_path_check)
   ament_target_dependencies(test_rail_clear_check nav_msgs geometry_msgs)
+  ament_add_gtest(test_straight_path test/test_straight_path.cpp)
+  target_link_libraries(test_straight_path route_path_check)
+  ament_target_dependencies(test_straight_path nav_msgs geometry_msgs)
 endif()
 
 ament_package()
