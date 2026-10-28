@@ -168,6 +168,8 @@ bt_navigator:
       - vica_is_route_path_usable_condition_bt_node
       # VICA 자작. 목적지 경로 끝점 방향을 목적지 방향으로(2026-09-30, run49 409호 교착).
       - vica_align_path_end_to_goal_action_bt_node
+      # VICA 자작. 사용자 안내 트리(guided.xml)만 쓴다 — 목적지 2 m 안 곧은 경로(2026-10-28).
+      - vica_straight_path_to_goal_action_bt_node
       - nav2_initial_pose_received_condition_bt_node
       - nav2_reinitialize_global_localization_service_bt_node
       - nav2_rate_controller_bt_node

@@ -9,9 +9,26 @@
   이 파일을 넣는다(파라미터 guided_bt_xml, Navigate.tree="guided"). 홈·배송·원격 주행은 기본 트리 그대로
   방향까지 맞춘다.
 
+  ── 레일 트리와 다른 둘째 곳: 마지막 2 m 곧은 경로 (2026-10-28) ─────────────────
+  판정기가 방향을 안 봐도, 목적지 2 m 안을 lattice planner 가 그리면 목적지의 **저장 yaw** 로 끝나는
+  길만 나온다(Humble Smac Lattice 는 목표 방향을 16칸 중 하나로 맞춰 도착한다). 그래서 도착 직전
+  그 방향으로 휘어 들어가고, 1 Hz 로 다시 그릴 때마다 휜 모양이 바뀌어 "살짝씩 틀기"가 됐다.
+  목적지 문(NearGoalKeepPath·LastMile)에서 planner 앞에 곧은 경로 갈래를 둔다:
+      StraightPathToGoal  로봇이 목적지 2.0 m 안일 때만 로봇 자리 -> 목적지 자리 곧은 선({straight_path}).
+                          2.0 = 레일 거름망 handoff_dist_to_goal(같은 식·같은 부등호). 목적지 문은 레일에서
+                          1.5 m 넘게 벗어난 회피·레일 서버 이상 때도 열리는데, 그때는 목적지가 멀어
+                          이 노드가 FAILURE -> planner 그대로다.
+      IsRailAheadClear    그 선을 몸통(꼬리 뺌)+여유 0.15 m 로 global costmap 치명 칸과 대 본다. 레일 쪽은
+                          0.05 다 — 곧은 선은 planner 처럼 벽에서 떨어지려 하지 않으므로 넓힌다. 막힘
+                          2번(약 1 s) 이어지면 planner 로. [미검증] 문 앞 목적지에서 너무 자주 막히는지.
+      StraightPathToGoal  통과했을 때만 {path} 에 다시 받는다(실패한 노드가 {path} 를 덮지 않게, 7판 교훈).
+  막히면·2 m 밖이면 아래 planner 갈래가 지금과 똑같이 돈다(사람이 목적지 위에 서 있는 경우 포함).
+  장애물 회피(레일 쪽 당근 갈래)·레일 트리·홈·배송·대기 장소·사람 접근 트리는 손대지 않았다.
+  되돌리기: 두 갈래(GoalStraightPath, LastMileStraightOrPlanner 감싸기)를 지우면 레일 트리와 같아진다.
+
   ── 레일 트리를 고치면 ───────────────────────────────────────────────────
-  이 파일도 똑같이 고친다. test/test_bt_goal_checker_contract.py 가 두 파일이 goal_checker_id 만 다른지
-  검사한다. 아래는 레일 트리 원문(머리 주석 포함)이다.
+  이 파일도 똑같이 고친다. test/test_bt_goal_checker_contract.py 가 두 파일이 goal_checker_id 와 위 곧은
+  경로 갈래만 다른지 검사한다. 아래는 레일 트리 원문(머리 주석 포함)이다.
 -->
 <!--
   레일(Route Server) 위로 다니는 트리. 2026-09-16 신설, 09-17 7판.
@@ -190,6 +207,18 @@
                      도착을 판정한다. 노드는 항상 SUCCESS 라 이 Fallback 의 흐름은 그대로다. -->
                 <Fallback name="NearGoalKeepPath">
                   <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+                  <!-- 안내 트리에만 있는 갈래(2026-10-28). 목적지 2 m 안이고 곧은 선이 비었으면 곧은 경로. 머리 주석 참고. -->
+                  <Sequence name="GoalStraightPath">
+                    <StraightPathToGoal goal="{goal}" path="{straight_path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="StraightToGoal"/>
+                    <IsRailAheadClear path="{straight_path}" skip_distance="0.5" confirm_ticks="2"
+                                      body_footprint="[[0.151, 0.225], [0.151, -0.225], [-0.459, -0.225], [-0.459, 0.225]]"
+                                      footprint_padding="0.15" name="StraightClear"/>
+                    <StraightPathToGoal goal="{goal}" path="{path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="StraightToGoalPath"/>
+                  </Sequence>
                   <Sequence name="GoalPathAlignedEnd">
                     <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
                     <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
@@ -214,12 +243,27 @@
           <PipelineSequence name="LastMileWithReplanning">
             <RateController hz="1.0">
               <RecoveryNode number_of_retries="1" name="ComputeLastMilePath">
-                <!-- 9판: 1단계 NearGoalKeepPath 와 같은 끝점 방향 맞춤. -->
-                <Sequence name="LastMilePathAlignedEnd">
-                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-                  <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
-                                      output_path="{path}"/>
-                </Sequence>
+                <!-- 안내 트리에만 있는 감싸기(2026-10-28). 1단계 GoalStraightPath 와 같은 갈래가 먼저,
+                     목적지 2 m 밖이거나 곧은 선이 막혔으면 아래 planner 그대로. -->
+                <Fallback name="LastMileStraightOrPlanner">
+                  <Sequence name="LastMileStraightPath">
+                    <StraightPathToGoal goal="{goal}" path="{straight_path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="LastMileStraightToGoal"/>
+                    <IsRailAheadClear path="{straight_path}" skip_distance="0.5" confirm_ticks="2"
+                                      body_footprint="[[0.151, 0.225], [0.151, -0.225], [-0.459, -0.225], [-0.459, 0.225]]"
+                                      footprint_padding="0.15" name="LastMileStraightClear"/>
+                    <StraightPathToGoal goal="{goal}" path="{path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="LastMileStraightToGoalPath"/>
+                  </Sequence>
+                  <!-- 9판: 1단계 NearGoalKeepPath 와 같은 끝점 방향 맞춤. -->
+                  <Sequence name="LastMilePathAlignedEnd">
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                    <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
+                                        output_path="{path}"/>
+                  </Sequence>
+                </Fallback>
                 <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"
                                     service_name="global_costmap/clear_entirely_global_costmap"/>
               </RecoveryNode>
