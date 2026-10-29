@@ -815,7 +815,8 @@ TEST(VccCoreEndStraight, EndBehindIsNotStraight)
 
 // 위치만 도착(안내, yaw 허용 3.141)은 (b′) 대상이 아니다 — 그 마지막 꺾임(run71 6~17°)은 사용자 보류(10-08).
 // 곧게 가기를 켜도 예전과 똑같이 끝점을 조준한다.
-TEST(VccCoreEndStraight, PositionOnlyArrivalIsUntouched)
+// 2026-10-21 사용자: 위치만 도착(안내)에도 곧게 가기를 건다(10-08 보류를 풂).
+TEST(VccCoreEndStraight, PositionOnlyArrivalAlsoGoesStraight)
 {
   World w;
   VccCore off; off.configure(paramsStraight(0.0));
@@ -828,9 +829,9 @@ TEST(VccCoreEndStraight, PositionOnlyArrivalIsUntouched)
   in.yaw_tol = 3.141;
   const CoreOutput o = off.step(in);
   const CoreOutput n = on.step(in);
-  EXPECT_FALSE(n.end_straight);
-  EXPECT_LT(n.cmd.w, -0.01);                 // 끝점(오른쪽)을 조준한다 — 예전 동작
-  EXPECT_DOUBLE_EQ(n.cmd.w, o.cmd.w);
+  EXPECT_LT(o.cmd.w, -0.01);                 // 끄면 끝점(오른쪽)을 조준한다 — 예전 동작
+  EXPECT_TRUE(n.end_straight);
+  EXPECT_NEAR(n.cmd.w, 0.0, 1e-9);           // 켜면 꺾지 않고 곧게 간다
   EXPECT_DOUBLE_EQ(n.cmd.v, o.cmd.v);
 }
 

@@ -279,8 +279,9 @@ CoreOutput VccCore::step(const CoreInputs & in)
         // 돌 수 있으면 곧 Turn 이 제자리에서 돌고, 막혔으면 선다(최종 리뷰 I2: 1.42 m 역주행).
         if (need) {vdes = 0.0;}
         // (b′) 연장 조준이 꺼지는 마지막 구간에서 끝점이 거의 정면이면 꺾지 않고 곧게 간다(CoreParams 근거).
-        // 방향까지 맞추는 도착만 — 위치만 도착(안내)의 마지막 꺾임(run71 6~17°)은 사용자 보류(10-08).
-        end_straight = p_.end_straight_lateral > 0.0 && !position_only &&
+        // 2026-10-21 사용자: 위치만 도착(안내)에도 건다 — 10-08 보류를 풀었다(run102 안내 도착 11번 중 7번이
+        // 마지막에 9~37° 꺾임). 위치만 도착은 곧게 가다 checker 원(xy_tol)에 닿으면 position_stop 으로 선다.
+        end_straight = p_.end_straight_lateral > 0.0 &&
           pathLength(lane_path) < p_.end_extend_min_length &&
           in.goal.x > 0.0 && std::abs(in.goal.y) <= p_.end_straight_lateral;
         d.cmd = {vdes, 0.0};
