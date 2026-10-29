@@ -1749,7 +1749,12 @@ local_costmap:
       #   나갈 때까지 남는다.
       # - no_readings_timeout 0.0: 초음파가 죽어도 costmap 을 stale 로 만들지
       #   않는다(보조 센서라 fail-open). 단절 진단은 /vica/smart_handle_state.
-      # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
+      # - clear/mark_threshold 는 기본값(0.2/0.8). 단 앞 두 개(front_left·right)의 mark_threshold 는
+      #   2026-10-21 사용자 결정으로 0.95(global 도 같게): 이 층은 확률로 칠하고 지워 빔 가운데는 한 번에
+      #   칠·지우지만 빔 가장자리·1.2 m(phi) 너머는 약하게 쌓이고 약하게 지워진다 — 사람이 앞에 섰다 떠나도
+      #   그 자국이 남아(run102 실측: 초음파 '없음' 뒤 중앙 0.5 s·최대 2.3 s, 라이다엔 아무것도 없는데 차선
+      #   0.4~0.6 m 옮김 5번) 다시 출발할 때 옆으로 꺾었다. 문턱을 올리면 약하게 쌓인 자국은 치명이 안 되고
+      #   빔 가운데의 확실한 물체는 그대로 잡힌다. 되돌리기 0.8.
       range_sensor_front_left:   # 2번 앞 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
@@ -1757,7 +1762,7 @@ local_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
@@ -1765,7 +1770,7 @@ local_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
       range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: False   # 2026-10-09 run79 뒤(사용자 결정): 바퀴 옆 초음파는 드라이버·펌웨어에서 끔(앞 두 개만). 엘리베이터·로봇팔 때 다시
@@ -2165,7 +2170,7 @@ global_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True
@@ -2173,7 +2178,7 @@ global_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
 
       obstacle_inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
