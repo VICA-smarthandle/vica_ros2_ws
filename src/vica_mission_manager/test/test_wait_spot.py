@@ -160,7 +160,7 @@ class TestWaitSpotFlow:
         assert logic.on_tick(5.0, NavStatus.NONE) == []
         assert logic.state == State.WAITING_RELEASE
 
-    def test_leaves_two_seconds_after_m2(self):
+    def test_leaves_shortly_after_m2(self):
         logic, _ = arrive()
         move = released(logic)
         nav = _navs(move)[0]
@@ -173,37 +173,39 @@ class TestWaitSpotFlow:
         logic, _ = arrive()
         wait_minutes(logic, 10, 3.0)
         logic.on_tick(3.0 + WAIT_RELEASE_SPEECH_FALLBACK_SEC + 0.1, NavStatus.NONE)
-        assert logic.state == State.WAITING_RELEASE                # 보험 시각 뒤에도 2초는 기다린다
+        assert logic.state == State.WAITING_RELEASE                # 보험 시각 뒤에도 출발 지연만큼은 기다린다
         logic.on_tick(3.0 + WAIT_RELEASE_SPEECH_FALLBACK_SEC + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1,
                       NavStatus.NONE)
         assert logic.state == State.MOVING_TO_WAIT_SPOT
 
-    def test_ignores_touch_sensor_and_leaves_two_seconds_after_m2(self):
-        """2026-10-21: 터치를 보지 않는다 — 센서가 계속 '잡음'이어도 M2 뒤 2초면 떠난다(10-21 레일테스트2
-        사회복지에서 센서 헛접촉으로 8분 넘게 못 떠난 것)."""
+    def test_ignores_touch_sensor_and_leaves_shortly_after_m2(self):
+        """2026-10-21: 터치를 보지 않는다 — 센서가 계속 '잡음'이어도 M2 뒤 WAIT_DEPART_AFTER_SPEECH_SEC(1초)면
+        떠난다(10-21 레일테스트2 사회복지에서 센서 헛접촉으로 8분 넘게 못 떠난 것)."""
         logic, _ = arrive()
         acts = wait_minutes(logic, 10, 3.0)
         logic.on_handle_state(True, True, 3.0)
         logic.on_wait_speech_spoken(_say(acts)[0], 7.0)
-        logic.on_handle_state(True, True, 8.5)                   # 잡고 있다(또는 헛접촉)
-        assert logic.on_tick(8.9, NavStatus.NONE) == []           # 아직 2초 전
+        before = 7.0 + WAIT_DEPART_AFTER_SPEECH_SEC - 0.1
+        after = 7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.05
+        logic.on_handle_state(True, True, before - 0.4)          # 잡고 있다(또는 헛접촉)
+        assert logic.on_tick(before, NavStatus.NONE) == []        # 아직 출발 지연 전
         assert logic.state == State.WAITING_RELEASE
-        logic.on_handle_state(True, True, 9.05)
-        logic.on_tick(9.05, NavStatus.NONE)
+        logic.on_handle_state(True, True, after)
+        logic.on_tick(after, NavStatus.NONE)
         assert logic.state == State.MOVING_TO_WAIT_SPOT
-        assert WAIT_DEPART_AFTER_SPEECH_SEC == 2.0
+        assert WAIT_DEPART_AFTER_SPEECH_SEC == 1.0
 
-    def test_demo_switch_same_two_seconds(self):
+    def test_demo_switch_same_delay(self):
         logic, _ = arrive(grip_assume_held=True)
         acts = wait_minutes(logic, 10, 3.0)
         logic.on_wait_speech_spoken(_say(acts)[0], 7.0)
-        assert logic.on_tick(7.1, NavStatus.NONE) == []
-        logic.on_tick(9.1, NavStatus.NONE)
+        assert logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC - 0.1, NavStatus.NONE) == []
+        logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)
         assert logic.state == State.MOVING_TO_WAIT_SPOT
 
     def test_arrives_then_beacons_every_10s(self):
         logic, _ = arrive()
-        released(logic, now=3.0)                                 # 9.1 초에 출발
+        released(logic, now=3.0)                                 # 3.0 + DEPART 초에 출발
         assert logic.on_tick(10.0, NavStatus.SUCCEEDED) == []
         assert logic.state == State.WAITING
         assert logic.wait_place == "입구 오른쪽"

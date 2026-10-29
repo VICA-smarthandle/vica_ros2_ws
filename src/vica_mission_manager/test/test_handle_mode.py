@@ -115,7 +115,8 @@ class TestGripWait:
         sensor_online(logic, 0.0, 2.0)
         accept(logic, 2.0)
         actions = run(logic, 2.0, 4.5, contact=True)
-        assert "tick" in haptics(actions)
+        # 잡음 확인 진동은 뺐다(2026-10-21 사용자) — 높이 안내·온보딩으로 넘어간 것으로 본다.
+        assert "tick" not in haptics(actions)
         assert says(actions) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert logic.dialog_state == "idle"
         # 잡음 확인은 2.0 s 를 채운 뒤다 — 대기 시작 전 접촉은 세지 않는다.
@@ -137,9 +138,9 @@ class TestGripWait:
         run(logic, 0.0, 2.0, contact=True)
         accept(logic, 2.0)
         early = run(logic, 2.0, 3.5, contact=True)
-        assert "tick" not in haptics(early)
+        assert MSG_HANDLE_HEIGHT not in says(early)
         late = run(logic, 3.5, 4.5, contact=True)
-        assert "tick" in haptics(late)
+        assert MSG_HANDLE_HEIGHT in says(late)
 
     def test_chattering_grip_at_80_percent_passes(self):
         logic = MissionLogic(wake_doa_sign=1.0)
@@ -152,7 +153,8 @@ class TestGripWait:
             out.extend(logic.on_tick(t, NavStatus.NONE))
             t = round(t + STEP, 6)
         out.extend(run(logic, t, t + 0.5, contact=True))
-        assert "tick" in haptics(out)
+        assert MSG_HANDLE_HEIGHT in says(out)
+        assert logic._handle_engaged
 
     def test_half_grip_does_not_pass(self):
         logic = MissionLogic(wake_doa_sign=1.0)
@@ -164,7 +166,7 @@ class TestGripWait:
             logic.on_handle_state(i % 2 == 0, True, t)
             out.extend(logic.on_tick(t, NavStatus.NONE))
             t = round(t + STEP, 6)
-        assert "tick" not in haptics(out)
+        assert MSG_HANDLE_HEIGHT not in says(out)
         assert logic.dialog_state == DIALOG_GRIP_WAIT
 
     def test_vibration_repeats_every_two_seconds(self):
@@ -520,8 +522,8 @@ class TestDemoAssumeHeld:
         assert haptics(first) == ["long"]
         assert says(first) == [MSG_HANDLE_HINT]
         out = run(logic, 2.0, 7.2, contact=False)
-        # 2초마다 반복(4, 6 s) 뒤 5초가 차는 7 s 에 확인 진동과 온보딩.
-        assert haptics(out) == ["long", "long", "tick"]
+        # 2초마다 반복(4, 6 s) 뒤 5초가 차는 7 s 에 온보딩(확인 진동은 2026-10-21 뺐다).
+        assert haptics(out) == ["long", "long"]
         assert says(out) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert logic._handle_engaged
         assert logic.dialog_state == "idle"

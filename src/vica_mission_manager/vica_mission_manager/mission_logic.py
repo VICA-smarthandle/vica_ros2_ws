@@ -110,6 +110,7 @@ class GateReason(str, Enum):
     # 사람 접근 요청 전용 사유.
     NO_TRACK_ID = "no_track_id"
     TRACK_SUPPRESSED = "track_suppressed"
+    USER_ENGAGED = "user_engaged"   # 접근을 수락한 사용자가 아직 곁에 있다(APPROACH_LOCK_QUIET_SEC)
     BUSY_APPROACHING = "busy_approaching"
     NOT_APPROACHING = "not_approaching"
     # 홈 복귀 요청 전용 사유.
@@ -543,7 +544,8 @@ HOME_BEACON_RADIUS_M = 0.5
 # 않는다 — 이 손잡이의 터치 칩(TTP223 계열)은 8.4 s 넘게 쥐면 혼자 '놓음'이 되고 그 뒤로는 손이 있어도
 # 못 본다(10-21 실측). 예전(10-07)엔 센서가 살아 있으면 '손 놓은 지 5 s'를 기다렸는데, 10-21
 # 레일테스트2 사회복지에서 센서 헛접촉으로 8분 넘게 못 떠났다.
-WAIT_DEPART_AFTER_SPEECH_SEC = 2.0
+# 2026-10-21 오후 사용자 "2초 너무 긴 것 같아" → 2.0 → 1.0.
+WAIT_DEPART_AFTER_SPEECH_SEC = 1.0
 # M2 재생 완료(tts_done)를 끝내 못 받았을 때의 보험 — 영영 서 있지 않게 한다.
 WAIT_RELEASE_SPEECH_FALLBACK_SEC = 30.0
 # 대기 중 "다 됐어"에 "어디로 모실까요?"를 물은 뒤 이 시간 안에 또 끝말(finish)이 오면
@@ -696,6 +698,8 @@ MSG_HANDLE_HEIGHT = "검지손가락으로 스위치를 위아래로 움직이�
 HAPTIC_PATTERN_HANDLE_HINT = "long"
 # "잡은 걸 알아챘다"(D5). 도착(짧게 ×3)과 횟수로 구별된다. 진행 중인 긴 진동을
 # 덮어써 곧바로 끊는 역할도 한다(펌웨어 hapticStart 는 새 명령이 이긴다).
+# 2026-10-21 사용자: 처음 잡기 대기에서는 뺀다 — 잡은 뒤 진동이 다시 울려 잘못 울린 것처럼 느껴진다.
+# 잡으면 2초 반복이 멈추고, 이미 울리던 긴 진동(1.2 s)만 끝까지 간다. 손 놓침 재출발(지금 꺼짐)에는 남긴다.
 HAPTIC_PATTERN_GRIP_ACK = "tick"
 # 대기(WAITING) 중 "비카야"를 들으면 손잡이를 1초씩 두 번(사이 1초) 떤다(2026-10-09 사용자).
 # 볼일을 마친 사용자가 대기 장소의 비카를 소리(M3)에 더해 손으로도 찾게 한다 — 접근
@@ -855,6 +859,13 @@ REAPPROACH_SUPPRESS_SEC = 60.0
 # 동안은 억제를 풀지 않는다. 시계는 지우지 않는다: 센서 고장은 위험한 쪽으로
 # 난다(신호가 안 오면 규약상 false = "아무도 안 잡았다").
 USER_ATTACHED_SUPPRESS_SEC = 60.0
+# 사람 접근 잠금(2026-10-21 사용자 결정 C + ②). 한 사람이 접근을 수락하면 감지기의 새 접근을 막고,
+# 로봇이 홈(제자리)으로 돌아오면 푼다. 회전 뒤 손잡이 안내·높이 안내·온보딩은 IDLE 의 하위 단계라
+# 관문이 열려 있었다 — 10-21 run102 에서 온보딩 2~3초 뒤 다른 사람에게 갔다(10:42:43·10:45:38).
+# 홈으로 가지 않고 그 자리 IDLE 로 끝나면(취소·앱 취소·주행 실패·비상정지 해제·확인 시간 초과)
+# 이만큼 아무도 말을 걸지 않을 때 푼다 — 사용자가 떠났다고 본다. 터치는 보지 않는다(칩이 8.4 s 넘게
+# 쥐면 혼자 '놓음'이 된다, 10-21 실측).
+APPROACH_LOCK_QUIET_SEC = 40.0
 # 근접 호출(2026-09-10 확장). 탐색 창(IDLE + _seek_deadline) 중 detection_gate 가
 # 거리 하나만으로 TOO_NEAR 거절한 결과(stable=true·approachable=false·
 # distance_m)가 person_detection 원본 토픽으로 들어오면, Mission 이 그 값을 직접
@@ -1166,8 +1177,12 @@ def check_approach_gate(
     nav_ready: bool,
     suppressed: bool,
     same_person: bool = False,
+    user_engaged: bool = False,
 ) -> GateReason:
     """사람 접근 요청 게이트. 첫 번째 실패 사유를 돌려준다.
+
+    `user_engaged` 는 접근을 수락한 사용자가 아직 곁에 있는가다(APPROACH_LOCK_QUIET_SEC) —
+    IDLE 이어도 손잡이 안내·온보딩 중이거나 그 자리에서 멈춘 직후면 새 사람에게 가지 않는다.
 
     `same_person` 은 접근 중 다른 track 번호의 요청이 지금 대상과 같은 자리(반경
     SAME_PERSON_RADIUS_M)인가다 — 추적기가 같은 사람에게 새 번호를 붙여도 다른 사람으로
@@ -1199,6 +1214,8 @@ def check_approach_gate(
         return GateReason.BUSY_NAVIGATING
     if suppressed:
         return GateReason.TRACK_SUPPRESSED
+    if user_engaged:
+        return GateReason.USER_ENGAGED
     if request.goal is None:
         # approach_geometry 가 방향을 정하지 못한 경우(사람과 로봇이 겹침).
         return GateReason.POSE_INVALID
@@ -1307,6 +1324,7 @@ class MissionLogic:
         nav_retry_delay_sec: float = 3.0,
         approach_response_timeout_sec: float = APPROACH_RESPONSE_TIMEOUT_SEC,
         reapproach_suppress_sec: float = REAPPROACH_SUPPRESS_SEC,
+        approach_lock_quiet_sec: float = APPROACH_LOCK_QUIET_SEC,
         person_approach_speed_percent: float = PERSON_APPROACH_SPEED_PERCENT,
         approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
         return_destination: Optional[Destination] = None,
@@ -1357,6 +1375,7 @@ class MissionLogic:
         # 사람 접근 값. 근거는 위 상수 정의에 있다.
         self.approach_response_timeout_sec = approach_response_timeout_sec
         self.reapproach_suppress_sec = reapproach_suppress_sec
+        self.approach_lock_quiet_sec = approach_lock_quiet_sec
         self.person_approach_speed_percent = person_approach_speed_percent
         self.approach_goal_update_m = approach_goal_update_m
         # 접근을 마치고 돌아갈 대기 위치이자 안내를 끝내고 돌아갈 홈이다.
@@ -1417,6 +1436,10 @@ class MissionLogic:
         # 지점이 필요 없다 — 지울 곳을 하나라도 놓치면 억제가 예상보다 오래
         # 남거나 일찍 사라지는 실수가 생기는데, 그 실수 자체를 없앤 것이다.
         self._user_attached_until: Optional[float] = None
+        # 사람 접근 잠금(APPROACH_LOCK_QUIET_SEC). 수락에 걸고 홈 도착·조용한 IDLE 에서 푼다.
+        # quiet_since 는 사용자가 곁에 있다는 마지막 표시(대화·IDLE 아닌 상태·잡기 대기·온보딩)의 시각이다.
+        self._approach_lock = False
+        self._approach_lock_quiet_since: Optional[float] = None
         # 원래 자세로 돌아가기 위해 돌아야 할 누적 각도. 탐색 창 중에 다시
         # 부르면 또 돌므로 덮어쓰지 않고 더한다. None 이면 지금이 복귀 회전이다.
         self._seek_return_yaw: Optional[float] = None
@@ -2141,6 +2164,7 @@ class MissionLogic:
         # 포함한다. LLM-unknown("안내와 관련된 요청이 아니에요")은 음성
         # 노드가 스스로 되묻고 재청취를 열므로, 미션까지 겹쳐 되물으면 두
         # 번 묻는 사고가 난다.
+        self._note_user_present(now)
         self._forget_dest_prompt()
         if self._return_interrupted and self.state == State.IDLE:
             # 복귀가 끊긴 채 대화가 오갔다(되묻기·질문 등) — 무응답 시계를
@@ -2692,6 +2716,12 @@ class MissionLogic:
             # 뒤 로봇이 취소를 무시한 것처럼 보인다.
             self._forget_interrupted_return()
             return ended, GateReason.OK   # 이미 대기 — 조용히 수락(멘트 최소주의)
+        if self.state in (State.APPROACHING, State.AWAITING_USER):
+            # 앱의 '접근 취소'(2026-10-29 사용자 결정, 목업 45): 로봇은 그 자리에 서고 이 사람에게는
+            # 비상정지 때처럼 reapproach_suppress_sec(60 s) 다시 다가가지 않는다. 안 걸면 감지기가 1~2 s 안에
+            # 같은 사람을 다시 요청해 곧바로 되돌아간다 — 관리자에겐 취소가 안 먹힌 것처럼 보였다.
+            # 수락 뒤(TURNING~)는 수락 때 이미 걸었다(on_approach_answer).
+            self._suppress_track(self.approach_track_id, now, self.approach_person)
         actions = [*ended, *self._force_clear_all(now)]
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
@@ -3071,6 +3101,7 @@ class MissionLogic:
             self._is_suppressed(request.track_id, now)
             or self._place_suppressed(request.person, now),
             same_person=same,
+            user_engaged=self._approach_lock_active(now),
         )
         if reason != GateReason.OK:
             return [], reason
@@ -3260,10 +3291,8 @@ class MissionLogic:
         self._grip_wait_since = None
         self._grip_pulse_at = None
         self._handle_engaged = engaged
-        actions: list = []
-        if engaged:
-            actions.append(Haptic(HAPTIC_PATTERN_GRIP_ACK))
-        actions.append(Say(MSG_HANDLE_HEIGHT, priority="response"))
+        # 잡음 확인 진동은 울리지 않는다(2026-10-21 사용자, HAPTIC_PATTERN_GRIP_ACK 주석).
+        actions: list = [Say(MSG_HANDLE_HEIGHT, priority="response")]
         approach_dest = self._approach_dest
         self._approach_dest = None
         if approach_dest is not None:
@@ -3484,6 +3513,9 @@ class MissionLogic:
             # 로봇이 곧바로 다시 다가가면 안 되므로 재접근 억제는 회전 전에 건다.
             track_id = self.approach_track_id
             self._suppress_track(track_id, now, self.approach_person)
+            # 이 사용자가 곁에 있는 동안 다른 사람에게 가지 않는다(APPROACH_LOCK_QUIET_SEC).
+            self._approach_lock = True
+            self._approach_lock_quiet_since = now
             if self.approach_turn_yaw_rad == 0.0 or self._near_call_no_spin:
                 # 회전이 없으면 회전 예고는 거짓말 — 온보딩으로 바로 간다.
                 # 온보딩 끝은 질문이라 expects_reply 로 재청취 창이 열린다.
@@ -3779,6 +3811,7 @@ class MissionLogic:
         말을 거는 동안은 대화가 이어지는 한 계속 막고, 조용해지면 그 값을
         새로 만들지 않으므로 결국 시간이 다 되어 풀린다.
         """
+        self._note_user_present(now)
         # 새 대화다 — 온보딩 되묻기 사다리가 돌고 있었다면 청산한다.
         self._forget_dest_prompt()
         if self.state in (State.WAITING, State.WAITING_RELEASE):
@@ -4534,6 +4567,9 @@ class MissionLogic:
         """
         actions: list = []
         self._prune_suppressed(now)
+        if self._approach_lock and (self.state != State.IDLE or self._idle_substage_active()):
+            # 안내·대기·복귀 중이거나 손잡이 안내·온보딩 중 — 사용자가 곁에 있다(APPROACH_LOCK_QUIET_SEC).
+            self._approach_lock_quiet_since = now
 
         # 넘어져 있는 동안 10초마다 같은 멘트(2026-10-15 사용자 결정). 상태와 상관없이
         # 본다 — 넘어지면 ESTOPPED 로 들어가고 세우기 전에는 나오지 않지만, 혹시
@@ -5094,8 +5130,36 @@ class MissionLogic:
         self._last_guided = None
         self._late_answer_finish = None
         self._to_idle()
+        # 홈(제자리)에 돌아왔다 — 사용자는 곁에 없다. 다음 사람에게 다가갈 수 있다(C, 2026-10-21).
+        self._approach_lock = False
+        self._approach_lock_quiet_since = None
         if not was_home:
             self._suppress_track(track_id, now, person)
+
+    def _idle_substage_active(self) -> bool:
+        """IDLE 안의 하위 단계(손잡이 잡기 대기·온보딩 되묻기)인가 — 사용자가 로봇 곁에서 답하는 중이다."""
+        return self._grip_wait_since is not None or self._dest_prompt_stage is not None
+
+    def _note_user_present(self, now: float) -> None:
+        """사용자가 말을 걸었다("비카야"·발화) — 접근 잠금의 조용한 시간을 처음부터 다시 잰다."""
+        if self._approach_lock:
+            self._approach_lock_quiet_since = now
+
+    def _approach_lock_active(self, now: float) -> bool:
+        """감지기의 새 접근을 막는가(C + ②, APPROACH_LOCK_QUIET_SEC).
+
+        수락 뒤 홈 도착(_finish_returning)까지 막는다. 홈으로 가지 않고 그 자리 IDLE 로 끝났으면
+        하위 단계도 대화도 없이 approach_lock_quiet_sec 가 지났을 때 사용자가 떠났다고 보고 푼다.
+        """
+        if not self._approach_lock:
+            return False
+        since = self._approach_lock_quiet_since
+        if (self.state == State.IDLE and not self._idle_substage_active()
+                and since is not None and now - since >= self.approach_lock_quiet_sec):
+            self._approach_lock = False
+            self._approach_lock_quiet_since = None
+            return False
+        return True
 
     def _suppress_track(
         self, track_id: Optional[int], now: float, person: Optional[Pose2D] = None

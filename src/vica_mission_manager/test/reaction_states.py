@@ -163,7 +163,7 @@ def waiting_release(minutes=10):
 def moving_to_wait_spot():
     logic, _ = waiting_release()
     logic.on_wait_speech_spoken(logic._release_text, 7.0)
-    logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)   # M2 뒤 2초(2026-10-21)
+    logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)   # M2 뒤 1초(2026-10-21)
     return logic, 9.5
 
 

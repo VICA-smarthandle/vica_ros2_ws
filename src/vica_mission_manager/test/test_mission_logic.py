@@ -18,6 +18,7 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_UNANSWERED,
     MSG_HANDLE_HEIGHT,
+    APPROACH_LOCK_QUIET_SEC,
     MSG_HANDLE_HINT,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -1232,6 +1233,107 @@ class TestReapproachSuppression:
         logic.on_tick(8.0, NavStatus.SUCCEEDED)      # 회전 완료 -> IDLE
         _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 9.0)
         assert reason == GateReason.TRACK_SUPPRESSED
+
+
+class TestAppCancelDuringApproach:
+    """앱의 '접근 취소'(2026-10-29): 그 자리에 서고, 이 사람에게는 60 s 다시 다가가지 않는다(목업 45)."""
+
+    def test_cancel_while_approaching_suppresses_the_same_person(self):
+        logic = MissionLogic(return_destination=make_home(), reapproach_suppress_sec=60.0)
+        start_approach(logic, 0.0)
+        actions, reason = logic.on_app_cancel(3.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, CancelNav) for a in actions)
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 4.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 63.1)
+        assert reason == GateReason.OK
+
+    def test_cancel_while_asking_suppresses_the_same_person(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic, 0.0)
+        arrive_and_ask(logic, 5.0)
+        _, reason = logic.on_app_cancel(6.0)
+        assert reason == GateReason.OK and logic.state == State.IDLE
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 7.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    def test_other_person_is_free_after_cancel(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic, 0.0)
+        logic.on_app_cancel(3.0)
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=8, person=Pose2D(x=-3.0, y=3.0, yaw_deg=0.0, frame_id="map")),
+            BOUNDS, True, 4.0)
+        assert reason == GateReason.OK
+
+
+class TestApproachLockAfterAccept:
+    """수락한 사용자가 곁에 있는 동안 감지기의 새 접근을 막는다(2026-10-21 사용자 결정 C + ②).
+
+    10-21 run102: 회전 뒤 손잡이 안내·온보딩이 IDLE 하위 단계라 온보딩 2~3초 뒤 다른 사람에게 갔다.
+    홈 도착에 풀고, 그 자리 IDLE 로 끝나면 APPROACH_LOCK_QUIET_SEC 동안 말이 없을 때 푼다.
+    """
+
+    def _accepted(self, logic):
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)      # 회전 완료 → 손잡이 안내·온보딩(IDLE)
+        assert logic.state == State.IDLE
+
+    def test_other_person_is_refused_during_onboarding(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 10.0)
+        assert reason == GateReason.USER_ENGAGED
+        # 온보딩 질문이 살아 있는 동안은 오래 지나도 막는다.
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 60.0)
+        assert reason == GateReason.USER_ENGAGED
+
+    def test_quiet_idle_in_place_releases_after_40s(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        # 사용자가 말해 온보딩 질문이 끝나고(예: 취소) 그 자리 IDLE 로 남았다.
+        logic.on_intent(make_intent(intent="question", matched_destination_id=None), None, BOUNDS, True, 12.0)
+        assert APPROACH_LOCK_QUIET_SEC == 40.0
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 12.0 + 39.9)
+        assert reason == GateReason.USER_ENGAGED
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 12.0 + 40.1)
+        assert reason == GateReason.OK
+
+    def test_wake_call_restarts_the_quiet_clock(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        logic.on_intent(make_intent(intent="question", matched_destination_id=None), None, BOUNDS, True, 12.0)
+        logic.on_wake(40.0)                           # 곁에서 "비카야"
+        logic._forget_dest_prompt()                   # 듣기 창이 닫혔다(대화 없음)
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 70.0)
+        assert reason == GateReason.USER_ENGAGED
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 80.1)
+        assert reason == GateReason.OK
+
+    def test_home_arrival_releases(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        accepted, reason, _ = logic.on_return_home_request(True, 15.0)
+        assert accepted and reason == GateReason.OK
+        logic.on_tick(25.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 26.0)
+        assert reason == GateReason.OK
+
+    def test_declined_person_does_not_lock(self):
+        """'아니요'면 잠그지 않는다 — 물러나 홈에 오면 다른 사람에게 갈 수 있다."""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(False, 6.0)
+        logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 11.0)
+        assert reason == GateReason.OK
 
 
 class TestApproachCancel:
