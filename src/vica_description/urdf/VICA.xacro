@@ -49,6 +49,15 @@
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
+<!-- 라이다 yaw (2026-11-01 실측). 스캔 0° 방향이 차체 정면보다 1.98° 오른쪽(시계 방향)이다.
+       방법 2 (진행 방향 기준, 이 값): teleop 명령 w=0 맨바닥 전진 2·후진 2 (4.3~5.3 m) 진행각
+         +2.04/+1.96/+1.99/+1.94° → yaw −1.98 ± 0.02°, 미끄럼 +0.02° (bag 1101_160605_laser_yaw_drive)
+       방법 1 (차체 오른쪽 옆판 기준): 벽 평행 정지 스캔 +1.45°, 줄자 정렬 보정(a 28.6·b 28.3·L 29.2 cm)
+         +0.59° → −2.04 ± 0.2° (bag 1101_154441_laser_yaw_wall). 두 값 일치 = 라이다가 차체에 비틀림,
+         구동축은 차체와 맞다.
+     0 이던 동안 직진 중 AMCL 이 모든 주행·양방향에서 로봇을 왼쪽으로 1~4 cm/m 씩 고쳤다.
+     재는 법·계산: scripts/drive_diag/laser_yaw.py (루트 저장소). 라이다를 다시 달면 다시 잰다. -->
+<xacro:property name="laser_yaw" value="-0.0346" />
 <!-- 초음파 DYP-A22 x2 (2026-08-31): 앞범퍼 중앙에서 좌우 107mm, 지면 91.3mm,
      수평 장착(틸트 불가 확정). docs/handoff_jetson_ultrasonic_i2c.md §6.6.
      frame 이름은 드라이버 ultrasonic_frame_ids 와 일치해야 한다.
@@ -369,7 +378,7 @@
 
 <!-- Sensor positions are expressed relative to the body-centered base_link. -->
 <joint name="laser_joint" type="fixed">
-  <origin xyz="${laser_x - axle_offset_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
+  <origin xyz="${laser_x - axle_offset_x} ${laser_y} ${laser_z}" rpy="0 0 ${laser_yaw}"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
 </joint>
