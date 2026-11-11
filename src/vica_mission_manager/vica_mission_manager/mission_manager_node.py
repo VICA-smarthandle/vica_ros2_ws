@@ -797,6 +797,9 @@ class MissionManagerNode(Node):
             safety_flag=msg.safety_flag,
             wait_minutes=int(getattr(msg, "wait_minutes", -1)),
             reply=msg.reply,
+            speaker_verdict=str(getattr(msg, "speaker_verdict", "")),
+            speaker_score=float(getattr(msg, "speaker_score", -1.0)),
+            speaker_joined=float(getattr(msg, "speaker_score_joined", -1.0)),
         )
         before = self.logic.state
         actions = self.logic.on_voice_intent(

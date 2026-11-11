@@ -190,6 +190,11 @@ class IntentData:
     # LLM 이 이 요청에 소리 내어 답하는 말(없으면 ""). 접근 질문 중의 질문은 그 답이 끝난 뒤
     # 다시 묻는다(2026-10-09) — 미션이 먼저 말하면 순서가 뒤바뀐다.
     reply: str = ""
+    # 화자 판정(2026-11-11 설계 speaker-follow) — pass·fail·short·no_target, 없으면 "". 점수 없으면 −1.
+    # speaker_joined = 직전 발화와 이어 붙인 점수(되묻기 판정에 쓴다).
+    speaker_verdict: str = ""
+    speaker_score: float = -1.0
+    speaker_joined: float = -1.0
 
 
 @dataclass(frozen=True)

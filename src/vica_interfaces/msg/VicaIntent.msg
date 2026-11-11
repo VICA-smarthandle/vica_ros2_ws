@@ -30,3 +30,7 @@ bool need_confirm
 string reply                   # 사용자에게 들려줄 한국어 답변
 string safety_flag             # normal / emergency
 int32 wait_minutes             # wait 의 요청 시간(분). 없거나 무관하면 -1
+# 화자 판정(2026-11-11 설계 speaker-follow) — 음성 호출 노드가 내고 의도 노드가 싣는다. 옛 의도에는 없다.
+string speaker_verdict         # pass / fail / short / no_target, 판정 없으면 ""
+float32 speaker_score          # 등록 목소리와의 점수(0~1), 없으면 -1
+float32 speaker_score_joined   # 직전 발화와 이어 붙인 점수(되묻기용), 없으면 -1

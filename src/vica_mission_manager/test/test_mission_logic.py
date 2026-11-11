@@ -3153,3 +3153,9 @@ class TestApproachGreeting:
     def test_greeting_text_is_the_decided_wording(self):
         from vica_mission_manager.mission_logic import MSG_APPROACH_COMING
         assert MSG_APPROACH_COMING == "동행로봇 비카가 다가가고 있어요."
+
+
+def test_intent_data_speaker_fields_default_to_empty():
+    """화자 판정 필드(2026-11-11 설계 speaker-follow) — 옛 의도에는 없으니 비었다(−1)가 기본."""
+    intent = IntentData(intent="cancel", matched_destination_id="", need_confirm=False, safety_flag="normal")
+    assert (intent.speaker_verdict, intent.speaker_score, intent.speaker_joined) == ("", -1.0, -1.0)
