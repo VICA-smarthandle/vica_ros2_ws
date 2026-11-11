@@ -171,6 +171,10 @@ def generate_launch_description() -> LaunchDescription:
             # grip_release_stop: 주행 중 손 놓침 정지. 2026-10-21 사용자 결정으로 끔 — 터치는 처음 잡기에만 쓴다
             # (손잡이 터치 칩이 8.4 s 넘게 쥐면 혼자 '놓음'이 됨, 10-21 실측). 켜면 위 grip_release_grace_sec 가 쓰인다.
             DeclareLaunchArgument("grip_release_stop", default_value="false"),
+            # speaker_gate: 대기 중 주행·종료·취소를 손잡이 + 목소리 판정(되묻기·본인 질문)으로만 받는다
+            # (2026-11-11 설계 speaker-follow). 음성 쪽 VICA_SPK_FOLLOW=on 과 함께 켠다. 기본 꺼짐 = 지금 그대로.
+            DeclareLaunchArgument("speaker_gate", default_value="false"),
+            DeclareLaunchArgument("spk_joined_threshold", default_value="0.50"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
@@ -263,6 +267,14 @@ def generate_launch_description() -> LaunchDescription:
                         "grip_release_stop": ParameterValue(
                             LaunchConfiguration("grip_release_stop"),
                             value_type=bool,
+                        ),
+                        "speaker_gate": ParameterValue(
+                            LaunchConfiguration("speaker_gate"),
+                            value_type=bool,
+                        ),
+                        "spk_joined_threshold": ParameterValue(
+                            LaunchConfiguration("spk_joined_threshold"),
+                            value_type=float,
                         ),
                         "obstacle_narration": ParameterValue(
                             LaunchConfiguration("obstacle_narration"),

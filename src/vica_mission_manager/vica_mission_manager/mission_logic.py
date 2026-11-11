@@ -26,6 +26,7 @@ from .approach_recheck import (
 )
 from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
 from .grip_meter import GripMeter
+from .speaker_gate import GRIP_RECENT_SEC, WaitSpeakerGate
 
 # 하드 긴급어: 즉시 goal 취소 + estopped 진입 (LLM 우회 경로).
 # "천천히/느리게/잠깐" 등 감속·유보 계열은 v2 (TODOS.md #6) — 여기서는 무시한다.
@@ -499,6 +500,11 @@ MSG_WAIT_BEACON = "비카가 대기 중입니다."
 # 그대로). 사용자가 로봇에게 와서 다시 부르면 그때부터 그 대기가 끝날 때까지 "네?"로 듣고, 진동은 빼다 —
 # 진동이 손잡이 터치 신호를 흔든다.
 MSG_WAIT_LOCATE = "비카가 여기 있어요"
+# 대기 중 본인 확인(2026-11-11 설계 speaker-follow, 사용자 확정 문구) — speaker_gate 가 켜졌을 때만.
+MSG_WAIT_IN_USE = "지금은 대기중입니다. 사용자님을 기다리고 있어요"   # 대기 중 첫 호출(MSG_WAIT_LOCATE 자리)
+MSG_SPK_REASK = "확인을 위해 한 번 더 말씀해 주세요"
+MSG_SPK_IDENTITY = "아까 {dest}에 가자고 하신 사용자님이신가요?"
+MSG_SPK_REJECT = "죄송합니다. 다른 분을 안내 중이라 지금은 이용하실 수 없어요."
 # M6 — 대기 장소로 가다 실패(Nav2 실패 신호). 말한 뒤 목적지로 돌아간다.
 MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
 # M7 — 대기 시간 만료(대기 장소가 있든 없든). 말한 뒤 홈으로 간다.
@@ -1355,6 +1361,8 @@ class MissionLogic:
         grip_assume_held: bool = False,
         grip_release_stop: bool = True,
         home_beacon_interval_sec: float = HOME_BEACON_INTERVAL_SEC,
+        speaker_gate: bool = False,
+        spk_joined_threshold: float = 0.50,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -1502,6 +1510,9 @@ class MissionLogic:
         # 8.4 s 넘게 쥐면 혼자 '놓음'이 되어 걷는 동안 8초마다 서게 된다(10-21 실측). 노드·launch 기본은
         # 꺼짐, 여기 기본값(켜짐)은 설계서 동작을 지키는 시험용이다.
         self.grip_release_stop = grip_release_stop
+        # 대기 중 본인 확인(2026-11-11 설계 speaker-follow). 꺼져 있으면 지금 그대로.
+        self.speaker_gate = speaker_gate
+        self._spk_gate = WaitSpeakerGate(spk_joined_threshold)
         # 접촉 사실은 노드가 /vica/smart_handle_state 로 넣어 준다(on_handle_state).
         self._grip = GripMeter(stale_sec=handle_state_stale_sec)
         # 지금 주행이 활성 모드(손을 놓으면 섬)인가. 출발 순간에 정한다.
@@ -1712,10 +1723,43 @@ class MissionLogic:
             # 질문 전에 시작한 예/아니요 — 버린다. 질문은 그대로 기다리고(다시 묻기 시계도 그대로) 사용자가 다시 답한다.
             self.voice_note = "질문 전에 시작한 말이라 대답으로 안 씀"
             return []
+        if self.speaker_gate and self.state in (State.WAITING, State.WAITING_RELEASE):
+            gated, intent = self._speaker_gate_step(intent, now)
+            if gated is not None:
+                return gated
         reacted = self._react_by_table(intent, now, lookup, bounds, nav_ready)
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def _speaker_gate_step(self, intent: IntentData, now: float):
+        """대기 중 본인 확인(설계 4.5·B1~B5). (동작 목록, None) 이면 그대로 내보내고,
+        (None, 의도) 면 그 의도로 평소 흐름을 탄다."""
+        followup_open = any(t is not None and now - t <= WAIT_FINISH_REPEAT_SEC
+                            for t in (self._wait_need_asked_at, self._wait_finish_asked_at))
+        out = self._spk_gate.decide(intent, grip_recent=self._grip.touched_within(now, GRIP_RECENT_SEC),
+                                    sensor_ok=self._grip.fresh(now), followup_open=followup_open, now=now)
+        if out.note:
+            self.voice_note = out.note
+        if out.action == "hint":
+            return [Haptic(HAPTIC_PATTERN_HANDLE_HINT), Say(MSG_HANDLE_HINT, priority="response")], None
+        if out.action == "reask":
+            return [self._ask(MSG_SPK_REASK)], None
+        if out.action == "identity":
+            dest = self._arrived_destination
+            return [self._ask(MSG_SPK_IDENTITY.format(dest=dest.name if dest is not None else "목적지"))], None
+        if out.action == "reject":
+            return [Say(MSG_SPK_REJECT, priority="response")], None
+        if out.action == "drop":
+            return [], None
+        chosen = out.intent
+        if out.skip_confirm and chosen.intent in ("cancel", "finish"):
+            # 같은 명령을 두 번 들었다 — "안내가 필요 없으신가요?"·"어디로 모실까요?"를 거치지 않는다(D6).
+            self._reset_arrival_dialog()
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)], None
+        if out.skip_confirm and chosen.intent == "navigate":
+            chosen = replace(chosen, need_confirm=False)
+        return None, chosen
 
     def note_question_asked(self, text: str, now: float) -> None:
         """노드가 대답을 기다리는 말(Say.expects_reply)을 내보낼 때 부른다. 같은 질문을 SAME_QUESTION_SEC 안에
@@ -2233,6 +2277,7 @@ class MissionLogic:
             else:
                 # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
                 # ros_tts_node 가 이미 재생하므로 여기서 중복 발화하지 않는다.
+                from_wait = self.state in _WAIT_STATES
                 if self.state in _WAIT_STATES and self._wait_hold is None:
                     # 대기 중의 새 목적지 제안. 출발이 확정될 때까지 대기를 끝내지
                     # 않는다 — 거절·무응답이면 이 대기로 돌아간다(2026-10-07).
@@ -2242,6 +2287,9 @@ class MissionLogic:
                 self._confirming_dest_id = intent.matched_destination_id or None
                 self._arm_confirm(now)
                 self._confirm_prompt = self._confirm_prompt_for(dest)
+                if self.speaker_gate and from_wait:
+                    # 대기 중 본인 확인(B5) — 음성 쪽은 이 reply 를 지웠다. 확인 질문은 미션이 말한다.
+                    return [self._ask(self._confirm_prompt)]
                 return []
 
         # need_confirm == false (확정 요청)
@@ -3787,7 +3835,8 @@ class MissionLogic:
         if self.state == State.WAITING and not self._wait_located:
             # 대기 중 첫 호출(2026-10-21 사용자 결정): 멀리서 로봇을 찾는 부름이다 — 듣기 창은 열지 않고
             # 손잡이 진동(on_wake) + "비카가 여기 있어요"로 자리만 알린다. 다음 호출부터 "네?"로 듣는다.
-            actions = [StopSpeech(), Say(MSG_WAIT_LOCATE, priority="response"), WakeReply(listen=False),
+            locate = MSG_WAIT_IN_USE if self.speaker_gate else MSG_WAIT_LOCATE
+            actions = [StopSpeech(), Say(locate, priority="response"), WakeReply(listen=False),
                        *self.on_wake(now)]
             self._wait_located = True
             if self._beacon_next_at is not None:
@@ -4571,6 +4620,7 @@ class MissionLogic:
         nav_ready 는 손 놓침 뒤 자동 재출발(_handle_pause_tick)의 재개 관문에만 쓴다.
         """
         actions: list = []
+        self._spk_gate.tick(now)
         self._prune_suppressed(now)
         if self._approach_lock and (self.state != State.IDLE or self._idle_substage_active()):
             # 안내·대기·복귀 중이거나 손잡이 안내·온보딩 중 — 사용자가 곁에 있다(APPROACH_LOCK_QUIET_SEC).
@@ -5085,6 +5135,7 @@ class MissionLogic:
         track_id 는 아직 지우지 않는다. 재접근 억제는 복귀가 끝난 시점부터
         세야 하므로 _finish_returning 까지 들고 간다(설계 4절).
         """
+        self._spk_gate.reset()   # 대기 중 본인 확인의 열린 단계도 닫는다(설계 D10)
         # 목적지를 떠난다 — 도착 대화의 목적지는 비운다. 안내를 마치고 떠나는 복귀라면
         # _last_guided 가 그 목적지를 기억한다: 홈 가는 중 "기다려"는 그 대기 장소로 간다
         # (2026-10-08 사용자 결정 1 — 10-07 의 '그 자리에서 기다린다'를 바꿨다). 접근 뒤·
@@ -5207,6 +5258,7 @@ class MissionLogic:
 
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
+        self._spk_gate.reset()
         self.active_destination = None
         # 보관한 목적지도 함께 버린다. 남겨두면 E-stop 뒤에 "다시 출발"이 통해
         # 이전 Goal 자동 재개 금지 원칙이 깨진다.
@@ -5255,6 +5307,7 @@ class MissionLogic:
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
+        self._spk_gate.reset()
         self.active_destination = None
         self._arrived_destination = None
         self.paused_destination = None

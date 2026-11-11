@@ -298,6 +298,9 @@ class MissionManagerNode(Node):
         self.declare_parameter("grip_assume_held", False)
         # 주행 중 손 놓침 정지(2026-10-21 사용자 결정으로 기본 꺼짐) — 터치는 처음 잡기에만 쓴다.
         self.declare_parameter("grip_release_stop", False)
+        # 대기 중 본인 확인(2026-11-11 설계 speaker-follow). 음성 VICA_SPK_FOLLOW=on 과 함께 켠다.
+        self.declare_parameter("speaker_gate", False)
+        self.declare_parameter("spk_joined_threshold", 0.50)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
@@ -403,6 +406,8 @@ class MissionManagerNode(Node):
                 "handle_lost_give_up_sec", "handle_state_stale_sec")},
             grip_assume_held=bool(self.get_parameter("grip_assume_held").value),
             grip_release_stop=bool(self.get_parameter("grip_release_stop").value),
+            speaker_gate=bool(self.get_parameter("speaker_gate").value),
+            spk_joined_threshold=float(self.get_parameter("spk_joined_threshold").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
         )
