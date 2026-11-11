@@ -118,3 +118,28 @@ def test_estop_clears_gate():
     logic.on_estop(True, 21.0)
     assert logic.state == State.ESTOPPED
     assert logic._spk_gate.stored is None
+
+
+# --- 음성 모드 따라 자동으로 켜기(11-11 사용자: ⑩ 칸에 speaker_gate:=true 붙이기는 불편) ------------------------------
+
+def test_voice_mode_on_turns_gate_on_without_param():
+    logic = waiting(gate=False)
+    logic.set_speaker_mode("on")
+    grip(logic, 19.5)
+    assert said(voice(logic, it("cancel", "fail"), 20.0)) == [REASK]
+
+
+def test_voice_mode_log_keeps_gate_off():
+    logic = waiting(gate=False)
+    logic.set_speaker_mode("log")
+    assert said(voice(logic, it("cancel", "fail"), 20.0)) == [MSG_WAIT_NEED_ASK]
+    assert MSG_WAIT_LOCATE in said(logic.on_wake_call(21.0))
+
+
+def test_voice_mode_off_closes_open_stage():
+    logic = waiting(gate=False)
+    logic.set_speaker_mode("on")
+    grip(logic, 19.5)
+    voice(logic, it("cancel", ""), 20.0)                    # 본인 질문 중
+    logic.set_speaker_mode("off")
+    assert logic._spk_gate.stored is None

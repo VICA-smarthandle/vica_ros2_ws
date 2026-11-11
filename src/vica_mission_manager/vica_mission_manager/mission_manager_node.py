@@ -614,6 +614,14 @@ class MissionManagerNode(Node):
             10,
             callback_group=self._main_group,
         )
+        # 화자 판정 모드(2026-11-11) — 음성 .env 의 VICA_SPK_FOLLOW 하나로 미션 대기 중 본인 확인까지 켠다.
+        # 마지막 값을 보관하는 토픽이라 어느 쪽이 먼저 떠도 받는다.
+        self.create_subscription(
+            String, "/vica/speaker_mode", self._on_speaker_mode,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            callback_group=self._main_group,
+        )
 
         self.pub_tts = self.create_publisher(String, "/vica/tts_request", 10)
         # 취소·앱 선점의 큐 청소(StopSpeech)는 tts_request 의 제어 메시지
@@ -792,6 +800,13 @@ class MissionManagerNode(Node):
         except Exception as exc:  # 홈이 없거나 깨져도 서비스는 계속돼야 한다
             self.get_logger().warn(f"홈 로드 실패(제자리 대기로 폴백): {exc}")
             return None
+
+    def _on_speaker_mode(self, msg: String) -> None:
+        before = self.logic.speaker_gate
+        self.logic.set_speaker_mode(msg.data)
+        if self.logic.speaker_gate != before:
+            self.get_logger().info(f"[화자] 음성 모드 {msg.data!r} — 대기 중 본인 확인 "
+                                   + ("켬" if self.logic.speaker_gate else "끔"))
 
     def _on_intent(self, msg: VicaIntent) -> None:
         """음성 요청. 판단은 로직(on_voice_intent)이 하고 여기선 실행·기록만 한다(2026-10-08)."""

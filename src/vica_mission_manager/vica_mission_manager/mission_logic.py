@@ -1511,7 +1511,8 @@ class MissionLogic:
         # 꺼짐, 여기 기본값(켜짐)은 설계서 동작을 지키는 시험용이다.
         self.grip_release_stop = grip_release_stop
         # 대기 중 본인 확인(2026-11-11 설계 speaker-follow). 꺼져 있으면 지금 그대로.
-        self.speaker_gate = speaker_gate
+        self._speaker_gate_param = speaker_gate   # 강제로 켜기(launch 인자). 보통은 음성 모드를 따른다
+        self._speaker_mode = "off"               # 음성 노드가 /vica/speaker_mode 로 알린 값
         self._spk_gate = WaitSpeakerGate(spk_joined_threshold)
         # 접촉 사실은 노드가 /vica/smart_handle_state 로 넣어 준다(on_handle_state).
         self._grip = GripMeter(stale_sec=handle_state_stale_sec)
@@ -1731,6 +1732,17 @@ class MissionLogic:
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    @property
+    def speaker_gate(self) -> bool:
+        """대기 중 본인 확인이 켜졌나 — 음성 VICA_SPK_FOLLOW=on 이거나 launch speaker_gate:=true."""
+        return self._speaker_gate_param or self._speaker_mode == "on"
+
+    def set_speaker_mode(self, mode: str) -> None:
+        """음성 노드의 화자 판정 모드(off·log·on). on 이 아니게 되면 열린 단계를 닫는다."""
+        self._speaker_mode = (mode or "off").strip().lower()
+        if not self.speaker_gate:
+            self._spk_gate.reset()
 
     def _speaker_gate_step(self, intent: IntentData, now: float):
         """대기 중 본인 확인(설계 4.5·B1~B5). (동작 목록, None) 이면 그대로 내보내고,
