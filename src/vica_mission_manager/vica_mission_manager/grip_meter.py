@@ -81,6 +81,18 @@ class GripMeter:
                 held += hi - lo
         return held / window
 
+    def touched_within(self, now: float, sec: float) -> bool:
+        """[now-sec, now] 안에 '잡음' 구간이 하나라도 있었나.
+
+        대기 중 본인 확인(2026-11-11 설계 B2): TTP223 은 쥔 채 약 8.1~8.4 s 뒤 '놓음'으로 읽힌다 — 순간 값으로
+        보면 손을 쥔 사람을 놓친다. history_sec 보다 긴 창은 보관한 만큼만 본다.
+        """
+        start = now - sec
+        for seg_start, seg_end, value in self._segments(now):
+            if value and seg_end > start and seg_start <= now:
+                return True
+        return False
+
     def released_for(self, now: float) -> float:
         """지금까지 계속 '놓음'이었던 시간(초). 잡고 있으면 0, 기록이 없으면 무한대."""
         if self._value_at(now):
