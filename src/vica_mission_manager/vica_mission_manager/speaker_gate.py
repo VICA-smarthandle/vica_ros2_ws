@@ -25,6 +25,20 @@ class GateOut:
     note: str = ""
 
 
+def same_command(a, b) -> bool:  # noqa: ANN001
+    """확인 질문을 건너뛸 '같은 명령'(D6) — 종류가 같고, navigate 면 목적지, wait 면 대기 시간까지 같다(검토 I1).
+
+    되묻기 답을 잘못 알아들어 다른 곳으로 확인 없이 출발하는 일을 막는다.
+    """
+    if a is None or b is None or a.intent != b.intent:
+        return False
+    if a.intent == "navigate":
+        return bool(a.matched_destination_id) and a.matched_destination_id == b.matched_destination_id
+    if a.intent == "wait":
+        return a.wait_minutes == b.wait_minutes
+    return True
+
+
 class WaitSpeakerGate:
     def __init__(self, joined_threshold: float = 0.50):
         self.joined_threshold = joined_threshold
@@ -58,13 +72,13 @@ class WaitSpeakerGate:
                 return GateOut("drop")
             if intent.speaker_joined >= self.joined_threshold:
                 self.reset()
-                if kind == stored.intent:
+                if same_command(intent, stored):
                     return GateOut("pass", intent, "current", skip_confirm=True)
                 if kind not in GATED_KINDS:
                     return GateOut("pass", stored, "stored")
                 return GateOut("pass", intent, "current")
             keep = intent if kind in GATED_KINDS else stored
-            return self._open("identity", keep, now, twice=kind == stored.intent)
+            return self._open("identity", keep, now, twice=same_command(intent, stored))
         if self._stage == "identity":
             stored, twice = self._stored, self._twice
             self.reset()

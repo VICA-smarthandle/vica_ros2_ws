@@ -115,3 +115,35 @@ def test_identity_silence_resets_on_tick():
     g.tick(16.0)
     assert g.stored is None
     assert decide(g, it("affirm"), now=17.0).action == "pass"          # 열린 단계 없음 — 묻지 않은 '네'
+
+
+# --- 최종 검토 수정 I1 — '같은 명령' = 종류 + 목적지(navigate) + 대기 시간(wait) ------------------------------------
+
+def test_navigate_to_other_destination_is_not_same_command():
+    g = WaitSpeakerGate()
+    decide(g, it("navigate", "fail", dest="restroom"))
+    out = decide(g, it("navigate", "fail", joined=0.61, dest="office"), now=3.0)
+    assert (out.action, out.intent.matched_destination_id, out.skip_confirm) == ("pass", "office", False)
+
+
+def test_navigate_same_destination_skips_confirm():
+    g = WaitSpeakerGate()
+    decide(g, it("navigate", "fail", dest="restroom"))
+    assert decide(g, it("navigate", "fail", joined=0.61, dest="restroom"), now=3.0).skip_confirm is True
+
+
+def test_wait_with_other_minutes_is_not_same_command():
+    g = WaitSpeakerGate()
+    decide(g, IntentData(intent="wait", matched_destination_id="", need_confirm=False, safety_flag="normal",
+                         wait_minutes=10, speaker_verdict="fail"))
+    out = decide(g, IntentData(intent="wait", matched_destination_id="", need_confirm=False, safety_flag="normal",
+                               wait_minutes=1, speaker_verdict="fail", speaker_joined=0.6), now=3.0)
+    assert out.skip_confirm is False
+
+
+def test_identity_after_two_different_destinations_keeps_confirm():
+    g = WaitSpeakerGate()
+    decide(g, it("navigate", "fail", dest="restroom"))
+    decide(g, it("navigate", "fail", joined=0.3, dest="office"), now=3.0)
+    out = decide(g, it("affirm"), now=6.0)
+    assert (out.intent.matched_destination_id, out.skip_confirm) == ("office", False)
