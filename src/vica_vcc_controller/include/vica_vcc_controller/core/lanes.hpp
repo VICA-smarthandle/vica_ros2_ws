@@ -53,6 +53,15 @@ public:
     target_ = std::clamp(std::round(d / p_.step) * p_.step, -p_.max_offset, p_.max_offset);
     pending_count_ = 0;
   }
+  // 새 경로가 로봇 자리에서 다시 그려져 d 를 다시 맞췄을 때(VccCore 재동기) 비켜 가던 목표도 같은 만큼
+  // 옮겨 세계 기준 옆 위치를 지킨다. 안 옮기면 새 경로마다 목표만큼 또 밀린다(run106 11-14: 7 s 에 레일에서
+  // 0.25 -> 0.85 m). 목표·대기 후보가 0(레일)이면 '경로를 따른다'는 뜻이라 그대로 둔다.
+  void shiftTarget(double delta)
+  {
+    if (std::abs(target_) < 1e-9) {return;}
+    target_ = snapLane(target_ + delta);
+    if (pending_count_ > 0 && std::abs(pending_) > 1e-9) {pending_ = snapLane(pending_ + delta);}
+  }
   double target() const {return target_;}
   bool blocked() const {return blocked_;}
   double currentClearance() const {return current_clearance_;}
@@ -65,6 +74,12 @@ public:
   Path lanePath(const Path & path, double v) const;
 
 private:
+  // 가장 가까운 차선. 딱 가운데면 레일 쪽.
+  double snapLane(double d) const
+  {
+    const double k = std::floor(std::abs(d) / p_.step + 0.5 - 1e-9);
+    return std::clamp(std::copysign(k * p_.step, d), -p_.max_offset, p_.max_offset);
+  }
   Path candidatePath(const Path & path, double cand, double shift_speed) const;
   double minClearance(const Path & lane, const ClearanceFn & f) const;
   LaneScore evaluate(const Path & path, double v_des, double cand, const ClearanceFn & f) const;

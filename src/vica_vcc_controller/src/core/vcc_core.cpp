@@ -62,6 +62,7 @@ void VccCore::reset(const Twist2D & measured)
   stopped_since_ = -1.0;
   resync_count_ = 0;
   resync_primed_ = false;
+  resync_new_path_ = false;
   align_failed_since_ = -1.0;
   need_since_ = -1.0;
   turn_rot_ = 0.0;
@@ -114,13 +115,21 @@ CoreOutput VccCore::step(const CoreInputs & in)
   // reset 뒤 0, 유턴 뒤 약 2R, 레일<->당근 경로 교체 뒤 어긋난 d 를 그대로 두면 차선 검사가 로봇이
   // 아닌 곳을 본다(최종 리뷰 I4). 한 주기만 튄 값으로는 옮기지 않는다 — 2주기 연속일 때만(run48 F2:
   // 가짜 되튐 75회, 64 % 가 새 경로 뒤 0.25 s 안). reset 뒤 첫 경로는 비교할 과거가 없어 바로 맞춘다.
+  // 어긋남이 새 경로와 함께 시작됐으면(경로가 로봇 자리에서 다시 그려짐) 목표 차선도 같은 만큼 옮긴다
+  // (LaneSelector::shiftTarget, run106 11-14). 로봇이 차선을 늦게 따라와 생긴 어긋남이면 목표는 그대로 —
+  // 피하던 폭을 줄이지 않는다.
   if (!in.path.empty()) {
     const double e = lateralError(in.path);
     if (std::abs(e - lanes_.offset()) <= p_.resync_offset) {
       resync_count_ = 0;
-    } else if (!resync_primed_ || ++resync_count_ >= 2) {
-      lanes_.syncOffset(e);
-      resync_count_ = 0;
+    } else {
+      if (resync_count_ == 0) {resync_new_path_ = path_fresh_;}
+      if (!resync_primed_ || ++resync_count_ >= 2) {
+        const double before = lanes_.offset();
+        lanes_.syncOffset(e);
+        if (resync_primed_ && resync_new_path_) {lanes_.shiftTarget(lanes_.offset() - before);}
+        resync_count_ = 0;
+      }
     }
     resync_primed_ = true;
   }
