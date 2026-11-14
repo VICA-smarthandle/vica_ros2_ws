@@ -421,6 +421,52 @@ def test_순찰_밖에서_끝난_올리기가_실패였으면_다음_순찰_진�
     assert rig.wiring._profile.engine_ready
 
 
+# ---- 감시 항목 켜고 끄기(2026-11-14 사용자 요청) -------------------------------
+
+
+def test_사람_감지를_꺼_둔_순찰에는_엔진을_올리지_않고_ready_다(rig):
+    rig.wiring.set_watch_off(frozenset({"intruder"}))
+    rig.wiring.on_dialog_state("patrol_dwell")
+    rig.wiring.on_color(color_msg())
+    rig.node.live_timers()[0].callback()
+    assert load_starts(rig.node) == 0 and rig.loader.paths == []
+    assert rig.wiring._patrol_model is None
+    status = rig.node.events("status")[-1]
+    assert status["ready"] is True and status["camera_ok"] is True
+
+
+def test_다음_순찰에서_사람_감지를_켜면_그때_엔진을_올린다(rig):
+    rig.wiring.set_watch_off(frozenset({"intruder"}))
+    rig.wiring.on_dialog_state("patrolling")
+    rig.wiring.on_dialog_state("idle")
+    rig.wiring.set_watch_off(frozenset())     # 미션이 다음 경비 시작 전에 알린다
+    assert load_starts(rig.node) == 0         # 순찰 밖에서는 올리지 않는다
+    rig.wiring.on_dialog_state("patrol_dwell")
+    assert load_starts(rig.node) == 1
+    settle(rig.wiring)
+    assert rig.wiring._profile.engine_ready
+
+
+def test_순찰_중에_사람_감지가_켜졌다고_오면_그때_엔진을_올린다(rig):
+    rig.wiring.set_watch_off(frozenset({"intruder"}))
+    rig.wiring.on_dialog_state("patrolling")
+    assert load_starts(rig.node) == 0
+    rig.wiring.set_watch_off(frozenset())     # 알림이 상태보다 늦게 처리된 경우
+    assert load_starts(rig.node) == 1
+    rig.node.live_timers()[0].callback()
+    assert rig.node.events("status")[-1]["ready"] is False    # 올라올 때까지는 준비 전
+    settle(rig.wiring)
+    rig.node.live_timers()[0].callback()
+    assert rig.node.events("status")[-1]["ready"] is True
+
+
+def test_감시_항목_알림만으로는_타이머도_프레임_가로채기도_생기지_않는다(rig):
+    rig.wiring.set_watch_off(frozenset({"light", "sound"}))
+    assert rig.node._patrol_busy is False
+    assert rig.node.live_timers() == []
+    assert rig.node.published == []
+
+
 # ---- 추론·프레임 --------------------------------------------------------------
 
 
@@ -699,10 +745,17 @@ class SpyWiring:
         self.args = (load_model, rate_hz, state_timeout_s)
         self.states = []
         self.frames = []
+        self.watch = []
+        self.calls = []                       # 불린 순서
         SpyWiring.made.append(self)
+
+    def set_watch_off(self, off):
+        self.watch.append(off)
+        self.calls.append(("watch", off))
 
     def on_dialog_state(self, state):
         self.states.append(state)
+        self.calls.append(("state", state))
 
     def on_color(self, msg):
         self.frames.append(msg)
@@ -713,6 +766,7 @@ def fake_self(**over):
     base = dict(
         _infer_gate=InferenceGate(),
         _patrol=None, _patrol_busy=False, _patrol_ok=True,
+        _patrol_watch_off=frozenset(),
         _load_model="LOADER", _period_s=0.2,
         get_parameter=lambda name: SimpleNamespace(value=3.0),
     )
@@ -750,6 +804,26 @@ def test_순찰_상태를_처음_보면_배선을_한_번_만들고_상태를_�
     assert len(spy.made) == 1
     assert spy.made[0].args == ("LOADER", 5.0, 3.0)
     assert spy.made[0].states == ["patrol_dwell", "patrolling"]
+
+
+def test_먼저_받아_둔_감시_항목은_배선을_만들_때_상태보다_먼저_넘긴다(spy):
+    logger = FakeLogger()
+    me = fake_self(get_logger=lambda: logger)
+    PersonDetectorNode._on_patrol_watch(me, SimpleNamespace(data='{"off": ["intruder"]}'))
+    PersonDetectorNode._on_patrol_watch(me, SimpleNamespace(data='{"off": ["intruder"]}'))
+    assert spy.made == [] and me._patrol_watch_off == {"intruder"}     # 알림만으로는 배선을 만들지 않는다
+    assert logger.lines == [("info", "순찰 감시 항목 알림 — 끔: intruder")]   # 바뀔 때만 한 줄(실기 확인용)
+    PersonDetectorNode._on_robot_state(me, state_msg("patrol_dwell"))
+    assert spy.made[0].calls == [("watch", frozenset({"intruder"})), ("state", "patrol_dwell")]
+
+
+def test_배선이_있으면_감시_항목_알림을_곧바로_넘기고_못_읽는_알림은_버린다(spy):
+    me = fake_self()
+    PersonDetectorNode._on_robot_state(me, state_msg("patrolling"))
+    PersonDetectorNode._on_patrol_watch(me, SimpleNamespace(data='{"off": ["light", "sound"]}'))
+    PersonDetectorNode._on_patrol_watch(me, SimpleNamespace(data="not json"))
+    assert spy.made[0].watch == [frozenset(), frozenset({"light", "sound"})]
+    assert me._patrol_watch_off == {"light", "sound"}
 
 
 def test_순찰에서_나오는_첫_상태까지만_배선에_넘긴다(spy):

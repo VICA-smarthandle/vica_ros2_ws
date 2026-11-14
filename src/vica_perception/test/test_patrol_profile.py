@@ -34,6 +34,7 @@ from vica_perception.patrol_profile import (
     event_light,
     event_status,
     is_patrol_state,
+    parse_watch_off,
 )
 
 WALL0 = datetime(2026, 11, 14, 20, 34, 55, tzinfo=ZoneInfo("Asia/Seoul")).timestamp()
@@ -836,6 +837,176 @@ def test_사람_장면을_쓰는_중에_소리_경보가_오면_새_장면_없�
     clips = rig.kinds("clip")
     assert [e["state"] for e in clips] == ["started", "done"]
     assert clips[1]["stamp"] >= WALL0 + extended_at + 10.0
+
+
+# ---- 감시 항목 켜고 끄기(2026-11-14 사용자 요청) -------------------------------
+
+
+def watching(tmp_path, off, **kw):
+    rig = Rig(tmp_path, **kw)
+    rig.profile.set_watch(off, ns(0.0))
+    return rig
+
+
+def test_감시_항목_알림은_아는_이름만_읽고_못_읽으면_None():
+    assert parse_watch_off('{"off": []}') == frozenset()
+    assert parse_watch_off('{"off": ["light", "sound", "camera_lost", 3]}') == {"light", "sound"}
+    for bad in ("", "nope", "[]", '{"off": "light"}', "{}", "null"):
+        assert parse_watch_off(bad) is None
+
+
+def test_사람_감지를_끄면_추론하지_않고_엔진_없이도_ready_다(tmp_path):
+    rig = watching(tmp_path, ["intruder"])
+    rig.profile.set_engine_loaded(False)      # 엔진을 올린 적이 없다
+    assert not rig.profile.needs_engine
+    rig.confs = (0.9,)
+    rig.state("patrolling")
+    rig.run(4.0)
+    assert rig.infers == 0 and rig.kinds() == []
+    assert rig.kinds("status")[-1]["ready"] is True
+    assert rig.encodes > 0                    # 큰 소리 경보의 영상 앞 5 s 는 모은다
+
+
+def test_사람_감지를_꺼도_엔진이_올라와_있으면_추론은_하지_않는다(tmp_path):
+    rig = watching(tmp_path, ["intruder"])    # 엔진은 지난 순찰 때 올라왔다
+    rig.confs = (0.9,)
+    rig.state("patrolling")
+    rig.run(4.0)
+    assert rig.infers == 0 and rig.kinds() == []
+
+
+def test_사람_감지를_꺼도_큰_소리_경보에는_장면을_찍는다(tmp_path):
+    rig = watching(tmp_path, ["intruder"])
+    rig.state("patrolling")
+    rig.run(8.0)
+    rig.state("patrol_alarm")                 # 음성 노드의 sound 로 미션이 멈췄다
+    rig.run(10.5)
+    assert [(e["state"], e["alarm"]) for e in rig.kinds("clip")] == [
+        ("started", "sound"), ("done", "sound")]
+    assert 70 <= rig.kinds("clip")[-1]["frames"] <= 77
+    assert rig.infers == 0
+
+
+def test_큰_소리를_끄면_미션이_낸_경보에_장면을_찍지_않는다(tmp_path):
+    rig = watching(tmp_path, ["sound"])
+    rig.state("patrolling")
+    rig.run(8.0)
+    rig.state("patrol_alarm")                 # 내가 내지 않은 경보 — 남은 것은 카메라 끊김뿐이다
+    rig.run(3.0)
+    assert rig.kinds() == []
+    assert not os.path.exists(rig.media)
+
+
+def test_큰_소리를_꺼도_사람_경보와_장면은_그대로다(tmp_path):
+    rig = watching(tmp_path, ["sound"])
+    rig.state("patrolling")
+    rig.confs = (0.8,)
+    rig.run(1.0)
+    assert rig.kinds() == ["intruder", "clip"]
+
+
+def test_사람과_큰_소리를_다_끄면_주행_중에는_영상을_풀지도_않는다(tmp_path):
+    rig = watching(tmp_path, ["intruder", "sound"])
+    rig.confs = (0.9,)
+    rig.state("patrolling")
+    rig.run(5.0)
+    assert rig.work() == (0, 0, 0)
+    assert rig.profile._clip.buffered == 0
+    status = rig.kinds("status")
+    assert len(status) == 5 and status[-1] == {
+        "src": "detector", "kind": "status", "stamp": status[-1]["stamp"],
+        "ready": True, "camera_ok": True}     # 카메라 끊김 감시는 그대로 돈다
+
+
+def test_사람과_큰_소리를_다_꺼도_불_켜짐은_잡고_사진_한_장만_압축한다(tmp_path):
+    rig = watching(tmp_path, ["intruder", "sound"])
+    rig.state("patrolling")
+    rig.run(1.0)
+    dwell(rig, 1.4)                           # 불 끔
+    assert rig.encodes == 0
+    dwell(rig, 35.0)                          # 누가 불을 켰다
+    lights = rig.kinds("light")
+    assert len(lights) == 1
+    assert os.path.isfile(os.path.join(rig.media, "photos", lights[0]["photo"]))
+    assert (rig.encodes, rig.infers) == (1, 0)
+    assert rig.decodes == 3                   # 밝기 2번 + 사진 1번
+    assert rig.exposure == [ExposureCmd.FIX, ExposureCmd.AUTO] * 2
+
+
+def test_불_켜짐을_끄면_노출을_건드리지_않는다(tmp_path):
+    rig = watching(tmp_path, ["light"])
+    rig.state("patrolling")
+    rig.run(1.0)
+    dwell(rig, 1.4)
+    dwell(rig, 35.0)
+    assert rig.exposure == [] and rig.kinds() == []
+    assert not rig.profile.exposure_dirty
+
+
+def test_불_켜짐을_끄면_dwell_에서도_사람_판정을_쉬지_않는다(tmp_path):
+    rig = watching(tmp_path, ["light"])
+    rig.state("patrol_dwell")
+    rig.confs = (0.8,)
+    rig.run(0.5)                              # 노출 전환으로 버리는 프레임이 없다
+    assert rig.kinds() == ["intruder", "clip"]
+
+
+def test_노출을_고정한_동안_불_켜짐이_꺼지면_곧바로_자동_노출로_되돌린다(tmp_path):
+    rig = Rig(tmp_path, auto_ack=False)
+    enter_fixed(rig)
+    rig.profile.set_watch(["light"], ns(rig.t))
+    assert rig.exposure == [ExposureCmd.FIX, ExposureCmd.AUTO]
+    rig.brightness = 35.0
+    rig.run(3.0)
+    assert rig.kinds("light") == []
+
+
+def test_dwell_도중에_불_켜짐이_켜졌다고_오면_그_dwell_부터_확인한다(tmp_path):
+    rig = watching(tmp_path, ["light"])       # 지난 순찰의 값
+    rig.state("patrol_dwell")                 # 상태가 알림보다 먼저 처리됐다
+    rig.run(0.2)
+    assert rig.exposure == []
+    rig.profile.set_watch([], ns(rig.t))
+    rig.run(1.5)
+    assert rig.exposure == [ExposureCmd.FIX, ExposureCmd.AUTO]
+
+
+def test_주행_중에_불_켜짐이_켜지면_다음_dwell_에서_확인한다(tmp_path):
+    rig = watching(tmp_path, ["light"])
+    rig.state("patrolling")
+    rig.run(0.5)
+    rig.profile.set_watch([], ns(rig.t))
+    rig.run(1.0)
+    assert rig.exposure == []                 # 이동 중에는 건드리지 않는다
+    dwell(rig, 1.4)
+    assert rig.exposure == [ExposureCmd.FIX, ExposureCmd.AUTO]
+
+
+def test_감시_항목은_순찰이_끝나도_남고_다시_켜면_돌아온다(tmp_path):
+    rig = watching(tmp_path, ["intruder", "light", "sound"])   # 셋 다 — 미션은 안 보내지만 받아도 된다
+    rig.confs = (0.9,)
+    rig.state("patrolling")
+    rig.run(2.0)
+    rig.state("idle")
+    rig.state("patrolling")
+    rig.run(2.0)
+    assert rig.work() == (0, 0, 0) and rig.kinds() == []
+    rig.profile.set_watch([], ns(rig.t))      # 모두 켬
+    assert rig.profile.needs_engine
+    rig.run(1.0)
+    assert rig.kinds() == ["intruder", "clip"]
+
+
+def test_같은_값을_다시_받으면_아무것도_하지_않는다(tmp_path):
+    rig = watching(tmp_path, ["light"])
+    logs = len(rig.logs)
+    rig.state("patrolling")
+    rig.confs = (0.8,)
+    rig.run(0.25)                             # 한 번 봤다(판정 창에 1번)
+    rig.profile.set_watch(["light"], ns(rig.t))
+    rig.run(0.25)
+    assert rig.kinds() == ["intruder", "clip"]            # 판정 창을 비우지 않았다
+    assert len(rig.logs) == logs
 
 
 # ---- 불 켜짐 확인 -------------------------------------------------------------

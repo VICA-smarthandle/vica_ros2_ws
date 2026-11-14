@@ -33,8 +33,9 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import String
 from tf2_geometry_msgs import do_transform_point
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -54,7 +55,7 @@ from vica_perception.inference_gate import (
     InferenceGate,
     InferenceReason,
 )
-from vica_perception.patrol_profile import is_patrol_state
+from vica_perception.patrol_profile import is_patrol_state, parse_watch_off
 from vica_perception.patrol_wiring import PatrolWiring
 from vica_perception.person_geometry import (
     bbox_center,
@@ -189,6 +190,14 @@ class PersonDetectorNode(Node):
         if load_model is not None and not self._patrol_ok:
             self.get_logger().warning(
                 "RobotState 에 dialog_state 가 없다(옛 vica_interfaces) — 순찰 프로필 꺼짐")
+        # 관리자가 꺼 둔 감시 항목(미션이 경비 시작 때 낸다, 마지막 값 보관). 배선보다 먼저 받아
+        # 두어야 사람 감지를 꺼 둔 첫 순찰에 엔진을 올리지 않는다. 못 받았으면 모두 켬이다.
+        self._patrol_watch_off: frozenset = frozenset()
+        if self._patrol_ok:
+            self.create_subscription(
+                String, "/vica/patrol/watch", self._on_patrol_watch,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Image, "/camera/camera/color/image_raw",
                                  self._on_color, qos_profile_sensor_data)
         self.create_subscription(Image, "/camera/camera/depth/image_rect_raw",
@@ -227,7 +236,19 @@ class PersonDetectorNode(Node):
                     rate_hz=1.0 / self._period_s,
                     state_timeout_s=float(
                         self.get_parameter("robot_state_timeout_s").value))
+                self._patrol.set_watch_off(self._patrol_watch_off)
             self._patrol.on_dialog_state(msg.dialog_state)
+
+    def _on_patrol_watch(self, msg: String) -> None:
+        off = parse_watch_off(msg.data)
+        if off is None:
+            return                      # 못 읽는 알림 — 지금 값을 그대로 둔다
+        if self._patrol is not None:
+            self._patrol.set_watch_off(off)     # 값이 바뀌면 프로필이 한 줄 남긴다
+        elif off != self._patrol_watch_off:
+            self.get_logger().info(
+                "순찰 감시 항목 알림 — 끔: %s" % (", ".join(sorted(off)) or "없음"))
+        self._patrol_watch_off = off
 
     def patrol_shutdown(self) -> None:
         """종료 직전에 부른다. 순찰을 쓴 적이 없으면 아무것도 안 한다."""

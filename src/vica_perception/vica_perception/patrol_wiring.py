@@ -9,7 +9,7 @@
 
     발행        `/vica/patrol/event` (std_msgs/String, JSON)
     노출        `/camera/camera/set_parameters` 비동기 호출
-    순찰 엔진   첫 순찰 때 따로 띄운 스레드에서 한 번 올려 계속 둔다
+    순찰 엔진   사람 감지가 켜진 첫 순찰 때 따로 띄운 스레드에서 한 번 올려 계속 둔다
     1 Hz 점검   status·노출 복구 재시도·상태 끊김
 
 엔진을 내렸다 다시 올리지 않는다. 지팡이 엔진은 건드리지 않고, 순찰 엔진은 순찰이
@@ -160,6 +160,12 @@ class PatrolWiring:
         self._stale_ticks = 0
         self._apply_state(state, now_ns)
 
+    def set_watch_off(self, off) -> None:
+        """`/vica/patrol/watch` — 관리자가 꺼 둔 감시 항목(노드가 받아 넘긴다)."""
+        self._profile.set_watch(off, time.monotonic_ns())
+        self._want_engine()                       # 순찰 중에 사람 감지가 켜졌으면 그때 올린다
+        self._sync()                              # 노출을 되돌리는 중이면 점검 타이머가 필요하다
+
     def on_color(self, msg) -> None:
         """노드가 이미 받는 컬러 프레임. 기존 추론 경로 대신 여기로 온다."""
         now_ns = time.monotonic_ns()
@@ -216,7 +222,7 @@ class PatrolWiring:
                 "진입(%s)" % state if self._profile.active else "이탈"))
             if self._profile.active:
                 self._poll_engine()           # 지난 순찰 때 시작한 올리기의 결과부터 받는다
-                self._ensure_engine()
+                self._want_engine()
         self._sync()
 
     def _sync(self) -> None:
@@ -233,6 +239,11 @@ class PatrolWiring:
             self._timer = None
 
     # ---- 순찰 엔진 -----------------------------------------------------------
+
+    def _want_engine(self) -> None:
+        """사람 감지가 켜진 순찰이면 엔진을 올린다 — 꺼 둔 순찰에는 올리지 않는다."""
+        if self._profile.active and self._profile.needs_engine:
+            self._ensure_engine()
 
     def _ensure_engine(self) -> None:
         """순찰 엔진이 없으면 올린다 — 첫 순찰 때 한 번, 실패했으면 다음 순찰 때 다시."""

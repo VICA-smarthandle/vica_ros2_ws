@@ -17,6 +17,15 @@
 멈춘 상태(`patrol_alarm`·`patrol_light`·`patrol_paused`)에서 쓰는 장면이 없으면 영상을
 풀지도 압축하지도 추론하지도 않는다 — 관리자를 기다리는 시간이 길 수 있다.
 
+관리자가 꺼 둔 감시 항목(`/vica/patrol/watch`, 2026-11-14)은 계산하지 않는다:
+
+    사람 끔            추론 없음(순찰 엔진도 올리지 않는다). `status` 의 ready 는 엔진 없이 true
+    불 켜짐 끔         노출을 건드리지 않는다
+    사람·큰 소리 끔    5 Hz 장면 모으기 없음(불 켜짐 사진 한 장만 그때 압축한다)
+    큰 소리 끔         미션이 낸 경보에 소리 장면을 찍지 않는다
+
+카메라 끊김 감시(`status` 의 camera_ok)는 끌 수 없다.
+
 모델·카메라·디스크·발행은 `PatrolPorts` 로 받는다. 그래서 GPU 없이 시험이 돈다.
 
 시간 계약: 단조 시각은 호출자의 STEADY clock 정수 나노초, 벽시계는 epoch 초.
@@ -24,10 +33,11 @@
 """
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Deque, Dict, Optional, Sequence, Tuple
+from typing import Callable, Deque, Dict, FrozenSet, Iterable, Optional, Sequence, Tuple
 
 from vica_perception.inference_gate import sec_to_ns
 from vica_perception.patrol_media import (
@@ -66,6 +76,10 @@ STATUS_PERIOD_S = 1.0
 
 EVENT_SRC = "detector"
 
+# 관리자가 켜고 끄는 감시 항목 — 미션의 PATROL_WATCH_KINDS 와 같은 이름이다.
+WATCH_LIGHT = "light"
+WATCH_KINDS = (ALARM_INTRUDER, WATCH_LIGHT, ALARM_SOUND)
+
 # ---- 명세에 없는 내부 한도 ----------------------------------------------------
 
 # 노출 요청의 응답을 기다리는 한도. 실측 응답 8~15 ms(2026-11-11).
@@ -85,6 +99,17 @@ PERIOD_SLACK_S = 0.01
 def is_patrol_state(dialog_state: str) -> bool:
     """순찰 프로필로 돌아야 하는 상태인가."""
     return bool(dialog_state) and dialog_state.startswith(PATROL_PREFIX)
+
+
+def parse_watch_off(text: str) -> Optional[FrozenSet[str]]:
+    """`/vica/patrol/watch` 의 JSON(`{"off": ["light"]}`) → 꺼 둔 항목. 못 읽으면 None(지금 값을 그대로 둔다)."""
+    try:
+        off = json.loads(text).get("off")
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not isinstance(off, list):
+        return None
+    return frozenset(kind for kind in WATCH_KINDS if kind in off)
 
 
 # ---- 이벤트 (SPEC 3.1) --------------------------------------------------------
@@ -370,6 +395,10 @@ class PatrolProfile:
         self._light = LightCheck()            # 노출 복구는 프로필 이탈 뒤에도 이어진다
         self._active = False
         self._engine_loaded = False           # 순찰 엔진이 올라왔다(배선이 알린다)
+        # 감시 항목. 미션이 꺼 뒀다고 알린 것만 False — 알림을 못 받았으면 모두 켬이다.
+        self._watch_intruder = True
+        self._watch_light = True
+        self._watch_sound = True
         self._reset()
 
     def _reset(self) -> None:
@@ -415,11 +444,51 @@ class PatrolProfile:
 
     @property
     def engine_ready(self) -> bool:
-        """`status` 의 ready — 순찰 엔진이 올라와 있고 추론이 된다."""
+        """순찰 엔진이 올라와 있고 추론이 된다."""
         return self._engine_loaded and not self._infer_broken
+
+    @property
+    def needs_engine(self) -> bool:
+        """사람 감지가 켜져 있다 — 꺼 두면 순찰 엔진을 올리지 않는다."""
+        return self._watch_intruder
+
+    @property
+    def ready(self) -> bool:
+        """`status` 의 ready — 사람 감지를 꺼 뒀으면 엔진 없이도 준비된 것이다."""
+        return not self._watch_intruder or self.engine_ready
 
     def set_engine_loaded(self, loaded: bool) -> None:
         self._engine_loaded = bool(loaded)
+
+    # ---- 입력: 감시 항목 -----------------------------------------------------
+
+    def set_watch(self, off: Iterable[str], now_ns: int) -> None:
+        """미션이 알린 꺼 둔 감시 항목. 값이 바뀔 때만 일한다(순찰 사이에도 값은 남는다)."""
+        off = frozenset(off)
+        watch = tuple(kind not in off for kind in WATCH_KINDS)
+        if watch == (self._watch_intruder, self._watch_light, self._watch_sound):
+            return
+        light_was_off = not self._watch_light
+        self._watch_intruder, self._watch_light, self._watch_sound = watch
+        self._p.log("info", "순찰 감시 항목 — 끔: %s" % (
+            ", ".join(kind for kind in WATCH_KINDS if kind in off) or "없음"))
+        if not self._watch_intruder:
+            self._judge.rearm()               # 세던 판정 창을 버린다
+            self._intruder_sent_ns = None
+        if not self._watch_light:
+            self._light_due = False
+            self._photo_brightness = None
+            self._light_sent_ns = None
+            self._send(self._light.abort(now_ns), now_ns)   # 확인 중이었으면 자동 노출로
+        elif light_was_off and self._active and self._state == STATE_DWELL:
+            self._light_due = True            # 알림이 상태보다 늦게 왔다 — 이번 dwell 부터 확인한다
+        if not self._keeps_frames and not self._clip.recording:
+            self._clip.clear()                # 모아 둔 5 s 를 버린다
+
+    @property
+    def _keeps_frames(self) -> bool:
+        """5 Hz 장면을 모아 둘 이유가 있다 — 사람·큰 소리 경보의 영상 앞 5 s."""
+        return self._watch_intruder or self._watch_sound
 
     # ---- 입력: 미션 상태 -----------------------------------------------------
 
@@ -445,7 +514,7 @@ class PatrolProfile:
             if self._light_sent_ns is not None:
                 self._light_sent_ns = None    # 불 켜짐 경보가 다른 경보에 묻혔다
                 self._arming.rearm()
-        self._light_due = state == STATE_DWELL
+        self._light_due = state == STATE_DWELL and self._watch_light
         if state == STATE_ALARM:
             self._on_alarm_state(now_ns, wall_s)
         elif state == STATE_LIGHT:
@@ -485,6 +554,8 @@ class PatrolProfile:
         self._intruder_sent_ns = None
         if mine:
             return                            # 내가 낸 사람 경보 — 장면은 이미 쓰는 중
+        if not self._watch_sound:
+            return                            # 큰 소리를 꺼 뒀다 — 남은 것은 카메라 끊김 경보, 기록 없음
         if self._clip.recording:
             self._clip.extend(now_ns)         # 앞 장면이 안 끝났다 — 10 s 더
             return
@@ -506,10 +577,12 @@ class PatrolProfile:
         if self._photo_brightness is not None and not judging:
             self._photo_brightness = None
             self._arming.rearm()              # 그새 미션이 멈췄다 — 다음 확인에서 다시
-        if not judging and not self._clip.recording:
-            return                            # 멈춰 있고 쓰는 장면도 없다 — 영상을 풀지 않는다
-
         photo_due = self._photo_brightness is not None
+        # 장면을 모으는 때: 판정 중이고 사람·큰 소리 중 하나라도 켜져 있거나, 쓰는 장면이 있다.
+        keeping = (judging and self._keeps_frames) or self._clip.recording
+        if not keeping and not photo_due:
+            return                            # 할 일이 없다 — 영상을 풀지 않는다
+
         if (not photo_due and self._proc_ns is not None
                 and now_ns - self._proc_ns < self._period_ns):
             return                            # 5 Hz 로 솎는다
@@ -518,14 +591,17 @@ class PatrolProfile:
         jpeg = self._p.encode_jpeg(img)
         if photo_due:
             self._emit_light(jpeg, wall_s)
+        if not keeping:
+            return                            # 불 켜짐 사진 한 장만 찍었다
 
         best = 0.0
-        if self.engine_ready and (judging or self._clip.follows_person):
+        watching = judging and self._watch_intruder
+        if self.engine_ready and (watching or self._clip.follows_person):
             best = self._infer(img)
             if best >= PERSON_MIN_CONF:
                 self._clip.mark_person(now_ns)
         self._push(Frame(now_ns, wall_s, jpeg, width, height))
-        if judging:
+        if watching:
             verdict = self._judge.observe(now_ns, best)
             if verdict is not None:
                 self._on_intruder(verdict, now_ns, wall_s)
@@ -559,7 +635,7 @@ class PatrolProfile:
         self._send(self._light.tick(now_ns), now_ns)
         if self._active:
             self._p.publish(event_status(
-                wall_s, self.engine_ready, self._camera_ok(now_ns)))
+                wall_s, self.ready, self._camera_ok(now_ns)))
         if self._active and self._state in JUDGE_STATES:
             if self._unanswered(self._intruder_sent_ns, now_ns):
                 self._intruder_sent_ns = None
