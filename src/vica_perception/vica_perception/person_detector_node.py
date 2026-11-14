@@ -13,6 +13,9 @@ Phase A5 골격. 계약은 `vica_interfaces/msg/PersonDetection.msg` 가 정본�
 이 노드는 Isaac ROS 컨테이너 안에서 돈다(추론 위치 결정, 핸드오프 §1.1).
 엔진(.engine)은 만든 기기에만 묶이므로 경로 기본값은 컨테이너 기준이다.
 
+순찰 프로필(2026-11-14): `/vica/robot_state` 의 dialog_state 가 patrol… 인 동안은
+같은 컬러 프레임을 `patrol_wiring` 이 가져가고 아래 경로는 쉰다(`patrol_profile` 참고).
+
 알려진 한계 [미검증]:
     - depth 가 color 에 정렬되지 않았다(run_d455.sh align_depth:=false). color bbox
       를 depth 이미지에 그대로 쓰므로 시차(수 cm)가 남는다. 문제가 되면
@@ -51,6 +54,8 @@ from vica_perception.inference_gate import (
     InferenceGate,
     InferenceReason,
 )
+from vica_perception.patrol_profile import is_patrol_state
+from vica_perception.patrol_wiring import PatrolWiring
 from vica_perception.person_geometry import (
     bbox_center,
     body_depth_median_m,
@@ -99,10 +104,18 @@ def approach_gate_thresholds(get_param) -> GateThresholds:
     )
 
 
+def load_engine(path: str):
+    """엔진을 올리고 한 번 돌려 본다. 기동(지팡이 엔진)과 첫 순찰(순찰 엔진)이 같이 쓴다."""
+    from ultralytics import YOLO
+    model = YOLO(path)
+    model.predict(np.zeros((480, 640, 3), dtype=np.uint8), device=0, verbose=False)
+    return model
+
+
 class PersonDetectorNode(Node):
     """배선만 갖는다 — 판정은 detection_gate, 기하는 person_geometry."""
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, load_model=None) -> None:
         super().__init__("person_detector_node")
         self.declare_parameter("engine_path", DEFAULT_ENGINE)
         self.declare_parameter("conf_threshold", 0.25)
@@ -162,6 +175,20 @@ class PersonDetectorNode(Node):
         # Mission 재시작 사이에 보낸 호출이 그랬다). 2초 지나면 버린 것으로
         # 보고 다시 보낸다.
         self._pending_since_ns: int | None = None
+        # ── 순찰 프로필 (2026-11-14, patrol_profile 참고) ────────────────
+        # 순찰 상태를 처음 볼 때 배선을 만든다. 그 전에는 아래 값뿐이다.
+        self._load_model = load_model
+        self._patrol: PatrolWiring | None = None
+        # True 면 컬러 프레임을 순찰 배선이 가져간다(순찰 프로필인 동안, 그리고
+        # 순찰이 끝난 뒤 쓰던 영상 장면이 끝날 때까지 — 최대 60 s).
+        self._patrol_busy = False
+        # 순찰 엔진을 올릴 수단과 dialog_state 칸이 있어야 순찰 프로필을 쓴다.
+        self._patrol_ok = (
+            load_model is not None
+            and "dialog_state" in RobotState.get_fields_and_field_types())
+        if load_model is not None and not self._patrol_ok:
+            self.get_logger().warning(
+                "RobotState 에 dialog_state 가 없다(옛 vica_interfaces) — 순찰 프로필 꺼짐")
         self.create_subscription(Image, "/camera/camera/color/image_raw",
                                  self._on_color, qos_profile_sensor_data)
         self.create_subscription(Image, "/camera/camera/depth/image_rect_raw",
@@ -191,9 +218,29 @@ class PersonDetectorNode(Node):
         # RobotState 에는 header 가 없다. 신선도는 수신 시각으로 잰다.
         self._infer_gate.observe_state(
             time.monotonic_ns(), msg.is_moving, msg.is_paused)
+        # 순찰 상태이거나 배선이 프레임을 붙잡고 있을 때만 넘긴다.
+        if self._patrol_busy or (
+                self._patrol_ok and is_patrol_state(msg.dialog_state)):
+            if self._patrol is None:
+                self._patrol = PatrolWiring(
+                    self, self._load_model,
+                    rate_hz=1.0 / self._period_s,
+                    state_timeout_s=float(
+                        self.get_parameter("robot_state_timeout_s").value))
+            self._patrol.on_dialog_state(msg.dialog_state)
+
+    def patrol_shutdown(self) -> None:
+        """종료 직전에 부른다. 순찰을 쓴 적이 없으면 아무것도 안 한다."""
+        if self._patrol is not None:
+            self._patrol.shutdown()
 
     # ── 본 처리 ────────────────────────────────────────────────────────────
     def _on_color(self, msg: Image) -> None:
+        if self._patrol_busy:
+            # 순찰 프로필: 추론 게이트·접근 요청·/vica/person_detection 없이
+            # 같은 프레임을 순찰 배선이 쓴다. 아래 기존 경로는 그대로다.
+            self._patrol.on_color(msg)
+            return
         # 5 Hz 솎기보다 **먼저** 본다. 차단 중에는 `_last_infer_mono` 를 건드리지
         # 않으므로, 주행이 끝나면 다음 프레임에서 곧바로 추론이 돌아온다.
         now_ns = time.monotonic_ns()
@@ -360,22 +407,23 @@ class PersonDetectorNode(Node):
 
 def main(args=None) -> None:
     # ultralytics 는 무겁다 — rclpy 초기화 전에, 실패는 일찍 드러낸다.
-    from ultralytics import YOLO
+    from ultralytics import YOLO  # noqa: F401
     rclpy.init(args=args)
     # 파라미터로 engine 경로를 받으려면 노드가 먼저 필요해 닭-달걀이 된다.
     # 골격에서는 기본 경로로 로드하고, 바꾸려면 환경변수로 준다.
     import os
     engine = os.environ.get("VICA_YOLO_ENGINE", DEFAULT_ENGINE)
-    model = YOLO(engine)
-    model.predict(np.zeros((480, 640, 3), dtype=np.uint8), device=0, verbose=False)
-    node = PersonDetectorNode(model)
+    node = PersonDetectorNode(load_engine(engine), load_engine)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.patrol_shutdown()       # 노출이 고정돼 있으면 자동 노출로
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
