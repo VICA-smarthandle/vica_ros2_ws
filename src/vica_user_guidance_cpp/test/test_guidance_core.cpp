@@ -177,6 +177,87 @@ TEST(Priority, EstopArrivalTurnOrder)
   EXPECT_FALSE(is_fresh_ns(2000, 1999, 1000));
 }
 
+// ── 순찰 표시(2026-11-14, 경비 모드 명세 4.D) ──
+
+TEST(Patrol, DialogStateToCode)
+{
+  EXPECT_EQ(patrol_state_code("patrolling"), protocol::STATE_PATROL);
+  EXPECT_EQ(patrol_state_code("patrol_dwell"), protocol::STATE_PATROL);
+  EXPECT_EQ(patrol_state_code("patrol_paused"), protocol::STATE_PATROL);
+  EXPECT_EQ(patrol_state_code("patrol_light"), protocol::STATE_PATROL_LIGHT);
+  EXPECT_EQ(patrol_state_code("patrol_alarm"), protocol::STATE_PATROL_ALARM);
+  EXPECT_EQ(protocol::STATE_PATROL, 8);
+  EXPECT_EQ(protocol::STATE_PATROL_LIGHT, 9);
+  EXPECT_EQ(protocol::STATE_PATROL_ALARM, 10);
+  // 순찰이 아닌 값·닮은 값
+  for (const char * s : {"", "idle", "navigating", "paused", "estopped", "waiting", "Patrolling",
+      " patrol_alarm", "patro"})
+  {
+    EXPECT_EQ(patrol_state_code(s), PATROL_NONE) << s;
+  }
+  // "patrol" 로 시작하는 모르는 값은 순찰(8)로 본다(명세 2절)
+  EXPECT_EQ(patrol_state_code("patrol_alarm2"), protocol::STATE_PATROL);
+}
+
+TEST(Patrol, SitsBetweenEstopAndArrival)
+{
+  const int64_t sec = 1000000000;
+  const int64_t now = 100 * sec;
+  GuidanceInputs in;
+  in.estop_last_ns = now;
+  in.turn_direction = DIRECTION_LEFT;
+  in.turn_last_ns = now;
+  in.arrival_started_ns = now;
+  auto run = [&](bool estop_required = true) {
+      return resolve_state_code(in, now, sec, sec, 4 * sec, estop_required);
+    };
+  EXPECT_EQ(run().state_code, protocol::STATE_ARRIVED);   // 순찰 값이 없으면 기존 판단
+  in.patrol_last_ns = now;
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT,
+      protocol::STATE_PATROL_ALARM})
+  {
+    in.patrol_code = code;
+    in.estop_active = false;
+    EXPECT_EQ(run().state_code, code);              // 도착·회전보다 위
+    EXPECT_TRUE(protocol::is_sendable(run().state_code));
+    in.estop_active = true;
+    EXPECT_EQ(run().state_code, protocol::STATE_ESTOP);   // 비상정지가 위
+  }
+  in.estop_active = false;
+  in.estop_last_ns = std::nullopt;
+  EXPECT_STREQ(run().reason, "estop_stale");        // /estop_state 끊김도 순찰보다 위
+  EXPECT_STREQ(run(false).reason, "patrol_alarm");
+  // 순찰 코드가 아닌 값(0·4·6·7 …)은 버린다
+  in.estop_last_ns = now;
+  for (int code : {0, 1, 3, 4, 5, 6, 7, 11, -1}) {
+    in.patrol_code = code;
+    EXPECT_EQ(run().state_code, protocol::STATE_ARRIVED) << code;
+  }
+}
+
+TEST(Patrol, DroppedWhenRobotStateIsSilentForThreeSeconds)
+{
+  const int64_t sec = 1000000000;
+  const int64_t now = 100 * sec;
+  GuidanceInputs in;
+  in.estop_last_ns = now;
+  in.turn_direction = DIRECTION_RIGHT;
+  in.turn_last_ns = now;
+  in.patrol_code = protocol::STATE_PATROL;
+  auto code = [&]() {return resolve_state_code(in, now, sec, sec, 4 * sec, true).state_code;};
+  EXPECT_EQ(PATROL_STATE_TIMEOUT_NS, 3 * sec);
+  in.patrol_last_ns = now - 3 * sec;               // 딱 3 s 까지는 유지
+  EXPECT_EQ(code(), protocol::STATE_PATROL);
+  in.patrol_last_ns = now - 3 * sec - 1;           // 넘으면 기존 판단(회전)
+  EXPECT_EQ(code(), protocol::STATE_RIGHT);
+  in.patrol_last_ns = std::nullopt;                // 받은 적 없음
+  EXPECT_EQ(code(), protocol::STATE_RIGHT);
+  in.patrol_last_ns = now + 1;                     // 시간 역전은 stale
+  EXPECT_EQ(code(), protocol::STATE_RIGHT);
+  EXPECT_EQ(active_patrol_code(protocol::STATE_PATROL_ALARM, now, now), protocol::STATE_PATROL_ALARM);
+  EXPECT_EQ(active_patrol_code(protocol::STATE_PATROL_ALARM, now - 4 * sec, now), PATROL_NONE);
+}
+
 TEST(Gate, ReportsTransitionOnce)
 {
   RangeTfGate gate(2);
@@ -259,6 +340,31 @@ TEST(SerialLinkRules, RefusesWatchdogAndStateCodesOnRawPath)
   EXPECT_THROW(link.send(protocol::STATE_LINK_LOST, 0), PyError);
   EXPECT_THROW(link.send_raw(protocol::STATE_ESTOP, 0), PyError);
   EXPECT_FALSE(link.send(protocol::STATE_NORMAL, 0));
+  // 순찰 코드 8·9·10 은 send() 로만 나간다. 6·7 은 여전히 못 보낸다(2026-11-14).
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT,
+      protocol::STATE_PATROL_ALARM})
+  {
+    EXPECT_NO_THROW(link.send(code, 0));
+    EXPECT_THROW(link.send_raw(code, 0), PyError);
+  }
+  EXPECT_THROW(link.send(protocol::STATE_CHARGING, 0), PyError);
+  EXPECT_THROW(link.send(protocol::STATE_CHARGED, 0), PyError);
+  EXPECT_THROW(link.send(11, 0), PyError);
+}
+
+TEST_F(PtyTest, PatrolCodesGoOutAsOneByte)
+{
+  SerialLink link(path_, 115200, true, 0.05, 2000000000, open_posix_serial);
+  ASSERT_TRUE(link.connected());
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT,
+      protocol::STATE_PATROL_ALARM})
+  {
+    EXPECT_TRUE(link.send(code, 0));
+    uint8_t got = 0xFF;
+    ASSERT_EQ(::read(master_, &got, 1), 1);
+    EXPECT_EQ(got, code);   // 10 = 0x0A — tty 가 줄바꿈으로 바꾸거나 삼키지 않아야 한다
+    EXPECT_EQ(link.last_state_code(), code);
+  }
 }
 
 TEST(SerialLinkRules, MissingPortIsPortOpenFault)

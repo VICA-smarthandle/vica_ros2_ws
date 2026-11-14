@@ -11,6 +11,7 @@
   start           노드 생성
   T <ns> / R <ns> 정상 시계 / ROS 시계
   turn <d> · estop <0|1> · goal <hex> · haptic <hex>     구독 콜백
+  rstate <hex>    /vica/robot_state 의 dialog_state(순찰 표시, 2026-11-14)
   send · diag · uplink · shutdown                          타이머·종료
   rx <hex>        열린 포트의 수신 버퍼에 바이트를 쌓는다(포트가 없으면 버림)
   tf <frame hex> <0|1|2>   can_transform 결과(2 = TransformException)
@@ -255,6 +256,8 @@ def run(lines):
                 node.cb_estop(SimpleNamespace(data=arg == '1'))
             elif cmd == 'goal':
                 node.cb_goal(SimpleNamespace(data=text(arg)))
+            elif cmd == 'rstate':
+                node.cb_robot_state(SimpleNamespace(dialog_state=text(arg)))
             elif cmd == 'haptic':
                 node.cb_haptic_request(SimpleNamespace(data=text(arg)))
             elif cmd == 'send':

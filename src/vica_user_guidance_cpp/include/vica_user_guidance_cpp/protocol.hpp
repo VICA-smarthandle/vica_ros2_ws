@@ -20,12 +20,18 @@ constexpr int STATE_LINK_LOST = 4;   // 펌웨어 워치독 전용 — ROS 는 �
 constexpr int STATE_ARRIVED = 5;
 constexpr int STATE_CHARGING = 6;    // [TARGET] 펌웨어 미구현
 constexpr int STATE_CHARGED = 7;     // [TARGET] 펌웨어 미구현
+// 순찰 표시(2026-11-14). 6·7 은 충전용 예약 그대로 비워 둔다.
+constexpr int STATE_PATROL = 8;         // 순찰 중 — 연두 상시
+constexpr int STATE_PATROL_LIGHT = 9;   // 불 켜짐 — 연노랑 상시
+constexpr int STATE_PATROL_ALARM = 10;  // 사람·큰 소리·카메라 끊김 — 빨강 300ms 점멸
+constexpr int STATE_CODE_MAX = STATE_PATROL_ALARM;   // 상태코드 범위 0~10 의 끝
 
 // ROS 가 보내도 되는 코드. 4 는 펌웨어 워치독을 무력화하므로, 6·7 은 펌웨어에 없으므로 뺀다.
 constexpr bool is_sendable(int code)
 {
   return code == STATE_NORMAL || code == STATE_LEFT || code == STATE_RIGHT ||
-         code == STATE_ESTOP || code == STATE_ARRIVED;
+         code == STATE_ESTOP || code == STATE_ARRIVED || code == STATE_PATROL ||
+         code == STATE_PATROL_LIGHT || code == STATE_PATROL_ALARM;
 }
 
 // protocol.STATE_NAMES.get(code, "?")
@@ -40,6 +46,9 @@ constexpr const char * state_name(int code)
     case STATE_ARRIVED: return "ARRIVED";
     case STATE_CHARGING: return "CHARGING";
     case STATE_CHARGED: return "CHARGED";
+    case STATE_PATROL: return "PATROL";
+    case STATE_PATROL_LIGHT: return "PATROL_LIGHT";
+    case STATE_PATROL_ALARM: return "PATROL_ALARM";
     default: return "?";
   }
 }
@@ -77,7 +86,7 @@ constexpr uint8_t TOUCH_FRAME_HEADER[2] = {0xAA, 0x56};    // 터치, 5바이트
 constexpr std::size_t TOUCH_FRAME_LEN = 5;
 constexpr uint8_t TOUCH_FLAG_CONTACT = 0x01;
 
-// ── 하향 햅틱 명령. 상태코드(0~7)와 겹치지 않는 별도 바이트 ──
+// ── 하향 햅틱 명령. 상태코드(0~10)와 겹치지 않는 별도 바이트 ──
 constexpr int HAPTIC_CMD_SHORT = 0x10;
 constexpr int HAPTIC_CMD_LONG = 0x11;
 constexpr int HAPTIC_CMD_TICK = 0x12;
