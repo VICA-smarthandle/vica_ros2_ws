@@ -3402,11 +3402,14 @@ class MissionLogic:
         """관리자의 경비 종료(`/vica/mission/patrol_stop`, 순찰 중 앱 취소) → 홈으로 복귀.
         (actions, GateReason).
 
-        2026-11-14 사용자 결정: 순찰을 끝낸 뒤(구간 취소·속도 상한 해제·patrol_stopped) 관리자
-        홈 복귀(on_return_home_request)를 그대로 시작한다 — 관문·상태·행동 트리가 같다. 홈이
-        없거나 그 관문이 거절하면 그 자리에서 쉰다. 결과는 patrol_stop_home_reason 에 남긴다.
-        구간 취소 뒤 곧바로 복귀 goal 이 나가는 순서는 앱 선점·일시정지 뒤 재개와 같다 — 늦은
-        취소가 새 goal 을 건드리지 않게 하는 것은 노드의 주행 번호표(_nav_gen)다.
+        2026-11-14 사용자 결정: 순찰을 끝낸 뒤(속도 상한 해제·patrol_stopped) 관리자 홈 복귀
+        (on_return_home_request)를 그대로 시작한다 — 관문·상태·행동 트리가 같다. 홈이 없거나
+        그 관문이 거절하면 그 자리에서 쉰다. 결과는 patrol_stop_home_reason 에 남긴다.
+
+        복귀 goal 이 이어질 때는 구간 goal 을 따로 취소하지 않는다 — 같은 트리라 Nav2 가 복귀
+        goal 로 선점한다. 2026-11-14 실기 2번: 취소를 먼저 보내고 30 ms 뒤 복귀 goal 을 보내니
+        bt_navigator 가 취소를 처리하면서 방금 받은 복귀 goal 까지 내려(terminate_all) 홈으로
+        한 번도 가지 못했고, 앱에는 '홈 복귀가 취소되었습니다'가 떴다.
         """
         if self.state not in _PATROL_STATES:
             return [], GateReason.NOT_PATROLLING
@@ -3416,6 +3419,8 @@ class MissionLogic:
         self._to_idle()
         went_home, self.patrol_stop_home_reason, home_actions = self.on_return_home_request(
             nav_ready, now)
+        if any(isinstance(a, Navigate) for a in home_actions):
+            actions = [a for a in actions if not isinstance(a, CancelNav)]
         if was_running:
             actions.append(PatrolEvent("patrol_stopped", reason="admin", return_home=went_home))
         actions.extend(home_actions)

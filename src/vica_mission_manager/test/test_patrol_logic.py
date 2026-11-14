@@ -789,15 +789,15 @@ def with_home(logic: MissionLogic) -> MissionLogic:
 
 
 def test_stop_on_the_way_ends_the_patrol_then_returns_home():
-    """관리자가 경비를 종료하면 홈으로 돌아간다(2026-11-14 사용자 결정) — 구간 취소·속도 상한
-    해제·patrol_stopped 뒤에 앱 홈 복귀와 똑같은 행동이 이어진다."""
+    """관리자가 경비를 종료하면 홈으로 돌아간다(2026-11-14 사용자 결정) — 속도 상한 해제·
+    patrol_stopped 뒤에 앱 홈 복귀와 똑같은 행동이 이어진다. 구간 goal 은 따로 취소하지 않는다
+    (복귀 goal 이 선점한다 — 취소를 먼저 보내면 Nav2 가 복귀 goal 까지 내린다, 11-14 실기)."""
     logic = with_home(patrolling())
     actions, reason = logic.on_patrol_stop(3.0)
     assert reason == GateReason.OK and logic.state == State.RETURNING
     assert logic.patrol_stop_home_reason == GateReason.OK and not logic.patrol_active
     assert actions == [
         SetNavSpeedLimit(0.0),
-        CancelNav(None),
         PatrolEvent("patrol_stopped", reason="admin", return_home=True),
         SetNavSpeedLimit(0.0),
         Navigate(HOME),
@@ -805,7 +805,7 @@ def test_stop_on_the_way_ends_the_patrol_then_returns_home():
     # 앱의 /vica/mission/return_home 과 같은 행동·같은 복귀 종류다.
     direct = with_home(new_logic())
     accepted, _, direct_actions = direct.on_return_home_request(True, 3.0)
-    assert accepted and actions[3:] == direct_actions
+    assert accepted and actions[2:] == direct_actions
     assert logic._returning_home is True and direct._returning_home is True
     # 도착하면 쉰다 — 순찰은 다시 돌지 않는다.
     assert logic.on_tick(10.0, NavStatus.RUNNING) == []
@@ -907,7 +907,7 @@ def test_app_cancel_during_patrol_also_returns_home():
     logic = with_home(patrolling())
     actions, reason = logic.on_app_cancel(3.0)
     assert reason == GateReason.OK and logic.state == State.RETURNING
-    assert actions == [SetNavSpeedLimit(0.0), CancelNav(None),
+    assert actions == [SetNavSpeedLimit(0.0),
                        PatrolEvent("patrol_stopped", reason="admin", return_home=True),
                        SetNavSpeedLimit(0.0), Navigate(HOME)]
     assert not says(actions)

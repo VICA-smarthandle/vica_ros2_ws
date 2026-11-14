@@ -600,7 +600,9 @@ def test_stop_service_ends_the_patrol_then_returns_home_like_the_app_button(node
     patrolling(node)
     response = call(node._on_patrol_stop)
     assert (response.accepted, response.message) == (True, "경비를 종료했습니다.")
-    assert node.logic.state == State.RETURNING and node.navigator.canceled == 1
+    # 구간 goal 은 취소하지 않고 복귀 goal 로 선점한다(취소를 먼저 보내면 Nav2 가 복귀 goal 까지 내린다).
+    assert node.logic.state == State.RETURNING and node.navigator.canceled == 0
+    assert node._nav_active is True
     names = event_names(node)
     assert names[-4:] == ["patrol_stopped", "goal_sent", "goal_accepted", "return_home_sent"]
     stopped = goal_events(node)[-4]
@@ -659,19 +661,19 @@ def test_stop_during_an_alarm_silences_it_and_returns_home(node):
     assert node.logic.state == State.RETURNING
 
 
-def test_late_cancel_of_the_leg_does_not_break_the_return_home(node):
-    """구간 취소 직후 복귀 goal 이 나간다. 취소 스레드가 늦게 돌아도(일시정지 뒤 재개·앱 선점과
-    같은 순서) 주행 번호표가 달라 복귀 goal 을 건드리지 않는다 — 복귀가 실패로 끝나지 않는다."""
+def test_stop_on_the_way_sends_no_cancel_so_nav2_cannot_drop_the_home_goal(node):
+    """2026-11-14 실기 2번: 구간 취소 30 ms 뒤 복귀 goal 을 보내자 bt_navigator 가 취소를
+    처리하며 복귀 goal 까지 내렸다(홈으로 못 가고 앱에 '홈 복귀가 취소되었습니다').
+    이동 중 종료는 취소 스레드를 아예 띄우지 않는다 — 복귀 goal 하나만 나간다."""
     node.logic.return_destination = HOME
     patrolling(node)
+    legs = len(node.navigator.goals)
     node.late["queue"] = []
     assert call(node._on_patrol_stop).accepted
     assert node.logic.state == State.RETURNING and node._nav_active is True
-    assert len(node.late["queue"]) == 1                    # 구간 취소가 아직 안 돌았다
-    for target, args in node.late["queue"]:
-        target(*args)                                      # 늦은 취소가 이제 돈다
+    assert node.late["queue"] == []                        # 취소 스레드가 없다
     node.late["queue"] = None
-    assert node.navigator.canceled == 0 and node._nav_active is True
+    assert node.navigator.canceled == 0 and len(node.navigator.goals) == legs + 1
     tick(node, 4.0)
     tick(node, 5.0)
     assert node.logic.state == State.RETURNING
