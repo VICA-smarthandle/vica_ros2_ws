@@ -7,4 +7,5 @@ bool found
 string map_id
 string[] destination_ids
 string[] names                # 같은 순서의 장소 이름. 지워진 장소는 ""
+string[] watch_off            # 꺼 둔 감시 항목(intruder / light / sound). 경로가 없어도(found=false) 채운다
 string message
