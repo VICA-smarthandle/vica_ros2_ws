@@ -144,19 +144,37 @@ def generate_launch_description() -> LaunchDescription:
             # 예고한다(실기 2026-09-11). return_resume_sec 과 값·뜻이 같다 —
             # 근거는 mission_logic.DEST_RETRY_RETURN_SEC 주석.
             DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
-            # 손잡이 터치 × 진동 (2026-09-30). 실기에서 조정할 두 값만 인자로 연다
-            # — 나머지(2초 중 80 %·반복 15 s·포기 180 s)는 노드 기본값이다.
+            # 손잡이 터치 × 진동 (2026-09-30). 실기에서 조정할 값만 인자로 연다
+            # — 나머지(80 %·반복 15 s·포기 180 s)는 노드 기본값이다. 2026-10-21 잡음 창도 연다.
             # grip_release_grace_sec: 이만큼 계속 놓으면 선다. **고쳐 잡기 공백을
             # bag 으로 잰 뒤 확정할 값**(설계 7절 4번) — 실측 전 활성 주행 금지.
-            DeclareLaunchArgument("grip_release_grace_sec", default_value="0.5"),
+            # 2026-10-21 사용자 "놓침을 느끼면 바로 중지" → 0.5 → 0.1. 이 값 앞에 펌웨어 TOUCH_HOLD_MS 200 ms(뗀 뒤
+            # '잡음' 유지)·프레임 ≤50 ms·드라이버 읽기 ≤50 ms 가 있고, 뒤에 미션 판정 주기(tick_hz 5 = 0.2 s)가 있어
+            # 손을 뗀 뒤 주행 취소까지 약 0.35~0.6 s. 0.2 s 보다 짧은 값은 판정 주기에 묶여 "다음 판정"과 같다.
+            # 걸으며 고쳐 잡다 헛정지가 잦으면 다시 올린다.
+            DeclareLaunchArgument("grip_release_grace_sec", default_value="0.1"),
+            # grip_enter_window_sec: 최근 이만큼 중 80 % 를 잡고 있으면 '잡음'으로 본다(잡기 대기·다시 잡기 출발 앞 단계).
+            # 2026-10-21 사용자 "잡음이 인식되면 바로 높낮이 멘트" → 노드 기본 2.0 → 1.0.
+            DeclareLaunchArgument("grip_enter_window_sec", default_value="1.0"),
             # grip_wait_timeout_sec: 손잡이 안내 뒤 이만큼 못 잡으면 비활성으로 온보딩.
             # [시연 2026-10-06] 15.0 → 5.0. 터치 모듈 고장(손 안 대도 "잡음") 중 시연을
             # 위해 진동 안내를 5초만 하고 넘어간다. 모듈을 고치면 15.0 으로 되돌린다.
-            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="5.0"),
+            # 2026-10-20 사용자: 터치를 다시 켜도 5.0 그대로 둔다.
+            # 2026-10-21 5.0 → 10.0: 시계는 힌트 시작부터 도는데 힌트 말이 약 3.3 s 라, 5 s 면 말이 끝난 뒤
+            # 잡을 틈이 1.7 s 뿐이다 — 10-21 07:47 실기에서 잡기를 인식 못 하고 비활성으로 넘어갔다.
+            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="10.0"),
             # grip_assume_held: 켜면 대기 시간이 다 되면 잡은 것으로 넘어가고(확인 진동 +
             # 온보딩), 주행 중 손 놓침 정지를 쓰지 않는다. [시연 2026-10-06] true —
             # 터치 OUT 선을 빼고 시연한다. 모듈을 고치면 false 로 되돌린다.
-            DeclareLaunchArgument("grip_assume_held", default_value="true"),
+            # 2026-10-20 false 로 되돌림(사용자) — 터치센서 장착·연동 뒤. 손 놓침 정지가 다시 걸린다.
+            DeclareLaunchArgument("grip_assume_held", default_value="false"),
+            # grip_release_stop: 주행 중 손 놓침 정지. 2026-10-21 사용자 결정으로 끔 — 터치는 처음 잡기에만 쓴다
+            # (손잡이 터치 칩이 8.4 s 넘게 쥐면 혼자 '놓음'이 됨, 10-21 실측). 켜면 위 grip_release_grace_sec 가 쓰인다.
+            DeclareLaunchArgument("grip_release_stop", default_value="false"),
+            # speaker_gate: 대기 중 주행·종료·취소를 손잡이 + 목소리 판정(되묻기·본인 질문)으로만 받는다
+            # (2026-11-11 설계 speaker-follow). 음성 쪽 VICA_SPK_FOLLOW=on 과 함께 켠다. 기본 꺼짐 = 지금 그대로.
+            DeclareLaunchArgument("speaker_gate", default_value="false"),
+            DeclareLaunchArgument("spk_joined_threshold", default_value="0.50"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
@@ -238,9 +256,25 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("grip_wait_timeout_sec"),
                             value_type=float,
                         ),
+                        "grip_enter_window_sec": ParameterValue(
+                            LaunchConfiguration("grip_enter_window_sec"),
+                            value_type=float,
+                        ),
                         "grip_assume_held": ParameterValue(
                             LaunchConfiguration("grip_assume_held"),
                             value_type=bool,
+                        ),
+                        "grip_release_stop": ParameterValue(
+                            LaunchConfiguration("grip_release_stop"),
+                            value_type=bool,
+                        ),
+                        "speaker_gate": ParameterValue(
+                            LaunchConfiguration("speaker_gate"),
+                            value_type=bool,
+                        ),
+                        "spk_joined_threshold": ParameterValue(
+                            LaunchConfiguration("spk_joined_threshold"),
+                            value_type=float,
                         ),
                         "obstacle_narration": ParameterValue(
                             LaunchConfiguration("obstacle_narration"),

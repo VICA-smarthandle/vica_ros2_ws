@@ -106,7 +106,7 @@ def test_timeout_boundary_is_fresh():
     assert "physical_stale" not in snapshot.active_sources
 
 
-@pytest.mark.parametrize("source", ["app", "voice"])
+@pytest.mark.parametrize("source", ["app", "voice", "tipped"])
 def test_reset_rejects_active_software_source(source):
     latch = EmergencyLatch(
         f1_timeout_ns=TIMEOUT_NS,
@@ -137,6 +137,36 @@ def test_source_reactivation_relatches_after_successful_reset():
     snapshot = latch.evaluate(T0 + sec_to_ns(0.2))
     assert snapshot.latched is True
     assert snapshot.active_sources == ("voice",)
+
+
+def test_tip_over_latches_and_standing_up_only_releases_the_input():
+    # 넘어짐(2026-10-15): 세우면 tipped=false 가 오지만 래치는 그대로다. 관리자가
+    # 세운 뒤 앱에서 reset 해야 풀린다. 세우기 전 reset 은 거부된다.
+    latch = EmergencyLatch(
+        f1_timeout_ns=TIMEOUT_NS,
+        motor_can_timeout_ns=MOTOR_CAN_TIMEOUT_NS,
+    )
+    latch.mark_physical_seen(False, T0)
+    latch.mark_motor_can_seen(True, T0)
+    assert latch.try_reset(T0)[0] is True
+
+    latch.update_source("tipped", True, T0 + sec_to_ns(0.1))
+    latch.mark_physical_seen(False, T0 + sec_to_ns(0.2))
+    latch.mark_motor_can_seen(True, T0 + sec_to_ns(0.2))
+    snapshot = latch.evaluate(T0 + sec_to_ns(0.2))
+    assert snapshot.latched is True
+    assert snapshot.active_sources == ("tipped",)
+    accepted, message = latch.try_reset(T0 + sec_to_ns(0.2))
+    assert accepted is False
+    assert message == "active sources: tipped"
+
+    latch.update_source("tipped", False, T0 + sec_to_ns(0.3))
+    latch.mark_physical_seen(False, T0 + sec_to_ns(0.4))
+    latch.mark_motor_can_seen(True, T0 + sec_to_ns(0.4))
+    snapshot = latch.evaluate(T0 + sec_to_ns(0.4))
+    assert snapshot.latched is True
+    assert snapshot.reset_allowed is True
+    assert latch.try_reset(T0 + sec_to_ns(0.4))[0] is True
 
 
 def test_unknown_software_source_is_rejected():

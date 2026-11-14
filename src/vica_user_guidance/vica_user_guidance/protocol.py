@@ -73,7 +73,7 @@ FIRMWARE_US_CYCLE_MS: int = 420  # 4라운드 × (GAP 5 + WAIT 100). 8채널 프
 # ── 상향 터치 프레임 (아두이노 → 젯슨, 2026-09-04 신설 · 09-05 재도입) ───
 # 정본은 펌웨어 touchPoll()이다. 5바이트: AA 56 seq flags xor (xor 는 seq^flags).
 #
-# 센서(D11)는 **idle HIGH / 터치 LOW** 인 active-low 타입이다(2026-09-05 인수인계
+# 센서(나노 D2, 2026-10-19 모듈 A1 납땜 뒤에도 같음)는 **idle HIGH / 터치 LOW** 인 active-low 타입이다(2026-09-05 인수인계
 # 문서 실측). 펌웨어가 극성과 '터치 중 튐'을 정리해 flags.bit0 = 1 이면 잡음이다.
 # 젯슨은 그 비트만 믿는다.
 #
@@ -110,7 +110,7 @@ FIRMWARE_TOUCH_HOLD_MS: int = 200    # 시간 브리지. LOW 본 뒤 이만큼�
 
 # ── 하향 햅틱 명령 (젯슨 → 아두이노, 2026-09-04 신설) ──────────────────
 # 상태코드(0~7)와 겹치지 않는 별도 바이트다. applyState()를 거치지 않으므로
-# LED·서보는 그대로이고 D10 의 진동모터만 패턴대로 떨린다.
+# LED·서보는 그대로이고 D6(2026-10-16 재배선)의 진동모터만 패턴대로 떨린다.
 #
 # 드라이버 노드(user_guidance_driver_node) 자체는 이 바이트를 스스로 보내지
 # 않는다(SENDABLE_STATE_CODES 에 없다) — 미션 매니저가 /vica/haptic_request 로

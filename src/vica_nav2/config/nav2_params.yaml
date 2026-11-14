@@ -168,6 +168,8 @@ bt_navigator:
       - vica_is_route_path_usable_condition_bt_node
       # VICA 자작. 목적지 경로 끝점 방향을 목적지 방향으로(2026-09-30, run49 409호 교착).
       - vica_align_path_end_to_goal_action_bt_node
+      # VICA 자작. 사용자 안내 트리(guided.xml)만 쓴다 — 목적지 2 m 안 곧은 경로(2026-10-28).
+      - vica_straight_path_to_goal_action_bt_node
       - nav2_initial_pose_received_condition_bt_node
       - nav2_reinitialize_global_localization_service_bt_node
       - nav2_rate_controller_bt_node
@@ -431,7 +433,10 @@ controller_server:
       # linear_accel 0.2·curve_decel 0.42·planned_linear_decel 0.7. 그대로: 출발 1단계 0.25/0.5, 비상 1.25, slow_clearance 0.35.
       # 2026-10-08 run69 뒤 0.7 -> 0.5(사용자 결정, 시연장은 0.5 로 시연). 8884069 의 다섯 값을 0.5 기준으로
       # 함께 되돌림: planned_linear_decel 0.5·linear_accel 0.143·curve_decel 0.3·smoother max_velocity[0] 0.5.
-      desired_linear_vel: 0.5
+      # 2026-10-28 0.5 -> 0.7(사용자 결정, "가감속도 비례해서"). 10-06 8884069 와 같은 다섯 값(0.5 기준 1.4배):
+      # planned_linear_decel 0.7·linear_accel 0.2·curve_decel 0.42·smoother max_velocity[0] 0.7.
+      # 그대로: 출발 1단계 0.25/0.5, 비상 1.25, slow_clearance 0.35. 되돌리기: 1b43f91 의 값(0.5 기준).
+      desired_linear_vel: 0.7
       lookahead_time: 2.5                # RPP 값 — run36 직진 최고
       min_lookahead_dist: 0.6            # run39
       max_lookahead_dist: 1.2            # run36: 레일 노드 1 m 를 건너뛴다
@@ -445,10 +450,10 @@ controller_server:
       # 정지거리 계산(motionCollides·경로 앞 검사)은 max_linear_decel 그대로라 안전 판단은 같다.
       # curve_decel(0.3) 이상이어야 코너 계획 곡선을 따라간다(test_nav2_params_contract).
       # 되돌리기: 이 줄을 지우면 max_linear_decel 과 같아진다.
-      planned_linear_decel: 0.5          # 10-06 0.5(run67 "부드럽다") -> 0.7(최고 0.7) -> 10-08 0.5(최고 0.5 로 복귀): 최고 -> 0 이 1.0 s
+      planned_linear_decel: 0.7          # 10-06 0.5(run67 "부드럽다") -> 0.7(최고 0.7) -> 10-08 0.5(최고 0.5 로 복귀) -> 10-28 0.7(최고 0.7): 최고 -> 0 이 1.0 s
       start_ramp_speed: 0.25             # 요구 8: 절반까지 살짝(0.5 s)
       start_ramp_accel: 0.5
-      linear_accel: 0.143                # 10-01 0.143 -> 0.2(0.7 용), 10-05 -> 0.17(0.6 용), 10-06 -> 0.143(0.5) -> 0.2(0.7) -> 10-08 0.143(0.5 복귀): 0.25 -> 0.5 를 1.75 s. 출발 1단계는 그대로
+      linear_accel: 0.2                  # 10-01 0.143 -> 0.2(0.7 용), 10-05 -> 0.17(0.6 용), 10-06 -> 0.143(0.5) -> 0.2(0.7) -> 10-08 0.143(0.5 복귀) -> 10-28 0.2(0.7): 0.25 -> 0.7 을 2.25 s. 출발 1단계는 그대로
       resync_margin: 0.15                # run48: 0.05 는 모터 지연 0.45 s 에 매번 되감겨 톱니(0 -> 0.25 에 0.85 s)
       min_speed: 0.12                    # RPP regulated_linear_scaling_min_speed
       # 앞 1.5 m 경로를 20 cm 간격 세 점으로 읽은 반경이 이보다 작으면 v = 최고속도 × 반경 / 이 값.
@@ -456,7 +461,7 @@ controller_server:
       # 줄였지만, 실제로 돈 반경은 0.9~1.7 m(조준점이 꺾임을 깎음)였다 — 필요 이상 감속.
       # 사용자 "줄이는 게 심함, 0.6 은 너무 확" -> 0.8. 되돌리기 1.2.
       curve_min_radius: 0.8
-      curve_decel: 0.3                   # 코너 미리 줄이기. 10-01 0.3 -> 0.42(0.7 용), 10-05 -> 0.36(0.6 용), 10-06 -> 0.3(0.5) -> 0.42(0.7) -> 10-08 0.3(0.5 복귀)
+      curve_decel: 0.42                  # 코너 미리 줄이기. 10-01 0.3 -> 0.42(0.7 용), 10-05 -> 0.36(0.6 용), 10-06 -> 0.3(0.5) -> 0.42(0.7) -> 10-08 0.3(0.5 복귀) -> 10-28 0.42(0.7)
       preview_dist: 1.5
       slow_clearance: 0.35               # 직접 잰 거리. 10-01 0.35 -> 0.49 -> 0.35: run53 사람 앞 차체 0.86 m 부터 감속·0.74 m 부터 기어감(사용자 "너무 멀리 섬")
       approach_velocity_scaling_dist: 0.6
@@ -521,18 +526,19 @@ controller_server:
       # 한 번 더 나와야 선다(0.1 s·5 cm). 실제로 내보낼 (v, w) 호 검사는 그대로 바로. 끄기: false.
       new_path_collision_confirm: true
       # 2026-10-07 위치만 도착(position_goal_checker, yaw 3.141 = 사용자 안내)이면 checker 원(0.15)에 닿는 순간
-      # 속도 0·곡률 0 으로 곧게 선다 — 마지막에 끝점을 조준해 꺾지 않는다. 원 경계 속도 약 0.13 m/s(최고 0.5)를
-      # planned_linear_decel 0.5 로 내려 약 0.25 s·2 cm(급정지 아님). 끄기: 0.
+      # 속도 0·곡률 0 으로 곧게 선다 — 마지막에 끝점을 조준해 꺾지 않는다. 원 경계 속도 약 0.17 m/s(최고 0.7)를
+      # planned_linear_decel 0.7 로 내려 약 0.25 s·2 cm(급정지 아님). 끄기: 0.
       position_only_yaw_tol: 3.0
       # 2026-10-10 (b′)(사용자 결정): 위 연장은 남은 경로가 0.3 m 보다 짧아지면 꺼지고, 그때부터 옆 몇 cm 의
       # 끝점을 바로 조준해 회전이 최대까지 붙었다가 도착 정렬이 되돌렸다(run65~67 도착 반대 회전 10~27°,
       # run82 사람 접근 track 69 는 9° 더 튼 뒤 30° 되돌림). 그 마지막 구간에서 끝점이 앞에 있고 옆으로 이 값
       # 안이면 꺾지 않고 곧게 간다 — 끝점을 이 거리로 스치므로 멈춤 반경 0.12 안에 든다(여유 4 cm).
       # 10-06 계산(run65·67 11장면): 반대 회전 0·놓침 0. run82 사람 접근 5건 중 3건(옆 1~5 cm)이 해당.
-      # 옆 0.08 넘는 끝점(run68·run82 track 47)은 예전처럼 조준. 진단: /vcc/state 의 str=1. 끄기: 0.0.
-      # 방향까지 맞추는 도착(사람 접근·홈·대기 장소·배송)에만 걸린다. 위 위치만 도착(안내)의 마지막 꺾임
-      # (run71 6~17°)은 사용자 보류(10-08, "일단 둬보자")라 이 값과 무관하게 예전 그대로다.
-      end_straight_lateral: 0.08
+      # 옆 이 값 넘는 끝점(run68·run82 track 47)은 예전처럼 조준. 진단: /vcc/state 의 str=1. 끄기: 0.0.
+      # 2026-10-21 사용자: 위치만 도착(안내)에도 건다(10-08 보류 풂 — run102 안내 도착 11번 중 7번이 마지막에
+      # 9~37° 꺾임, 끝점 옆 거리는 10번이 0.09 m 안) + 0.08 → 0.10. 상한은 방향까지 맞추는 도착의 멈춤 반경
+      # 0.12(xy 0.15 − arrive_margin 0.03) — 넘으면 원 옆을 스쳐 지나가 되돌아온다(여유 2 cm).
+      end_straight_lateral: 0.10
       pivot_angular_vel: 0.35            # RPP rotate_to_heading_angular_vel
       align_angular_vel: 0.35
       motor_lag: 0.35                    # run41 지연 0.3~0.5 s [추정] — 매 정렬 실측으로 갱신
@@ -1743,7 +1749,12 @@ local_costmap:
       #   나갈 때까지 남는다.
       # - no_readings_timeout 0.0: 초음파가 죽어도 costmap 을 stale 로 만들지
       #   않는다(보조 센서라 fail-open). 단절 진단은 /vica/smart_handle_state.
-      # - clear/mark_threshold 는 기본값. 실기 후 조정한다.
+      # - clear/mark_threshold 는 기본값(0.2/0.8). 단 앞 두 개(front_left·right)의 mark_threshold 는
+      #   2026-10-21 사용자 결정으로 0.95(global 도 같게): 이 층은 확률로 칠하고 지워 빔 가운데는 한 번에
+      #   칠·지우지만 빔 가장자리·1.2 m(phi) 너머는 약하게 쌓이고 약하게 지워진다 — 사람이 앞에 섰다 떠나도
+      #   그 자국이 남아(run102 실측: 초음파 '없음' 뒤 중앙 0.5 s·최대 2.3 s, 라이다엔 아무것도 없는데 차선
+      #   0.4~0.6 m 옮김 5번) 다시 출발할 때 옆으로 꺾었다. 문턱을 올리면 약하게 쌓인 자국은 치명이 안 되고
+      #   빔 가운데의 확실한 물체는 그대로 잡힌다. 되돌리기 0.8.
       range_sensor_front_left:   # 2번 앞 왼쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
@@ -1751,7 +1762,7 @@ local_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True   # 2026-10-09 run77 뒤(사용자 결정): 이전 방식으로 비교(VCC 직접 읽기 끔). 되돌리기 False — 09-24: VCC 직접 읽기, run43 지워지지 않는 표시 정지 9회
@@ -1759,7 +1770,7 @@ local_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
       range_sensor_left_wheel:   # 1번 왼쪽 바퀴 옆
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: False   # 2026-10-09 run79 뒤(사용자 결정): 바퀴 옆 초음파는 드라이버·펌웨어에서 끔(앞 두 개만). 엘리베이터·로봇팔 때 다시
@@ -2159,7 +2170,7 @@ global_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
       range_sensor_front_right:   # 3번 앞 오른쪽
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True
@@ -2167,7 +2178,7 @@ global_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95   # 2026-10-21 0.8 → 0.95(잔상, 위 공통 주석)
 
       obstacle_inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -2847,7 +2858,8 @@ velocity_smoother:
     # [2026-10-05] 0.7 -> 0.6(사용자 결정). FollowPath.desired_linear_vel 0.6 과 한 세트.
     # [2026-10-06] 0.6 -> 0.5(사용자 결정). FollowPath.desired_linear_vel 0.5 와 한 세트.
     # [2026-10-06 run67 뒤] 0.5 -> 0.7(사용자 결정). FollowPath.desired_linear_vel 0.7 과 한 세트.
-    max_velocity: [0.5, 0.0, 0.5]   # 10-08 0.7 -> 0.5(시연 최고 0.5, FollowPath.desired_linear_vel 과 한 세트)
+    # [2026-10-08 run69 뒤] 0.7 -> 0.5(시연 최고 0.5, FollowPath.desired_linear_vel 과 한 세트).
+    max_velocity: [0.7, 0.0, 0.5]   # 10-28 0.5 -> 0.7(사용자 결정, FollowPath.desired_linear_vel 0.7 과 한 세트). 회전 0.5 는 그대로
     # min_velocity 의 셋째 칸은 **반대 방향 회전의 상한**이다. −1.0 으로 두면 왼쪽은
     # 0.5 까지만 돌면서 오른쪽은 1.0 까지 열려 있어 **좌우가 비대칭**이 된다.
     # 지금까지는 컨트롤러가 자체 회전 상한을 갖고 있어 안 드러났다. RPP 는 없다.

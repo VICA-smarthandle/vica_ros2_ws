@@ -12,9 +12,9 @@ from vica_mission_manager.mission_logic import (
     MSG_WAIT_BEACON, MSG_WAIT_CONFIRM, MSG_WAIT_DEFAULT, MSG_WAIT_EXPIRED,
     MSG_WAIT_SPOT_BLOCKED, NAV_TREE_DEFAULT, NAV_TREE_GUIDED, NAV_TREE_WAIT,
     WAIT_BACK_DESTINATION_PREFIX, WAIT_BEACON_INTERVAL_SEC,
-    WAIT_RELEASE_SEC, WAIT_RELEASE_SPEECH_FALLBACK_SEC,
+    WAIT_DEPART_AFTER_SPEECH_SEC, WAIT_RELEASE_SPEECH_FALLBACK_SEC,
     WAIT_SPOT_DESTINATION_PREFIX, door_side_word, josa_eun_neun,
-    Haptic, HAPTIC_PATTERN_WAKE_LOCATE, MSG_WAKE_GREETING,
+    Haptic, HAPTIC_PATTERN_WAKE_LOCATE, MSG_WAKE_GREETING, MSG_WAIT_LOCATE, WakeReply,
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
@@ -64,12 +64,17 @@ def wait_minutes(logic, minutes=10, now=3.0):
     return logic.on_arrival_answer(_intent("wait", wait_minutes=minutes), now)
 
 
+# M2 재생 완료(now + 4.0) 뒤 WAIT_DEPART_AFTER_SPEECH_SEC 지나 출발하는 시각 — now=3.0 이면 9.1.
+DEPART = 4.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1
+
+
 def released(logic, now=3.0, minutes=10):
-    """대기 확정 → M2 재생 완료 → (센서 없음) 대기 장소로 출발."""
+    """대기 확정 → M2 재생 완료 → 2초 뒤 대기 장소로 출발(2026-10-21 터치 안 봄)."""
     acts = wait_minutes(logic, minutes, now)
     text = _say(acts)[0]
     logic.on_wait_speech_spoken(text, now + 4.0)
-    move = logic.on_tick(now + 4.1, NavStatus.NONE)
+    assert logic.on_tick(now + 4.1, NavStatus.NONE) == []      # M2 바로 뒤엔 아직 안 떠난다
+    move = logic.on_tick(now + DEPART, NavStatus.NONE)
     assert logic.state == State.MOVING_TO_WAIT_SPOT
     return move
 
@@ -155,7 +160,7 @@ class TestWaitSpotFlow:
         assert logic.on_tick(5.0, NavStatus.NONE) == []
         assert logic.state == State.WAITING_RELEASE
 
-    def test_leaves_right_after_m2_without_sensor(self):
+    def test_leaves_shortly_after_m2(self):
         logic, _ = arrive()
         move = released(logic)
         nav = _navs(move)[0]
@@ -168,40 +173,43 @@ class TestWaitSpotFlow:
         logic, _ = arrive()
         wait_minutes(logic, 10, 3.0)
         logic.on_tick(3.0 + WAIT_RELEASE_SPEECH_FALLBACK_SEC + 0.1, NavStatus.NONE)
+        assert logic.state == State.WAITING_RELEASE                # 보험 시각 뒤에도 출발 지연만큼은 기다린다
+        logic.on_tick(3.0 + WAIT_RELEASE_SPEECH_FALLBACK_SEC + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1,
+                      NavStatus.NONE)
         assert logic.state == State.MOVING_TO_WAIT_SPOT
 
-    def test_waits_for_hand_release_when_sensor_alive(self):
+    def test_ignores_touch_sensor_and_leaves_shortly_after_m2(self):
+        """2026-10-21: 터치를 보지 않는다 — 센서가 계속 '잡음'이어도 M2 뒤 WAIT_DEPART_AFTER_SPEECH_SEC(1초)면
+        떠난다(10-21 레일테스트2 사회복지에서 센서 헛접촉으로 8분 넘게 못 떠난 것)."""
         logic, _ = arrive()
         acts = wait_minutes(logic, 10, 3.0)
         logic.on_handle_state(True, True, 3.0)
         logic.on_wait_speech_spoken(_say(acts)[0], 7.0)
-        logic.on_handle_state(True, True, 7.5)
-        assert logic.on_tick(7.6, NavStatus.NONE) == []          # 아직 잡고 있다
-        logic.on_handle_state(False, True, 8.0)                  # 손을 뗐다
-        for t in (9.0, 10.0, 11.0, 12.0):
-            logic.on_handle_state(False, True, t)
-            assert logic.on_tick(t, NavStatus.NONE) == []         # 5초가 안 됐다
-        logic.on_handle_state(False, True, 13.05)
-        logic.on_tick(13.05, NavStatus.NONE)
+        before = 7.0 + WAIT_DEPART_AFTER_SPEECH_SEC - 0.1
+        after = 7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.05
+        logic.on_handle_state(True, True, before - 0.4)          # 잡고 있다(또는 헛접촉)
+        assert logic.on_tick(before, NavStatus.NONE) == []        # 아직 출발 지연 전
+        assert logic.state == State.WAITING_RELEASE
+        logic.on_handle_state(True, True, after)
+        logic.on_tick(after, NavStatus.NONE)
         assert logic.state == State.MOVING_TO_WAIT_SPOT
-        assert WAIT_RELEASE_SEC == 5.0
+        assert WAIT_DEPART_AFTER_SPEECH_SEC == 1.0
 
-    def test_demo_switch_leaves_right_after_m2(self):
+    def test_demo_switch_same_delay(self):
         logic, _ = arrive(grip_assume_held=True)
         acts = wait_minutes(logic, 10, 3.0)
-        logic.on_handle_state(True, True, 3.0)                   # 센서가 '잡음'이어도
         logic.on_wait_speech_spoken(_say(acts)[0], 7.0)
-        logic.on_handle_state(True, True, 7.0)
-        logic.on_tick(7.1, NavStatus.NONE)
+        assert logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC - 0.1, NavStatus.NONE) == []
+        logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)
         assert logic.state == State.MOVING_TO_WAIT_SPOT
 
     def test_arrives_then_beacons_every_10s(self):
         logic, _ = arrive()
-        released(logic, now=3.0)                                 # 7.1 초에 출발
-        assert logic.on_tick(8.0, NavStatus.SUCCEEDED) == []
+        released(logic, now=3.0)                                 # 3.0 + DEPART 초에 출발
+        assert logic.on_tick(10.0, NavStatus.SUCCEEDED) == []
         assert logic.state == State.WAITING
         assert logic.wait_place == "입구 오른쪽"
-        first = 7.1 + WAIT_BEACON_INTERVAL_SEC
+        first = 3.0 + DEPART + WAIT_BEACON_INTERVAL_SEC
         assert logic.on_tick(first - 0.1, NavStatus.NONE) == []
         assert _say(logic.on_tick(first, NavStatus.NONE)) == [MSG_WAIT_BEACON]
         assert logic.on_tick(first + 5.0, NavStatus.NONE) == []
@@ -212,11 +220,11 @@ class TestWaitSpotFlow:
     def test_beacon_skipped_while_talking(self):
         logic, _ = arrive()
         released(logic, now=3.0)
-        logic.on_tick(8.0, NavStatus.SUCCEEDED)
-        logic.on_listen_state("speech", 16.0)
-        assert logic.on_tick(17.2, NavStatus.NONE) == []         # 대화 중엔 건너뜀
-        logic.on_listen_state("empty", 18.0)
-        assert _say(logic.on_tick(27.2, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+        logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        logic.on_listen_state("speech", 18.0)
+        assert logic.on_tick(19.2, NavStatus.NONE) == []         # 대화 중엔 건너뜀
+        logic.on_listen_state("empty", 20.0)
+        assert _say(logic.on_tick(29.2, NavStatus.NONE)) == [MSG_WAIT_BEACON]
 
     def test_blocked_says_m6_and_goes_back(self):
         logic, _ = arrive()
@@ -272,7 +280,7 @@ class TestTalkingWhileWaiting:
     def _waiting(self):
         logic, _ = arrive()
         released(logic, now=3.0)
-        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        logic.on_tick(10.0, NavStatus.SUCCEEDED)
         return logic
 
     # ---- 대기 중 "비카야" → 손잡이 위치 진동 (2026-10-09 사용자) ----------------------
@@ -292,20 +300,56 @@ class TestTalkingWhileWaiting:
         assert logic.state == State.WAITING
         assert logic.wait_left_sec(20.0) == left
 
-    def test_wake_call_while_waiting_answers_and_vibrates_once(self):
-        """일반 호출(on_wake_call)은 "네?"와 진동 한 번. 창 안에서 건진 호출은 노드가
-        on_wake 만 부르므로 위 시험이 그 길이다 — 어느 길이든 호출 한 번에 한 번 떤다."""
+    def test_first_wake_call_while_waiting_only_tells_where(self):
+        """대기 중 첫 호출(2026-10-21 사용자): 듣기 창 없이 진동 + "비카가 여기 있어요"로 자리만 알린다."""
         logic = self._waiting()
         acts = logic.on_wake_call(20.0)
-        assert _say(acts) == [MSG_WAKE_GREETING]
+        assert MSG_WAIT_LOCATE == "비카가 여기 있어요"
+        assert _say(acts) == [MSG_WAIT_LOCATE]
         assert self._haptics(acts) == ["locate"]
+        assert [a for a in acts if isinstance(a, WakeReply)] == [WakeReply(listen=False)]
         assert logic.state == State.WAITING
 
-    def test_every_wake_while_waiting_vibrates_again(self):
+    def test_first_wake_call_restarts_beacon_count(self):
+        """첫 호출 뒤 M3 가 곧바로 겹치지 않게(2026-10-22 사용자) — M3 박자를 그 호출 시각부터 다시 10초로 센다."""
         logic = self._waiting()
-        assert self._haptics(logic.on_wake_call(20.0)) == ["locate"]
-        assert self._haptics(logic.on_wake_call(40.0)) == ["locate"]
+        first = 3.0 + DEPART + WAIT_BEACON_INTERVAL_SEC          # 출발 시각부터 10초 박자
+        assert _say(logic.on_tick(first, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+        call = first + 7.9                                       # 다음 박자 2.1초 전에 부른다
+        logic.on_wake_call(call)
+        logic.on_listen_state("open", call)                      # 음성 쪽이 연 호출 창 — ignore 로 곧 닫힌다
+        logic.on_listen_state("empty:wake-ignored", call + 0.3)
+        assert logic.on_tick(first + WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE) == []   # 옛 박자는 버린다
+        assert logic.on_tick(call + WAIT_BEACON_INTERVAL_SEC - 0.1, NavStatus.NONE) == []
+        assert _say(logic.on_tick(call + WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+        assert _say(logic.on_tick(call + 2 * WAIT_BEACON_INTERVAL_SEC, NavStatus.NONE)) == [MSG_WAIT_BEACON]
+
+    def test_first_wake_call_keeps_quiet_wait_quiet(self):
+        """대기 장소가 없는 대기(M3 없음)는 첫 호출 뒤에도 M3 가 없다."""
+        logic, _ = arrive(_dest(wait_spot=None))
+        wait_minutes(logic, 10, 3.0)
         assert logic.state == State.WAITING
+        assert _say(logic.on_wake_call(20.0)) == [MSG_WAIT_LOCATE]
+        assert logic.on_tick(100.0, NavStatus.NONE) == []
+
+    def test_later_wake_calls_listen_without_vibration(self):
+        """두 번째 호출부터는 그 대기가 끝날 때까지 "네?"로 듣고 진동은 없다 — 진동이 터치 신호를 흔든다."""
+        logic = self._waiting()
+        logic.on_wake_call(20.0)
+        for t in (40.0, 60.0):
+            acts = logic.on_wake_call(t)
+            assert _say(acts) == [MSG_WAKE_GREETING]
+            assert self._haptics(acts) == []
+            assert [a for a in acts if isinstance(a, WakeReply)] == [WakeReply(listen=True)]
+        assert logic.state == State.WAITING
+
+    def test_a_new_wait_tells_where_again(self):
+        """새 대기가 시작되면(다음 목적지의 대기) 첫 호출은 다시 자리 알림이다."""
+        logic = self._waiting()
+        logic.on_wake_call(20.0)
+        logic._enter_waiting(5, 30.0)
+        logic.state = State.WAITING
+        assert _say(logic.on_wake_call(40.0)) == [MSG_WAIT_LOCATE]
 
     def test_no_vibration_outside_waiting(self):
         # 손 놓기 기다림 — 사용자가 아직 손잡이 곁이라 떨지 않는다.
@@ -370,7 +414,7 @@ class TestWaitExpired:
     def test_expiry_says_m7_alerts_app_and_goes_home(self):
         logic, _ = arrive()
         released(logic, now=3.0, minutes=1)
-        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        logic.on_tick(10.0, NavStatus.SUCCEEDED)
         acts = logic.on_tick(3.0 + 61.0, NavStatus.NONE)
         assert _say(acts)[0] == MSG_WAIT_EXPIRED
         assert _events(acts) == ["wait_expired"]
@@ -384,7 +428,7 @@ class TestWaitExpired:
     def test_expiry_waits_for_conversation(self):
         logic, _ = arrive()
         released(logic, now=3.0, minutes=1)
-        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        logic.on_tick(10.0, NavStatus.SUCCEEDED)
         logic.on_listen_state("speech", 60.0)
         assert MSG_WAIT_EXPIRED not in _say(logic.on_tick(64.0, NavStatus.NONE))
         assert logic.state == State.WAITING
@@ -456,11 +500,11 @@ class TestAppDestinationYaw:
 def test_estop_while_moving_cancels_and_clears_hold():
     logic, _ = arrive()
     released(logic)
-    acts = logic.on_estop(True, 9.0)
+    acts = logic.on_estop(True, 11.0)
     assert any(isinstance(a, CancelNav) for a in acts)
     assert logic.state == State.ESTOPPED
-    logic.on_estop(False, 10.0)
-    logic.on_tick(12.0, NavStatus.NONE)
+    logic.on_estop(False, 12.0)
+    logic.on_tick(14.0, NavStatus.NONE)
     assert logic.state == State.IDLE
     assert logic.wait_place == ""
 
@@ -475,21 +519,24 @@ class TestReviewFixes:
         acts = wait_minutes(logic, 10, 3.0)
         logic.on_listen_state("speech", 4.0)
         logic.on_wait_speech_spoken(_say(acts)[0], 7.0)
-        assert _navs(logic.on_tick(7.1, NavStatus.NONE)) == []
+        assert _navs(logic.on_tick(9.1, NavStatus.NONE)) == []     # 2초가 지났어도 대화 중이라 안 떠난다
         assert logic.state == State.WAITING_RELEASE
-        logic.on_listen_state("empty", 8.0)
+        logic.on_listen_state("empty", 9.5)
         assert _navs(logic.on_tick(30.0, NavStatus.NONE))
         assert logic.state == State.MOVING_TO_WAIT_SPOT
 
     def test_release_state_still_expires(self):
-        # 손을 끝내 놓지 않아도(센서가 계속 '잡힘') 대기 시간이 끝나면 M7 + 앱 알림 + 홈.
+        # 손을 끝내 놓지 않아도(센서가 계속 '잡힘') M2 뒤 2초면 대기 장소로 가고(2026-10-21 — 예전엔
+        # 대기 시간이 끝날 때까지 그 자리에 있었다), 대기 시간이 끝나면 M7 + 앱 알림 + 홈.
         logic, _ = arrive()
         acts = wait_minutes(logic, 1, 3.0)
         logic.on_handle_state(True, True, 3.0)
         logic.on_wait_speech_spoken(_say(acts)[0], 7.0)
-        for t in (10.0, 30.0, 60.0):
-            logic.on_handle_state(True, True, t)
-            assert logic.on_tick(t, NavStatus.NONE) == []
+        logic.on_handle_state(True, True, 9.1)
+        logic.on_tick(9.1, NavStatus.NONE)
+        assert logic.state == State.MOVING_TO_WAIT_SPOT
+        logic.on_tick(40.0, NavStatus.SUCCEEDED)                  # 대기 장소 도착
+        assert logic.state == State.WAITING
         logic.on_handle_state(True, True, 64.0)
         acts = logic.on_tick(64.0, NavStatus.NONE)
         assert MSG_WAIT_EXPIRED in _say(acts)

@@ -13,6 +13,7 @@ from vica_mission_manager.mission_logic import (
     HANDLE_LOST_REPEAT_SEC,
     MSG_APPROACH_ONBOARDING,
     MSG_CANCELED,
+    MSG_HANDLE_HEIGHT,
     MSG_HANDLE_HINT,
     MSG_HANDLE_LOST,
     MSG_HANDLE_UNAVAILABLE,
@@ -114,11 +115,22 @@ class TestGripWait:
         sensor_online(logic, 0.0, 2.0)
         accept(logic, 2.0)
         actions = run(logic, 2.0, 4.5, contact=True)
-        assert "tick" in haptics(actions)
-        assert says(actions) == [MSG_APPROACH_ONBOARDING]
+        # 잡음 확인 진동은 뺐다(2026-10-21 사용자) — 높이 안내·온보딩으로 넘어간 것으로 본다.
+        assert "tick" not in haptics(actions)
+        assert says(actions) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert logic.dialog_state == "idle"
         # 잡음 확인은 2.0 s 를 채운 뒤다 — 대기 시작 전 접촉은 세지 않는다.
         assert logic._handle_engaged
+
+    def test_handle_height_is_told_after_the_grip_ack(self):
+        """손잡이 높이 안내(2026-10-20 사용자 문구)는 잡음 확인 뒤·온보딩 앞에 한 번. 듣기 창은 온보딩만 연다."""
+        logic = MissionLogic(wake_doa_sign=1.0)
+        sensor_online(logic, 0.0, 2.0)
+        accept(logic, 2.0)
+        spoken = [a for a in run(logic, 2.0, 4.5, contact=True) if isinstance(a, Say)]
+        assert [s.text for s in spoken] == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
+        assert [s.expects_reply for s in spoken] == [False, True]
+        assert MSG_HANDLE_HEIGHT == "검지손가락으로 스위치를 위아래로 움직이시면 스마트핸들 높이를 조절하실 수 있습니다."
 
     def test_grip_before_the_wait_does_not_count(self):
         """회전 중·대기 시작 전부터 쥐고 있어도 시작 뒤 2초는 지켜본다."""
@@ -126,9 +138,9 @@ class TestGripWait:
         run(logic, 0.0, 2.0, contact=True)
         accept(logic, 2.0)
         early = run(logic, 2.0, 3.5, contact=True)
-        assert "tick" not in haptics(early)
+        assert MSG_HANDLE_HEIGHT not in says(early)
         late = run(logic, 3.5, 4.5, contact=True)
-        assert "tick" in haptics(late)
+        assert MSG_HANDLE_HEIGHT in says(late)
 
     def test_chattering_grip_at_80_percent_passes(self):
         logic = MissionLogic(wake_doa_sign=1.0)
@@ -141,7 +153,8 @@ class TestGripWait:
             out.extend(logic.on_tick(t, NavStatus.NONE))
             t = round(t + STEP, 6)
         out.extend(run(logic, t, t + 0.5, contact=True))
-        assert "tick" in haptics(out)
+        assert MSG_HANDLE_HEIGHT in says(out)
+        assert logic._handle_engaged
 
     def test_half_grip_does_not_pass(self):
         logic = MissionLogic(wake_doa_sign=1.0)
@@ -153,7 +166,7 @@ class TestGripWait:
             logic.on_handle_state(i % 2 == 0, True, t)
             out.extend(logic.on_tick(t, NavStatus.NONE))
             t = round(t + STEP, 6)
-        assert "tick" not in haptics(out)
+        assert MSG_HANDLE_HEIGHT not in says(out)
         assert logic.dialog_state == DIALOG_GRIP_WAIT
 
     def test_vibration_repeats_every_two_seconds(self):
@@ -168,7 +181,7 @@ class TestGripWait:
         sensor_online(logic, 0.0, 2.0)
         accept(logic, 2.0)
         out = run(logic, 2.0, 2.0 + GRIP_WAIT_TIMEOUT_SEC + 0.2, contact=False)
-        assert says(out) == [MSG_APPROACH_ONBOARDING]
+        assert says(out) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert "tick" not in haptics(out)
         assert not logic._handle_engaged
         assert logic.dialog_state == "idle"
@@ -177,7 +190,7 @@ class TestGripWait:
         """touch_enabled false·드라이버 없음: 기다릴 수단이 없다 — 09-11 흐름."""
         logic = MissionLogic(wake_doa_sign=1.0)
         actions = accept(logic, 2.0)
-        assert says(actions) == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert says(actions) == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert haptics(actions) == ["long"]
         assert logic.dialog_state == "idle"
 
@@ -187,7 +200,7 @@ class TestGripWait:
         accept(logic, 2.0)
         run(logic, 2.0, 2.5, contact=False)
         out = run(logic, 2.5, 4.0, contact=None)       # 메시지 끊김
-        assert says(out) == [MSG_APPROACH_ONBOARDING]
+        assert says(out) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert not logic._handle_engaged
 
     def test_destination_spoken_before_grip_ends_the_wait(self):
@@ -276,6 +289,29 @@ def active_nav():
     depart(logic, 5.0)
     run(logic, 5.0, 6.0, contact=True, nav=NavStatus.RUNNING)
     return logic
+
+
+class TestReleaseStopOff:
+    """2026-10-21 사용자: 터치는 처음 잡기에만 쓴다(grip_release_stop=False, 노드·launch 기본).
+    손잡이 터치 칩이 8.4 s 넘게 쥐면 혼자 '놓음'이 되어(10-21 실측) 주행 중 놓침 정지를 쓸 수 없다."""
+
+    def test_grip_wait_still_uses_touch(self):
+        logic = engaged_logic(grip_release_stop=False)       # 잡기 대기는 그대로 터치로 통과
+        assert logic._handle_engaged
+
+    def test_engaged_user_departs_inactive(self):
+        logic = engaged_logic(grip_release_stop=False)
+        depart(logic, 5.0)
+        assert not logic.handle_active
+
+    def test_release_while_driving_keeps_going(self):
+        logic = engaged_logic(grip_release_stop=False)
+        depart(logic, 5.0)
+        run(logic, 5.0, 6.0, contact=True, nav=NavStatus.RUNNING)
+        out = run(logic, 6.0, 9.0, contact=False, nav=NavStatus.RUNNING)
+        assert logic.state == State.NAVIGATING
+        assert MSG_HANDLE_LOST not in says(out)
+        assert not any(isinstance(a, CancelNav) for a in out)
 
 
 class TestHandleRelease:
@@ -486,9 +522,9 @@ class TestDemoAssumeHeld:
         assert haptics(first) == ["long"]
         assert says(first) == [MSG_HANDLE_HINT]
         out = run(logic, 2.0, 7.2, contact=False)
-        # 2초마다 반복(4, 6 s) 뒤 5초가 차는 7 s 에 확인 진동과 온보딩.
-        assert haptics(out) == ["long", "long", "tick"]
-        assert says(out) == [MSG_APPROACH_ONBOARDING]
+        # 2초마다 반복(4, 6 s) 뒤 5초가 차는 7 s 에 온보딩(확인 진동은 2026-10-21 뺐다).
+        assert haptics(out) == ["long", "long"]
+        assert says(out) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert logic._handle_engaged
         assert logic.dialog_state == "idle"
 
@@ -515,7 +551,7 @@ class TestDemoAssumeHeld:
         sensor_online(logic, 0.0, 2.0)
         accept(logic, 2.0)
         out = run(logic, 2.0, 7.2, contact=False)
-        assert says(out) == [MSG_APPROACH_ONBOARDING]
+        assert says(out) == [MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert "tick" not in haptics(out)
         assert not logic._handle_engaged
 

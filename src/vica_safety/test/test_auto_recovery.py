@@ -80,6 +80,27 @@ def test_voice_estop_blocks_recovery():
     assert p.should_recover(T0 + sec_to_ns(5.0)) is False
 
 
+def test_tip_over_blocks_recovery_even_after_standing_up():
+    # 넘어짐(2026-10-15)은 관리자가 와서 세워야 끝난다. 세웠다고 스스로 풀리면 안 된다.
+    p = policy()
+    p.observe_sources(("tipped",), T0)
+    p.observe_sources((), T0 + sec_to_ns(0.1))
+
+    assert p.should_recover(T0 + sec_to_ns(5.0)) is False
+
+
+def test_tip_over_mixed_with_comm_cause_blocks_recovery():
+    # 통신이 끊겨 서 있던 로봇이 넘어졌다. 세운 순간 원인이 모두 사라져도
+    # 관리자 없이 풀리면 안 된다 — tipped 가 HUMAN_SOURCES 에 있어야 하는 이유.
+    p = policy()
+    p.observe_sources(("motor_can_stale",), T0)
+    p.observe_sources(("motor_can_stale", "tipped"), T0 + sec_to_ns(0.5))
+    p.observe_sources(("tipped",), T0 + sec_to_ns(1.0))
+    p.observe_sources((), T0 + sec_to_ns(2.0))
+
+    assert p.should_recover(T0 + sec_to_ns(10.0)) is False
+
+
 def test_comm_cause_mixed_with_button_blocks_recovery():
     # 통신 원인과 사람 개입이 섞이면 사람 쪽이 이긴다.
     p = policy()

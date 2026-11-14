@@ -49,6 +49,15 @@
 <xacro:property name="laser_x" value="0.185" />
 <xacro:property name="laser_y" value="0.0" />
 <xacro:property name="laser_z" value="0.192" />
+<!-- 라이다 yaw (2026-11-01 실측). 스캔 0° 방향이 차체 정면보다 1.98° 오른쪽(시계 방향)이다.
+       방법 2 (진행 방향 기준, 이 값): teleop 명령 w=0 맨바닥 전진 2·후진 2 (4.3~5.3 m) 진행각
+         +2.04/+1.96/+1.99/+1.94° → yaw −1.98 ± 0.02°, 미끄럼 +0.02° (bag 1101_160605_laser_yaw_drive)
+       방법 1 (차체 오른쪽 옆판 기준): 벽 평행 정지 스캔 +1.45°, 줄자 정렬 보정(a 28.6·b 28.3·L 29.2 cm)
+         +0.59° → −2.04 ± 0.2° (bag 1101_154441_laser_yaw_wall). 두 값 일치 = 라이다가 차체에 비틀림,
+         구동축은 차체와 맞다.
+     0 이던 동안 직진 중 AMCL 이 모든 주행·양방향에서 로봇을 왼쪽으로 1~4 cm/m 씩 고쳤다.
+     재는 법·계산: scripts/drive_diag/laser_yaw.py (루트 저장소). 라이다를 다시 달면 다시 잰다. -->
+<xacro:property name="laser_yaw" value="-0.0346" />
 <!-- 초음파 DYP-A22 x2 (2026-08-31): 앞범퍼 중앙에서 좌우 107mm, 지면 91.3mm,
      수평 장착(틸트 불가 확정). docs/handoff_jetson_ultrasonic_i2c.md §6.6.
      frame 이름은 드라이버 ultrasonic_frame_ids 와 일치해야 한다.
@@ -85,8 +94,12 @@
      2026-08-30 재고정: 지면 1.045 m (줄자 실측, 사용자 확정).
      camera_z = 1.045 - base_link 0.190 = 0.855. 카메라를 탈착 후 재장착하면서
      2.0 cm 올라갔다. **탈부착할 때마다 높이와 기울기를 함께 재는 것을 절차로
-     삼는다** - 아래 camera_pitch 주석의 도구가 둘을 같이 출력한다. -->
-<xacro:property name="camera_z" value="0.855" />
+     삼는다** - 아래 camera_pitch 주석의 도구가 둘을 같이 출력한다.
+     2026-10-24 재측정: 지면 0.978 m (scripts/vica_camera_pitch.py 6장 x 4회, 평면 두께 8 mm,
+     줄자 0.98 m 와 일치). URDF 1.045 보다 6.7 cm 낮아 깊이 띠가 실제로는 0.233~0.983 m 였다.
+     camera_z = 0.978 - base_link 0.190 = 0.788. 같은 측정의 기울기 잔여 +0.22 도는 0.5 도 안이라
+     camera_pitch 는 그대로 둔다. -->
+<xacro:property name="camera_z" value="0.788" />
 <!-- 2026-08-29 저녁 실측: 마스트가 위로 3.0도 들려 있다(pitch 음수).
      재는 법 - 깊이 포인트클라우드에서 바닥 평면을 RANSAC 으로 찾아
      그 법선의 앞뒤 성분을 읽었다(평면 두께 9 mm, 점 9,000개).
@@ -365,7 +378,7 @@
 
 <!-- Sensor positions are expressed relative to the body-centered base_link. -->
 <joint name="laser_joint" type="fixed">
-  <origin xyz="${laser_x - axle_offset_x} ${laser_y} ${laser_z}" rpy="0 0 0"/>
+  <origin xyz="${laser_x - axle_offset_x} ${laser_y} ${laser_z}" rpy="0 0 ${laser_yaw}"/>
   <parent link="base_link"/>
   <child link="laser_frame"/>
 </joint>

@@ -452,7 +452,7 @@ class UserGuidanceDriverNode(Node):
     def _setup_touch(self) -> None:
         self.touch_acc = TouchFrameAccumulator()
         self.get_logger().info(
-            "Touch sensor uplink enabled (D11, active-low, firmware 200ms bridge)"
+            "Touch sensor uplink enabled (D2, active-low, firmware 200ms bridge)"
         )
 
     def _uplink_fresh(self, now_ns: int) -> bool:

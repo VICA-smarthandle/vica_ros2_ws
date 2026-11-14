@@ -10,7 +10,7 @@ mission_logic.py(순수 함수/상태 머신)에 있고, 이 파일은 ROS 배�
 - 모터 정지의 권위는 vica_safety의 /emergency_stop 중앙 래치 체인.
   여기서의 goal 취소는 심층 방어 보조 경로.
 
-구독: /vica/intent, /vica/emergency(전용 callback group), /emergency_stop
+구독: /vica/intent, /vica/emergency·/vica/tipped·/app_estop_state·/emergency_stop(전용 callback group)
 
 `/emergency_stop`은 emergency_stop_node가 물리·앱·음성을 중앙 래치한 권위 상태다.
 입력 펄스가 끝나도 명시적 reset 전까지 true를 유지한다.
@@ -60,7 +60,8 @@ from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
-from .ledger import Ledger, LedgerStore, apply_goal_event, confirm_abort_name, state_fields
+from .ledger import (Ledger, LedgerStore, apply_goal_event, confirm_abort_name, place_here,
+                     state_fields)
 from .map_meta import load_map_meta
 from .mission_logic import (
     APPROACH_TURN_YAW_DEG,
@@ -93,6 +94,7 @@ from .mission_logic import (
     WAIT_SPOT_BT_FILE,
     ApproachRequest,
     GoalEvent,
+    HelpEvent,
     CancelNav,
     Destination,
     GateReason,
@@ -294,6 +296,11 @@ class MissionManagerNode(Node):
         # 시연 스위치(2026-10-05): 잡기 대기 시간이 다 되면 잡은 것으로 넘어가고
         # 손 놓침 정지를 쓰지 않는다. 터치 모듈 고장 중 시연용.
         self.declare_parameter("grip_assume_held", False)
+        # 주행 중 손 놓침 정지(2026-10-21 사용자 결정으로 기본 꺼짐) — 터치는 처음 잡기에만 쓴다.
+        self.declare_parameter("grip_release_stop", False)
+        # 대기 중 본인 확인(2026-11-11 설계 speaker-follow). 음성 VICA_SPK_FOLLOW=on 과 함께 켠다.
+        self.declare_parameter("speaker_gate", False)
+        self.declare_parameter("spk_joined_threshold", 0.50)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
@@ -398,6 +405,9 @@ class MissionManagerNode(Node):
                 "grip_resume_window_sec", "handle_lost_repeat_sec",
                 "handle_lost_give_up_sec", "handle_state_stale_sec")},
             grip_assume_held=bool(self.get_parameter("grip_assume_held").value),
+            grip_release_stop=bool(self.get_parameter("grip_release_stop").value),
+            speaker_gate=bool(self.get_parameter("speaker_gate").value),
+            spk_joined_threshold=float(self.get_parameter("spk_joined_threshold").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
         )
@@ -405,7 +415,8 @@ class MissionManagerNode(Node):
             "손잡이: 잡기 "
             f"{self.logic.grip_enter_window_sec:.1f}s 중 {self.logic.grip_ratio:.0%} · "
             f"대기 {self.logic.grip_wait_timeout_sec:.0f}s · "
-            f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지")
+            + (f"놓침 {self.logic.grip_release_grace_sec:.2f}s 뒤 정지" if self.logic.grip_release_stop
+               else "주행 중 놓침 정지 꺼짐(터치는 처음 잡기만)"))
         if self.logic.grip_assume_held:
             self.get_logger().warn(
                 f"손잡이 시연 스위치 켜짐: 대기 {self.logic.grip_wait_timeout_sec:.0f}s 뒤 "
@@ -507,6 +518,29 @@ class MissionManagerNode(Node):
             callback_group=self._emergency_group,
         )
         self._estop_active = False
+        # 몸통 넘어짐(2026-10-15)과 앱 원인. 둘 다 /emergency_stop 보다 **먼저** 만든다 —
+        # 같은 콜백 그룹에서 동시에 준비된 콜백은 만든 순서대로 처리된다. 두 신호는
+        # 래치보다 먼저 오므로, 그 순서가 지켜지면 넘어짐은 넘어짐 멘트 하나만,
+        # 앱 버튼은 "관리자를 호출했습니다" 없는 멘트가 나간다(mission_logic.on_tipped).
+        # /vica/tipped 는 바뀔 때만 오므로 transient_local 로 받는다(재기동해도 지금 상태).
+        self.create_subscription(
+            Bool,
+            "/vica/tipped",
+            self._on_tipped,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            callback_group=self._emergency_group,
+        )
+        # 앱 원인은 /app_estop_state(1 Hz JSON)의 app_active 로 받는다. 앱 버튼을 누른 순간
+        # app_emergency_node 가 1 Hz 를 기다리지 않고 한 번 더 낸다. 10 Hz /app_emergency_stop 을
+        # 받던 판은 서 있을 때 CPU 를 약 3 %p 더 썼다(run96, 2026-10-15).
+        self.create_subscription(
+            String,
+            "/app_estop_state",
+            self._on_app_estop_state,
+            10,
+            callback_group=self._emergency_group,
+        )
         self.create_subscription(
             Bool,
             "/emergency_stop",
@@ -578,6 +612,14 @@ class MissionManagerNode(Node):
             lambda msg: self.logic.on_handle_state(
                 msg.user_contact, msg.uplink_fresh, self._now()),
             10,
+            callback_group=self._main_group,
+        )
+        # 화자 판정 모드(2026-11-11) — 음성 .env 의 VICA_SPK_FOLLOW 하나로 미션 대기 중 본인 확인까지 켠다.
+        # 마지막 값을 보관하는 토픽이라 어느 쪽이 먼저 떠도 받는다.
+        self.create_subscription(
+            String, "/vica/speaker_mode", self._on_speaker_mode,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
             callback_group=self._main_group,
         )
 
@@ -654,6 +696,13 @@ class MissionManagerNode(Node):
             MissionCommand,
             "/vica/mission/resume_navigation",
             self._on_resume_request,
+            callback_group=self._main_group,
+        )
+        # 관리자 호출(도움 요청, 2026-10-15 설계): 앱 팝업의 "확인". request_id 가 확인할 help_id 다.
+        self.create_service(
+            MissionCommand,
+            "/vica/mission/help_ack",
+            self._on_help_ack,
             callback_group=self._main_group,
         )
         # ── 사람 접근 (Phase B, 설계 3·5절) ────────────────────────────────
@@ -752,6 +801,13 @@ class MissionManagerNode(Node):
             self.get_logger().warn(f"홈 로드 실패(제자리 대기로 폴백): {exc}")
             return None
 
+    def _on_speaker_mode(self, msg: String) -> None:
+        before = self.logic.speaker_gate
+        self.logic.set_speaker_mode(msg.data)
+        if self.logic.speaker_gate != before:
+            self.get_logger().info(f"[화자] 음성 모드 {msg.data!r} — 대기 중 본인 확인 "
+                                   + ("켬" if self.logic.speaker_gate else "끔"))
+
     def _on_intent(self, msg: VicaIntent) -> None:
         """음성 요청. 판단은 로직(on_voice_intent)이 하고 여기선 실행·기록만 한다(2026-10-08)."""
         intent = IntentData(
@@ -761,6 +817,9 @@ class MissionManagerNode(Node):
             safety_flag=msg.safety_flag,
             wait_minutes=int(getattr(msg, "wait_minutes", -1)),
             reply=msg.reply,
+            speaker_verdict=str(getattr(msg, "speaker_verdict", "")),
+            speaker_score=float(getattr(msg, "speaker_score", -1.0)),
+            speaker_joined=float(getattr(msg, "speaker_score_joined", -1.0)),
         )
         before = self.logic.state
         actions = self.logic.on_voice_intent(
@@ -1000,6 +1059,9 @@ class MissionManagerNode(Node):
         before = self.logic.state
         actions, reason = self._run_mission_command(command)
         if reason != GateReason.OK:
+            # 거절이어도 로직이 돌려준 행동은 낸다 — 비상 정지 중 앱 취소가 끝낸 도움 요청의
+            # help_canceled(2026-10-16 결정 3). 다른 거절은 행동이 없다.
+            self._run_actions(actions)
             response.accepted = False
             response.message = f"{command} 요청 거부: {reason.value}"
             self.get_logger().warn(
@@ -1013,6 +1075,34 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"{command} 처리: {before.value} -> {self.logic.state.value}"
         )
+        return response
+
+    def _on_help_ack(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """관리자가 앱에서 도움 요청을 확인했다. request_id = 확인할 help_id(uuid4)."""
+        try:
+            request_id = str(UUID(request.request_id))
+        except ValueError:
+            response.accepted = False
+            response.message = "request_id는 UUID여야 합니다."
+            return response
+        if request_id != request.request_id.lower():
+            response.accepted = False
+            response.message = "request_id가 canonical UUID 형식이 아닙니다."
+            return response
+        actions, accepted = self.logic.on_help_ack(request_id, self._now())
+        self._run_actions(actions)
+        response.accepted = accepted
+        if accepted:
+            response.message = "ok"
+        elif self.logic.help_id is None:
+            response.message = "no_active_help"
+        else:
+            response.message = "id_mismatch"
+        self.get_logger().info(f"도움 요청 확인: {request_id} → {response.message}")
         return response
 
     # -- 홈 위치 service (2026-08-26) --------------------------------------------
@@ -1762,6 +1852,28 @@ class MissionManagerNode(Node):
         actions = self.logic.on_emergency(msg.keyword, self._now())
         self._run_actions(actions)
 
+    def _on_tipped(self, msg: Bool) -> None:
+        tipped = bool(msg.data)
+        was_tipped = self.logic.tipped
+        actions = self.logic.on_tipped(tipped, self._now())
+        if tipped and not was_tipped:
+            self.get_logger().error(
+                f"넘어짐 감지 -> state={self.logic.state.value} (세울 때까지 멘트 반복)")
+        elif was_tipped and not tipped:
+            self.get_logger().warn(
+                f"넘어짐 풀림(세움) -> state={self.logic.state.value} (해제는 관리자 앱)")
+        else:
+            # 켤 때 받는 지금 상태(transient_local) — 바뀐 것이 아니다.
+            self.get_logger().info(f"넘어짐 신호: {'넘어짐' if tipped else '서 있음'}(지금 상태)")
+        self._run_actions(actions)
+
+    def _on_app_estop_state(self, msg: String) -> None:
+        try:
+            app_active = bool(json.loads(msg.data).get("app_active", False))
+        except (ValueError, AttributeError):
+            return
+        self.logic.on_app_estop(app_active)
+
     def _on_estop(self, msg: Bool) -> None:
         active = bool(msg.data)
         changed = active != self._estop_active
@@ -1888,11 +2000,29 @@ class MissionManagerNode(Node):
                     extra={"wait_place": action.wait_place,
                            "wait_minutes": action.wait_minutes})
                 self.get_logger().info(f"앱 알림: {action.event} {action.reason}")
+            elif isinstance(action, HelpEvent):
+                self._publish_help_event(action)
             elif isinstance(action, Haptic):
                 out = String()
                 out.data = action.pattern
                 self.pub_haptic.publish(out)
                 self.get_logger().info(f"진동 요청: {action.pattern}")
+
+    def _publish_help_event(self, action: HelpEvent) -> None:
+        """도움 요청 사건을 /vica_goal_event 로 낸다(목적지 칸은 빈 값). help_requested 는 보낼
+        때마다 그 순간의 위치를 싣는다 — place 는 상황판 place_here 와 같은 문장, robot_x·y 는
+        AMCL. 기존 x·y 는 목적지 좌표 칸이라 쓰지 않는다."""
+        extra: dict = {"help_id": action.help_id}
+        if action.event == "help_requested":
+            pose = self._robot_pose
+            place, _ = place_here(pose, self.destinations, self._pose_cov_xy)
+            extra.update({
+                "place": place,
+                "robot_x": pose.x if pose is not None else None,
+                "robot_y": pose.y if pose is not None else None,
+            })
+        self._publish_goal_event(action.event, None, extra=extra)
+        self.get_logger().info(f"앱 알림: {action.event} {action.help_id} {extra.get('place', '')}")
 
     def _publish_nav_speed_limit(self, percent: float) -> None:
         msg = SpeedLimit()

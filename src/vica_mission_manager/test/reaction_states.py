@@ -6,6 +6,7 @@
 reactions-design.md
 """
 from vica_mission_manager.mission_logic import (
+    WAIT_DEPART_AFTER_SPEECH_SEC,
     ApproachRequest,
     Destination,
     IntentData,
@@ -162,14 +163,14 @@ def waiting_release(minutes=10):
 def moving_to_wait_spot():
     logic, _ = waiting_release()
     logic.on_wait_speech_spoken(logic._release_text, 7.0)
-    logic.on_tick(7.1, NavStatus.NONE)
-    return logic, 7.5
+    logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)   # M2 뒤 1초(2026-10-21)
+    return logic, 9.5
 
 
 def waiting():
     logic, _ = moving_to_wait_spot()
-    logic.on_tick(8.0, NavStatus.SUCCEEDED)
-    return logic, 9.0
+    logic.on_tick(10.0, NavStatus.SUCCEEDED)
+    return logic, 11.0
 
 
 def waiting_asked():

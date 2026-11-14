@@ -59,6 +59,45 @@ from vica_perception.person_geometry import (
 
 DEFAULT_ENGINE = "/workspaces/isaac_ros-dev/models/v6-blur-640/weights/best.engine"
 
+# 접근 판정에 쓰는 conf 문턱. detection_gate 의 DEFAULT_MIN_CONFIDENCE(0.6)는
+# 설계 때 가정값이고, 실측으로 올린 값을 노드 파라미터로 넣는다(그 파일의 규칙).
+#
+# 근거 — 2026-11-10 오탐 평가셋(~/vica_data/analysis/cane_fp_2026-11-10/eval_set,
+# 31회차, E-stop 상태, 실제 관문 규칙 '3 s 이력·끊김 0.6 s' 그대로 오프라인 재생):
+#     문턱 0.6  진짜(흰 지팡이 1.8~7.2 m, 9회차) 9/9, 오탐 장면 7
+#     문턱 0.8  진짜 9/9, 오탐 장면 3 (흰 자를 지팡이처럼 짚기 2·나무 막대 1)
+#     (8.45 m 진짜 1회차는 접근 상한 8.0 m 밖이라 셈에서 뺐다)
+#     문턱 0.85 7.19 m 진짜를 놓침 / 0.9 는 7.19 m 와 옆모습 1.77 m 를 놓침
+# 오탐은 사람 몸에 붙은 밝고 가는 물체(흰 줄·밀대 자루·나무 막대)에서 conf 가
+# 0.6~0.9 를 오르내리고, 진짜는 0.86~0.94 로 꾸준하다.
+# [대가] 7.19 m 진짜의 conf 중앙이 0.80 이라 접근 승인이 3.2 s → 9.0 s 로,
+# 옆모습 1.77 m 는 3.1 s → 7.0 s 로 늦어진다(재생 기준).
+# 같은 날 0.8 로 감지기를 돌린 실기 6회차: 진짜 1.76·3.09·6.31 m 모두 approachable,
+# 목에 건 흰 줄 2회차 approachable 0, 밀대 자루를 지팡이처럼 세워 짚은 사람(2.58 m,
+# conf 중앙 0.85)은 통과 — 지팡이처럼 짚은 밝은 막대는 문턱으로 못 거른다.
+# [미검증] 7 m 이상 지연은 실기 재확인 못 함. 회차마다 1명·20 s.
+DEFAULT_APPROACH_MIN_CONFIDENCE = 0.8
+
+# 접근 관문에 들어가는 노드 파라미터와 기본값. 노드는 이 표대로 선언한다.
+APPROACH_PARAM_DEFAULTS = {
+    "approach_min_confidence": DEFAULT_APPROACH_MIN_CONFIDENCE,
+    "approach_min_distance_m": DEFAULT_MIN_DISTANCE_M,
+    "approach_max_distance_m": DEFAULT_MAX_DISTANCE_M,
+}
+
+
+def approach_gate_thresholds(get_param) -> GateThresholds:
+    """노드 파라미터 → 접근 관문 문턱. get_param(이름) 이 값을 돌려준다.
+
+    시험이 rclpy 노드를 만들지 않고 이름 배선을 확인하려고 뺐다 — 노드를 만들고
+    지우는 시험은 rclpy destroy_node 에서 가끔 멈췄다(2026-11-10).
+    """
+    return GateThresholds(
+        min_confidence=float(get_param("approach_min_confidence")),
+        min_distance_m=float(get_param("approach_min_distance_m")),
+        max_distance_m=float(get_param("approach_max_distance_m")),
+    )
+
 
 class PersonDetectorNode(Node):
     """배선만 갖는다 — 판정은 detection_gate, 기하는 person_geometry."""
@@ -77,22 +116,24 @@ class PersonDetectorNode(Node):
         # 하한은 접근 goal(1.1 m)이 이미 지나간 자리인지, 상한은 도착까지 걸리는
         # 시간이 근거다. 잘못된 범위(하한 >= 상한)는 GateThresholds 가 기동 때
         # 예외로 막는다.
-        self.declare_parameter("approach_min_distance_m", DEFAULT_MIN_DISTANCE_M)
-        self.declare_parameter("approach_max_distance_m", DEFAULT_MAX_DISTANCE_M)
+        # 접근 판정 conf 문턱 approach_min_confidence 도 같은 표에 있다(근거는
+        # DEFAULT_APPROACH_MIN_CONFIDENCE 주석). 발행 문턱 conf_threshold(0.25)와
+        # 다르다 — 그보다 낮은 상자는 아예 안 나가고, 이 문턱보다 낮은 상자는
+        # 발행은 되지만 접근 증거에서 빠진다.
+        for name, default in APPROACH_PARAM_DEFAULTS.items():
+            self.declare_parameter(name, default)
 
         self._model = model
         self._conf = float(self.get_parameter("conf_threshold").value)
         self._period_s = 1.0 / float(self.get_parameter("publish_rate_hz").value)
         self._target_frame = str(self.get_parameter("target_frame").value)
 
-        self._approach_min_m = float(
-            self.get_parameter("approach_min_distance_m").value)
-        self._approach_max_m = float(
-            self.get_parameter("approach_max_distance_m").value)
-        self._gate = DetectionGate(GateThresholds(
-            min_distance_m=self._approach_min_m,
-            max_distance_m=self._approach_max_m,
-        ))
+        thresholds = approach_gate_thresholds(
+            lambda name: self.get_parameter(name).value)
+        self._approach_min_m = thresholds.min_distance_m
+        self._approach_max_m = thresholds.max_distance_m
+        self._approach_min_conf = thresholds.min_confidence
+        self._gate = DetectionGate(thresholds)
         self._infer_gate = InferenceGate(
             state_timeout_s=float(
                 self.get_parameter("robot_state_timeout_s").value),
@@ -133,10 +174,11 @@ class PersonDetectorNode(Node):
                                  self._on_robot_state, 10)
         self.get_logger().info(
             "person_detector_node 시작 (conf %.2f, %.1f Hz, frame %s, "
-            "주행 중 추론 %s, 접근 거리 %.1f~%.1f m)"
+            "주행 중 추론 %s, 접근 거리 %.1f~%.1f m, 접근 conf ≥ %.2f)"
             % (self._conf, 1.0 / self._period_s, self._target_frame,
                "차단" if self._infer_gate.enabled else "허용",
-               self._approach_min_m, self._approach_max_m))
+               self._approach_min_m, self._approach_max_m,
+               self._approach_min_conf))
 
     # ── 입력 보관 ──────────────────────────────────────────────────────────
     def _on_depth(self, msg: Image) -> None:
