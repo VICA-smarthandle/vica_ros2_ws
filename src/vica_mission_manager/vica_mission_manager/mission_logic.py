@@ -1363,6 +1363,7 @@ class MissionLogic:
         home_beacon_interval_sec: float = HOME_BEACON_INTERVAL_SEC,
         speaker_gate: bool = False,
         spk_joined_threshold: float = 0.50,
+        speaker_gate_grip: bool = False,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -1514,6 +1515,8 @@ class MissionLogic:
         self._speaker_gate_param = speaker_gate   # 강제로 켜기(launch 인자). 보통은 음성 모드를 따른다
         self._speaker_mode = "off"               # 음성 노드가 /vica/speaker_mode 로 알린 값
         self._spk_gate = WaitSpeakerGate(spk_joined_threshold)
+        # 손잡이를 잡아야 받는 앞 조건(설계 4.5-1). 2026-11-14 실기에서 너무 불편해 기본 꺼짐 — 목소리만 본다.
+        self._speaker_gate_grip = speaker_gate_grip
         # 접촉 사실은 노드가 /vica/smart_handle_state 로 넣어 준다(on_handle_state).
         self._grip = GripMeter(stale_sec=handle_state_stale_sec)
         # 지금 주행이 활성 모드(손을 놓으면 섬)인가. 출발 순간에 정한다.
@@ -1750,7 +1753,8 @@ class MissionLogic:
         followup_open = any(t is not None and now - t <= WAIT_FINISH_REPEAT_SEC
                             for t in (self._wait_need_asked_at, self._wait_finish_asked_at))
         out = self._spk_gate.decide(intent, grip_recent=self._grip.touched_within(now, GRIP_RECENT_SEC),
-                                    sensor_ok=self._grip.fresh(now), followup_open=followup_open, now=now)
+                                    sensor_ok=self._speaker_gate_grip and self._grip.fresh(now),
+                                    followup_open=followup_open, now=now)
         if out.note:
             self.voice_note = out.note
         if out.action == "hint":

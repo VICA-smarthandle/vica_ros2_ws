@@ -175,6 +175,8 @@ def generate_launch_description() -> LaunchDescription:
             # (2026-11-11 설계 speaker-follow). 음성 쪽 VICA_SPK_FOLLOW=on 과 함께 켠다. 기본 꺼짐 = 지금 그대로.
             DeclareLaunchArgument("speaker_gate", default_value="false"),
             DeclareLaunchArgument("spk_joined_threshold", default_value="0.50"),
+            # speaker_gate_grip: 대기 중 명령에 손잡이 접촉(최근 10 s)도 요구. 2026-11-14 실기에서 불편해 기본 꺼짐.
+            DeclareLaunchArgument("speaker_gate_grip", default_value="false"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
@@ -275,6 +277,10 @@ def generate_launch_description() -> LaunchDescription:
                         "spk_joined_threshold": ParameterValue(
                             LaunchConfiguration("spk_joined_threshold"),
                             value_type=float,
+                        ),
+                        "speaker_gate_grip": ParameterValue(
+                            LaunchConfiguration("speaker_gate_grip"),
+                            value_type=bool,
                         ),
                         "obstacle_narration": ParameterValue(
                             LaunchConfiguration("obstacle_narration"),
