@@ -21,13 +21,16 @@ from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from vica_interfaces.msg import SmartHandleState, TurnGuide
+from vica_interfaces.msg import RobotState, SmartHandleState, TurnGuide
 
 from . import protocol
 from .guidance_priority import (
     GuidanceInputs,
+    PATROL_NONE,
+    active_patrol_code,
     is_arrival_event,
     parse_goal_event,
+    patrol_state_code,
     resolve_state_code,
 )
 from .range_tf_gate import RangeTfGate
@@ -138,11 +141,18 @@ class UserGuidanceDriverNode(Node):
         self.turn_direction = TurnGuide.DIRECTION_NONE
         self.turn_last_ns = None
         self.arrival_started_ns = None
+        # 순찰 표시(2026-11-14). 순찰 값을 받은 적 없으면 PATROL_NONE·None 그대로다.
+        self.patrol_code = PATROL_NONE
+        self.patrol_last_ns = None
         self.last_reason = None
 
         self.create_subscription(TurnGuide, "/vica/turn_guide", self.cb_turn, 10)
         self.create_subscription(Bool, "/estop_state", self.cb_estop, 10)
         self.create_subscription(String, "/vica_goal_event", self.cb_goal, 10)
+        # 순찰 여부만 본다(dialog_state). 미션이 1Hz + 상태가 바뀔 때 보낸다.
+        self.create_subscription(
+            RobotState, "/vica/robot_state", self.cb_robot_state, 10
+        )
         # 햅틱 명령 (2026-09-04). 주행 중에는 이 노드가 포트를 잡고 있어
         # bench_test.py 가 못 붙는다 — 그래서 여기를 거친다. 이 노드 자체는
         # 스스로 보내지 않는다 — 미션 매니저가 손잡이 안내 시점에 자동
@@ -199,7 +209,8 @@ class UserGuidanceDriverNode(Node):
             )
 
         self.get_logger().info(
-            "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event"
+            "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event, "
+            "/vica/robot_state"
         )
         self.get_logger().info("Publishing: /vica/smart_handle_state + serial")
         self.get_logger().info(
@@ -273,6 +284,12 @@ class UserGuidanceDriverNode(Node):
             self.arrival_started_ns = self.now_ns()
             self.get_logger().info("도착 이벤트 수신 — Smart Handle 도착 표시 시작")
 
+    def cb_robot_state(self, msg: RobotState) -> None:
+        """순찰 여부만 본다. 순찰이 아니면 코드를 비워 기존 판단이 그대로 돈다."""
+        self.patrol_code = patrol_state_code(msg.dialog_state)
+        if self.patrol_code != PATROL_NONE:
+            self.patrol_last_ns = self.now_ns()
+
     # ── 주기 처리 ──────────────────────────────────────
 
     def send_loop(self) -> None:
@@ -286,6 +303,8 @@ class UserGuidanceDriverNode(Node):
                 turn_direction=self.turn_direction,
                 turn_last_ns=self.turn_last_ns,
                 arrival_started_ns=self.arrival_started_ns,
+                patrol_code=self.patrol_code,
+                patrol_last_ns=self.patrol_last_ns,
             ),
             now_ns=now,
             estop_timeout_ns=self.estop_timeout_ns,
@@ -360,7 +379,12 @@ class UserGuidanceDriverNode(Node):
                 f"{sorted(self.HAPTIC_PATTERNS)} 중 하나여야 합니다. 무시합니다."
             )
             return
-        ok = self.link.send_raw(code, self.now_ns())
+        now = self.now_ns()
+        if active_patrol_code(self.patrol_code, self.patrol_last_ns, now) != PATROL_NONE:
+            # 순찰 중에는 진동 신호를 내지 않는다(2026-11-14).
+            self.get_logger().info(f"[HAPTIC] 순찰 중 — {name} 무시")
+            return
+        ok = self.link.send_raw(code, now)
         if ok:
             self.get_logger().info(f"[HAPTIC] {name} (0x{code:02X}) 전송")
         else:

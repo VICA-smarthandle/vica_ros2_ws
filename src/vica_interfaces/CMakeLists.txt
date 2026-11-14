@@ -38,6 +38,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DraftRoute.srv"
   "srv/SaveRoute.srv"
   "srv/GetRoute.srv"
+  "srv/SavePatrolRoute.srv"
+  "srv/GetPatrolRoute.srv"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 

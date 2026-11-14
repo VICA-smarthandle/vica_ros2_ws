@@ -169,6 +169,50 @@ def test_unimplemented_charging_codes_rejected():
         link.send(protocol.STATE_CHARGING, NOW)
 
 
+@pytest.mark.parametrize(
+    "code",
+    [protocol.STATE_PATROL, protocol.STATE_PATROL_LIGHT, protocol.STATE_PATROL_ALARM],
+)
+def test_patrol_codes_are_sent_as_one_byte(code):
+    """순찰 코드 8·9·10 은 send() 로 1바이트씩 나간다(2026-11-14)."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake",
+        baudrate=115200,
+        enabled=True,
+        serial_factory=lambda **kw: port,
+    )
+    assert link.send(code, NOW) is True
+    assert port.written == [bytes([code])]
+    assert link.last_state_code == code
+
+
+@pytest.mark.parametrize(
+    "code",
+    [protocol.STATE_PATROL, protocol.STATE_PATROL_LIGHT, protocol.STATE_PATROL_ALARM],
+)
+def test_send_raw_rejects_patrol_codes(code):
+    """순찰 코드도 상태코드 범위(0~10)다 — send_raw 로는 못 보낸다."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    with pytest.raises(ValueError):
+        link.send_raw(code, NOW)
+    assert port.written == []
+
+
+def test_code_above_patrol_range_is_rejected():
+    """11 이상은 상태코드가 아니다."""
+    port = FakePort()
+    link = SerialLink(
+        port="/dev/fake", baudrate=115200, serial_factory=lambda **kw: port
+    )
+    with pytest.raises(ValueError):
+        link.send(protocol.STATE_CODE_MAX + 1, NOW)
+    assert port.written == []
+
+
 def test_reconnect_respects_backoff_interval():
     """backoff 간격 이전에는 재연결을 시도하지 않는다."""
     attempts = []

@@ -105,10 +105,10 @@ class SerialLink:
         진단이 "마지막 상태 16"이라는 헛소리를 하게 된다 — 그 필드는 아두이노가
         마지막으로 받은 **표시 상태**여야 한다. 오류 처리는 send() 와 같다.
 
-        [주의] 상태코드 범위(0~7)는 여기로 보내지 않는다. 워치독 계약(코드 4 금지)
+        [주의] 상태코드 범위(0~10)는 여기로 보내지 않는다. 워치독 계약(코드 4 금지)
         을 우회하게 되기 때문이다. 그 검사는 send() 에만 있다.
         """
-        if 0 <= byte <= protocol.STATE_CHARGED:
+        if 0 <= byte <= protocol.STATE_CODE_MAX:
             raise ValueError(
                 f"상태코드 범위({byte})는 send_raw 로 보내지 않는다. send() 를 쓸 것."
             )

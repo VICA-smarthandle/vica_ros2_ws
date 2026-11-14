@@ -23,7 +23,7 @@ Safety 결정 사항이다.
 | `timebase.py` | 시간 판정 (STEADY_TIME + 정수 ns + 미수신 `None`) |
 | `protocol.py` | 아두이노 1바이트 상태코드 프로토콜 상수 |
 | `turn_detector.py` | yaw 변화량 → LEFT/RIGHT 판정 (순수 로직) |
-| `guidance_priority.py` | E-stop > 도착 > 회전 > 기본 우선순위 병합 (순수 로직) |
+| `guidance_priority.py` | E-stop > 순찰 > 도착 > 회전 > 기본 우선순위 병합 (순수 로직) |
 | `serial_link.py` | 시리얼 전송 래퍼 |
 | `turn_guide_node.py` | `/odom` → `/vica/turn_guide` |
 | `user_guidance_driver_node.py` | cue 병합 → 시리얼 전송 + 진단 발행 |
@@ -32,6 +32,21 @@ Safety 결정 사항이다.
 
 순수 로직 모듈은 `rclpy`에 의존하지 않으며, 시각은 전부 호출자가 정수 나노초로
 주입한다. 하드웨어 없이 pytest로 검증할 수 있다.
+
+### 순찰 표시 (2026-11-14)
+
+드라이버가 `/vica/robot_state`의 `dialog_state`를 보고 순찰 상태코드를 보낸다.
+
+| `dialog_state` | 코드 | LED |
+| --- | --- | --- |
+| `patrolling` · `patrol_dwell` · `patrol_paused` | 8 | 연두 RGB(110,255,0) 상시 |
+| `patrol_light` | 9 | 연노랑 RGB(255,210,60) 상시 |
+| `patrol_alarm` | 10 | 빨강 RGB(255,0,0) 300 ms 점멸 |
+
+- 우선순위는 비상정지 > 순찰 > 도착·회전·기본이다. 순찰 중에는 방향지시·도착 표시를 내지 않고,
+  `/vica/haptic_request`도 버린다. 펌웨어는 세 상태에서 서보를 가운데 두고 진동을 걸지 않는다.
+- `/vica/robot_state`가 3 s 넘게 끊기면 순찰 코드를 버리고 기존 판단으로 돌아간다.
+- 코드 6·7 은 충전용 예약 그대로다. 실물 확인: `python3 firmware/bench_test.py --case 9`(10·11).
 
 ### C++ 판 — 손잡이 드라이버·방향지시 (2026-10-13)
 

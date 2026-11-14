@@ -217,6 +217,47 @@ def estopped():
     return logic, t + 1.0
 
 
+# ---- 경비(순찰) 상태 (2026-11-14) ------------------------------------------------
+PATROL_ROUTE = (ROOM, TOILET, ELEV)
+DETECTOR_OK = {"src": "detector", "kind": "status", "ready": True, "camera_ok": True}
+
+
+def patrol_dwell():
+    """경비 시작 직후 — 감지 노드 준비를 기다리는 중."""
+    logic = new_logic()
+    logic.on_patrol_start(PATROL_ROUTE, BOUNDS, True, True, 0.0)
+    return logic, 1.0
+
+
+def patrolling():
+    """감지 노드가 준비돼 첫 지점으로 가는 중."""
+    logic, t = patrol_dwell()
+    logic.on_patrol_event(DETECTOR_OK, t)
+    logic.on_tick(t, NavStatus.NONE)
+    return logic, t + 0.5
+
+
+def patrol_alarm():
+    logic, t = patrolling()
+    logic.on_patrol_event({"src": "detector", "kind": "intruder", "conf": 0.8, "hits": 2,
+                           "clip_id": "20261114_203455_intruder"}, t)
+    return logic, t + 0.5
+
+
+def patrol_light():
+    logic, t = patrolling()
+    logic.on_tick(t, NavStatus.SUCCEEDED)          # 첫 지점 도착 → 3초 정지
+    logic.on_patrol_event({"src": "detector", "kind": "light", "brightness": 35.0,
+                           "photo": "light_203500.jpg"}, t + 0.5)
+    return logic, t + 1.0
+
+
+def patrol_paused():
+    logic, t = patrolling()
+    logic.on_pause_request(t)
+    return logic, t + 0.5
+
+
 # 반응표의 행. 상태 이름 정본은 State 다 — 같은 상태의 갈래(세운 뒤·바꾸기 질문·늦은 답)는
 # 반응표 칸의 쪽지에 적힌 경우를 따로 세운 것이다.
 ROWS = {
@@ -243,6 +284,11 @@ ROWS = {
     "RETURNING": returning,
     "RETURNING_LATE": returning_late,
     "ESTOPPED": estopped,
+    "PATROLLING": patrolling,
+    "PATROL_DWELL": patrol_dwell,
+    "PATROL_ALARM": patrol_alarm,
+    "PATROL_LIGHT": patrol_light,
+    "PATROL_PAUSED": patrol_paused,
 }
 
 # 반응표의 열 — 음성 요청 11종. 목적지 요청은 지금 가는 곳과 다른 엘리베이터로 한다.

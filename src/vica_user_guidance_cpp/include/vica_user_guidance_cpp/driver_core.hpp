@@ -117,6 +117,7 @@ public:
   void on_turn(int direction);
   void on_estop(bool data);
   void on_goal(const std::string & payload);
+  void on_robot_state(const std::string & dialog_state);   // 순찰 여부만 본다(2026-11-14)
   void on_haptic(const std::string & data);
 
   // 주기 처리(타이머)
@@ -162,6 +163,8 @@ private:
   int turn_direction_ = DIRECTION_NONE;
   std::optional<int64_t> turn_last_ns_;
   std::optional<int64_t> arrival_started_ns_;
+  int patrol_code_ = PATROL_NONE;
+  std::optional<int64_t> patrol_last_ns_;
   std::optional<std::string> last_reason_;
 
   int64_t send_period_ns_ = 0;

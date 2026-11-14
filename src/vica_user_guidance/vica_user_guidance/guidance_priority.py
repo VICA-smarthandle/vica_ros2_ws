@@ -1,4 +1,4 @@
-"""E-stop > 도착 > 회전 > 기본 우선순위 병합 (순수 로직).
+"""E-stop > 순찰 > 도착 > 회전 > 기본 우선순위 병합 (순수 로직).
 
 이 계층은 어떤 구동 명령도 만들지 않는다. 출력은 Smart Handle 상태코드 1개뿐이다.
 ``/estop_state``는 중앙 래치(emergency_stop_node)의 결과이며, 여기서 reset하거나
@@ -15,6 +15,20 @@ from .turn_detector import DIRECTION_LEFT, DIRECTION_RIGHT
 
 ARRIVAL_EVENT = "goal_succeeded"
 
+# ── 순찰 표시 (2026-11-14) ────────────────────────────
+# /vica/robot_state 의 dialog_state 가 "patrol" 로 시작하면 순찰이다(경비 모드 명세 2절).
+PATROL_NONE = 0
+PATROL_PREFIX = "patrol"
+PATROL_LIGHT_STATE = "patrol_light"
+PATROL_ALARM_STATE = "patrol_alarm"
+# robot_state 가 이만큼 끊기면 순찰 표시를 버린다(미션 발행 1Hz 의 3배).
+PATROL_STATE_TIMEOUT_NS = 3_000_000_000
+PATROL_REASONS = {
+    protocol.STATE_PATROL: "patrol",
+    protocol.STATE_PATROL_LIGHT: "patrol_light",
+    protocol.STATE_PATROL_ALARM: "patrol_alarm",
+}
+
 
 @dataclass(frozen=True)
 class GuidanceInputs:
@@ -25,6 +39,8 @@ class GuidanceInputs:
     turn_direction: int                 # TurnGuide.direction
     turn_last_ns: Optional[int]
     arrival_started_ns: Optional[int]   # goal_succeeded 수신 시각
+    patrol_code: int = PATROL_NONE      # robot_state 로 받은 순찰 코드(8·9·10)
+    patrol_last_ns: Optional[int] = None  # 순찰 값을 마지막으로 받은 시각
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,34 @@ def is_arrival_event(event: Optional[str]) -> bool:
     return event == ARRIVAL_EVENT
 
 
+def patrol_state_code(dialog_state: str) -> int:
+    """dialog_state → 순찰 상태코드. 순찰이 아니면 PATROL_NONE.
+
+    patrolling·patrol_dwell·patrol_paused 는 8, patrol_light 는 9, patrol_alarm 은 10.
+    """
+    if not dialog_state.startswith(PATROL_PREFIX):
+        return PATROL_NONE
+    if dialog_state == PATROL_ALARM_STATE:
+        return protocol.STATE_PATROL_ALARM
+    if dialog_state == PATROL_LIGHT_STATE:
+        return protocol.STATE_PATROL_LIGHT
+    return protocol.STATE_PATROL
+
+
+def active_patrol_code(
+    patrol_code: int,
+    patrol_last_ns: Optional[int],
+    now_ns: int,
+    timeout_ns: int = PATROL_STATE_TIMEOUT_NS,
+) -> int:
+    """지금 유효한 순찰 코드. 순찰이 아니거나 robot_state 가 끊겼으면 PATROL_NONE."""
+    if patrol_code not in PATROL_REASONS:
+        return PATROL_NONE
+    if not is_fresh_ns(patrol_last_ns, now_ns, timeout_ns):
+        return PATROL_NONE
+    return patrol_code
+
+
 def resolve_state_code(
     inputs: GuidanceInputs,
     now_ns: int,
@@ -67,6 +111,7 @@ def resolve_state_code(
     cue_timeout_ns: int,
     arrival_hold_ns: int,
     estop_required: bool = True,
+    patrol_timeout_ns: int = PATROL_STATE_TIMEOUT_NS,
 ) -> GuidanceOutcome:
     """우선순위를 배타적으로 적용해 상태코드 1개를 고른다.
 
@@ -84,14 +129,21 @@ def resolve_state_code(
     ):
         return GuidanceOutcome(protocol.STATE_ESTOP, "estop_stale")
 
-    # ② 도착 hold.
+    # ② 순찰 표시(2026-11-14). 도착·회전보다 앞이라 순찰 중에는 그 표시가 안 나간다.
+    patrol = active_patrol_code(
+        inputs.patrol_code, inputs.patrol_last_ns, now_ns, patrol_timeout_ns
+    )
+    if patrol != PATROL_NONE:
+        return GuidanceOutcome(patrol, PATROL_REASONS[patrol])
+
+    # ③ 도착 hold.
     if inputs.arrival_started_ns is not None:
         age_ns = now_ns - inputs.arrival_started_ns
         if 0 <= age_ns <= arrival_hold_ns:
             return GuidanceOutcome(protocol.STATE_ARRIVED, "arrival")
         # 시간 역전(age < 0)이나 만료는 아래로 흘려보낸다
 
-    # ③ 회전 cue (fresh할 때만).
+    # ④ 회전 cue (fresh할 때만).
     #
     # ══════════════════════════════════════════════════════════════════════
     # [계약] 여기서 좌우를 뒤집지 않는다. 왼쪽이면 STATE_LEFT를 보낸다.
@@ -122,5 +174,5 @@ def resolve_state_code(
         if inputs.turn_direction == DIRECTION_RIGHT:
             return GuidanceOutcome(protocol.STATE_RIGHT, "turn_right")
 
-    # ④ 기본.
+    # ⑤ 기본.
     return GuidanceOutcome(protocol.STATE_NORMAL, "normal")

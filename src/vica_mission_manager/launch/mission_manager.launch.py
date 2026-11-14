@@ -179,6 +179,28 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("speaker_gate_grip", default_value="false"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
+            # 경비(순찰) 모드(2026-11-14, ~/vica_data/patrol_plan/SPEC.md 4.A). 값은 사용자 결정·11-10·11 실기 근거.
+            # patrol_dwell_sec: 지점마다 서 있는 시간(그동안 소리를 민감하게 듣고 불 켜짐을 본다).
+            DeclareLaunchArgument("patrol_dwell_sec", default_value="3.0"),
+            # 확인 전까지 문장을 되풀이하는 간격 — "침입자 발생" 3초, "불 켜짐 감지" 10초.
+            DeclareLaunchArgument("patrol_intruder_repeat_sec", default_value="3.0"),
+            DeclareLaunchArgument("patrol_light_repeat_sec", default_value="10.0"),
+            # 확인 전까지 경보 이벤트를 앱에 다시 보내는 간격.
+            DeclareLaunchArgument("patrol_alarm_resend_sec", default_value="10.0"),
+            # 감지 노드 정상 신호(1 Hz)가 이만큼 없으면 카메라 끊김 경보.
+            DeclareLaunchArgument("patrol_detector_timeout_sec", default_value="3.0"),
+            # 시작 뒤 감지 노드 준비를 기다리는 상한. 넘으면 순찰을 끝낸다(detector_not_ready).
+            DeclareLaunchArgument("patrol_arming_timeout_sec", default_value="15.0"),
+            # 순찰 구간 속도 상한(m/s). /speed_limit 절대값으로 낸다. 0 이면 상한 없음.
+            DeclareLaunchArgument("patrol_speed_mps", default_value="0.6"),
+            # 구간이 연속으로 이만큼 실패하면 순찰을 끝낸다(nav_failed).
+            DeclareLaunchArgument("patrol_max_leg_failures", default_value="3"),
+            # 경보 기록(events.jsonl) 폴더 — 감지 노드의 영상·사진과 같은 폴더.
+            DeclareLaunchArgument(
+                "patrol_media_dir",
+                default_value=PathJoinSubstitution(
+                    [EnvironmentVariable("HOME"), "workspaces", "isaac_ros-dev", "vica_patrol"]),
+            ),
             # name= 을 지정하지 않는다: launch 의 name 리매핑은 프로세스 안의
             # 모든 노드(BasicNavigator 포함)에 적용되어 이름 충돌을 일으킨다.
             Node(
@@ -286,6 +308,21 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("obstacle_narration"),
                             value_type=bool,
                         ),
+                        **{
+                            name: ParameterValue(
+                                LaunchConfiguration(name), value_type=float)
+                            for name in (
+                                "patrol_dwell_sec", "patrol_intruder_repeat_sec",
+                                "patrol_light_repeat_sec", "patrol_alarm_resend_sec",
+                                "patrol_detector_timeout_sec", "patrol_arming_timeout_sec",
+                                "patrol_speed_mps")
+                        },
+                        "patrol_max_leg_failures": ParameterValue(
+                            LaunchConfiguration("patrol_max_leg_failures"),
+                            value_type=int,
+                        ),
+                        "patrol_media_dir": ParameterValue(
+                            LaunchConfiguration("patrol_media_dir"), value_type=str),
                     }
                 ],
             ),

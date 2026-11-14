@@ -12,6 +12,7 @@
 #include "std_msgs/msg/string.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "vica_interfaces/msg/robot_state.hpp"
 #include "vica_interfaces/msg/smart_handle_state.hpp"
 #include "vica_interfaces/msg/turn_guide.hpp"
 
@@ -95,6 +96,12 @@ public:
       "/estop_state", 10, [this](const std_msgs::msg::Bool & m) {core_->on_estop(m.data);});
     sub_goal_ = create_subscription<std_msgs::msg::String>(
       "/vica_goal_event", 10, [this](const std_msgs::msg::String & m) {core_->on_goal(m.data);});
+    // 순찰 여부만 본다(dialog_state, 2026-11-14). 미션이 1 Hz + 상태가 바뀔 때 보낸다.
+    sub_robot_state_ = create_subscription<vica_interfaces::msg::RobotState>(
+      "/vica/robot_state", 10,
+      [this](const vica_interfaces::msg::RobotState & m) {
+        core_->on_robot_state(m.dialog_state);
+      });
     // 햅틱 명령. 이 노드는 스스로 보내지 않는다 — 미션이 손잡이 안내 시점에 발행한다.
     sub_haptic_ = create_subscription<std_msgs::msg::String>(
       "/vica/haptic_request", 10,
@@ -195,6 +202,7 @@ private:
   rclcpp::Subscription<vica_interfaces::msg::TurnGuide>::SharedPtr sub_turn_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_estop_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_goal_;
+  rclcpp::Subscription<vica_interfaces::msg::RobotState>::SharedPtr sub_robot_state_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_haptic_;
   rclcpp::Publisher<vica_interfaces::msg::SmartHandleState>::SharedPtr pub_state_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Range>::SharedPtr> us_pubs_;

@@ -32,6 +32,16 @@ def test_estop_state_is_subscribed_never_published():
         assert call.group(1) == '"/vica/smart_handle_state"', call.group(0)
 
 
+def test_robot_state_is_subscribed_like_python():
+    """순찰 표시(2026-11-14) — 두 판 다 /vica/robot_state 를 깊이 10 으로 구독만 한다."""
+    node = (PKG / 'src' / 'user_guidance_driver_node.cpp').read_text(encoding='utf-8')
+    assert re.search(
+        r'create_subscription<vica_interfaces::msg::RobotState>\(\s*"/vica/robot_state", 10,', node)
+    py = (PKG.parent / 'vica_user_guidance' / 'vica_user_guidance' /
+          'user_guidance_driver_node.py').read_text(encoding='utf-8')
+    assert 'RobotState, "/vica/robot_state", self.cb_robot_state, 10' in py
+
+
 def test_executable_and_node_names_match_python():
     cmake = (PKG / 'CMakeLists.txt').read_text(encoding='utf-8')
     assert 'add_executable(user_guidance_driver_node ' in cmake

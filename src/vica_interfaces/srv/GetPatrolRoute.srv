@@ -1,0 +1,11 @@
+# 경비(순찰) 경로 읽기. mission_manager_node 가 처리한다(2026-11-14).
+#
+# 경로가 없으면 found=false 다 — 아직 저장하지 않은 정상 상태다.
+string map_id                 # "" = 현재 지도
+---
+bool found
+string map_id
+string[] destination_ids
+string[] names                # 같은 순서의 장소 이름. 지워진 장소는 ""
+string[] watch_off            # 꺼 둔 감시 항목(intruder / light / sound). 경로가 없어도(found=false) 채운다
+string message
