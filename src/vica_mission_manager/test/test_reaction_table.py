@@ -333,6 +333,14 @@ EXPECT = {
         "no": ((), State.ESTOPPED),
         "talk": ((), State.ESTOPPED),
     },
+    # 경비(순찰, 2026-11-14) — 어떤 음성 요청에도 말하지 않고 상태도 그대로다.
+    **{row: {col: ((), state) for col in COLS} for row, state in (
+        ("PATROLLING", State.PATROLLING),
+        ("PATROL_DWELL", State.PATROL_DWELL),
+        ("PATROL_ALARM", State.PATROL_ALARM),
+        ("PATROL_LIGHT", State.PATROL_LIGHT),
+        ("PATROL_PAUSED", State.PATROL_PAUSED),
+    )},
 }
 
 PENDING = {

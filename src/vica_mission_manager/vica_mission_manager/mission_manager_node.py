@@ -10,7 +10,8 @@ mission_logic.py(순수 함수/상태 머신)에 있고, 이 파일은 ROS 배�
 - 모터 정지의 권위는 vica_safety의 /emergency_stop 중앙 래치 체인.
   여기서의 goal 취소는 심층 방어 보조 경로.
 
-구독: /vica/intent, /vica/emergency·/vica/tipped·/app_estop_state·/emergency_stop(전용 callback group)
+구독: /vica/intent, /vica/emergency·/vica/tipped·/app_estop_state·/emergency_stop(전용 callback group),
+      /vica/patrol/event(경비 모드 — 감지·호출어 노드가 순찰 중에만 낸다)
 
 `/emergency_stop`은 emergency_stop_node가 물리·앱·음성을 중앙 래치한 권위 상태다.
 입력 펄스가 끝나도 명시적 reset 전까지 true를 유지한다.
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 from collections import deque
@@ -56,12 +58,17 @@ from vica_interfaces.srv import (
     SaveHome,
 )
 
+try:
+    from vica_interfaces.srv import GetPatrolRoute, SavePatrolRoute
+except ImportError:  # vica_interfaces 를 다시 빌드하기 전 — 미션은 뜨고 순찰 경로 서비스만 빠진다
+    GetPatrolRoute = SavePatrolRoute = None
+
 from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
 from .home_storage import HomeStorage, build_home
-from .ledger import (Ledger, LedgerStore, apply_goal_event, confirm_abort_name, place_here,
-                     state_fields)
+from .ledger import (COV_UNKNOWN, Ledger, LedgerStore, apply_goal_event, confirm_abort_name,
+                     place_here, state_fields)
 from .map_meta import load_map_meta
 from .mission_logic import (
     APPROACH_TURN_YAW_DEG,
@@ -91,6 +98,21 @@ from .mission_logic import (
     GUIDED_NO_RAIL_BT_FILE,
     NAV_TREE_GUIDED,
     NAV_TREE_WAIT,
+    PATROL_ALARM_KINDS,
+    PATROL_ALARM_RESEND_SEC,
+    PATROL_ARMING_TIMEOUT_SEC,
+    PATROL_DESTINATION_PREFIX,
+    PATROL_DETECTOR_TIMEOUT_SEC,
+    PATROL_DWELL_SEC,
+    PATROL_INTRUDER_REPEAT_SEC,
+    PATROL_LIGHT_REPEAT_SEC,
+    PATROL_MAX_LEG_FAILURES,
+    PATROL_REJECT_TEXT,
+    PATROL_SPEED_MPS,
+    PATROL_START_REJECT_TEXT,
+    PatrolEvent,
+    PatrolRecordClip,
+    SetNavSpeedCap,
     WAIT_SPOT_BT_FILE,
     ApproachRequest,
     GoalEvent,
@@ -127,6 +149,21 @@ from .obstacle_inputs import (
     yaw_of,
 )
 from .obstacle_judge import ObstacleJudge, cm_what, goal_event, parse_state
+from .patrol_storage import (
+    ROUTE_IO_ERROR,
+    ROUTE_OK,
+    ROUTE_TOO_FEW,
+    ROUTE_UNKNOWN_MAP,
+    PatrolEventLog,
+    PatrolRouteStorage,
+    alarm_record,
+    check_route_ids,
+    clip_record,
+    nearest_place_name,
+)
+
+#: 경보 id 모양(YYYYMMDD_HHMMSS_<kind>). patrol_ack 의 request_id 가 이 모양이면 그 경보만 확인한다.
+PATROL_ALARM_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_[a-z_]+$")
 
 #: 트리가 바뀌는 goal 을 보내기 전, 앞 task 의 취소가 끝나기를 기다리는 상한(초).
 #: _nav_lock_timeout_sec(2.0) 과 같은 크기 — 콜백을 오래 붙잡지 않는다.
@@ -312,6 +349,17 @@ class MissionManagerNode(Node):
         self.declare_parameter("handle_lost_repeat_sec", HANDLE_LOST_REPEAT_SEC)
         self.declare_parameter("handle_lost_give_up_sec", HANDLE_LOST_GIVE_UP_SEC)
         self.declare_parameter("handle_state_stale_sec", HANDLE_STATE_STALE_SEC)
+        # 경비(순찰) 모드(2026-11-14, ~/vica_data/patrol_plan/SPEC.md 4.A). 뜻은 mission_logic 의 PATROL_* 주석.
+        self.declare_parameter("patrol_dwell_sec", PATROL_DWELL_SEC)
+        self.declare_parameter("patrol_intruder_repeat_sec", PATROL_INTRUDER_REPEAT_SEC)
+        self.declare_parameter("patrol_light_repeat_sec", PATROL_LIGHT_REPEAT_SEC)
+        self.declare_parameter("patrol_alarm_resend_sec", PATROL_ALARM_RESEND_SEC)
+        self.declare_parameter("patrol_detector_timeout_sec", PATROL_DETECTOR_TIMEOUT_SEC)
+        self.declare_parameter("patrol_arming_timeout_sec", PATROL_ARMING_TIMEOUT_SEC)
+        self.declare_parameter("patrol_speed_mps", PATROL_SPEED_MPS)
+        self.declare_parameter("patrol_max_leg_failures", PATROL_MAX_LEG_FAILURES)
+        # 경보 기록(events.jsonl)을 두는 폴더. 감지 노드의 영상·사진과 같은 폴더다(컨테이너 안에서는 /workspaces/…).
+        self.declare_parameter("patrol_media_dir", "~/workspaces/isaac_ros-dev/vica_patrol")
 
         dest_path = str(self.get_parameter("destinations_yaml").value)
         if not dest_path:
@@ -410,7 +458,15 @@ class MissionManagerNode(Node):
             spk_joined_threshold=float(self.get_parameter("spk_joined_threshold").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
+            **{name: float(self.get_parameter(name).value) for name in (
+                "patrol_dwell_sec", "patrol_intruder_repeat_sec", "patrol_light_repeat_sec",
+                "patrol_alarm_resend_sec", "patrol_detector_timeout_sec",
+                "patrol_arming_timeout_sec", "patrol_speed_mps")},
+            patrol_max_leg_failures=int(self.get_parameter("patrol_max_leg_failures").value),
         )
+        # 순찰 경로는 목적지와 같은 폴더의 patrol.yaml, 경보 기록은 patrol_media_dir 의 events.jsonl.
+        self._patrol_routes = PatrolRouteStorage(Path(self._destinations_path).parent.parent)
+        self._patrol_log = PatrolEventLog(str(self.get_parameter("patrol_media_dir").value))
         self.get_logger().info(
             "손잡이: 잡기 "
             f"{self.logic.grip_enter_window_sec:.1f}s 중 {self.logic.grip_ratio:.0%} · "
@@ -705,6 +761,32 @@ class MissionManagerNode(Node):
             self._on_help_ack,
             callback_group=self._main_group,
         )
+        # ── 경비(순찰) 모드 (2026-11-14, SPEC 3.1·3.2) ─────────────────────────
+        # 감지 노드·호출어 노드가 순찰 중에만 내는 사건(JSON). 순찰로 늘어난 구독은 이것 하나다.
+        self.create_subscription(
+            String, "/vica/patrol/event", self._on_patrol_event, 10,
+            callback_group=self._main_group,
+        )
+        # 시작·종료·경보 확인. 일시정지·재개는 기존 pause_navigation·resume_navigation 을 같이 쓴다.
+        for name, handler in (("patrol_start", self._on_patrol_start),
+                              ("patrol_stop", self._on_patrol_stop),
+                              ("patrol_ack", self._on_patrol_ack)):
+            self.create_service(
+                MissionCommand, f"/vica/mission/{name}", handler,
+                callback_group=self._main_group,
+            )
+        if SavePatrolRoute is not None:
+            self.create_service(
+                SavePatrolRoute, "/vica/patrol/route/save", self._on_save_patrol_route,
+                callback_group=self._main_group,
+            )
+            self.create_service(
+                GetPatrolRoute, "/vica/patrol/route/get", self._on_get_patrol_route,
+                callback_group=self._main_group,
+            )
+        else:
+            self.get_logger().warn(
+                "순찰 경로 서비스 없음 — vica_interfaces 를 다시 빌드해야 한다(SavePatrolRoute·GetPatrolRoute)")
         # ── 사람 접근 (Phase B, 설계 3·5절) ────────────────────────────────
         # goal 권한의 경계다. person_detector_node 는 요청만 보내고, 좌표를
         # 계산해 Nav2 로 보내는 것은 여기뿐이다.
@@ -1057,6 +1139,8 @@ class MissionManagerNode(Node):
             return response
 
         before = self.logic.state
+        # 순찰 중의 일시정지·재개·취소(2026-11-14) — 거절 사유는 한국어로, 바뀐 상태는 곧바로 방송한다.
+        patrol = before.value.startswith("patrol")
         actions, reason = self._run_mission_command(command)
         if reason != GateReason.OK:
             # 거절이어도 로직이 돌려준 행동은 낸다 — 비상 정지 중 앱 취소가 끝낸 도움 요청의
@@ -1064,14 +1148,20 @@ class MissionManagerNode(Node):
             self._run_actions(actions)
             response.accepted = False
             response.message = f"{command} 요청 거부: {reason.value}"
+            if patrol and reason in PATROL_REJECT_TEXT:
+                response.message = PATROL_REJECT_TEXT[reason]
             self.get_logger().warn(
                 f"{command} 요청 거부: state={before.value} reason={reason.value}"
             )
             return response
 
         self._run_actions(actions)
+        # 순찰 중 취소 = 경비 종료 → 홈 복귀. 복귀를 못 했으면 기존 홈 복귀 거절 문구를 싣는다.
+        home_message = self._patrol_stop_follow_up() if patrol and command == "cancel" else ""
+        if patrol and self.logic.state != before:
+            self._publish_robot_state()
         response.accepted = True
-        response.message = f"{command} 요청을 처리했습니다."
+        response.message = home_message or f"{command} 요청을 처리했습니다."
         self.get_logger().info(
             f"{command} 처리: {before.value} -> {self.logic.state.value}"
         )
@@ -1104,6 +1194,234 @@ class MissionManagerNode(Node):
             response.message = "id_mismatch"
         self.get_logger().info(f"도움 요청 확인: {request_id} → {response.message}")
         return response
+
+    # -- 경비(순찰) 모드 (2026-11-14, ~/vica_data/patrol_plan/SPEC.md 3절) ----------
+    #
+    # 판단은 mission_logic(on_patrol_*)이 한다. 여기는 경로 파일·서비스 응답·사건 JSON·기록 파일 배선이다.
+    # 세 서비스의 request_id 는 형식을 따지지 않는다(순찰 서비스는 앱만 부른다).
+
+    def _patrol_follow(self, before: str, why: str) -> None:
+        """순찰 상태가 바뀌었으면 한 줄 남기고 /vica/robot_state 를 곧바로 낸다.
+
+        감지·음성·손잡이가 dialog_state 로 순찰을 따라온다 — 1 Hz 를 기다리면 3초 지점 정지의
+        1초를 잃는다. 틱 안에서 바뀐 것은 _tick 이 같은 일을 한다.
+        """
+        after = self.logic.dialog_state
+        if after == before:
+            return
+        self.get_logger().info(f"순찰({why}): {before} -> {after}")
+        self._publish_robot_state()
+
+    def _on_patrol_event(self, msg: String) -> None:
+        """/vica/patrol/event — 순찰이 아니면 JSON 도 풀지 않는다."""
+        if not self.logic.patrol_active:
+            return
+        try:
+            data = json.loads(msg.data)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        before = self.logic.dialog_state
+        self._run_actions(self.logic.on_patrol_event(data, self._now()))
+        self._patrol_follow(before, f"감지 {data.get('kind')}")
+
+    def _load_patrol_route(self) -> tuple:
+        """지금 지도의 순찰 경로 → (장소 목록 또는 None, 못 쓰는 이유 한 줄)."""
+        try:
+            ids = self._patrol_routes.read(self._map_id)
+        except ValueError:
+            ids = None
+        if not ids:
+            return None, ""
+        code, message = check_route_ids(ids, self.destinations)
+        if code == ROUTE_TOO_FEW:
+            return None, ""   # 2곳 미만 — 시작 거절의 정해진 문구(PATROL_START_REJECT_TEXT)가 나간다
+        if code != ROUTE_OK:
+            return None, message
+        return [self.destinations[dest_id] for dest_id in ids], ""
+
+    def _patrol_reply(self, response, reason: GateReason, ok_message: str, what: str):
+        """순찰 서비스 응답. 거절 사유는 한국어 한 줄로 돌려준다."""
+        response.accepted = reason == GateReason.OK
+        response.message = (ok_message if response.accepted
+                            else PATROL_REJECT_TEXT.get(reason, reason.value))
+        if response.accepted:
+            self.get_logger().info(f"{what}: {response.message}")
+        else:
+            self.get_logger().warn(f"{what} 거부: {reason.value}")
+        return response
+
+    def _on_patrol_start(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """경비 시작. patrol.yaml 을 읽어 로직에 넘긴다 — 수락하면 감지 노드 준비부터 기다린다."""
+        route, problem = self._load_patrol_route()
+        pose_known = self._robot_pose is not None and self._pose_cov_xy <= COV_UNKNOWN
+        before = self.logic.dialog_state
+        actions, reason = self.logic.on_patrol_start(
+            route, self.map_bounds, self._nav2_ready(), pose_known, self._now())
+        self._run_actions(actions)
+        self._patrol_follow(before, "시작")
+        self._patrol_reply(response, reason, "경비를 시작합니다.", "경비 시작")
+        if reason in PATROL_START_REJECT_TEXT:
+            # 앱이 그대로 보여 주는 목업 문구(비상정지 중·지점 2곳 미만). 시작 거절에만 쓴다.
+            response.message = PATROL_START_REJECT_TEXT[reason]
+        if reason == GateReason.NO_PATROL_ROUTE and problem:
+            response.message = problem   # 경로는 2곳 이상인데 못 쓰는 경우(지워진 장소 등)
+        return response
+
+    def _on_patrol_stop(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """경비 종료 → 홈으로 복귀(2026-11-14 사용자 결정). 홈이 없거나 복귀를 시작할 수 없으면
+        그 자리에서 끝내고, 응답 message 에 기존 홈 복귀 거절 문구를 싣는다."""
+        before = self.logic.dialog_state
+        actions, reason = self.logic.on_patrol_stop(self._now(), self._nav2_ready())
+        self._run_actions(actions)
+        home_message = self._patrol_stop_follow_up() if reason == GateReason.OK else ""
+        self._patrol_follow(before, "종료")
+        self._patrol_reply(response, reason, "경비를 종료했습니다.", "경비 종료")
+        if home_message:
+            response.message = home_message
+        return response
+
+    def _patrol_stop_follow_up(self) -> str:
+        """관리자 경비 종료 뒤의 홈 복귀 마무리(로직 on_patrol_stop 의 행동을 실행한 다음 부른다).
+
+        복귀를 시작했으면 앱의 홈 복귀(_on_return_home)와 똑같이 return_home_sent 를 내고 "" 를,
+        못 했으면 그 서비스의 거절 문구와 같은 글자를 돌려준다.
+        """
+        reason = self.logic.patrol_stop_home_reason
+        self.logic.patrol_stop_home_reason = None   # 한 번만 쓴다 — 다음 취소에 옛 결과가 남지 않게
+        if reason is None:
+            return ""
+        if reason != GateReason.OK:
+            self.get_logger().warn(f"경비 종료 뒤 홈 복귀 거부: reason={reason.value}")
+            return f"홈 복귀 거부: {reason.value}"
+        home = self.logic.return_destination
+        if home is not None:
+            self._publish_goal_event("return_home_sent", home)
+        self.get_logger().info("경비 종료 — 홈으로 복귀합니다.")
+        return ""
+
+    def _on_patrol_ack(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """경보 확인(음성 반복·재전송만 멈춘다). request_id 가 경보 id 모양이면 그 경보만,
+        아니면 지금 걸린 경보를 확인한다."""
+        raw = str(request.request_id or "").strip()
+        alarm_id = raw if PATROL_ALARM_ID_PATTERN.fullmatch(raw) else ""
+        actions, reason = self.logic.on_patrol_ack(alarm_id, self._now())
+        self._run_actions(actions)
+        return self._patrol_reply(response, reason, "경보를 확인했습니다.", "경보 확인")
+
+    def _patrol_catalog(self, map_id: str):
+        """그 지도의 목적지 catalog. 지금 지도면 메모리의 것, 다른 지도면 파일을 읽는다. 없으면 None."""
+        if map_id == self._map_id:
+            return self.destinations
+        try:
+            path = self._patrol_routes.path_for(map_id).with_name("destinations.yaml")
+            return load_destinations(str(path)) if path.exists() else None
+        except Exception:  # noqa: BLE001 — 깨진 catalog 는 '모르는 지도'로 본다
+            return None
+
+    def _on_save_patrol_route(self, request, response):
+        """순찰 경로 저장. 빈 배열이면 경로를 지운다. reason 코드는 SPEC 3.2."""
+        map_id = str(request.map_id or "").strip() or self._map_id
+        ids = [str(dest_id).strip().lower() for dest_id in request.destination_ids]
+        catalog = self._patrol_catalog(map_id)
+        if catalog is None:
+            code, message = ROUTE_UNKNOWN_MAP, f"지도를 찾을 수 없습니다: {map_id}"
+        else:
+            try:
+                if not ids:
+                    removed = self._patrol_routes.delete(map_id)
+                    code = ROUTE_OK
+                    message = "순찰 경로를 지웠습니다." if removed else "지울 순찰 경로가 없었습니다."
+                else:
+                    code, message = check_route_ids(ids, catalog)
+                    if code == ROUTE_OK:
+                        self._patrol_routes.write(map_id, ids)
+                        message = f"순찰 경로를 저장했습니다(장소 {len(ids)}곳)."
+            except (OSError, ValueError) as exc:
+                code, message = ROUTE_IO_ERROR, f"순찰 경로 저장 실패: {exc}"
+        response.accepted = code == ROUTE_OK
+        response.reason = code
+        response.message = message
+        self.get_logger().info(f"순찰 경로 저장({map_id}, {len(ids)}곳): {code} — {message}")
+        return response
+
+    def _on_get_patrol_route(self, request, response):
+        """순찰 경로 읽기. 이름은 catalog 에서 찾고, 지워진 장소는 이름을 "" 로 둔다."""
+        map_id = str(request.map_id or "").strip() or self._map_id
+        response.found = False
+        response.map_id = map_id
+        response.destination_ids = []
+        response.names = []
+        try:
+            ids = self._patrol_routes.read(map_id)
+        except ValueError:
+            response.message = f"지도를 찾을 수 없습니다: {map_id}"
+            return response
+        if not ids:
+            response.message = "저장된 순찰 경로가 없습니다."
+            return response
+        catalog = self._patrol_catalog(map_id) or {}
+        names = [catalog[dest_id].name if dest_id in catalog else "" for dest_id in ids]
+        response.found = True
+        response.destination_ids = ids
+        response.names = names
+        response.message = "" if all(names) else "경로에 지워진 장소가 있습니다. 경로를 다시 저장하세요."
+        return response
+
+    def _patrol_record(self, record: dict) -> None:
+        """경보 기록 파일에 한 줄 덧붙인다. 실패는 경고만 — 순찰은 계속한다."""
+        if not self._patrol_log.append(record):
+            self.get_logger().warn(f"경보 기록 쓰기 실패: {self._patrol_log.path}")
+
+    def _publish_patrol_event(self, action: PatrolEvent) -> None:
+        """순찰 사건을 /vica_goal_event 로 낸다(SPEC 3.3).
+
+        경보 4종은 보낼 때마다 그 순간 위치(place·robot_x·robot_y)를 싣는다. 기록 파일은 첫
+        전송에만 쓴다 — 10초마다의 재전송은 쓰지 않는다.
+        """
+        extra: dict = {}
+        if action.event == "patrol_started":
+            extra["route"] = list(action.route)
+        elif action.event == "patrol_waypoint":
+            extra.update({"index": action.index, "lap": action.lap, "count": action.count})
+        elif action.event == "patrol_acked":
+            extra["alarm_id"] = action.alarm_id
+        elif action.event == "patrol_stopped":
+            extra["return_home"] = action.return_home   # 이어서 홈 복귀를 시작했나(admin 만 true)
+        elif action.kind in PATROL_ALARM_KINDS:
+            pose = self._robot_pose
+            place = nearest_place_name(pose, self.destinations)
+            robot_x = pose.x if pose is not None else None
+            robot_y = pose.y if pose is not None else None
+            extra.update({"alarm_id": action.alarm_id, "place": place,
+                          "robot_x": robot_x, "robot_y": robot_y, "resend": action.resend})
+            if action.clip_id:
+                extra["clip_id"] = action.clip_id
+            if action.photo:
+                extra["photo"] = action.photo
+            if action.level_db is not None:
+                extra["level_db"] = action.level_db
+            if not action.resend:
+                self._patrol_record(alarm_record(
+                    action.alarm_id, action.kind, action.time, place, robot_x, robot_y,
+                    self._map_id, action.clip_id, action.photo, action.level_db))
+        self._publish_goal_event(action.event, action.destination, action.reason, extra=extra)
+        self.get_logger().info(
+            f"앱 알림: {action.event} {action.alarm_id or action.reason}"
+            + (" (재전송)" if action.resend else ""))
 
     # -- 홈 위치 service (2026-08-26) --------------------------------------------
     #
@@ -1661,6 +1979,9 @@ class MissionManagerNode(Node):
     def _run_mission_command(self, command: str) -> tuple:
         """command 이름에 맞는 로직 핸들러를 부른다. (actions, GateReason)"""
         now = self._now()
+        if command == "cancel" and self.logic.state.value.startswith("patrol"):
+            # 순찰 중 앱 취소 = 경비 종료 → 홈 복귀(2026-11-14). 홈 복귀 관문이 Nav2 준비를 본다.
+            return self.logic.on_patrol_stop(now, self._nav2_ready())
         if command == "cancel":
             # 앱 취소는 전면 개방 판 — 음성 취소(on_cancel_request)와 다르다.
             was_idle = self.logic.state is State.IDLE
@@ -1921,6 +2242,9 @@ class MissionManagerNode(Node):
             # 시작·종료). /vica/robot_state 1 Hz 의 최대 1초 지연을 즉시
             # 갱신으로 회수한다 — _on_wake_doa 와 같은 이유(2026-09-10 재검토).
             self._publish_robot_state()
+        elif "patrol" in (dialog_before[:6], self.logic.dialog_state[:6]):
+            # 순찰 상태가 틱 안에서 바뀌었으면(도착·지점 정지 끝·카메라 끊김·종료) 곧바로 방송한다.
+            self._patrol_follow(dialog_before, "틱")
         elif dialog_before != self.logic.dialog_state:
             # 손잡이 대화 단계(grip_wait·paused_handle)가 바뀌었다. 손 놓쳐 선
             # 사용자가 곧바로 "왜 안 가요?"라고 물을 수 있어 1 Hz 를 기다리지 않는다.
@@ -1942,11 +2266,13 @@ class MissionManagerNode(Node):
         # APPROACHING 을 넣지 않는 것은 의도된 현행 유지다: 접근 중에는 목표점
         # 갱신에 탐지가 필요하다.
         # 대기 장소로 혼자 가는 두 상태도 바퀴가 돈다(2026-10-07).
+        # 순찰 구간 이동(PATROLLING)도 바퀴가 돈다(2026-11-14).
         msg.is_moving = self.logic.state in (
             State.NAVIGATING, State.SEEKING,
-            State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
+            State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST, State.PATROLLING)
         # LLM 이 "다시 출발"을 이해하려면 그냥 정지와 일시정지를 구분해야 한다.
-        msg.is_paused = self.logic.state == State.PAUSED
+        # 순찰 중 관리자 일시정지(PATROL_PAUSED)도 일시정지다.
+        msg.is_paused = self.logic.state in (State.PAUSED, State.PATROL_PAUSED)
         # dialog_state 는 state.value 에 손잡이 두 단계(grip_wait·paused_handle)를
         # 더한 것이다(2026-09-30, 설계 4.7). is_paused 의 뜻은 그대로다.
         fields = state_fields(
@@ -2002,6 +2328,13 @@ class MissionManagerNode(Node):
                 self.get_logger().info(f"앱 알림: {action.event} {action.reason}")
             elif isinstance(action, HelpEvent):
                 self._publish_help_event(action)
+            elif isinstance(action, PatrolEvent):
+                self._publish_patrol_event(action)
+            elif isinstance(action, PatrolRecordClip):
+                # 경보 뒤에 알게 된 영상 id — 기록 파일에만 덧붙인다.
+                self._patrol_record(clip_record(action.alarm_id, action.clip_id))
+            elif isinstance(action, SetNavSpeedCap):
+                self._publish_nav_speed_cap(action.mps)
             elif isinstance(action, Haptic):
                 out = String()
                 out.data = action.pattern
@@ -2033,6 +2366,14 @@ class MissionManagerNode(Node):
             self.get_logger().info("Nav2 접근 속도 제한 해제")
         else:
             self.get_logger().info(f"Nav2 접근 속도 제한: 최대속도의 {percent:.1f}%")
+
+    def _publish_nav_speed_cap(self, mps: float) -> None:
+        """순찰 구간 속도 상한(m/s). 같은 /speed_limit 을 절대값으로 낸다 — 푸는 것은 0.0(위)."""
+        msg = SpeedLimit()
+        msg.percentage = False
+        msg.speed_limit = float(mps)
+        self.pub_speed_limit.publish(msg)
+        self.get_logger().info(f"Nav2 속도 상한(순찰): {mps:.2f} m/s")
 
     def _resolve_bt(self, value: str, file_name: str, label: str) -> str:
         """*_bt_xml 파라미터를 실제 파일 경로로 바꾼다. 못 쓰면 "" (끔 = 기본 트리).
@@ -2141,8 +2482,18 @@ class MissionManagerNode(Node):
         except Exception as exc:  # noqa: BLE001 - 보내기 자체는 막지 않는다
             self.get_logger().warn(f"출발 전 costmap 비우기 실패: {exc}")
 
+    def _patrol_leg_stale(self) -> bool:
+        """순찰 구간을 보내려는데 순찰이 이미 끝났나(비상정지 스레드가 그 사이 끼어든 경우)."""
+        return self.logic.state != State.PATROLLING or self.logic.estop_active
+
     def _start_nav(self, action: Navigate) -> None:
         dest = action.destination
+        # 순찰 구간(2026-11-14)은 목적지 id 로 안다 — 상태는 비상정지 스레드가 그 사이 바꿀 수 있다.
+        # 순찰 구간은 goal_* 사건을 내지 않고, 순찰이 끝난 뒤에는 보내지 않는다.
+        patrol_leg = dest.id.startswith(PATROL_DESTINATION_PREFIX)
+        if patrol_leg and self._patrol_leg_stale():
+            self.get_logger().warn(f"순찰 구간 전송 안 함 — 그 사이 순찰이 끝났다 ({dest.id})")
+            return
         if self._delivery_dest_id is not None and dest.id != self._delivery_dest_id:
             # 배송지가 아닌 곳으로 출발한다(음성 안내·홈·접근 등) — 배송은 끝났다.
             self._delivery_dest_id = None
@@ -2162,7 +2513,7 @@ class MissionManagerNode(Node):
         # 틱·"비카야" 판정·앱 서비스가 모두 멈춘다. 관문(check_gate)을 거치지 않는
         # 재시도·재개·주행 중 바꾸기의 원래 목적지 재출발도 여기서 함께 막는다.
         if not self._nav2_ready():
-            if not self._quiet_goal_events():
+            if not (patrol_leg or self._quiet_goal_events()):
                 self._publish_goal_event("goal_rejected", dest, "Nav2 가 준비되지 않았습니다.")
             self.get_logger().error(f"NavigateToPose 전송 보류: Nav2 미준비 ({dest.id})")
             self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
@@ -2170,9 +2521,10 @@ class MissionManagerNode(Node):
         # 앞선 취소가 아직 Nav2 응답을 기다리는 중이면 여기서 영원히 기다리지
         # 않는다. 못 보낸 것을 실패로 처리하는 편이 콜백을 막는 것보다 낫다.
         if not self._nav_lock.acquire(timeout=self._nav_lock_timeout_sec):
-            self._publish_goal_event(
-                "goal_rejected", dest, "이전 goal 취소가 아직 처리 중입니다."
-            )
+            if not patrol_leg:   # 순찰 구간은 goal_* 사건을 내지 않는다
+                self._publish_goal_event(
+                    "goal_rejected", dest, "이전 goal 취소가 아직 처리 중입니다."
+                )
             self.get_logger().error(
                 f"NavigateToPose 전송 보류: 이전 취소가 "
                 f"{self._nav_lock_timeout_sec:.1f}초 안에 끝나지 않았다 ({dest.id})"
@@ -2189,7 +2541,7 @@ class MissionManagerNode(Node):
             bt = self._guided_no_rail_bt
         # 대기 장소로 혼자 가는 주행은 앱에 일반 주행 알림을 내지 않는다 — 앱에는
         # 미션이 따로 내는 wait_spot_blocked·wait_expired 만 뜬다(주행 실패 팝업 중복 방지).
-        quiet = self._quiet_goal_events()
+        quiet = patrol_leg or self._quiet_goal_events()
         try:
             if bt != self._task_bt:
                 self._finish_task_for_bt_switch()
@@ -2208,6 +2560,13 @@ class MissionManagerNode(Node):
                 self._nav_task_is_spin = False
         finally:
             self._nav_lock.release()
+        if accepted and patrol_leg and self._patrol_leg_stale():
+            # 구간을 보내는 사이(costmap 비우기·수락 대기) 비상정지·종료가 끼어들었다. 그때의 취소는
+            # 아직 goal 이 없어 빈손으로 끝났다 — 방금 보낸 goal 을 거둔다. 안 거두면 래치가 풀린 뒤
+            # Nav2 가 그 지점으로 혼자 간다(해제 뒤 스스로 다시 출발하지 않는다, SPEC 1절 8항).
+            self.get_logger().warn(f"순찰 구간 전송 직후 취소 — 그 사이 순찰이 끝났다 ({dest.id})")
+            self._cancel_nav(None)
+            return
         if accepted:
             if not quiet:
                 self._publish_goal_event("goal_sent", dest)
@@ -2384,8 +2743,13 @@ class MissionManagerNode(Node):
         return any(name.rstrip("/").endswith("compute_route") for name, _ in names)
 
     def _quiet_goal_events(self) -> bool:
-        """지금 주행이 앱에 일반 주행 알림을 내지 않는 주행인가(대기 장소로 혼자 가는 길)."""
-        return self.logic.state in (State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
+        """지금 주행이 앱에 일반 주행 알림을 내지 않는 주행인가(대기 장소로 혼자 가는 길·순찰 구간).
+
+        순찰 구간(2026-11-14)은 goal_sent·goal_succeeded 등을 내지 않는다 — 손잡이가 goal_succeeded 를
+        도착 표시로, 앱이 도착 팝업으로 쓴다. 순찰은 patrol_* 사건을 로직이 따로 낸다.
+        """
+        return self.logic.state in (
+            State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST, State.PATROLLING)
 
     def _record_home_visit(self, visited_ok: bool) -> None:
         """복귀 결과를 home.yaml 에 남긴다. 실패해도 주행 판정을 막지 않는다."""

@@ -14,6 +14,7 @@ import math
 import uuid
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import Enum
 from typing import Callable, Optional, Sequence, Union
 
@@ -80,6 +81,17 @@ class State(str, Enum):
     WAITING_RELEASE = "waiting_release"
     MOVING_TO_WAIT_SPOT = "moving_to_wait_spot"
     MOVING_BACK_TO_DEST = "moving_back_to_dest"
+    # ---- 경비(순찰) 모드 (2026-11-14, ~/vica_data/patrol_plan/SPEC.md 2절) ----------
+    #
+    # 관리자가 앱에서 시작한다. 지점을 차례로 돌고(PATROLLING) 지점마다 3초 선다
+    # (PATROL_DWELL — 시작 직후 감지 노드 준비를 기다리는 동안도 이 값). 감지가 오면 그
+    # 자리에 서고(PATROL_ALARM·PATROL_LIGHT) 관리자가 재개를 눌러야 다시 간다.
+    # 값이 모두 "patrol" 로 시작한다 — 감지·음성·손잡이는 dialog_state 앞머리로 순찰을 안다.
+    PATROLLING = "patrolling"
+    PATROL_DWELL = "patrol_dwell"
+    PATROL_ALARM = "patrol_alarm"      # 사람·큰 소리·카메라 끊김
+    PATROL_LIGHT = "patrol_light"      # 불 켜짐
+    PATROL_PAUSED = "patrol_paused"    # 관리자 일시정지
 
 
 class NavStatus(str, Enum):
@@ -119,6 +131,14 @@ class GateReason(str, Enum):
     ALREADY_HOME_BOUND = "already_home_bound"
     # 대기 장소로 가보기(관리자) 전용 사유.
     NO_WAIT_SPOT = "no_wait_spot"
+    # 경비(순찰) 전용 사유 (2026-11-14).
+    NO_PATROL_ROUTE = "no_patrol_route"
+    ALREADY_PATROLLING = "already_patrolling"
+    POSE_UNKNOWN = "pose_unknown"
+    NOT_PATROLLING = "not_patrolling"
+    DETECTOR_NOT_READY = "detector_not_ready"
+    NO_PATROL_ALARM = "no_patrol_alarm"
+    PATROL_ALARM_MISMATCH = "alarm_id_mismatch"
 
 
 @dataclass(frozen=True)
@@ -345,9 +365,50 @@ class Haptic:
     pattern: str
 
 
+@dataclass(frozen=True)
+class SetNavSpeedCap:
+    """Nav2 controller 최대속도 상한(m/s). 순찰 구간 전용(2026-11-14) — 같은 /speed_limit 을
+    비율이 아닌 절대값으로 낸다. 푸는 것은 SetNavSpeedLimit(0.0) 이다."""
+
+    mps: float
+
+
+@dataclass(frozen=True)
+class PatrolEvent:
+    """경비(순찰) 사건 하나 — 노드가 /vica_goal_event JSON 으로 낸다(SPEC 3.3).
+
+    경보 4종의 위치 칸(place·robot_x·robot_y)은 보낼 때 노드가 그 순간 값으로 채우고,
+    첫 전송(resend=False)에만 기록 파일에 한 줄 쓴다 — 로직은 위치도 파일도 모른다.
+    """
+
+    event: str
+    reason: str = ""                              # patrol_stopped: admin/estop/nav_failed/detector_not_ready
+    route: tuple = ()                             # patrol_started: 지점 이름(순서대로)
+    destination: Optional[Destination] = None     # patrol_waypoint: 가는 지점
+    index: int = -1                               # patrol_waypoint: 0부터
+    lap: int = 0                                  # patrol_waypoint: 1부터
+    count: int = 0                                # patrol_waypoint: 지점 수
+    alarm_id: str = ""                            # 경보 4종·patrol_acked
+    kind: str = ""                                # intruder/sound/light/camera_lost
+    time: str = ""                                # 경보 시각(ISO, 초까지)
+    clip_id: str = ""
+    photo: str = ""
+    level_db: Optional[float] = None
+    resend: bool = False
+    return_home: bool = False                     # patrol_stopped: 이어서 홈 복귀를 시작했나(admin 만 true)
+
+
+@dataclass(frozen=True)
+class PatrolRecordClip:
+    """경보 뒤에 알게 된 영상 id — 노드가 기록 파일에 {"type":"clip"} 한 줄을 덧붙인다(SPEC 3.5)."""
+
+    alarm_id: str
+    clip_id: str
+
+
 Action = Union[
     Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic, SpinInPlace, StopSpeech,
-    GoalEvent, WakeReply,
+    GoalEvent, WakeReply, SetNavSpeedCap, PatrolEvent, PatrolRecordClip,
 ]
 
 
@@ -625,6 +686,44 @@ MSG_HELP_UNAVAILABLE = "지금은 도움 요청을 보낼 수 없습니다"
 # 관리자가 앱에서 확인할 때까지 같은 help_id 로 다시 보내는 간격. 상한은 없다 — 앱을
 # 껐다 켜도 다음 재전송에 팝업이 뜬다.
 HELP_RESEND_SEC = 10.0
+# ---- 경비(순찰) 모드 (2026-11-14, SPEC 3.4·4.A) --------------------------------
+# 문장은 글자 그대로 둔다 — 음성 쪽 녹음 대응표가 같은 글자로 찾는다. 확인 전까지 되풀이한다.
+MSG_PATROL_INTRUDER = "침입자 발생"       # 사람·큰 소리
+MSG_PATROL_LIGHT = "불 켜짐 감지"         # 불 켜짐
+# 노드 매개변수 기본값(같은 이름의 patrol_* 매개변수).
+PATROL_DWELL_SEC = 3.0                # 지점마다 서 있는 시간
+PATROL_INTRUDER_REPEAT_SEC = 3.0      # "침입자 발생" 반복 간격
+PATROL_LIGHT_REPEAT_SEC = 10.0        # "불 켜짐 감지" 반복 간격
+PATROL_ALARM_RESEND_SEC = 10.0        # 확인 전까지 경보 이벤트 재전송 간격
+PATROL_DETECTOR_TIMEOUT_SEC = 3.0     # 감지 노드 정상 신호가 이만큼 없으면 카메라 끊김
+PATROL_ARMING_TIMEOUT_SEC = 15.0      # 시작 뒤 감지 노드 준비를 기다리는 상한
+PATROL_SPEED_MPS = 0.6                # 순찰 구간 속도 상한
+PATROL_MAX_LEG_FAILURES = 3           # 구간 연속 실패가 이만큼이면 순찰 종료
+PATROL_ALARM_KINDS = ("intruder", "sound", "light", "camera_lost")
+# 순찰 구간 goal 을 감싼 Destination 의 id 접두어(대기 장소 접두어와 같은 방식).
+PATROL_DESTINATION_PREFIX = "patrol:"
+# 순찰 서비스 거절 사유 → 앱에 돌려주는 한 줄(서비스 응답 message). 로봇이 말하는 문장이 아니다.
+PATROL_REJECT_TEXT = {
+    GateReason.ESTOP_ACTIVE: "비상정지 중입니다. 해제한 뒤 다시 시도하세요.",
+    GateReason.ALREADY_PATROLLING: "이미 순찰 중입니다.",
+    GateReason.BUSY_NAVIGATING: "안내·접근 중에는 경비를 시작할 수 없습니다.",
+    GateReason.NO_PATROL_ROUTE: "순찰 지점이 2곳 이상이어야 경비를 시작할 수 있습니다.",
+    GateReason.POSE_INVALID: "순찰 경로에 갈 수 없는 장소가 있습니다.",
+    GateReason.NAV_NOT_READY: "주행 준비(Nav2)가 아직 안 됐습니다.",
+    GateReason.POSE_UNKNOWN: "로봇 위치가 아직 정해지지 않았습니다.",
+    GateReason.NOT_PATROLLING: "순찰 중이 아닙니다.",
+    GateReason.NOT_NAVIGATING: "지금은 일시정지할 수 없습니다.",
+    GateReason.NOT_PAUSED: "재개할 순찰이 없습니다.",
+    GateReason.DETECTOR_NOT_READY: "카메라가 준비되지 않아 재개할 수 없습니다.",
+    GateReason.NO_PATROL_ALARM: "확인할 경보가 없습니다.",
+    GateReason.PATROL_ALARM_MISMATCH: "지금 경보와 다른 경보입니다.",
+}
+# 경비 시작(patrol_start) 거절에만 쓰는 문구. 앱이 그대로 보여 준다 — 목업 문구와 글자까지 같다
+# (2026-11-14 사용자 승인). 다른 서비스의 거절 문구는 위 표 그대로다.
+PATROL_START_REJECT_TEXT = {
+    GateReason.ESTOP_ACTIVE: "비상정지 중에는 경비를 시작할 수 없습니다.",
+    GateReason.NO_PATROL_ROUTE: "순찰 지점이 2곳 이상이어야 경비를 시작할 수 있습니다.",
+}
 # 사람 접근. 질문은 되묻기와 같은 이유로 expects_reply 를 달아 내보낸다.
 # ⚠️ 문구 정본은 voice replies.py·ment_cache (approach-voice-flow.md 확정 흐름).
 # 글자까지 일치해야 사전 녹음이 재생된다 — 바꾸려면 양쪽을 함께 고치고
@@ -1018,6 +1117,12 @@ _APPROACH_STATES = (
 _GOAL_ACTIVE_STATES = (
     State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING,
     State.SEEKING, State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST,
+    State.PATROLLING,
+)
+# 경비(순찰) 상태 묶음(2026-11-14). 이 구간에서는 호출어·음성 요청·목적지 요청을 받지 않는다.
+_PATROL_STATES = (
+    State.PATROLLING, State.PATROL_DWELL, State.PATROL_ALARM, State.PATROL_LIGHT,
+    State.PATROL_PAUSED,
 )
 # 대기의 일부인 상태들(2026-10-07). 대기 시간·상황판 대기 칸이 이 구간 내내 살아 있다.
 _WAIT_STATES = (
@@ -1032,6 +1137,7 @@ _WAIT_MOVING_STATES = (State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
 # 비상 정지는 따로 한 마디(MSG_ESTOP_WAKE)를 하고 역시 듣지 않는다.
 _WAKE_IGNORE_STATES = (
     State.APPROACHING, State.TURNING, State.FAILED, *_WAIT_MOVING_STATES,
+    *_PATROL_STATES,   # 순찰 중에는 사용자 응대가 없다(2026-11-14)
 )
 
 _REJECT_MESSAGES = {
@@ -1312,6 +1418,70 @@ def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
     return (0.0, 0.0, math.sin(half), math.cos(half))
 
 
+# ---- 경비(순찰) 문맥 (2026-11-14) ----------------------------------------------
+
+
+def patrol_leg_destination(target: Destination, following: Destination) -> Destination:
+    """순찰 구간 goal. 도착 방향은 저장 방향이 아니라 **다음 지점을 바라보는 방향**이다.
+
+    두 지점이 겹치면(5 cm 안) 방향을 정할 수 없어 저장 방향을 쓴다.
+    """
+    dx = following.pose.x - target.pose.x
+    dy = following.pose.y - target.pose.y
+    yaw = (math.degrees(math.atan2(dy, dx)) if math.hypot(dx, dy) >= 0.05
+           else target.pose.yaw_deg)
+    return Destination(
+        id=PATROL_DESTINATION_PREFIX + target.id,
+        name=target.name,
+        pose=Pose2D(target.pose.x, target.pose.y, yaw, target.pose.frame_id),
+        calibrated=True,
+    )
+
+
+def _patrol_text(value) -> str:
+    """순찰 이벤트 JSON 의 글자 칸. 글자가 아니면 ""."""
+    return value if isinstance(value, str) else ""
+
+
+def _patrol_number(value) -> Optional[float]:
+    """순찰 이벤트 JSON 의 숫자 칸. 유한한 숫자가 아니면 None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+@dataclass
+class PatrolAlarm:
+    """지금 걸린 경보 하나. 확인(acked) 전까지 음성 반복·이벤트 재전송을 한다."""
+
+    alarm_id: str            # YYYYMMDD_HHMMSS_<kind>
+    kind: str                # PATROL_ALARM_KINDS
+    time: str                # ISO 시각(초까지)
+    said_at: float           # 마지막으로 말한 시각
+    sent_at: float           # 마지막으로 이벤트를 보낸 시각
+    clip_id: str = ""
+    photo: str = ""
+    level_db: Optional[float] = None
+    acked: bool = False
+
+
+@dataclass
+class PatrolRun:
+    """순찰 한 번의 문맥. 시작에 만들고 종료·비상정지에 버린다."""
+
+    route: tuple                               # Destination 들(누른 순서)
+    index: int = 0                             # 지금 가는(또는 서 있는) 지점
+    lap: int = 1
+    arrived: bool = False                      # index 지점에 도착해 있나 — 재개가 다음 지점으로 갈지 정한다
+    armed: bool = False                        # 감지 노드 준비를 한 번 확인했나
+    arming_deadline: Optional[float] = None
+    dwell_until: Optional[float] = None
+    leg_failures: int = 0                      # 연속 구간 실패
+    detector_ok_at: Optional[float] = None     # 감지 노드 정상(ready && camera_ok)을 마지막으로 받은 시각
+    alarm: Optional[PatrolAlarm] = None
+    last_alarm: Optional[PatrolAlarm] = None   # 재개 뒤 늦게 온 영상 id 를 붙일 직전 경보
+
+
 # ---- 상태 머신 ---------------------------------------------------------------
 
 
@@ -1363,6 +1533,14 @@ class MissionLogic:
         home_beacon_interval_sec: float = HOME_BEACON_INTERVAL_SEC,
         speaker_gate: bool = False,
         spk_joined_threshold: float = 0.50,
+        patrol_dwell_sec: float = PATROL_DWELL_SEC,
+        patrol_intruder_repeat_sec: float = PATROL_INTRUDER_REPEAT_SEC,
+        patrol_light_repeat_sec: float = PATROL_LIGHT_REPEAT_SEC,
+        patrol_alarm_resend_sec: float = PATROL_ALARM_RESEND_SEC,
+        patrol_detector_timeout_sec: float = PATROL_DETECTOR_TIMEOUT_SEC,
+        patrol_arming_timeout_sec: float = PATROL_ARMING_TIMEOUT_SEC,
+        patrol_speed_mps: float = PATROL_SPEED_MPS,
+        patrol_max_leg_failures: int = PATROL_MAX_LEG_FAILURES,
     ) -> None:
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
@@ -1689,6 +1867,23 @@ class MissionLogic:
         # (사람 자리, 재접근을 다시 허용할 시각). 번호가 바뀐 같은 사람도 막는다(2026-10-10 B6).
         self._suppressed_places: list = []
 
+        # ── 경비(순찰) 모드 (2026-11-14, 상수 절 주석 참고) ─────────────────
+        self.patrol_dwell_sec = patrol_dwell_sec
+        self.patrol_intruder_repeat_sec = patrol_intruder_repeat_sec
+        self.patrol_light_repeat_sec = patrol_light_repeat_sec
+        self.patrol_alarm_resend_sec = patrol_alarm_resend_sec
+        self.patrol_detector_timeout_sec = patrol_detector_timeout_sec
+        self.patrol_arming_timeout_sec = patrol_arming_timeout_sec
+        self.patrol_speed_mps = patrol_speed_mps
+        self.patrol_max_leg_failures = patrol_max_leg_failures
+        # 경보 id·기록 시각용 벽시계. 시험에서 갈아 끼운다.
+        self.patrol_wall_clock: Callable[[], datetime] = datetime.now
+        # 순찰 문맥. 순찰이 아니면 None — 그때는 순찰 쪽 계산이 하나도 돌지 않는다.
+        self._patrol: Optional[PatrolRun] = None
+        # 마지막 경비 종료(on_patrol_stop)에 이은 홈 복귀 관문 결과. OK = 복귀 시작, 그 밖 = 거절 사유.
+        # 노드가 응답 문구·return_home_sent 발행에 쓴다.
+        self.patrol_stop_home_reason: Optional[GateReason] = None
+
     # -- 접근 감속 조회 ---------------------------------------------------------
 
     @property
@@ -1720,6 +1915,10 @@ class MissionLogic:
         설계: docs/superpowers/specs/2026-10-08-mission-request-reactions-design.md
         """
         self.voice_note = ""
+        if self.state in _PATROL_STATES:
+            # 순찰 중에는 음성 요청을 받지 않는다(2026-11-14) — 말도 상태도 그대로.
+            self.voice_note = "순찰 중이라 받지 않음"
+            return []
         if self._answer_predates_question(intent):
             # 질문 전에 시작한 예/아니요 — 버린다. 질문은 그대로 기다리고(다시 묻기 시계도 그대로) 사용자가 다시 답한다.
             self.voice_note = "질문 전에 시작한 말이라 대답으로 안 씀"
@@ -2687,6 +2886,9 @@ class MissionLogic:
         """
         if self.estop_active or self.state == State.ESTOPPED:
             return [], GateReason.ESTOP_ACTIVE
+        if self.state in _PATROL_STATES:
+            # 순찰 중에는 선점하지 않는다(2026-11-14) — 관리자가 경비를 끝낸 뒤 보낸다.
+            return [], GateReason.BUSY_NAVIGATING
         if dest is None:
             return [], GateReason.UNKNOWN_DESTINATION
         if dest.authorization != "public" and not allow_private:
@@ -2763,7 +2965,7 @@ class MissionLogic:
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
 
-    def on_app_cancel(self, now: float) -> tuple:
+    def on_app_cancel(self, now: float, nav_ready: bool = True) -> tuple:
         """앱(관리자) 취소 — ESTOPPED 만 빼고 어느 상태든 전부 정리하고
         IDLE (2026-08-31 사용자 결정). 음성 취소와 달리 게이트가 없다:
         관리자 버튼은 오인식이 없고, 접근 응대·도착 질문도 끊을 권한이 있다.
@@ -2775,6 +2977,11 @@ class MissionLogic:
         ended = self._end_help()
         if self.estop_active or self.state == State.ESTOPPED:
             return ended, GateReason.ESTOP_ACTIVE
+        if self.state in _PATROL_STATES:
+            # 순찰 중 앱 취소 = 경비 종료 → 홈 복귀(2026-11-14). 안내 취소 멘트는 내지 않는다.
+            # nav_ready 는 이 길(홈 복귀 관문)에서만 쓴다.
+            actions, reason = self.on_patrol_stop(now, nav_ready)
+            return [*ended, *actions], reason
         if self.state == State.IDLE:
             # 끊긴 복귀 재개 사다리가 도는 중일 수 있다(2026-09-10 사용자
             # 결정) — 조용히 수락하는 척만 하고 사다리를 그대로 두면 18초
@@ -2797,6 +3004,8 @@ class MissionLogic:
         손 놓침으로 선 PAUSED 에서 "잠깐"이 오면 말로 재개하는 보통 일시정지로
         바꾼다 — 이제 쥐고 있어도 자동으로 출발하지 않는다(설계 4.3 (다)).
         """
+        if self.state in _PATROL_STATES:
+            return self._patrol_pause(now)
         if self.state == State.PAUSED and self._handle_pause:
             self._clear_handle_pause()
             return [Say(MSG_PAUSED, priority="response")], GateReason.OK
@@ -2845,6 +3054,8 @@ class MissionLogic:
     def on_resume_request(self, nav_ready: bool, now: float) -> tuple:
         """다시 출발. 성공하면 걸린 도움 요청을 끝낸다(설계 5.6절) — 음성 "다시 가자"는 관리자 확인
         전에만 여기 오고(확인 뒤엔 _react_help 가 막는다), 앱 "다시 출발"은 확인 뒤에도 온다."""
+        if self.state in _PATROL_STATES:
+            return self._patrol_resume(nav_ready, now)
         actions, reason = self._resume_request(nav_ready, now)
         if reason == GateReason.OK and self.help_phase != "none":
             actions = [*actions, *self._end_help()]
@@ -3127,6 +3338,337 @@ class MissionLogic:
         self._close_help_cancel()
         self.help_id = None
         self._help_last_sent_at = None
+        return actions
+
+    # -- 경비(순찰) 모드 (2026-11-14, ~/vica_data/patrol_plan/SPEC.md 4.A) ----------
+    #
+    # 시작 → 감지 노드 준비 대기(PATROL_DWELL) → 지점 이동(PATROLLING) → 3초 정지(PATROL_DWELL)
+    # → 다음 지점 … 끝 다음은 처음. 감지가 오면 그 자리에 서고(PATROL_ALARM·PATROL_LIGHT)
+    # 관리자가 앱에서 확인·재개한다. 구간 이동에는 goal_* 이벤트가 나가지 않는다(노드가 조용히 보낸다).
+
+    @property
+    def patrol_active(self) -> bool:
+        """순찰 상태(5개 중 하나)인가."""
+        return self.state in _PATROL_STATES
+
+    def on_patrol_start(
+        self,
+        route: Optional[Sequence[Destination]],
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+        pose_known: bool,
+        now: float,
+    ) -> tuple:
+        """경비 시작(`/vica/mission/patrol_start`). (actions, GateReason).
+
+        route 는 노드가 patrol.yaml 을 읽어 만든 장소 목록이다(없으면 None). 쉬는 중(IDLE)에만
+        받는다 — 안내·접근·대기 중인 사용자가 먼저다. 수락하면 감지 노드 준비부터 기다린다.
+        """
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if self.state in _PATROL_STATES:
+            return [], GateReason.ALREADY_PATROLLING
+        if self.state != State.IDLE or self._idle_substage_active():
+            return [], GateReason.BUSY_NAVIGATING
+        if not route or len(route) < 2:
+            return [], GateReason.NO_PATROL_ROUTE
+        if any(not d.is_approachable or not pose_valid(d, bounds) for d in route):
+            return [], GateReason.POSE_INVALID
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        if not pose_known:
+            return [], GateReason.POSE_UNKNOWN
+        # 쉬는 중의 흔적(찾는 창·끊긴 복귀·늦은 답·접근 잠금)을 치운다 — 관리자가 넘겨받았다.
+        self._forget_interrupted_return()
+        self._to_idle()
+        self._last_guided = None
+        self._late_answer_finish = None
+        self._handle_engaged = False
+        self._approach_lock = False
+        self._approach_lock_quiet_since = None
+        self._patrol = PatrolRun(
+            route=tuple(route), arming_deadline=now + self.patrol_arming_timeout_sec)
+        self.state = State.PATROL_DWELL
+        return [PatrolEvent("patrol_started", route=tuple(d.name for d in route))], GateReason.OK
+
+    def on_patrol_stop(self, now: float, nav_ready: bool = True) -> tuple:
+        """관리자의 경비 종료(`/vica/mission/patrol_stop`, 순찰 중 앱 취소) → 홈으로 복귀.
+        (actions, GateReason).
+
+        2026-11-14 사용자 결정: 순찰을 끝낸 뒤(구간 취소·속도 상한 해제·patrol_stopped) 관리자
+        홈 복귀(on_return_home_request)를 그대로 시작한다 — 관문·상태·행동 트리가 같다. 홈이
+        없거나 그 관문이 거절하면 그 자리에서 쉰다. 결과는 patrol_stop_home_reason 에 남긴다.
+        구간 취소 뒤 곧바로 복귀 goal 이 나가는 순서는 앱 선점·일시정지 뒤 재개와 같다 — 늦은
+        취소가 새 goal 을 건드리지 않게 하는 것은 노드의 주행 번호표(_nav_gen)다.
+        """
+        if self.state not in _PATROL_STATES:
+            return [], GateReason.NOT_PATROLLING
+        actions = self._patrol_halt()
+        was_running = self._patrol is not None
+        self._patrol = None
+        self._to_idle()
+        went_home, self.patrol_stop_home_reason, home_actions = self.on_return_home_request(
+            nav_ready, now)
+        if was_running:
+            actions.append(PatrolEvent("patrol_stopped", reason="admin", return_home=went_home))
+        actions.extend(home_actions)
+        return actions, GateReason.OK
+
+    def on_patrol_ack(self, alarm_id: str, now: float) -> tuple:
+        """경보 확인(`/vica/mission/patrol_ack`) — 음성 반복·이벤트 재전송만 멈춘다. 정지·상태는 그대로다.
+
+        alarm_id 가 비어 있으면 지금 경보를 확인한다. 적혀 있으면 지금 경보와 같아야 한다
+        (지난 경보의 팝업이 새 경보를 끄지 않게). 두 번 눌러도 받되 알림은 한 번이다.
+        """
+        p = self._patrol
+        alarm = p.alarm if p is not None else None
+        if alarm is None or self.state not in (State.PATROL_ALARM, State.PATROL_LIGHT):
+            return [], GateReason.NO_PATROL_ALARM
+        if alarm_id and alarm_id != alarm.alarm_id:
+            return [], GateReason.PATROL_ALARM_MISMATCH
+        if alarm.acked:
+            return [], GateReason.OK
+        alarm.acked = True
+        return [PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id)], GateReason.OK
+
+    def on_patrol_event(self, data: dict, now: float) -> list:
+        """`/vica/patrol/event` 한 건(JSON 을 푼 dict). 순찰 문맥이 없으면 아무것도 하지 않는다.
+
+        status 는 감지 노드 정상 시각만 적는다. 경보(intruder·light·sound)는 이동 중·지점 정지
+        중에만 받고 그 밖(경보·일시정지)에서는 버린다 — clip 의 영상 id 만 같은 종류 경보에 붙인다.
+
+        준비 대기 중(2026-11-14 사용자 결정 "경비 시작 직후에도 사람 감지를 쉬지 않는다"):
+        감지 노드의 intruder·light 는 그 자체가 준비됐다는 증거라 준비된 것으로 치고 받는다.
+        음성의 sound 는 준비 전에는 버린다 — 시작 버튼을 누른 관리자의 소리다.
+        """
+        p = self._patrol
+        if p is None or not isinstance(data, dict):
+            return []
+        kind = data.get("kind")
+        if kind == "status":
+            if (data.get("src") == "detector" and bool(data.get("ready"))
+                    and bool(data.get("camera_ok"))):
+                p.detector_ok_at = now
+            return []
+        if kind == "clip":
+            return self._patrol_attach_clip(p, data)
+        if self.state not in (State.PATROLLING, State.PATROL_DWELL):
+            return []
+        if not p.armed:
+            if data.get("src") != "detector" or kind not in ("intruder", "light"):
+                return []
+            p.armed = True
+            p.arming_deadline = None
+            p.detector_ok_at = now
+        if kind == "intruder":
+            return self._patrol_raise(p, "intruder", now, clip_id=_patrol_text(data.get("clip_id")))
+        if kind == "light":
+            return self._patrol_raise(p, "light", now, photo=_patrol_text(data.get("photo")))
+        if kind == "sound":
+            return self._patrol_raise(p, "sound", now, level_db=_patrol_number(data.get("db")))
+        return []
+
+    def _patrol_detector_ok(self, p: PatrolRun, now: float) -> bool:
+        """감지 노드 정상 신호(ready && camera_ok)를 patrol_detector_timeout_sec 안에 받았나."""
+        return (p.detector_ok_at is not None
+                and now - p.detector_ok_at <= self.patrol_detector_timeout_sec)
+
+    def _patrol_voice(self, kind: str) -> tuple:
+        """경보 종류 → (문장, 반복 간격 초). 카메라 끊김은 말하지 않는다."""
+        if kind in ("intruder", "sound"):
+            return MSG_PATROL_INTRUDER, self.patrol_intruder_repeat_sec
+        if kind == "light":
+            return MSG_PATROL_LIGHT, self.patrol_light_repeat_sec
+        return "", 0.0
+
+    @staticmethod
+    def _patrol_alarm_event(alarm: PatrolAlarm, resend: bool) -> PatrolEvent:
+        return PatrolEvent(
+            "patrol_" + alarm.kind, alarm_id=alarm.alarm_id, kind=alarm.kind, time=alarm.time,
+            clip_id=alarm.clip_id, photo=alarm.photo, level_db=alarm.level_db, resend=resend)
+
+    def _patrol_halt(self) -> list:
+        """이동 중이면 구간 goal 을 거둔다. 목적지를 싣지 않아 goal_canceled 는 나가지 않는다."""
+        if self.state != State.PATROLLING:
+            return []
+        return [SetNavSpeedLimit(NO_SPEED_LIMIT), CancelNav(None)]
+
+    def _patrol_drop(self, reason: str) -> list:
+        """순찰 문맥을 버리고 patrol_stopped 를 낸다. 상태는 부르는 쪽이 옮긴다. 순찰이 아니면 빈 목록."""
+        if self._patrol is None:
+            return []
+        self._patrol = None
+        return [PatrolEvent("patrol_stopped", reason=reason)]
+
+    def _patrol_depart(self, p: PatrolRun, now: float, advance: bool) -> list:
+        """지점으로 출발한다. advance 면 다음 지점으로(끝 다음은 처음, lap +1), 아니면 지금 지점으로 다시."""
+        if self._patrol is not p:
+            return []   # 그 사이 비상정지가 문맥을 버렸다
+        count = len(p.route)
+        if advance:
+            p.index += 1
+            if p.index >= count:
+                p.index = 0
+                p.lap += 1
+        target = p.route[p.index]
+        leg = patrol_leg_destination(target, p.route[(p.index + 1) % count])
+        p.arrived = False
+        p.dwell_until = None
+        self.state = State.PATROLLING
+        actions: list = [PatrolEvent(
+            "patrol_waypoint", destination=target, index=p.index, lap=p.lap, count=count)]
+        if self.patrol_speed_mps > 0.0:
+            actions.append(SetNavSpeedCap(self.patrol_speed_mps))
+        actions.append(Navigate(leg))
+        return actions
+
+    def _patrol_raise(self, p: PatrolRun, kind: str, now: float, clip_id: str = "",
+                      photo: str = "", level_db: Optional[float] = None) -> list:
+        """경보를 건다: 주행 취소 → 상태 전환 → 이벤트·음성. 기록은 노드가 이벤트 첫 전송 때 쓴다."""
+        if self._patrol is not p:
+            return []   # 그 사이 비상정지가 문맥을 버렸다
+        actions = self._patrol_halt()
+        stamp = self.patrol_wall_clock()
+        alarm = PatrolAlarm(
+            alarm_id=f"{stamp:%Y%m%d_%H%M%S}_{kind}", kind=kind,
+            time=stamp.isoformat(timespec="seconds"), said_at=now, sent_at=now,
+            clip_id=clip_id, photo=photo, level_db=level_db)
+        p.alarm = alarm
+        p.dwell_until = None
+        self.state = State.PATROL_LIGHT if kind == "light" else State.PATROL_ALARM
+        actions.append(self._patrol_alarm_event(alarm, resend=False))
+        text, _ = self._patrol_voice(kind)
+        if text:
+            actions.append(Say(text, priority="emergency"))
+        return actions
+
+    @staticmethod
+    def _patrol_attach_clip(p: PatrolRun, data: dict) -> list:
+        """clip 이벤트의 영상 id 를 경보 기록에 붙인다 — clip 의 alarm(intruder·sound)이 경보 종류와
+        같을 때만(2026-11-14 구성요소 감사). 카메라 끊김·불 켜짐 경보에는 영상을 붙이지 않는다:
+        감지 노드는 제가 내지 않은 patrol_alarm 이면 소리 장면을 찍으므로, 종류를 안 보면 카메라
+        끊김 경보에 `…_sound` 장면이 붙는다. 지금 경보를 먼저 보고, 재개 뒤 늦게 온 것은 직전 경보에.
+        """
+        clip_id = _patrol_text(data.get("clip_id"))
+        clip_kind = _patrol_text(data.get("alarm"))
+        if not clip_id or clip_kind not in ("intruder", "sound"):
+            return []
+        for alarm in (p.alarm, p.last_alarm):
+            if alarm is None or alarm.kind != clip_kind:
+                continue
+            if alarm.clip_id:
+                return []   # 이미 안다(사람 경보는 영상 id 가 경보와 함께 온다)
+            alarm.clip_id = clip_id
+            return [PatrolRecordClip(alarm.alarm_id, clip_id)]
+        return []
+
+    def _patrol_pause(self, now: float) -> tuple:
+        """관리자 일시정지(`pause_navigation`). 이동 중·지점 정지 중에만 — 경보로 선 것은 재개만 받는다."""
+        p = self._patrol
+        if p is None or self.state not in (State.PATROLLING, State.PATROL_DWELL):
+            return [], GateReason.NOT_NAVIGATING
+        actions = self._patrol_halt()
+        p.dwell_until = None
+        p.arming_deadline = None
+        self.state = State.PATROL_PAUSED
+        actions.append(PatrolEvent("patrol_paused"))
+        return actions, GateReason.OK
+
+    def _patrol_resume(self, nav_ready: bool, now: float) -> tuple:
+        """순찰 재개(`resume_navigation`) — 일시정지·경보에서 다시 출발한다.
+
+        경보에서 받으면 확인(ack)도 함께 한 것이다. 감지 노드가 정상이 아니면(카메라 끊김)
+        거절한다. 가던 지점은 그 지점으로 다시, 서 있던 지점에서는 다음 지점으로 간다.
+        """
+        p = self._patrol
+        if self.estop_active:
+            return [], GateReason.ESTOP_ACTIVE
+        if p is None or self.state not in (
+                State.PATROL_PAUSED, State.PATROL_ALARM, State.PATROL_LIGHT):
+            return [], GateReason.NOT_PAUSED
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        if not self._patrol_detector_ok(p, now):
+            return [], GateReason.DETECTOR_NOT_READY
+        actions: list = []
+        alarm = p.alarm
+        if alarm is not None:
+            if not alarm.acked:
+                alarm.acked = True
+                actions.append(PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id))
+            p.last_alarm = alarm
+            p.alarm = None
+        p.armed = True
+        actions.append(PatrolEvent("patrol_resumed"))
+        actions.extend(self._patrol_depart(p, now, advance=p.arrived))
+        return actions, GateReason.OK
+
+    def _patrol_tick(self, now: float, nav_status: NavStatus) -> list:
+        """순찰 주기 처리(on_tick 안). 구간 결과·지점 정지·준비 대기·카메라 감시·경보 반복."""
+        p = self._patrol
+        if p is None:
+            # 문맥 없이 순찰 상태만 남았다(비상정지 스레드와 겹침) — 가던 구간을 거두고 끝낸다.
+            # 안 거두면 래치가 풀린 뒤 Nav2 가 그 지점으로 혼자 간다.
+            actions = self._patrol_halt()
+            if self.estop_active:
+                self._enter_estopped(now)
+            else:
+                self._to_idle()
+            return actions
+        if self.state == State.PATROLLING:
+            if nav_status == NavStatus.SUCCEEDED:
+                p.arrived = True
+                p.leg_failures = 0
+                p.dwell_until = now + self.patrol_dwell_sec
+                self.state = State.PATROL_DWELL
+                return [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+            if nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
+                # 이 구간은 못 갔다 — 다음 지점으로 넘어간다. 연속으로 막히면 끝낸다.
+                p.leg_failures += 1
+                actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+                if p.leg_failures >= self.patrol_max_leg_failures:
+                    actions.extend(self._patrol_drop("nav_failed"))
+                    self._to_idle()
+                else:
+                    actions.extend(self._patrol_depart(p, now, advance=True))
+                return actions
+            if not self._patrol_detector_ok(p, now):
+                return self._patrol_raise(p, "camera_lost", now)
+            return []
+        if self.state == State.PATROL_DWELL:
+            if not p.armed:
+                # 시작 직후 — 감지 노드가 순찰 엔진을 올리고 카메라를 받을 때까지 기다린다.
+                if self._patrol_detector_ok(p, now):
+                    p.armed = True
+                    return self._patrol_depart(p, now, advance=False)
+                if p.arming_deadline is not None and now >= p.arming_deadline:
+                    actions = self._patrol_drop("detector_not_ready")
+                    self._to_idle()
+                    return actions
+                return []
+            if not self._patrol_detector_ok(p, now):
+                return self._patrol_raise(p, "camera_lost", now)
+            if p.dwell_until is None or now >= p.dwell_until:
+                return self._patrol_depart(p, now, advance=True)
+            return []
+        if self.state in (State.PATROL_ALARM, State.PATROL_LIGHT):
+            return self._patrol_alarm_tick(p, now)
+        return []   # PATROL_PAUSED — 재개를 기다린다
+
+    def _patrol_alarm_tick(self, p: PatrolRun, now: float) -> list:
+        """확인 전까지 문장을 되풀이하고(넘어짐 멘트와 같은 방식) 경보 이벤트를 다시 보낸다.
+        밀린 만큼 몰아 내지 않는다 — 늦은 틱이어도 한 번만."""
+        alarm = p.alarm
+        if alarm is None or alarm.acked:
+            return []
+        actions: list = []
+        text, every = self._patrol_voice(alarm.kind)
+        if text and every > 0.0 and now - alarm.said_at >= every:
+            alarm.said_at = now
+            actions.append(Say(text, priority="emergency"))
+        if self.patrol_alarm_resend_sec > 0.0 and now - alarm.sent_at >= self.patrol_alarm_resend_sec:
+            alarm.sent_at = now
+            actions.append(self._patrol_alarm_event(alarm, resend=True))
         return actions
 
     # -- 사람 접근 --------------------------------------------------------------
@@ -3877,6 +4419,8 @@ class MissionLogic:
         말을 거는 동안은 대화가 이어지는 한 계속 막고, 조용해지면 그 값을
         새로 만들지 않으므로 결국 시간이 다 되어 풀린다.
         """
+        if self.state in _PATROL_STATES:
+            return []   # 순찰 중에는 호출로 아무것도 바꾸지 않는다(2026-11-14)
         self._note_user_present(now)
         # 새 대화다 — 온보딩 되묻기 사다리가 돌고 있었다면 청산한다.
         self._forget_dest_prompt()
@@ -4532,6 +5076,7 @@ class MissionLogic:
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
         moving = self.state in _GOAL_ACTIVE_STATES
+        actions.extend(self._patrol_drop("estop"))   # 순찰 중이면 경비 종료를 알린다
         self._enter_estopped(now)
         if moving and not already_estopped:
             self._estop_announced = True
@@ -4580,6 +5125,7 @@ class MissionLogic:
         if self.state in _GOAL_ACTIVE_STATES:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
+        actions.extend(self._patrol_drop("estop"))   # 순찰 중이면 경비 종료를 알린다
         if self.state != State.ESTOPPED:
             self._enter_estopped(now)
         # 시계를 먼저 세우고 tipped 를 켠다 — 다른 스레드의 on_tick 이 그 사이에
@@ -4609,6 +5155,7 @@ class MissionLogic:
                 # 자동복구 포함)은 사용자에게 달라지는 게 없어 침묵한다.
                 # 넘어짐은 on_tipped 가 따로 말한다(보통 이미 ESTOPPED 라 여기 안 옴).
                 moving = self.state in _GOAL_ACTIVE_STATES and not self.tipped
+                actions.extend(self._patrol_drop("estop"))   # 순찰 중이면 경비 종료를 알린다
                 self._enter_estopped(now)
                 self._estop_announced = moving or self.tipped
                 if moving:
@@ -5026,6 +5573,10 @@ class MissionLogic:
             elif self._dwell_until is None or now >= self._dwell_until:
                 self._to_idle()
 
+        elif self.state in _PATROL_STATES:
+            # 경비(순찰) — 구간 도착·지점 정지·경보 반복·카메라 감시(2026-11-14).
+            actions.extend(self._patrol_tick(now, nav_status))
+
         elif self.state == State.ESTOPPED:
             # 넘어져 있으면 래치가 풀려 보여도 나가지 않는다 — 비상정지 노드가 tipped 를
             # 모르는 옛 판이어도 넘어진 채 "해제되었습니다"를 말하지 않게.
@@ -5271,6 +5822,8 @@ class MissionLogic:
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
         self._spk_gate.reset()
+        # 순찰 문맥도 버린다 — 해제 뒤 스스로 다시 돌지 않는다. 알림은 부르는 쪽이 _patrol_drop 으로 낸다.
+        self._patrol = None
         self.active_destination = None
         # 보관한 목적지도 함께 버린다. 남겨두면 E-stop 뒤에 "다시 출발"이 통해
         # 이전 Goal 자동 재개 금지 원칙이 깨진다.
