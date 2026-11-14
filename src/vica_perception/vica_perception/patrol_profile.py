@@ -557,7 +557,7 @@ class PatrolProfile:
         if not self._watch_sound:
             return                            # 큰 소리를 꺼 뒀다 — 남은 것은 카메라 끊김 경보, 기록 없음
         if self._clip.recording:
-            self._clip.extend(now_ns)         # 앞 장면이 안 끝났다 — 10 s 더
+            self._clip.extend(now_ns)         # 앞 장면이 안 끝났다 — 5 s 더
             return
         if not self._camera_ok(now_ns):
             return                            # 카메라 끊김 경보 — 기록 없음

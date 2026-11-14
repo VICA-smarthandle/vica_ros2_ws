@@ -42,7 +42,7 @@ ALARM_SOUND = "sound"
 
 CLIP_RATE_HZ = 5.0
 CLIP_PRE_S = 5.0                      # 경보 앞 5 s
-CLIP_POST_S = 10.0                    # 마지막으로 사람이 보인 뒤(소리는 경보 뒤) 10 s
+CLIP_POST_S = 5.0                     # 마지막으로 사람이 보인 뒤(소리는 경보 뒤) 5 s — 11-14 실기 뒤 10 → 5(사용자: 끊는 게 너무 길다)
 CLIP_MAX_S = 60.0                     # 첫 프레임부터 장면 전체 길이 상한
 JPEG_QUALITY = 75
 
@@ -193,8 +193,8 @@ def clip_end_ns(
 ) -> int:
     """장면이 끝나는 시각.
 
-    소리 장면은 경보 뒤 10 s(`hold_until_ns`)에서 끝난다. 사람 장면은 마지막으로
-    사람이 보인 뒤 10 s 까지 늘어난다. 어느 쪽이든 첫 프레임부터 60 s 를 넘지 않는다.
+    소리 장면은 경보 뒤 5 s(`hold_until_ns`)에서 끝난다. 사람 장면은 마지막으로
+    사람이 보인 뒤 5 s 까지 늘어난다. 어느 쪽이든 첫 프레임부터 60 s 를 넘지 않는다.
     """
     end = hold_until_ns
     if follow_person and last_person_ns is not None:
@@ -302,7 +302,7 @@ class ClipRecorder:
             self._clip.last_person_ns = now_ns
 
     def extend(self, now_ns: int) -> None:
-        """쓰고 있는 장면을 지금부터 10 s 뒤까지 늘린다(사람 장면 중 소리 경보)."""
+        """쓰고 있는 장면을 지금부터 5 s 뒤까지 늘린다(사람 장면 중 소리 경보)."""
         if self._clip is not None:
             self._clip.hold_until_ns = max(
                 self._clip.hold_until_ns, now_ns + self._post_ns)

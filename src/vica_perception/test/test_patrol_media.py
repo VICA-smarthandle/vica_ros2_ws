@@ -76,7 +76,7 @@ def test_사진_이름과_시각_글자():
 
 def test_저장_값은_명세_그대로다():
     assert JPEG_QUALITY == 75
-    assert (CLIP_POST_S, CLIP_MAX_S) == (10.0, 60.0)
+    assert (CLIP_POST_S, CLIP_MAX_S) == (5.0, 60.0)       # 11-14 실기 뒤 10 → 5 s
     assert MEDIA_KEEP_S == 7 * 24 * 3600
     assert MEDIA_MAX_BYTES == 1_000_000_000
 
@@ -215,14 +215,14 @@ def test_JPEG_압축은_BGR_를_받아_제_색으로_담는다():
 # ---- 장면 끝 시각 -------------------------------------------------------------
 
 
-def test_소리_장면은_경보_뒤_10초에_끝난다():
+def test_소리_장면은_경보_뒤_hold_까지에서_끝난다():
     end = clip_end_ns(first_ns=ns(95.0), hold_until_ns=ns(110.0),
                       last_person_ns=ns(109.0), follow_person=False,
                       post_ns=ns(10.0), max_ns=ns(60.0))
     assert end == ns(110.0)                   # 사람이 보여도 늘어나지 않는다
 
 
-def test_사람_장면은_마지막으로_보인_뒤_10초에_끝난다():
+def test_사람_장면은_마지막으로_보인_뒤_post_만큼_지나_끝난다():
     end = clip_end_ns(first_ns=ns(95.0), hold_until_ns=ns(110.0),
                       last_person_ns=ns(123.4), follow_person=True,
                       post_ns=ns(10.0), max_ns=ns(60.0))
@@ -257,7 +257,7 @@ def test_버퍼를_비우면_메모리가_빈다(tmp_path):
 # ---- 장면 쓰기 ---------------------------------------------------------------
 
 
-def test_사람_장면_5초_전부터_사람이_사라지고_10초_뒤까지(tmp_path):
+def test_사람_장면_5초_전부터_사람이_사라지고_5초_뒤까지(tmp_path):
     rec = ClipRecorder(str(tmp_path))
     feed(rec, 0.0, 20.0)                      # 마지막 프레임 19.8 s
     clip_id = rec.start(ALARM_INTRUDER, ns(19.8), WALL0 + 19.8)
@@ -272,13 +272,13 @@ def test_사람_장면_5초_전부터_사람이_사라지고_10초_뒤까지(tmp
         if t <= 23.0:
             rec.mark_person(ns(t))            # 23.0 s 까지 사람이 보인다
         rec.push(frame(t))
-    assert ended_at == 33.0                   # 23.0 + 10 s
+    assert ended_at == 28.0                   # 23.0 + 5 s
 
     done = rec.finish()
     frames_dir = tmp_path / "clips" / clip_id / "frames"
     names = sorted(os.listdir(frames_dir))
-    # 경보 앞 15.0~19.8 s 의 25장 + 20.0~32.8 s 의 65장
-    assert done.frames == len(names) == 25 + 65
+    # 경보 앞 15.0~19.8 s 의 25장 + 20.0~27.8 s 의 40장
+    assert done.frames == len(names) == 25 + 40
     assert names[0] == "000001.jpg" and names[-1] == "%06d.jpg" % done.frames
     assert (frames_dir / "000001.jpg").read_bytes() == b"\xff\xd8jpeg"
 
@@ -294,14 +294,14 @@ def test_장면_시작은_5초보다_오래된_프레임을_빼고_쓴다(tmp_pa
     assert os.listdir(tmp_path / "clips" / clip_id / "frames") == ["000001.jpg"]
 
 
-def test_소리_장면은_사람이_보여도_10초에_끝난다(tmp_path):
+def test_소리_장면은_사람이_보여도_5초에_끝난다(tmp_path):
     rec = ClipRecorder(str(tmp_path))
     feed(rec, 0.0, 8.0)
     rec.start(ALARM_SOUND, ns(8.0), WALL0 + 8.0)
     assert not rec.follows_person
-    rec.mark_person(ns(15.0))
-    assert rec.end_ns() == ns(18.0)
-    assert not rec.due(ns(17.9)) and rec.due(ns(18.0))
+    rec.mark_person(ns(11.0))
+    assert rec.end_ns() == ns(13.0)
+    assert not rec.due(ns(12.9)) and rec.due(ns(13.0))
 
 
 def test_사람_장면은_60초에서_잘린다(tmp_path):
@@ -324,27 +324,27 @@ def test_끝_시각을_넘긴_프레임은_쓰지_않는다(tmp_path):
     rec = ClipRecorder(str(tmp_path))
     rec.push(frame(0.0))
     rec.start(ALARM_SOUND, ns(0.0), WALL0)
-    rec.push(frame(10.0))
-    rec.push(frame(10.2))                     # 끝(10.0 s) 뒤
+    rec.push(frame(5.0))
+    rec.push(frame(5.2))                      # 끝(5.0 s) 뒤
     assert rec.finish().frames == 2
 
 
-def test_쓰던_장면에_소리_경보가_겹치면_10초_더_늘린다(tmp_path):
+def test_쓰던_장면에_소리_경보가_겹치면_5초_더_늘린다(tmp_path):
     rec = ClipRecorder(str(tmp_path))
     rec.push(frame(0.0))
     rec.start(ALARM_INTRUDER, ns(0.0), WALL0)
-    assert rec.end_ns() == ns(10.0)
-    rec.extend(ns(8.0))
-    assert rec.end_ns() == ns(18.0)
+    assert rec.end_ns() == ns(5.0)
+    rec.extend(ns(4.0))
+    assert rec.end_ns() == ns(9.0)
 
 
 def test_소리_장면_중_사람_판정이_나면_사람_규칙으로_바뀐다(tmp_path):
     rec = ClipRecorder(str(tmp_path))
     rec.push(frame(0.0))
     rec.start(ALARM_SOUND, ns(0.0), WALL0)
-    rec.follow_person(ns(9.0))
+    rec.follow_person(ns(4.0))
     assert rec.follows_person
-    assert rec.end_ns() == ns(19.0)
+    assert rec.end_ns() == ns(9.0)
 
 
 def test_meta_json_키와_값(tmp_path):

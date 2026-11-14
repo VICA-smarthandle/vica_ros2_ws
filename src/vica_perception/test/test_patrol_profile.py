@@ -556,7 +556,7 @@ def test_conf_0_5_미만이면_계속_보여도_경보가_없다(tmp_path):
     assert rig.kinds() == []
 
 
-def test_사람_장면은_안_보이고_10초_뒤에_끝나고_meta_와_done_을_남긴다(tmp_path):
+def test_사람_장면은_안_보이고_5초_뒤에_끝나고_meta_와_done_을_남긴다(tmp_path):
     rig = Rig(tmp_path)
     rig.state("patrolling")
     rig.run(6.0)
@@ -567,8 +567,8 @@ def test_사람_장면은_안_보이고_10초_뒤에_끝나고_meta_와_done_을
     seen_until = rig.t
     rig.confs = ()
     cleanups = rig.cleanups
-    rig.run(9.5)
-    assert [e["state"] for e in rig.kinds("clip")] == ["started"]     # 아직 10 s 전
+    rig.run(4.5)
+    assert [e["state"] for e in rig.kinds("clip")] == ["started"]     # 아직 5 s 전
     rig.run(1.0)
 
     done = rig.kinds("clip")[-1]
@@ -581,10 +581,10 @@ def test_사람_장면은_안_보이고_10초_뒤에_끝나고_meta_와_done_을
                           "frames", "width", "height", "start_epoch", "end_epoch"]
     assert meta["frames"] == done["frames"] == len(os.listdir(
         os.path.join(clip_dir, "frames")))
-    assert meta["end"] in (iso_local(WALL0 + seen_until + 10.0),
-                           iso_local(WALL0 + seen_until + 9.0))
-    # 5 s 전 + 경보까지 0.5 s + 보인 4 s + 10 s ≈ 19.5 s
-    assert 90 <= meta["frames"] <= 100
+    assert meta["end"] in (iso_local(WALL0 + seen_until + 5.0),
+                           iso_local(WALL0 + seen_until + 4.0))
+    # 5 s 전 + 경보까지 0.5 s + 보인 4 s + 5 s ≈ 14.5 s
+    assert 65 <= meta["frames"] <= 75
     assert rig.cleanups == cleanups + 1       # 장면을 끝낼 때 정리
 
 
@@ -787,7 +787,7 @@ def test_추론이_잇따라_실패하면_ready_를_내리고_노드는_산다(t
 # ---- 큰 소리 경보(내가 낸 경보가 아닌 patrol_alarm) ----------------------------
 
 
-def test_큰_소리_경보_5초_전부터_10초_뒤까지_장면을_남긴다(tmp_path):
+def test_큰_소리_경보_5초_전부터_5초_뒤까지_장면을_남긴다(tmp_path):
     rig = Rig(tmp_path)
     rig.state("patrolling")
     rig.run(8.0)
@@ -800,12 +800,12 @@ def test_큰_소리_경보_5초_전부터_10초_뒤까지_장면을_남긴다(tm
 
     rig.confs = (0.9,)                        # 사람이 보여도 소리 장면은 늘어나지 않는다
     infers = rig.infers
-    rig.run(9.5)
+    rig.run(4.5)
     assert len(rig.kinds("clip")) == 1
     rig.run(1.0)
     done = rig.kinds("clip")[-1]
     assert done["state"] == "done" and done["alarm"] == "sound"
-    assert 70 <= done["frames"] <= 77         # 5 s + 10 s, 5 Hz
+    assert 45 <= done["frames"] <= 52         # 5 s + 5 s, 5 Hz
     assert rig.infers == infers               # 멈춘 동안 추론하지 않는다
 
 
@@ -819,7 +819,7 @@ def test_카메라가_끊겨서_난_경보에는_장면을_만들지_않는다(t
     assert not os.path.exists(rig.media)
 
 
-def test_사람_장면을_쓰는_중에_소리_경보가_오면_새_장면_없이_10초_늘린다(tmp_path):
+def test_사람_장면을_쓰는_중에_소리_경보가_오면_새_장면_없이_5초_늘린다(tmp_path):
     rig = Rig(tmp_path)
     rig.state("patrolling")
     rig.confs = (0.8,)
@@ -828,15 +828,15 @@ def test_사람_장면을_쓰는_중에_소리_경보가_오면_새_장면_없�
     rig.confs = ()
     rig.run(2.0)
     rig.state("patrolling")                   # 재개
-    rig.run(6.0)
+    rig.run(2.0)                              # 사람 장면이 아직 안 끝났다(마지막으로 보인 뒤 5 s 전)
     rig.state("patrol_alarm")                 # 이번엔 소리
     extended_at = rig.t
-    rig.run(9.5)
+    rig.run(4.5)
     assert [e["state"] for e in rig.kinds("clip")] == ["started"]
     rig.run(1.0)
     clips = rig.kinds("clip")
     assert [e["state"] for e in clips] == ["started", "done"]
-    assert clips[1]["stamp"] >= WALL0 + extended_at + 10.0
+    assert clips[1]["stamp"] >= WALL0 + extended_at + 5.0
 
 
 # ---- 감시 항목 켜고 끄기(2026-11-14 사용자 요청) -------------------------------
@@ -880,10 +880,10 @@ def test_사람_감지를_꺼도_큰_소리_경보에는_장면을_찍는다(tmp
     rig.state("patrolling")
     rig.run(8.0)
     rig.state("patrol_alarm")                 # 음성 노드의 sound 로 미션이 멈췄다
-    rig.run(10.5)
+    rig.run(5.5)
     assert [(e["state"], e["alarm"]) for e in rig.kinds("clip")] == [
         ("started", "sound"), ("done", "sound")]
-    assert 70 <= rig.kinds("clip")[-1]["frames"] <= 77
+    assert 45 <= rig.kinds("clip")[-1]["frames"] <= 52
     assert rig.infers == 0
 
 
@@ -1282,7 +1282,7 @@ def test_쓰는_장면이_없으면_순찰이_끝나는_즉시_프레임을_놓�
     assert (rig.work(), len(rig.events)) == before
 
 
-def test_순찰이_끝나도_쓰던_사람_장면은_사람이_사라지고_10초_뒤까지_쓴다(tmp_path):
+def test_순찰이_끝나도_쓰던_사람_장면은_사람이_사라지고_5초_뒤까지_쓴다(tmp_path):
     rig = Rig(tmp_path)
     rig.state("patrolling")
     rig.confs = (0.8,)
@@ -1300,19 +1300,19 @@ def test_순찰이_끝나도_쓰던_사람_장면은_사람이_사라지고_10�
     assert rig.infers > infers                # 사람 장면이라 추론도 계속한다
     seen_until = rig.t
     rig.confs = ()                            # 사람이 사라졌다
-    rig.run(9.5)
-    assert rig.profile.draining               # 아직 10 s 전
+    rig.run(4.5)
+    assert rig.profile.draining               # 아직 5 s 전
     rig.run(1.0)
 
     clips = rig.kinds("clip")
     assert [e["state"] for e in clips] == ["started", "done"]
-    assert clips[1]["stamp"] >= WALL0 + seen_until + 10.0 - 0.3
+    assert clips[1]["stamp"] >= WALL0 + seen_until + 5.0 - 0.3
     clip_dir = os.path.join(rig.media, "clips", clips[0]["clip_id"])
     with open(os.path.join(clip_dir, "meta.json"), encoding="utf-8") as f:
         meta = json.load(f)
     assert meta["frames"] == clips[1]["frames"] == len(os.listdir(
         os.path.join(clip_dir, "frames")))
-    assert meta["end_epoch"] > WALL0 + seen_until + 9.0       # 종료 뒤 프레임이 들어 있다
+    assert meta["end_epoch"] > WALL0 + seen_until + 4.0       # 종료 뒤 프레임이 들어 있다
 
     assert not rig.profile.draining and not rig.profile.wants_frames  # 프레임을 돌려준다
     assert rig.profile._clip.buffered == 0
@@ -1321,7 +1321,7 @@ def test_순찰이_끝나도_쓰던_사람_장면은_사람이_사라지고_10�
     assert (rig.work(), len(rig.events)) == before
 
 
-def test_순찰이_끝나도_쓰던_소리_장면은_경보_10초_뒤까지_쓴다(tmp_path):
+def test_순찰이_끝나도_쓰던_소리_장면은_경보_5초_뒤까지_쓴다(tmp_path):
     rig = Rig(tmp_path)
     rig.state("patrolling")
     rig.run(6.0)
@@ -1332,14 +1332,14 @@ def test_순찰이_끝나도_쓰던_소리_장면은_경보_10초_뒤까지_쓴�
     assert rig.profile.draining
     infers = rig.infers
     rig.confs = (0.9,)
-    rig.run(7.5)
+    rig.run(2.5)
     assert rig.profile.draining
     rig.run(1.0)
     assert not rig.profile.wants_frames
     done = rig.kinds("clip")[-1]
     assert done["state"] == "done" and done["alarm"] == "sound"
-    assert 70 <= done["frames"] <= 77         # 5 s 전 + 10 s 뒤 — 종료로 잘리지 않았다
-    assert done["stamp"] >= WALL0 + alarm_at + 10.0 - 0.3
+    assert 45 <= done["frames"] <= 52         # 5 s 전 + 5 s 뒤 — 종료로 잘리지 않았다
+    assert done["stamp"] >= WALL0 + alarm_at + 5.0 - 0.3
     assert rig.infers == infers               # 소리 장면은 추론하지 않는다
 
 
@@ -1371,7 +1371,7 @@ def test_마저_쓰는_동안에는_status_도_판정도_불_확인도_없다(tm
     rig.state("idle")
     events = len(rig.events)
     rig.confs = (0.9,)
-    rig.run(5.0)
+    rig.run(3.0)
     assert rig.profile.draining
     assert len(rig.events) == events          # status·intruder·light 없음
     assert rig.exposure == []
