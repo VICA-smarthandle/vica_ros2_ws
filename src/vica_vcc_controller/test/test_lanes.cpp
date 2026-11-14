@@ -125,6 +125,52 @@ TEST(Lanes, ReturnsToRailOnlyAfterOneSecondClear)
   EXPECT_NEAR(ls.target(), 0.0, 1e-9);
 }
 
+TEST(Lanes, InwardCandidatesKeepTheReturnWait)
+{
+  // 비켜 간 뒤 레일 쪽 두 후보(레일 차선과 중간 차선)가 매 주기 번갈아 1등이 돼도
+  // 1 s 를 처음부터 다시 세지 않고 이어서 센다(2026-11-14, run102 복귀 4~5 s).
+  World w;
+  w.box(1.5, 1.6, -0.05, 0.05);
+  LaneSelector ls;
+  double now = 0.0;
+  run(ls, w, 3, now);
+  const double avoided = ls.target();
+  ASSERT_GE(std::abs(avoided), 0.3);
+  // 짝수 주기: 0.5 m 앞부터 레일 위(|y| < 0.05)만 여유 0.10 m(20 cm 모자람) → 중간 차선이 1등.
+  // 홀수 주기: 어디나 넓음 → 레일 차선이 1등.
+  for (int i = 0; i < 11; ++i) {
+    const bool rail_tight = (i % 2 == 0);
+    ClearanceFn fn = [rail_tight](const Pose2D & p) {
+        return (rail_tight && p.x > 0.5 && std::abs(p.y) < 0.05) ? 0.10 : 5.0;
+      };
+    now += 0.1;
+    ls.update(rail(), 0.4, 0.5, now, 0.1, fn);
+    if (i < 10) {EXPECT_NEAR(ls.target(), avoided, 1e-9) << "1 s 전에는 그대로, i=" << i;}
+  }
+  // 1 s: 레일 쪽으로 옮겼다(예전 규칙은 매 주기 다시 세서 여기서도 그대로였다).
+  EXPECT_LT(std::abs(ls.target()), std::abs(avoided));
+  EXPECT_GE(ls.target() * avoided, 0.0);
+}
+
+TEST(Lanes, ObstacleBackRestartsTheReturnWait)
+{
+  // 레일 쪽 대기 중에 물체가 다시 보이면 예전처럼 처음부터 다시 센다(안전 쪽, 바뀌지 않음).
+  World w;
+  w.box(1.5, 1.6, -0.05, 0.05);
+  LaneSelector ls;
+  double now = 0.0;
+  run(ls, w, 3, now);
+  const double avoided = ls.target();
+  World empty;
+  run(ls, empty, 5, now);                 // 0.5 s 레일 쪽 대기
+  EXPECT_NEAR(ls.target(), avoided, 1e-9);
+  run(ls, w, 1, now);                     // 물체가 다시 보임 → 대기 끊김
+  run(ls, empty, 9, now);                 // 다시 0.9 s — 합쳐 1.4 s 여도 아직
+  EXPECT_NEAR(ls.target(), avoided, 1e-9);
+  run(ls, empty, 2, now);                 // 새로 1.1 s
+  EXPECT_NEAR(ls.target(), 0.0, 1e-9);
+}
+
 TEST(Lanes, NearlyEqualLanesDoNotFlipFlop)
 {
   // 두 차선이 거의 같은 점수로 매 주기 번갈아 1등 — MPPI 식 비틀거림 방지(switch_margin)
