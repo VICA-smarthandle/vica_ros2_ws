@@ -110,6 +110,7 @@ from .mission_logic import (
     PATROL_REJECT_TEXT,
     PATROL_SPEED_MPS,
     PATROL_START_REJECT_TEXT,
+    PATROL_WATCH_KINDS,
     PatrolEvent,
     PatrolRecordClip,
     SetNavSpeedCap,
@@ -151,6 +152,7 @@ from .obstacle_inputs import (
 from .obstacle_judge import ObstacleJudge, cm_what, goal_event, parse_state
 from .patrol_storage import (
     ROUTE_IO_ERROR,
+    ROUTE_NOTHING_WATCHED,
     ROUTE_OK,
     ROUTE_TOO_FEW,
     ROUTE_UNKNOWN_MAP,
@@ -158,6 +160,7 @@ from .patrol_storage import (
     PatrolRouteStorage,
     alarm_record,
     check_route_ids,
+    clean_watch_off,
     clip_record,
     nearest_place_name,
 )
@@ -767,6 +770,15 @@ class MissionManagerNode(Node):
             String, "/vica/patrol/event", self._on_patrol_event, 10,
             callback_group=self._main_group,
         )
+        # 관리자가 꺼 둔 감시 항목(2026-11-14 사용자 요청) — 감지·호출어 노드가 꺼진 항목은 계산도 하지
+        # 않게 알린다. 기동·저장(순찰 중 제외)·경비 시작 때만 내고, 마지막 값 보관이라 늦게 뜬 노드도 받는다.
+        # 못 받은 노드는 모두 켬으로 돈다(경보를 버리는 판단은 on_patrol_event 가 한다).
+        self._pub_patrol_watch = self.create_publisher(
+            String, "/vica/patrol/watch",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        self._publish_patrol_watch()
         # 시작·종료·경보 확인. 일시정지·재개는 기존 pause_navigation·resume_navigation 을 같이 쓴다.
         for name, handler in (("patrol_start", self._on_patrol_start),
                               ("patrol_stop", self._on_patrol_stop),
@@ -1227,19 +1239,28 @@ class MissionManagerNode(Node):
         self._patrol_follow(before, f"감지 {data.get('kind')}")
 
     def _load_patrol_route(self) -> tuple:
-        """지금 지도의 순찰 경로 → (장소 목록 또는 None, 못 쓰는 이유 한 줄)."""
+        """지금 지도의 순찰 경로 → (장소 목록 또는 None, 못 쓰는 이유 한 줄, 꺼 둔 감시 항목)."""
         try:
-            ids = self._patrol_routes.read(self._map_id)
+            ids, watch_off = self._patrol_routes.read(self._map_id)
         except ValueError:
-            ids = None
+            ids, watch_off = None, []
         if not ids:
-            return None, ""
+            return None, "", watch_off
         code, message = check_route_ids(ids, self.destinations)
         if code == ROUTE_TOO_FEW:
-            return None, ""   # 2곳 미만 — 시작 거절의 정해진 문구(PATROL_START_REJECT_TEXT)가 나간다
+            return None, "", watch_off   # 2곳 미만 — 시작 거절의 정해진 문구(PATROL_START_REJECT_TEXT)가 나간다
         if code != ROUTE_OK:
-            return None, message
-        return [self.destinations[dest_id] for dest_id in ids], ""
+            return None, message, watch_off
+        return [self.destinations[dest_id] for dest_id in ids], "", watch_off
+
+    def _publish_patrol_watch(self, watch_off=None) -> None:
+        """꺼 둔 감시 항목을 /vica/patrol/watch 로 알린다. None 이면 지금 지도의 파일에서 읽는다."""
+        if watch_off is None:
+            try:
+                watch_off = self._patrol_routes.read(self._map_id)[1]
+            except ValueError:
+                watch_off = []
+        self._pub_patrol_watch.publish(String(data=json.dumps({"off": list(watch_off)})))
 
     def _patrol_reply(self, response, reason: GateReason, ok_message: str, what: str):
         """순찰 서비스 응답. 거절 사유는 한국어 한 줄로 돌려준다."""
@@ -1258,11 +1279,16 @@ class MissionManagerNode(Node):
         response: MissionCommand.Response,
     ) -> MissionCommand.Response:
         """경비 시작. patrol.yaml 을 읽어 로직에 넘긴다 — 수락하면 감지 노드 준비부터 기다린다."""
-        route, problem = self._load_patrol_route()
+        route, problem, watch_off = self._load_patrol_route()
         pose_known = self._robot_pose is not None and self._pose_cov_xy <= COV_UNKNOWN
         before = self.logic.dialog_state
         actions, reason = self.logic.on_patrol_start(
-            route, self.map_bounds, self._nav2_ready(), pose_known, self._now())
+            route, self.map_bounds, self._nav2_ready(), pose_known, self._now(), watch_off)
+        if reason == GateReason.OK:
+            # 순찰 상태(/vica/robot_state)보다 먼저 — 감지 노드가 엔진을 올릴지 이 값으로 정한다.
+            self._publish_patrol_watch(watch_off)
+            if watch_off:
+                self.get_logger().info(f"경비 시작 — 꺼 둔 감시 항목: {', '.join(watch_off)}")
         self._run_actions(actions)
         self._patrol_follow(before, "시작")
         self._patrol_reply(response, reason, "경비를 시작합니다.", "경비 시작")
@@ -1333,29 +1359,44 @@ class MissionManagerNode(Node):
             return None
 
     def _on_save_patrol_route(self, request, response):
-        """순찰 경로 저장. 빈 배열이면 경로를 지운다. reason 코드는 SPEC 3.2."""
+        """순찰 경로와 꺼 둔 감시 항목 저장. 장소가 빈 배열이면 경로를 지운다. reason 코드는 SPEC 3.2.
+
+        감시 항목은 셋 다 끌 수 없다. 경로를 지워도 꺼 둔 항목이 있으면 파일에 그 값만 남긴다.
+        """
         map_id = str(request.map_id or "").strip() or self._map_id
         ids = [str(dest_id).strip().lower() for dest_id in request.destination_ids]
+        watch_off = clean_watch_off(list(request.watch_off))
         catalog = self._patrol_catalog(map_id)
         if catalog is None:
             code, message = ROUTE_UNKNOWN_MAP, f"지도를 찾을 수 없습니다: {map_id}"
+        elif len(watch_off) == len(PATROL_WATCH_KINDS):
+            code, message = ROUTE_NOTHING_WATCHED, "감시 항목은 하나 이상 켜 두어야 합니다."
         else:
             try:
                 if not ids:
-                    removed = self._patrol_routes.delete(map_id)
+                    had_route = bool(self._patrol_routes.read(map_id)[0])
+                    if watch_off:
+                        self._patrol_routes.write(map_id, [], watch_off)
+                    else:
+                        self._patrol_routes.delete(map_id)
                     code = ROUTE_OK
-                    message = "순찰 경로를 지웠습니다." if removed else "지울 순찰 경로가 없었습니다."
+                    message = "순찰 경로를 지웠습니다." if had_route else "지울 순찰 경로가 없었습니다."
                 else:
                     code, message = check_route_ids(ids, catalog)
                     if code == ROUTE_OK:
-                        self._patrol_routes.write(map_id, ids)
+                        self._patrol_routes.write(map_id, ids, watch_off)
                         message = f"순찰 경로를 저장했습니다(장소 {len(ids)}곳)."
             except (OSError, ValueError) as exc:
                 code, message = ROUTE_IO_ERROR, f"순찰 경로 저장 실패: {exc}"
         response.accepted = code == ROUTE_OK
         response.reason = code
         response.message = message
-        self.get_logger().info(f"순찰 경로 저장({map_id}, {len(ids)}곳): {code} — {message}")
+        if response.accepted and map_id == self._map_id and not self.logic.patrol_active:
+            # 다음 경비 전에 미리 알려 둔다. 순찰 중에는 내지 않는다 — 이번 순찰은 시작 때 값으로 끝까지
+            # 가는데, 감지·호출어 노드는 받는 즉시 바꾼다. 다음 경비 시작 때 파일 값이 다시 나간다.
+            self._publish_patrol_watch(watch_off)
+        self.get_logger().info(
+            f"순찰 경로 저장({map_id}, {len(ids)}곳, 끈 항목 {watch_off or '없음'}): {code} — {message}")
         return response
 
     def _on_get_patrol_route(self, request, response):
@@ -1365,8 +1406,9 @@ class MissionManagerNode(Node):
         response.map_id = map_id
         response.destination_ids = []
         response.names = []
+        response.watch_off = []
         try:
-            ids = self._patrol_routes.read(map_id)
+            ids, response.watch_off = self._patrol_routes.read(map_id)
         except ValueError:
             response.message = f"지도를 찾을 수 없습니다: {map_id}"
             return response

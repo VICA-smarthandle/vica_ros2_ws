@@ -4,6 +4,7 @@
     <patrol_media_dir>/events.jsonl                   경보 기록. 한 줄에 JSON 하나, 덧붙이기만
 
 경로는 장소 id 만 적는다 — 이름·좌표는 읽을 때 목적지 catalog 에서 찾는다.
+같은 파일에 꺼 둔 감시 항목(watch_off)도 적는다. 칸이 없으면 모두 켬이다(2026-11-14 사용자 요청).
 기록 파일은 경보가 났을 때와 영상 id 를 뒤늦게 알았을 때만 쓴다(주기 쓰기 없음).
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import yaml
 
 from .home_storage import validate_map_id
-from .mission_logic import Destination, Pose2D, pose_valid
+from .mission_logic import PATROL_WATCH_KINDS, Destination, Pose2D, pose_valid
 
 SCHEMA_VERSION = 1
 HOME_ID = "__home__"
@@ -30,6 +31,7 @@ ROUTE_UNKNOWN_MAP = "unknown_map"
 ROUTE_UNKNOWN_DESTINATION = "unknown_destination"
 ROUTE_TOO_FEW = "too_few"
 ROUTE_DUPLICATE_ADJACENT = "duplicate_adjacent"
+ROUTE_NOTHING_WATCHED = "nothing_watched"
 ROUTE_IO_ERROR = "io_error"
 
 ROUTE_MIN_PLACES = 2
@@ -55,6 +57,14 @@ def check_route_ids(ids: Sequence[str], catalog: Dict[str, Destination]) -> Tupl
     return ROUTE_OK, ""
 
 
+def clean_watch_off(raw) -> List[str]:
+    """끌 감시 항목 목록을 정리한다 — 아는 이름만, PATROL_WATCH_KINDS 순서, 겹침 없이."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    named = {str(item).strip().lower() for item in raw}
+    return [kind for kind in PATROL_WATCH_KINDS if kind in named]
+
+
 class PatrolRouteStorage:
     """`<root>/<map_id>/patrol.yaml`. root 는 목적지 저장 폴더와 같다(HomeStorage 와 같은 규약)."""
 
@@ -64,22 +74,31 @@ class PatrolRouteStorage:
     def path_for(self, map_id: str) -> Path:
         return self.root / validate_map_id(map_id) / "patrol.yaml"
 
-    def read(self, map_id: str) -> Optional[List[str]]:
-        """장소 id 목록. 파일이 없거나 깨졌거나 비었으면 None."""
+    def read(self, map_id: str) -> Tuple[Optional[List[str]], List[str]]:
+        """(장소 id 목록, 꺼 둔 감시 항목). 파일이 없거나 깨졌으면 (None, []), 경로가 비었으면 id 쪽만 None.
+
+        셋 다 꺼진 파일은 저장 서비스가 만들지 않는다 — 손으로 고친 것이므로 모두 켬으로 읽는다.
+        """
         path = self.path_for(map_id)
         if not path.exists():
-            return None
+            return None, []
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, yaml.YAMLError):
-            return None
-        raw = data.get("destination_ids") if isinstance(data, dict) else None
+            return None, []
+        if not isinstance(data, dict):
+            return None, []
+        off = clean_watch_off(data.get("watch_off"))
+        if len(off) == len(PATROL_WATCH_KINDS):
+            off = []
+        raw = data.get("destination_ids")
         if not isinstance(raw, list):
-            return None
+            return None, off
         ids = [str(item).strip().lower() for item in raw if str(item).strip()]
-        return ids or None
+        return ids or None, off
 
-    def write(self, map_id: str, ids: Sequence[str], saved_at: Optional[str] = None) -> None:
+    def write(self, map_id: str, ids: Sequence[str], watch_off: Sequence[str] = (),
+              saved_at: Optional[str] = None) -> None:
         """임시 파일에 쓰고 교체한다(home.yaml 과 같은 방식). 지도 폴더가 없으면 OSError."""
         path = self.path_for(map_id)
         if not path.parent.is_dir():
@@ -88,6 +107,7 @@ class PatrolRouteStorage:
             "schema_version": SCHEMA_VERSION,
             "map_id": validate_map_id(map_id),
             "destination_ids": [str(i) for i in ids],
+            "watch_off": clean_watch_off(list(watch_off)),
             "saved_at": saved_at or datetime.now().isoformat(timespec="seconds"),
         }
         fd, temp_name = tempfile.mkstemp(prefix=".patrol-", suffix=".yaml.tmp", dir=path.parent)

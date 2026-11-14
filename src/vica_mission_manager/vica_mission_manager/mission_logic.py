@@ -700,6 +700,9 @@ PATROL_ARMING_TIMEOUT_SEC = 15.0      # 시작 뒤 감지 노드 준비를 기�
 PATROL_SPEED_MPS = 0.6                # 순찰 구간 속도 상한
 PATROL_MAX_LEG_FAILURES = 3           # 구간 연속 실패가 이만큼이면 순찰 종료
 PATROL_ALARM_KINDS = ("intruder", "sound", "light", "camera_lost")
+# 관리자가 앱에서 켜고 끌 수 있는 감시 항목(2026-11-14 사용자 요청) — 경보 종류와 같은 이름을 쓴다.
+# 카메라 끊김은 끌 수 없다(큰 소리 경보의 영상도 카메라로 찍는다).
+PATROL_WATCH_KINDS = ("intruder", "light", "sound")
 # 순찰 구간 goal 을 감싼 Destination 의 id 접두어(대기 장소 접두어와 같은 방식).
 PATROL_DESTINATION_PREFIX = "patrol:"
 # 순찰 서비스 거절 사유 → 앱에 돌려주는 한 줄(서비스 응답 message). 로봇이 말하는 문장이 아니다.
@@ -1470,6 +1473,7 @@ class PatrolRun:
     """순찰 한 번의 문맥. 시작에 만들고 종료·비상정지에 버린다."""
 
     route: tuple                               # Destination 들(누른 순서)
+    watch_off: frozenset = frozenset()         # 이번 순찰에서 꺼 둔 감시 항목(PATROL_WATCH_KINDS). 시작 때 정해 끝까지 간다
     index: int = 0                             # 지금 가는(또는 서 있는) 지점
     lap: int = 1
     arrived: bool = False                      # index 지점에 도착해 있나 — 재개가 다음 지점으로 갈지 정한다
@@ -3358,11 +3362,13 @@ class MissionLogic:
         nav_ready: bool,
         pose_known: bool,
         now: float,
+        watch_off: Sequence[str] = (),
     ) -> tuple:
         """경비 시작(`/vica/mission/patrol_start`). (actions, GateReason).
 
         route 는 노드가 patrol.yaml 을 읽어 만든 장소 목록이다(없으면 None). 쉬는 중(IDLE)에만
         받는다 — 안내·접근·대기 중인 사용자가 먼저다. 수락하면 감지 노드 준비부터 기다린다.
+        watch_off 는 같은 파일의 꺼 둔 감시 항목이다 — 이번 순찰 동안 그 종류의 경보는 버린다.
         """
         if self.estop_active or self.state == State.ESTOPPED:
             return [], GateReason.ESTOP_ACTIVE
@@ -3387,7 +3393,8 @@ class MissionLogic:
         self._approach_lock = False
         self._approach_lock_quiet_since = None
         self._patrol = PatrolRun(
-            route=tuple(route), arming_deadline=now + self.patrol_arming_timeout_sec)
+            route=tuple(route), watch_off=frozenset(watch_off).intersection(PATROL_WATCH_KINDS),
+            arming_deadline=now + self.patrol_arming_timeout_sec)
         self.state = State.PATROL_DWELL
         return [PatrolEvent("patrol_started", route=tuple(d.name for d in route))], GateReason.OK
 
@@ -3436,6 +3443,7 @@ class MissionLogic:
 
         status 는 감지 노드 정상 시각만 적는다. 경보(intruder·light·sound)는 이동 중·지점 정지
         중에만 받고 그 밖(경보·일시정지)에서는 버린다 — clip 의 영상 id 만 같은 종류 경보에 붙인다.
+        꺼 둔 감시 항목(watch_off)의 경보도 버린다.
 
         준비 대기 중(2026-11-14 사용자 결정 "경비 시작 직후에도 사람 감지를 쉬지 않는다"):
         감지 노드의 intruder·light 는 그 자체가 준비됐다는 증거라 준비된 것으로 치고 받는다.
@@ -3454,6 +3462,8 @@ class MissionLogic:
             return self._patrol_attach_clip(p, data)
         if self.state not in (State.PATROLLING, State.PATROL_DWELL):
             return []
+        if isinstance(kind, str) and kind in p.watch_off:
+            return []   # 관리자가 꺼 둔 항목 — 감지·음성 노드도 계산하지 않지만, 판단은 여기가 한다
         if not p.armed:
             if data.get("src") != "detector" or kind not in ("intruder", "light"):
                 return []

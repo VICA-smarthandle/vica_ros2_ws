@@ -153,7 +153,7 @@ def node(tmp_path, monkeypatch):
     n.get_logger = lambda: log
     n.get_clock = lambda: _Clock()
     for name in ("pub_goal_event", "pub_tts", "pub_speed_limit", "pub_state",
-                 "pub_listen_request", "pub_wake_reply", "pub_haptic"):
+                 "pub_listen_request", "pub_wake_reply", "pub_haptic", "_pub_patrol_watch"):
         setattr(n, name, _Pub())
     # Nav2 배선(진짜 _start_nav·_poll_nav_status·_cancel_nav 를 탄다).
     n.navigator = _Navigator()
@@ -230,8 +230,8 @@ def arrive(node, t) -> None:
     tick(node, t)
 
 
-def start_patrol(node, ids=(ID_A, ID_B, ID_C)):
-    node._patrol_routes.write(MAP, list(ids))
+def start_patrol(node, ids=(ID_A, ID_B, ID_C), watch_off=()):
+    node._patrol_routes.write(MAP, list(ids), list(watch_off))
     response = call(node._on_patrol_start)
     assert response.accepted, response.message
     return response
@@ -792,14 +792,16 @@ def test_ordinary_guidance_still_publishes_goal_events(node):
 # ---- 경로 서비스 ------------------------------------------------------------
 
 
-def save(node, ids, map_id=MAP):
+def save(node, ids, map_id=MAP, watch_off=()):
     response = SimpleNamespace(accepted=None, reason="", message="")
     return node._on_save_patrol_route(
-        SimpleNamespace(map_id=map_id, destination_ids=list(ids)), response)
+        SimpleNamespace(map_id=map_id, destination_ids=list(ids), watch_off=list(watch_off)),
+        response)
 
 
 def get(node, map_id=""):
-    response = SimpleNamespace(found=None, map_id="", destination_ids=None, names=None, message="")
+    response = SimpleNamespace(found=None, map_id="", destination_ids=None, names=None,
+                               watch_off=None, message="")
     return node._on_get_patrol_route(SimpleNamespace(map_id=map_id), response)
 
 
@@ -814,7 +816,7 @@ def test_save_then_get_returns_ids_and_names_in_tap_order(node):
 
 def test_save_with_empty_map_id_means_the_current_map(node):
     assert save(node, [ID_A, ID_B], map_id="").accepted
-    assert node._patrol_routes.read(MAP) == [ID_A, ID_B]
+    assert node._patrol_routes.read(MAP) == ([ID_A, ID_B], [])
 
 
 @pytest.mark.parametrize("ids,reason", [
@@ -827,7 +829,7 @@ def test_save_rejections_use_the_spec_codes_and_keep_the_old_route(node, ids, re
     save(node, [ID_A, ID_B])
     refused = save(node, ids)
     assert (refused.accepted, refused.reason) == (False, reason) and refused.message
-    assert node._patrol_routes.read(MAP) == [ID_A, ID_B]
+    assert node._patrol_routes.read(MAP) == ([ID_A, ID_B], [])
 
 
 def test_save_empty_list_deletes_the_route(node):
@@ -861,7 +863,7 @@ def test_save_for_another_map_checks_that_maps_places(node, tmp_path):
 
 
 def test_save_io_error_is_reported(node, monkeypatch):
-    def _fail(map_id, ids, saved_at=None):
+    def _fail(map_id, ids, watch_off=(), saved_at=None):
         raise OSError("디스크가 가득 찼습니다")
 
     monkeypatch.setattr(node._patrol_routes, "write", _fail)
@@ -877,12 +879,115 @@ def test_get_marks_deleted_places_with_an_empty_name(node):
     assert "지워진 장소" in got.message
 
 
+# ---- 감시 항목 켜고 끄기(2026-11-14 사용자 요청) -----------------------------
+
+
+def watch_msgs(node) -> list:
+    return [json.loads(m.data) for m in node._pub_patrol_watch.msgs]
+
+
+def test_start_tells_the_watch_setting_before_the_patrol_state(node):
+    order = []
+    node._pub_patrol_watch.publish = lambda msg: order.append(("watch", json.loads(msg.data)))
+    node.pub_state.publish = lambda msg: order.append(("state", msg.dialog_state))
+    start_patrol(node, watch_off=["light"])
+    assert order == [("watch", {"off": ["light"]}), ("state", "patrol_dwell")]
+
+
+def test_start_with_everything_watched_says_so(node):
+    start_patrol(node)
+    assert watch_msgs(node) == [{"off": []}]               # 지난 순찰의 값이 남지 않게 매번 낸다
+
+
+def test_a_refused_start_does_not_touch_the_watch_setting(node):
+    call(node._on_patrol_start)                            # 경로 없음
+    assert node._pub_patrol_watch.msgs == []
+
+
+def test_an_item_switched_off_is_ignored_for_the_whole_patrol(node):
+    start_patrol(node, watch_off=["intruder"])
+    tick(node, 1.0)
+    send(node, INTRUDER)
+    assert node.logic.state == State.PATROLLING            # 꺼 둔 종류는 버린다
+    told = watch_msgs(node)
+    save(node, [ID_A, ID_B, ID_C])                         # 순찰 중 다시 켜 저장해도 이번 순찰은 그대로
+    assert watch_msgs(node) == told                        # 감지·호출어 노드에도 순찰 중에는 알리지 않는다
+    assert node._patrol_routes.read(MAP) == ([ID_A, ID_B, ID_C], [])   # 파일에는 적혔다 — 다음 경비부터
+    send(node, INTRUDER)
+    assert node.logic.state == State.PATROLLING
+    send(node, {"src": "audio", "kind": "sound", "db": 70.0, "threshold": 67.0})
+    assert node.logic.state == State.PATROL_ALARM          # 켜 둔 종류는 그대로 받는다
+
+
+def test_save_keeps_the_watch_setting_and_get_returns_it(node):
+    saved = save(node, [ID_A, ID_B], watch_off=["sound", "LIGHT", "nonsense"])
+    assert (saved.accepted, saved.reason) == (True, "ok")
+    assert node._patrol_routes.read(MAP) == ([ID_A, ID_B], ["light", "sound"])
+    got = get(node)
+    assert got.found and got.watch_off == ["light", "sound"]
+    assert get(node, map_id=MAP).watch_off == ["light", "sound"]
+    save(node, [ID_A, ID_B])                               # 다시 모두 켬
+    assert get(node).watch_off == []
+
+
+def test_all_three_cannot_be_switched_off(node):
+    save(node, [ID_A, ID_B], watch_off=["light"])
+    refused = save(node, [ID_A, ID_B], watch_off=["intruder", "light", "sound"])
+    assert (refused.accepted, refused.reason) == (False, "nothing_watched")
+    assert refused.message == "감시 항목은 하나 이상 켜 두어야 합니다."
+    assert node._patrol_routes.read(MAP) == ([ID_A, ID_B], ["light"])
+
+
+def test_the_watch_setting_outlives_a_deleted_route(node):
+    save(node, [ID_A, ID_B], watch_off=["sound"])
+    deleted = save(node, [], watch_off=["sound"])
+    assert (deleted.accepted, deleted.message) == (True, "순찰 경로를 지웠습니다.")
+    got = get(node)
+    assert (got.found, got.destination_ids, got.watch_off) == (False, [], ["sound"])
+    assert save(node, [], watch_off=["sound"]).message == "지울 순찰 경로가 없었습니다."
+    save(node, [])                                         # 경로도 끈 항목도 없으면 파일을 지운다
+    assert not node._patrol_routes.path_for(MAP).exists()
+
+
+def test_saving_for_the_current_map_tells_the_watch_setting_at_once(node):
+    save(node, [ID_A, ID_B], watch_off=["light"])
+    assert watch_msgs(node) == [{"off": ["light"]}]
+    save(node, [ID_A], watch_off=["sound"])                # 거절된 저장은 알리지 않는다
+    assert watch_msgs(node) == [{"off": ["light"]}]
+
+
+def test_saving_for_another_map_does_not_tell(node, tmp_path):
+    folder = tmp_path / "destinations" / "map_2"
+    folder.mkdir()
+    (folder / "destinations.yaml").write_text(
+        "destinations:\n"
+        f"  - {{id: {ID_A}, name: 다른 층 로비, pose: {{x: 1.0, y: 1.0, yaw: 0.0}}}}\n"
+        f"  - {{id: {ID_C}, name: 다른 층 창고, pose: {{x: 2.0, y: 1.0, yaw: 0.0}}}}\n",
+        encoding="utf-8")
+    assert save(node, [ID_A, ID_C], map_id="map_2", watch_off=["sound"]).accepted
+    assert node._pub_patrol_watch.msgs == []
+    assert get(node, map_id="map_2").watch_off == ["sound"]
+
+
+def test_startup_tells_the_saved_setting_of_the_current_map(node):
+    node._patrol_routes.write(MAP, [ID_A, ID_B], ["intruder"])
+    node._publish_patrol_watch()                           # __init__ 이 발행자를 만든 직후 부른다
+    assert watch_msgs(node) == [{"off": ["intruder"]}]
+    assert NODE_SRC.count("self._publish_patrol_watch()") == 1
+
+
+def test_get_for_a_missing_file_says_everything_is_watched(node):
+    got = get(node)
+    assert (got.found, got.watch_off) == (False, [])
+
+
 # ---- 배선 계약(소스) --------------------------------------------------------
 
 
 def test_patrol_adds_exactly_one_subscription_and_no_timer_or_thread():
     assert NODE_SRC.count("create_subscription(") == 25      # 순찰 전 24 + /vica/patrol/event
     assert NODE_SRC.count('"/vica/patrol/event"') == 1
+    assert NODE_SRC.count('"/vica/patrol/watch"') == 1       # 감시 항목 알림 — 발행자 하나, 구독 없음
     assert NODE_SRC.count("create_timer(") == 3              # 틱·robot_state·장애물 판정 — 그대로
     assert NODE_SRC.count("threading.Thread(") == 2          # 장애물 입력·주행 취소 — 그대로
 
@@ -899,13 +1004,14 @@ def test_services_use_the_spec_names():
 def test_route_service_types_match_the_spec():
     request, response = mm.SavePatrolRoute.Request(), mm.SavePatrolRoute.Response()
     assert request.get_fields_and_field_types() == {
-        "map_id": "string", "destination_ids": "sequence<string>"}
+        "map_id": "string", "destination_ids": "sequence<string>",
+        "watch_off": "sequence<string>"}
     assert response.get_fields_and_field_types() == {
         "accepted": "boolean", "reason": "string", "message": "string"}
     assert mm.GetPatrolRoute.Request().get_fields_and_field_types() == {"map_id": "string"}
     assert mm.GetPatrolRoute.Response().get_fields_and_field_types() == {
         "found": "boolean", "map_id": "string", "destination_ids": "sequence<string>",
-        "names": "sequence<string>", "message": "string"}
+        "names": "sequence<string>", "watch_off": "sequence<string>", "message": "string"}
 
 
 PATROL_PARAMS = {

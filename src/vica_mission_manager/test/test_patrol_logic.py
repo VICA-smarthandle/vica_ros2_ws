@@ -425,9 +425,58 @@ def test_further_detections_are_ignored_outside_moving_and_dwelling(make):
     assert logic.state == state
 
 
+# ---- 감시 항목 켜고 끄기(2026-11-14 사용자 요청) -----------------------------
+
+
+def watching(watch_off, dwell=False) -> MissionLogic:
+    """꺼 둔 항목이 있는 순찰 — 첫 지점으로 가는 중(t=1) 또는 그 지점에 서 있는 중(t=5~8)."""
+    logic = new_logic()
+    assert logic.on_patrol_start(ROUTE, BOUNDS, True, True, 0.0, watch_off)[1] == GateReason.OK
+    tick(logic, 1.0, NavStatus.NONE)
+    if dwell:
+        tick(logic, 5.0, NavStatus.SUCCEEDED)
+    return logic
+
+
+@pytest.mark.parametrize("off,event", [("intruder", INTRUDER), ("light", LIGHT), ("sound", SOUND)])
+def test_an_item_switched_off_raises_no_alarm_moving_or_dwelling(off, event):
+    for dwell in (False, True):
+        logic = watching([off], dwell)
+        state = logic.state
+        assert logic.on_patrol_event(event, 6.0) == []
+        assert logic.state == state
+
+
+def test_the_other_items_still_raise_alarms():
+    logic = watching(["light"], dwell=True)
+    assert logic.on_patrol_event(LIGHT, 6.0) == []
+    assert events(logic.on_patrol_event(SOUND, 6.5)) == ["patrol_sound"]
+    logic = watching(["intruder", "sound"])
+    assert logic.on_patrol_event(INTRUDER, 2.0) == [] and logic.on_patrol_event(SOUND, 2.5) == []
+    logic = watching(["intruder", "sound"], dwell=True)
+    assert events(logic.on_patrol_event(LIGHT, 6.0)) == ["patrol_light"]
+
+
+def test_an_item_switched_off_does_not_count_as_proof_of_readiness():
+    logic = new_logic()
+    logic.on_patrol_start(ROUTE, BOUNDS, True, True, 0.0, ["intruder"])
+    assert logic.on_patrol_event(INTRUDER, 0.5) == []
+    assert logic.state == State.PATROL_DWELL
+    assert tick(logic, 0.6, NavStatus.NONE, ok=False) == []      # 아직 준비 신호가 없다 — 출발하지 않는다
+    assert navigates(tick(logic, 1.0, NavStatus.NONE))           # 준비 신호가 오면 출발
+
+
+def test_camera_loss_cannot_be_switched_off():
+    logic = new_logic()
+    logic.on_patrol_start(ROUTE, BOUNDS, True, True, 0.0, ["camera_lost", "status", "clip", "light"])
+    tick(logic, 1.0, NavStatus.NONE)
+    assert logic.state == State.PATROLLING
+    assert events(tick(logic, 6.0, ok=False)) == ["patrol_camera_lost"]   # 3초 넘게 정상 신호 없음
+
+
 def test_malformed_events_are_ignored():
     logic = patrolling()
-    for bad in ({}, {"kind": "unknown"}, {"kind": 7}, [], "intruder", None):
+    for bad in ({}, {"kind": "unknown"}, {"kind": 7}, {"kind": ["sound"]}, [], "intruder", None):
         assert logic.on_patrol_event(bad, 2.0) == []
     assert logic.state == State.PATROLLING
     # 숫자가 아닌 크기·글자가 아닌 파일 이름은 빈 값으로 받는다.

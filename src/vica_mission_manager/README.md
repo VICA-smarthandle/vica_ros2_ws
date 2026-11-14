@@ -88,10 +88,15 @@ parameter(double 배열, 순번끼리 짝)로 조정한다. 단계 개수도 바
 | 서비스 | `/vica/patrol/route/save` · `/vica/patrol/route/get` | `SavePatrolRoute` · `GetPatrolRoute` |
 | 서비스 | `/vica/mission/pause_navigation` · `resume_navigation` | 순찰 중이면 일시정지·재개 |
 | 구독 | `/vica/patrol/event` | `std_msgs/String` JSON. 감지·호출어 노드가 순찰 중에만 낸다 |
+| 발행 | `/vica/patrol/watch` | `std_msgs/String` JSON `{"off": ["light"]}`, 마지막 값 보관. 관리자가 꺼 둔 감시 항목 — 기동·저장(순찰 중 제외)·경비 시작 때만 낸다 |
 | 발행 | `/vica_goal_event` | `patrol_started`·`patrol_waypoint`·`patrol_intruder`·`patrol_sound`·`patrol_light`·`patrol_camera_lost`·`patrol_acked`·`patrol_paused`·`patrol_resumed`·`patrol_stopped` |
 | 발행 | `/vica/robot_state` | `dialog_state` = `patrolling`·`patrol_dwell`·`patrol_alarm`·`patrol_light`·`patrol_paused` |
 
 - 순찰 구간 이동에는 `goal_sent`·`goal_succeeded` 등 `goal_*` 사건이 나가지 않는다.
+- 감시 항목(`intruder` 사람 · `light` 불 켜짐 · `sound` 큰 소리)은 앱에서 켜고 끈다. 꺼 둔 목록 `watch_off` 는
+  경로와 같은 `patrol.yaml` 에 있고(`SavePatrolRoute`·`GetPatrolRoute` 의 `watch_off`), 칸이 없으면 모두 켬이다.
+  셋 다 끌 수는 없고, 카메라 끊김 감시는 끌 수 없다. 경비 시작 때 읽은 값이 그 순찰 끝까지 간다 — 꺼 둔 종류의
+  경보는 미션이 버리고, 감지·호출어 노드는 `/vica/patrol/watch` 를 보고 계산도 하지 않는다.
 - 구간 속도 상한은 `/speed_limit` 절대값(`patrol_speed_mps`, 기본 0.6 m/s)으로 낸다.
 - 경로 파일은 `~/vica_data/destinations/<map_id>/patrol.yaml`(장소 id 순서), 경보 기록은
   `<patrol_media_dir>/events.jsonl`(경보 때만 한 줄씩 덧붙인다).

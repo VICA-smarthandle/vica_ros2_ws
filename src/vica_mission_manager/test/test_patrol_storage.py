@@ -14,6 +14,7 @@ from vica_mission_manager.patrol_storage import (
     PatrolRouteStorage,
     alarm_record,
     check_route_ids,
+    clean_watch_off,
     clip_record,
     nearest_place_name,
 )
@@ -64,29 +65,61 @@ def storage(tmp_path):
 
 def test_route_round_trip_keeps_the_tap_order(storage):
     storage.write("map_1", ["c", "a", "b"], saved_at="2026-11-14T20:00:00")
-    assert storage.read("map_1") == ["c", "a", "b"]
+    assert storage.read("map_1") == (["c", "a", "b"], [])
     doc = yaml.safe_load(storage.path_for("map_1").read_text(encoding="utf-8"))
     assert doc == {"schema_version": 1, "map_id": "map_1", "destination_ids": ["c", "a", "b"],
-                   "saved_at": "2026-11-14T20:00:00"}
+                   "watch_off": [], "saved_at": "2026-11-14T20:00:00"}
     assert storage.path_for("map_1").name == "patrol.yaml"
     # 임시 파일을 남기지 않는다.
     assert sorted(p.name for p in storage.path_for("map_1").parent.iterdir()) == ["patrol.yaml"]
 
 
 def test_missing_or_broken_route_reads_as_none(storage):
-    assert storage.read("map_1") is None
+    assert storage.read("map_1") == (None, [])
     path = storage.path_for("map_1")
     for text in ("", "- just\n- a list\n", "destination_ids: nope\n", "destination_ids: []\n",
                  "{broken: [yaml"):
         path.write_text(text, encoding="utf-8")
-        assert storage.read("map_1") is None
+        assert storage.read("map_1") == (None, [])
+
+
+def test_watch_off_round_trip_keeps_only_known_kinds_in_a_fixed_order(storage):
+    storage.write("map_1", ["a", "b"], ["sound", "LIGHT ", "camera_lost", "sound", 7])
+    assert storage.read("map_1") == (["a", "b"], ["light", "sound"])
+    doc = yaml.safe_load(storage.path_for("map_1").read_text(encoding="utf-8"))
+    assert doc["watch_off"] == ["light", "sound"]
+
+
+def test_a_file_without_watch_off_means_everything_is_watched(storage):
+    storage.path_for("map_1").write_text("destination_ids: [a, b]\n", encoding="utf-8")
+    assert storage.read("map_1") == (["a", "b"], [])
+    storage.path_for("map_1").write_text("destination_ids: [a, b]\nwatch_off: light\n", encoding="utf-8")
+    assert storage.read("map_1") == (["a", "b"], [])        # 목록이 아니면 버린다
+
+
+def test_a_hand_edited_file_with_all_three_off_reads_as_all_on(storage):
+    storage.path_for("map_1").write_text(
+        "destination_ids: [a, b]\nwatch_off: [intruder, light, sound]\n", encoding="utf-8")
+    assert storage.read("map_1") == (["a", "b"], [])
+
+
+def test_watch_off_survives_without_a_route(storage):
+    storage.write("map_1", [], ["intruder"])
+    assert storage.read("map_1") == (None, ["intruder"])
+
+
+def test_clean_watch_off_takes_only_lists():
+    assert clean_watch_off(["sound", "intruder"]) == ["intruder", "sound"]
+    assert clean_watch_off(("light",)) == ["light"]
+    for bad in (None, "light", 3, {"light": True}):
+        assert clean_watch_off(bad) == []
 
 
 def test_delete_reports_whether_there_was_a_route(storage):
     assert storage.delete("map_1") is False
     storage.write("map_1", ["a", "b"])
     assert storage.delete("map_1") is True
-    assert storage.read("map_1") is None
+    assert storage.read("map_1") == (None, [])
 
 
 def test_write_needs_the_map_folder_and_a_safe_map_id(storage):
