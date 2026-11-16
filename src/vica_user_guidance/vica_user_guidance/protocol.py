@@ -16,7 +16,7 @@ STATE_CHARGING: int = 6   # [TARGET] 펌웨어 미구현. 충전 상태 입력�
 STATE_CHARGED: int = 7    # [TARGET] 펌웨어 미구현
 # 순찰 표시(2026-11-14). 6·7 은 충전용 예약 그대로 비워 둔다.
 STATE_PATROL: int = 8         # 순찰 중 — 연두 상시
-STATE_PATROL_LIGHT: int = 9   # 불 켜짐 — 연노랑 상시
+STATE_PATROL_LIGHT: int = 9   # 불 켜짐 — 진노랑 상시
 STATE_PATROL_ALARM: int = 10  # 사람·큰 소리·카메라 끊김 — 빨강 300ms 점멸
 STATE_CODE_MAX: int = STATE_PATROL_ALARM   # 상태코드 범위 0~10 의 끝
 
