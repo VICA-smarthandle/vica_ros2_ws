@@ -11,8 +11,10 @@ import pytest
 
 from vica_mission_manager.mission_logic import (
     MSG_ESTOPPED,
+    MSG_PATROL_ENDED,
     MSG_PATROL_INTRUDER,
     MSG_PATROL_LIGHT,
+    MSG_PATROL_STARTED,
     MSG_TIPPED,
     PATROL_DESTINATION_PREFIX,
     ApproachRequest,
@@ -38,6 +40,8 @@ from vica_mission_manager.mission_logic import (
 )
 
 BOUNDS = MapBounds(min_x=-50, min_y=-50, max_x=50, max_y=50)
+# 관리자가 경비를 끝내면 한 번 말한다(2026-11-16 사용자 요청 "경비 모드를 종료합니다").
+SAY_ENDED = Say(MSG_PATROL_ENDED, priority="response")
 A = Destination(id="a", name="로비", pose=Pose2D(1.0, 0.0, 10.0, "map"), calibrated=True)
 B = Destination(id="b", name="복도 끝", pose=Pose2D(1.0, 2.0, 20.0, "map"), calibrated=True)
 C = Destination(id="c", name="창고 앞", pose=Pose2D(-1.0, 2.0, 30.0, "map"), calibrated=True)
@@ -63,7 +67,8 @@ def started(route=ROUTE, **kw) -> MissionLogic:
     logic = new_logic(**kw)
     actions, reason = logic.on_patrol_start(route, BOUNDS, True, True, 0.0)
     assert reason == GateReason.OK
-    assert actions == [PatrolEvent("patrol_started", route=tuple(d.name for d in route))]
+    assert actions == [PatrolEvent("patrol_started", route=tuple(d.name for d in route)),
+                       Say(MSG_PATROL_STARTED, priority="response")]   # 2026-11-16 "경비 모드를 시작합니다."
     assert logic.state == State.PATROL_DWELL
     return logic
 
@@ -823,18 +828,35 @@ def test_stop_on_the_way_ends_the_patrol_then_returns_home():
     assert actions == [
         SetNavSpeedLimit(0.0),
         PatrolEvent("patrol_stopped", reason="admin", return_home=True),
+        SAY_ENDED,
         SetNavSpeedLimit(0.0),
         Navigate(HOME),
     ]
     # 앱의 /vica/mission/return_home 과 같은 행동·같은 복귀 종류다.
     direct = with_home(new_logic())
     accepted, _, direct_actions = direct.on_return_home_request(True, 3.0)
-    assert accepted and actions[2:] == direct_actions
+    assert accepted and actions[3:] == direct_actions
     assert logic._returning_home is True and direct._returning_home is True
     # 도착하면 쉰다 — 순찰은 다시 돌지 않는다.
     assert logic.on_tick(10.0, NavStatus.RUNNING) == []
     logic.on_tick(20.0, NavStatus.SUCCEEDED)
     assert logic.state == State.IDLE and logic._patrol is None
+
+
+def test_start_and_admin_stop_each_say_one_sentence_and_other_endings_stay_silent():
+    """2026-11-16 사용자 요청: 시작하면 "경비 모드를 시작합니다.", 관리자가 끝내면 "경비 모드를 종료합니다.".
+    구간 실패·감지 노드 준비 시한으로 끝날 때는 말하지 않는다."""
+    logic = new_logic()
+    actions, _ = logic.on_patrol_start(ROUTE, BOUNDS, True, True, 0.0)
+    assert [a for a in actions if isinstance(a, Say)] == [Say(MSG_PATROL_STARTED, priority="response")]
+    assert MSG_PATROL_STARTED == "경비 모드를 시작합니다." and MSG_PATROL_ENDED == "경비 모드를 종료합니다."
+    assert [a for a in logic.on_patrol_stop(1.0)[0] if isinstance(a, Say)] == [SAY_ENDED]
+    not_ready = started()
+    assert not [a for a in not_ready.on_tick(15.0, NavStatus.NONE) if isinstance(a, Say)]
+    failed = patrolling()
+    for t in (4.0, 5.0):
+        tick(failed, t, NavStatus.FAILED)
+    assert not [a for a in tick(failed, 6.0, NavStatus.FAILED) if isinstance(a, Say)]
 
 
 def test_stop_without_a_home_ends_in_place():
@@ -843,7 +865,7 @@ def test_stop_without_a_home_ends_in_place():
     assert reason == GateReason.OK and logic.state == State.IDLE
     assert logic.patrol_stop_home_reason == GateReason.NO_HOME
     assert actions == [SetNavSpeedLimit(0.0), CancelNav(None),
-                       PatrolEvent("patrol_stopped", reason="admin", return_home=False)]
+                       PatrolEvent("patrol_stopped", reason="admin", return_home=False), SAY_ENDED]
     assert logic.on_tick(4.0, NavStatus.NONE) == []            # 그 자리에서 쉰다
 
 
@@ -863,7 +885,7 @@ def test_stop_while_standing_also_returns_home(name):
     assert reason == GateReason.OK and logic.state == State.RETURNING
     silence = [StopSpeech()] if name in ("patrol_alarm", "patrol_light") else []   # 확인 전 경보 음성을 끊는다
     assert actions == silence + [PatrolEvent("patrol_stopped", reason="admin", return_home=True),
-                                 SetNavSpeedLimit(0.0), Navigate(HOME)]
+                                 SAY_ENDED, SetNavSpeedLimit(0.0), Navigate(HOME)]
 
 
 def test_stop_during_an_alarm_silences_it():
@@ -902,7 +924,7 @@ def test_stop_while_standing_only_reports(make):
     logic = make()
     silence = [StopSpeech()] if logic.state == State.PATROL_LIGHT else []           # 확인 전 경보 음성을 끊는다
     assert logic.on_patrol_stop(9.0) == (
-        silence + [PatrolEvent("patrol_stopped", reason="admin")], GateReason.OK)
+        silence + [PatrolEvent("patrol_stopped", reason="admin"), SAY_ENDED], GateReason.OK)
     assert logic.state == State.IDLE
 
 
@@ -922,11 +944,12 @@ def test_stop_when_not_patrolling_is_refused():
     assert new_logic().on_patrol_stop(1.0) == ([], GateReason.NOT_PATROLLING)
 
 
-def test_app_cancel_during_patrol_ends_the_patrol_quietly():
+def test_app_cancel_during_patrol_ends_the_patrol_with_the_same_sentence():
+    """앱의 취소도 경비 종료다 — 취소 안내 대신 "경비 모드를 종료합니다."만 한 번(2026-11-16)."""
     logic = patrolling()
     actions, reason = logic.on_app_cancel(3.0)
     assert reason == GateReason.OK and logic.state == State.IDLE
-    assert events(actions) == ["patrol_stopped"] and not says(actions)
+    assert events(actions) == ["patrol_stopped"] and [a for a in actions if isinstance(a, Say)] == [SAY_ENDED]
 
 
 def test_app_cancel_during_patrol_also_returns_home():
@@ -935,8 +958,7 @@ def test_app_cancel_during_patrol_also_returns_home():
     assert reason == GateReason.OK and logic.state == State.RETURNING
     assert actions == [SetNavSpeedLimit(0.0),
                        PatrolEvent("patrol_stopped", reason="admin", return_home=True),
-                       SetNavSpeedLimit(0.0), Navigate(HOME)]
-    assert not says(actions)
+                       SAY_ENDED, SetNavSpeedLimit(0.0), Navigate(HOME)]
     # Nav2 가 준비되지 않았으면 그 자리에서 끝낸다.
     blocked = with_home(patrolling())
     blocked.on_app_cancel(3.0, nav_ready=False)

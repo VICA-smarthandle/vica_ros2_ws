@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -172,10 +173,35 @@ def clip_record(alarm_id: str, clip_id: str) -> dict:
 
 
 class PatrolEventLog:
-    """`<patrol_media_dir>/events.jsonl` — 덧붙이기만 한다."""
+    """`<patrol_media_dir>/events.jsonl` — 덧붙이기만 한다. 지우는 것은 clear() 한 곳뿐이다."""
+
+    # 같은 폴더에 감지 노드·지도 서버가 두는 영상·사진 폴더. clear() 가 그 안의 것만 지운다.
+    MEDIA_FOLDERS = ("clips", "photos")
 
     def __init__(self, media_dir: str | Path) -> None:
         self.path = Path(str(media_dir)).expanduser() / "events.jsonl"
+
+    def clear(self) -> int:
+        """경보 기록과 영상·사진을 모두 지운다(2026-11-16 사용자 요청 — 앱 '경비 기록' 삭제). 지운 항목 수.
+
+        clips/·photos/ 안의 것과 events.jsonl 만 지운다 — 폴더 자체와 그 밖의 파일은 남긴다.
+        못 지우면 OSError 를 그대로 올린다. 경비 중에는 부르지 않는다(감지 노드가 장면을 쓰고 있을 수 있다).
+        """
+        removed = 0
+        for name in self.MEDIA_FOLDERS:
+            folder = self.path.parent / name
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            for entry in folder.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+                removed += 1
+        if self.path.is_file():
+            self.path.unlink()
+            removed += 1
+        return removed
 
     def append(self, record: dict) -> bool:
         """한 줄 덧붙인다. 실패하면 False — 기록 실패로 순찰을 세우지 않는다."""
