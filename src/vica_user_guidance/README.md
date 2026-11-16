@@ -40,7 +40,7 @@ Safety 결정 사항이다.
 | `dialog_state` | 코드 | LED |
 | --- | --- | --- |
 | `patrolling` · `patrol_dwell` · `patrol_paused` | 8 | 연두 RGB(110,255,0) 상시 |
-| `patrol_light` | 9 | 연노랑 RGB(255,210,60) 상시 |
+| `patrol_light` | 9 | 진노랑 RGB(255,170,0) 상시 |
 | `patrol_alarm` | 10 | 빨강 RGB(255,0,0) 300 ms 점멸 |
 
 - 우선순위는 비상정지 > 순찰 > 도착·회전·기본이다. 순찰 중에는 방향지시·도착 표시를 내지 않고,

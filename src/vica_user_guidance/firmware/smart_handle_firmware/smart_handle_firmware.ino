@@ -32,7 +32,7 @@
 // 빌드: arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
 //
 // ── 2026-11-14 순찰 표시 (경비 모드) ──
-// 상태코드 8(연두 상시)·9(연노랑 상시)·10(빨강 300ms 점멸)을 더했다. LED 만 바뀐다 —
+// 상태코드 8(연두 상시)·9(진노랑 상시)·10(빨강 300ms 점멸)을 더했다. LED 만 바뀐다 —
 // 서보는 가운데, 진동은 없다. 워치독·비상정지·초음파·터치는 그대로다.
 //
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
@@ -112,7 +112,7 @@
 // ── 순찰 표시 (2026-11-14) ────────────────
 // 6·7 은 충전용 예약이라 건너뛴다(받아도 버린다). 수신 범위는 0~5 와 8~10 두 구간이다.
 #define STATE_PATROL        8   // 순찰 중: 연두 상시
-#define STATE_PATROL_LIGHT  9   // 불 켜짐: 연노랑 상시
+#define STATE_PATROL_LIGHT  9   // 불 켜짐: 진노랑 상시
 #define STATE_PATROL_ALARM 10   // 사람·큰 소리·카메라 끊김: 빨강 점멸(BLINK_MS)
 #define STATE_PATROL_MIN  STATE_PATROL
 #define STATE_PATROL_MAX  STATE_PATROL_ALARM
@@ -136,7 +136,9 @@ const uint32_t GREEN  = Adafruit_NeoPixel::Color(0,   255, 0  );
 const uint32_t OFF    = Adafruit_NeoPixel::Color(0,   0,   0  );
 // 순찰 색(2026-11-11 실물로 확정). 연두는 충전 예약 GREEN 과 다른 값이다.
 const uint32_t LIME         = Adafruit_NeoPixel::Color(110, 255, 0  );   // 순찰 중
-const uint32_t LIGHT_YELLOW = Adafruit_NeoPixel::Color(255, 210, 60 );   // 불 켜짐
+// 불 켜짐은 2026-11-16 에 연노랑(255,210,60)에서 진노랑으로 바꿨다. 실물에서 거의 흰색으로 보였다(사용자).
+// ORANGE(255,80,0) 와는 초록 값으로 구분한다.
+const uint32_t DEEP_YELLOW  = Adafruit_NeoPixel::Color(255, 170, 0  );   // 불 켜짐
 
 enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE, BLINK_ALARM };
 Mode    currentMode  = NORMAL;
@@ -856,7 +858,7 @@ void applyState(uint8_t state) {
 
     case STATE_PATROL_LIGHT:
       currentMode = NORMAL;
-      setBoth(LIGHT_YELLOW);
+      setBoth(DEEP_YELLOW);
       servoMoveTo(SERVO_CENTER);
       break;
 

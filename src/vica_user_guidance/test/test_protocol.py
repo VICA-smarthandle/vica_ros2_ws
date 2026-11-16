@@ -87,10 +87,10 @@ def test_firmware_accepts_patrol_codes_but_not_reserved_6_7():
 
 
 def test_firmware_patrol_colors_are_the_confirmed_ones():
-    """색은 2026-11-11 실물로 확정한 값이다(명세 1절 6항)."""
+    """연두·빨강은 2026-11-11 실물로 확정. 불 켜짐은 2026-11-16 진노랑으로 바꿈(사용자)."""
     code = _ino_code()
     assert re.search(r"LIME\s*=\s*Adafruit_NeoPixel::Color\(\s*110,\s*255,\s*0\s*\)", code)
-    assert re.search(r"LIGHT_YELLOW\s*=\s*Adafruit_NeoPixel::Color\(\s*255,\s*210,\s*60\s*\)", code)
+    assert re.search(r"DEEP_YELLOW\s*=\s*Adafruit_NeoPixel::Color\(\s*255,\s*170,\s*0\s*\)", code)
     assert re.search(r"RED\s*=\s*Adafruit_NeoPixel::Color\(\s*255,\s*0,\s*0\s*\)", code)
     assert "#define BLINK_MS    300" in code
 
@@ -102,12 +102,12 @@ def _case_body(src: str, case: str) -> str:
 
 
 def test_firmware_patrol_patterns():
-    """연두 상시 · 연노랑 상시 · 빨강 300ms 점멸. 셋 다 서보 가운데, 진동 없음."""
+    """연두 상시 · 진노랑 상시 · 빨강 300ms 점멸. 셋 다 서보 가운데, 진동 없음."""
     code = _ino_code()
     steady = _case_body(code, "STATE_PATROL")
     assert "setBoth(LIME)" in steady and "currentMode = NORMAL" in steady
     light = _case_body(code, "STATE_PATROL_LIGHT")
-    assert "setBoth(LIGHT_YELLOW)" in light and "currentMode = NORMAL" in light
+    assert "setBoth(DEEP_YELLOW)" in light and "currentMode = NORMAL" in light
     alarm = _case_body(code, "STATE_PATROL_ALARM")
     assert "currentMode = BLINK_ALARM" in alarm and "setBoth(RED)" in alarm
     for body in (steady, light, alarm):
