@@ -357,7 +357,7 @@ def test_state_changes_inside_a_tick_are_broadcast_at_once(node):
 def test_a_leg_decided_before_an_estop_is_not_sent(node):
     """로직이 구간을 정한 뒤 실행 전에 비상정지(다른 스레드)가 순찰을 끝냈다 — 보내지 않는다."""
     patrolling(node)
-    leg = Navigate(patrol_leg_destination(B, C))
+    leg = Navigate(patrol_leg_destination(B))
     node._run_actions(node.logic.on_estop(True, 2.0))
     node._start_nav(leg)
     assert len(node.navigator.goals) == 1 and node._nav_active is False
