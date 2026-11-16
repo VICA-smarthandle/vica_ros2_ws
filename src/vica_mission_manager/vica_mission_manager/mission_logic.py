@@ -690,6 +690,9 @@ HELP_RESEND_SEC = 10.0
 # 문장은 글자 그대로 둔다 — 음성 쪽 녹음 대응표가 같은 글자로 찾는다. 확인 전까지 되풀이한다.
 MSG_PATROL_INTRUDER = "침입자 발생"       # 사람·큰 소리
 MSG_PATROL_LIGHT = "불 켜짐 감지"         # 불 켜짐
+# 관리자가 경비를 시작·종료했을 때 한 번(2026-11-16 사용자 요청). 그 밖의 끝(구간 실패·비상정지 등)에는 말하지 않는다.
+MSG_PATROL_STARTED = "경비 모드를 시작합니다."
+MSG_PATROL_ENDED = "경비 모드를 종료합니다."
 # 노드 매개변수 기본값(같은 이름의 patrol_* 매개변수).
 PATROL_DWELL_SEC = 3.0                # 지점마다 서 있는 시간
 PATROL_INTRUDER_REPEAT_SEC = 3.0      # "침입자 발생" 반복 간격
@@ -3400,7 +3403,8 @@ class MissionLogic:
             route=tuple(route), watch_off=frozenset(watch_off).intersection(PATROL_WATCH_KINDS),
             arming_deadline=now + self.patrol_arming_timeout_sec)
         self.state = State.PATROL_DWELL
-        return [PatrolEvent("patrol_started", route=tuple(d.name for d in route))], GateReason.OK
+        return [PatrolEvent("patrol_started", route=tuple(d.name for d in route)),
+                Say(MSG_PATROL_STARTED, priority="response")], GateReason.OK
 
     def on_patrol_stop(self, now: float, nav_ready: bool = True) -> tuple:
         """관리자의 경비 종료(`/vica/mission/patrol_stop`, 순찰 중 앱 취소) → 홈으로 복귀.
@@ -3427,6 +3431,7 @@ class MissionLogic:
             actions = [a for a in actions if not isinstance(a, CancelNav)]
         if was_running:
             actions.append(PatrolEvent("patrol_stopped", reason="admin", return_home=went_home))
+            actions.append(Say(MSG_PATROL_ENDED, priority="response"))
         actions.extend(home_actions)
         return actions, GateReason.OK
 

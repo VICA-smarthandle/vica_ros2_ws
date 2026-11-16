@@ -654,7 +654,8 @@ def test_stop_during_an_alarm_silences_it_and_returns_home(node):
     send(node, INTRUDER)
     assert call(node._on_patrol_stop).message == "경비를 종료했습니다."
     assert node.logic.state == State.RETURNING
-    assert node.pub_tts.msgs[-1].data == "control:stop"    # 재생 중인 "침입자 발생"을 끊는다
+    # 재생 중인 "침입자 발생"을 끊고, 종료 안내를 한 번 한다(2026-11-16).
+    assert [m.data for m in node.pub_tts.msgs[-2:]] == ["control:stop", "response:경비 모드를 종료합니다."]
     said = len(node.pub_tts.msgs)
     for t in (5.0, 12.0, 22.0):
         tick(node, t)
@@ -1048,3 +1049,41 @@ def test_launch_file_still_loads():
              if isinstance(e, DeclareLaunchArgument)]
     for name in (*PATROL_PARAMS, "patrol_media_dir"):
         assert name in names
+
+
+# ---- 기록 지우기(2026-11-16 사용자 요청 — 앱 '경비 기록' 삭제) ----------------
+
+
+def _media(node, tmp_path):
+    media = tmp_path / "media"
+    (media / "clips").mkdir(parents=True, exist_ok=True)
+    (media / "clips" / "20261114_203455_intruder.mp4").write_bytes(b"mp4")
+    node._patrol_log.append({"type": "alarm", "alarm_id": "20261114_203455_intruder"})
+    return media
+
+
+def test_records_clear_removes_everything_when_not_patrolling(node, tmp_path):
+    media = _media(node, tmp_path)
+    response = call(node._on_patrol_records_clear)
+    assert (response.accepted, response.message) == (True, "경비 기록을 지웠습니다.")
+    assert not (media / "events.jsonl").exists() and list((media / "clips").iterdir()) == []
+
+
+def test_records_clear_is_refused_while_patrolling(node, tmp_path):
+    media = _media(node, tmp_path)
+    patrolling(node)
+    response = call(node._on_patrol_records_clear)
+    assert (response.accepted, response.message) == (False, "경비 중에는 기록을 지울 수 없습니다.")
+    assert (media / "clips" / "20261114_203455_intruder.mp4").exists()
+
+
+def test_records_clear_reports_a_failure(node, monkeypatch):
+    def broken():
+        raise OSError("읽기 전용")
+    monkeypatch.setattr(node._patrol_log, "clear", broken)
+    response = call(node._on_patrol_records_clear)
+    assert (response.accepted, response.message) == (False, "경비 기록을 지우지 못했습니다.")
+
+
+def test_records_clear_service_is_registered():
+    assert '("patrol_records_clear", self._on_patrol_records_clear)' in NODE_SRC

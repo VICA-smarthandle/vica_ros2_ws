@@ -186,3 +186,46 @@ def test_log_expands_the_home_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     log = PatrolEventLog("~/workspaces/isaac_ros-dev/vica_patrol")
     assert log.path == tmp_path / "workspaces" / "isaac_ros-dev" / "vica_patrol" / "events.jsonl"
+
+
+# ---- 기록 지우기(2026-11-16 사용자 요청 — 앱 '경비 기록' 삭제) ----------------
+
+
+def _fill_media(root):
+    """기록 한 줄 + 영상(mp4·대표 사진·장면 폴더) + 사진 + 지우면 안 되는 파일."""
+    log = PatrolEventLog(root)
+    log.append({"type": "alarm", "alarm_id": "20261114_203455_intruder"})
+    (root / "clips" / "20261114_203455_intruder").mkdir(parents=True)
+    (root / "clips" / "20261114_203455_intruder" / "meta.json").write_text("{}", encoding="utf-8")
+    (root / "clips" / "20261114_203455_intruder.mp4").write_bytes(b"mp4")
+    (root / "clips" / "20261114_203455_intruder.jpg").write_bytes(b"jpg")
+    (root / "photos").mkdir()
+    (root / "photos" / "20261114_203500_light.jpg").write_bytes(b"jpg")
+    (root / "keep.txt").write_text("남는다", encoding="utf-8")
+    return log
+
+
+def test_clear_removes_the_log_and_every_clip_and_photo_but_keeps_the_folders(tmp_path):
+    root = tmp_path / "vica_patrol"
+    log = _fill_media(root)
+    assert log.clear() == 5                      # 장면 폴더·mp4·대표 사진·사진·기록 파일
+    assert not log.path.exists()
+    assert list((root / "clips").iterdir()) == [] and list((root / "photos").iterdir()) == []
+    assert (root / "keep.txt").read_text(encoding="utf-8") == "남는다"   # 그 밖의 파일은 건드리지 않는다
+    assert log.clear() == 0                      # 지울 것이 없어도 조용하다
+    assert log.append({"type": "alarm"}) and log.path.exists()           # 지운 뒤에도 다시 쓴다
+
+
+def test_clear_without_any_folder_is_quiet(tmp_path):
+    assert PatrolEventLog(tmp_path / "nothing").clear() == 0
+
+
+def test_clear_does_not_follow_a_linked_folder(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.mp4").write_bytes(b"x")
+    root = tmp_path / "vica_patrol"
+    root.mkdir()
+    (root / "clips").symlink_to(outside, target_is_directory=True)
+    assert PatrolEventLog(root).clear() == 0
+    assert (outside / "precious.mp4").exists()

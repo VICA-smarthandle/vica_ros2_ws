@@ -782,9 +782,11 @@ class MissionManagerNode(Node):
         )
         self._publish_patrol_watch()
         # 시작·종료·경보 확인. 일시정지·재개는 기존 pause_navigation·resume_navigation 을 같이 쓴다.
+        # patrol_records_clear(2026-11-16)는 경비 기록·영상·사진을 모두 지운다 — 앱 '경비 기록' 삭제.
         for name, handler in (("patrol_start", self._on_patrol_start),
                               ("patrol_stop", self._on_patrol_stop),
-                              ("patrol_ack", self._on_patrol_ack)):
+                              ("patrol_ack", self._on_patrol_ack),
+                              ("patrol_records_clear", self._on_patrol_records_clear)):
             self.create_service(
                 MissionCommand, f"/vica/mission/{name}", handler,
                 callback_group=self._main_group,
@@ -1349,6 +1351,30 @@ class MissionManagerNode(Node):
         actions, reason = self.logic.on_patrol_ack(alarm_id, self._now())
         self._run_actions(actions)
         return self._patrol_reply(response, reason, "경보를 확인했습니다.", "경보 확인")
+
+    def _on_patrol_records_clear(
+        self,
+        request: MissionCommand.Request,
+        response: MissionCommand.Response,
+    ) -> MissionCommand.Response:
+        """경비 기록·영상·사진을 모두 지운다(앱 '알림 및 로그 > 경비 기록'의 삭제, 2026-11-16 사용자 요청).
+        경비 중에는 거절한다 — 감지 노드가 장면을 쓰고 있을 수 있다."""
+        if self.logic.patrol_active:
+            response.accepted = False
+            response.message = "경비 중에는 기록을 지울 수 없습니다."
+            self.get_logger().warn("경비 기록 삭제 거부: 경비 중")
+            return response
+        try:
+            removed = self._patrol_log.clear()
+        except OSError as exc:
+            response.accepted = False
+            response.message = "경비 기록을 지우지 못했습니다."
+            self.get_logger().warn(f"경비 기록 삭제 실패: {exc}")
+            return response
+        response.accepted = True
+        response.message = "경비 기록을 지웠습니다."
+        self.get_logger().info(f"경비 기록 삭제: {removed}개 ({self._patrol_log.path.parent})")
+        return response
 
     def _patrol_catalog(self, map_id: str):
         """그 지도의 목적지 catalog. 지금 지도면 메모리의 것, 다른 지도면 파일을 읽는다. 없으면 None."""
