@@ -32,6 +32,7 @@ from vica_mission_manager.mission_logic import (
     SetNavSpeedCap,
     SetNavSpeedLimit,
     State,
+    StopSpeech,
     WakeReply,
     patrol_leg_destination,
 )
@@ -509,7 +510,7 @@ def test_intruder_sentence_repeats_every_three_seconds_until_acked():
     assert said == [(13.0, "침입자 발생", "emergency"), (16.0, "침입자 발생", "emergency"),
                     (19.0, "침입자 발생", "emergency")]
     assert logic.on_patrol_ack("", 20.0) == (
-        [PatrolEvent("patrol_acked", alarm_id="20261114_203455_intruder")], GateReason.OK)
+        [StopSpeech(), PatrolEvent("patrol_acked", alarm_id="20261114_203455_intruder")], GateReason.OK)
     assert _alarm_ticks(logic, 20.2, 40.0) == ([], [])
     assert logic.state == State.PATROL_ALARM            # 확인은 음성만 끈다 — 정지는 그대로
 
@@ -545,6 +546,28 @@ def test_ack_is_idempotent_and_checks_the_alarm_id():
     assert logic.on_patrol_ack("20261114_200000_sound", 4.0) == ([], GateReason.PATROL_ALARM_MISMATCH)
     assert events(logic.on_patrol_ack("20261114_203455_intruder", 5.0)[0]) == ["patrol_acked"]
     assert logic.on_patrol_ack("20261114_203455_intruder", 6.0) == ([], GateReason.OK)
+
+
+def test_ack_cuts_the_sentence_that_is_playing():
+    """확인은 재생 중인 경보 음성도 끊는다(2026-11-16 — 경고음을 붙인 녹음이 약 3초). 두 번째 확인은 조용하다."""
+    for alarm in (INTRUDER, SOUND):
+        logic = patrolling()
+        logic.on_patrol_event(alarm, 3.0)
+        actions, reason = logic.on_patrol_ack("", 4.0)
+        assert reason == GateReason.OK and actions[0] == StopSpeech()
+        assert events(actions) == ["patrol_acked"]
+        assert logic.on_patrol_ack("", 5.0) == ([], GateReason.OK)
+
+
+def test_stop_during_an_unacked_alarm_cuts_the_sentence_first():
+    logic = with_home(patrolling())
+    logic.on_patrol_event(INTRUDER, 3.0)
+    actions, _ = logic.on_patrol_stop(4.0)
+    assert actions[0] == StopSpeech()
+    acked = with_home(patrolling())
+    acked.on_patrol_event(INTRUDER, 3.0)
+    acked.on_patrol_ack("", 3.5)
+    assert StopSpeech() not in acked.on_patrol_stop(4.0)[0]      # 이미 끊었다 — 홈 복귀 안내를 지우지 않는다
 
 
 # ---- 영상 id ----------------------------------------------------------------
@@ -653,6 +676,7 @@ def test_resume_from_an_alarm_on_the_way_acks_and_goes_to_the_same_place():
     actions, reason = logic.on_resume_request(True, 9.5)
     assert reason == GateReason.OK and logic.state == State.PATROLLING
     assert actions == [
+        StopSpeech(),
         PatrolEvent("patrol_acked", alarm_id="20261114_203455_intruder"),
         PatrolEvent("patrol_resumed"),
         PatrolEvent("patrol_waypoint", destination=A, index=0, lap=1, count=3),
@@ -837,8 +861,9 @@ def test_stop_while_standing_also_returns_home(name):
     logic = with_home(PATROL_STATE_MAKERS[name]())
     actions, reason = logic.on_patrol_stop(9.0)
     assert reason == GateReason.OK and logic.state == State.RETURNING
-    assert actions == [PatrolEvent("patrol_stopped", reason="admin", return_home=True),
-                       SetNavSpeedLimit(0.0), Navigate(HOME)]
+    silence = [StopSpeech()] if name in ("patrol_alarm", "patrol_light") else []   # 확인 전 경보 음성을 끊는다
+    assert actions == silence + [PatrolEvent("patrol_stopped", reason="admin", return_home=True),
+                                 SetNavSpeedLimit(0.0), Navigate(HOME)]
 
 
 def test_stop_during_an_alarm_silences_it():
@@ -875,8 +900,9 @@ def test_endings_that_are_not_the_admins_do_not_return_home():
                                   lambda: (lambda l: l.on_patrol_event(LIGHT, 6.0) and l)(dwelling())])
 def test_stop_while_standing_only_reports(make):
     logic = make()
+    silence = [StopSpeech()] if logic.state == State.PATROL_LIGHT else []           # 확인 전 경보 음성을 끊는다
     assert logic.on_patrol_stop(9.0) == (
-        [PatrolEvent("patrol_stopped", reason="admin")], GateReason.OK)
+        silence + [PatrolEvent("patrol_stopped", reason="admin")], GateReason.OK)
     assert logic.state == State.IDLE
 
 

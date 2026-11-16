@@ -3413,7 +3413,7 @@ class MissionLogic:
         """
         if self.state not in _PATROL_STATES:
             return [], GateReason.NOT_PATROLLING
-        actions = self._patrol_halt()
+        actions = self._patrol_silence(self._patrol) + self._patrol_halt()
         was_running = self._patrol is not None
         self._patrol = None
         self._to_idle()
@@ -3431,6 +3431,7 @@ class MissionLogic:
 
         alarm_id 가 비어 있으면 지금 경보를 확인한다. 적혀 있으면 지금 경보와 같아야 한다
         (지난 경보의 팝업이 새 경보를 끄지 않게). 두 번 눌러도 받되 알림은 한 번이다.
+        재생 중인 경보 음성도 그 자리에서 끊는다(2026-11-16 사용자 결정 — 경고음을 붙인 녹음이 약 3초다).
         """
         p = self._patrol
         alarm = p.alarm if p is not None else None
@@ -3440,8 +3441,10 @@ class MissionLogic:
             return [], GateReason.PATROL_ALARM_MISMATCH
         if alarm.acked:
             return [], GateReason.OK
+        actions = self._patrol_silence(p)
         alarm.acked = True
-        return [PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id)], GateReason.OK
+        actions.append(PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id))
+        return actions, GateReason.OK
 
     def on_patrol_event(self, data: dict, now: float) -> list:
         """`/vica/patrol/event` 한 건(JSON 을 푼 dict). 순찰 문맥이 없으면 아무것도 하지 않는다.
@@ -3487,6 +3490,13 @@ class MissionLogic:
         """감지 노드 정상 신호(ready && camera_ok)를 patrol_detector_timeout_sec 안에 받았나."""
         return (p.detector_ok_at is not None
                 and now - p.detector_ok_at <= self.patrol_detector_timeout_sec)
+
+    def _patrol_silence(self, p: Optional[PatrolRun]) -> list:
+        """확인 전인 경보의 음성을 그 자리에서 끊는다. 말하지 않는 경보(카메라 끊김)·확인된 경보면 빈 목록."""
+        alarm = p.alarm if p is not None else None
+        if alarm is None or alarm.acked or not self._patrol_voice(alarm.kind)[0]:
+            return []
+        return [StopSpeech()]
 
     def _patrol_voice(self, kind: str) -> tuple:
         """경보 종류 → (문장, 반복 간격 초). 카메라 끊김은 말하지 않는다."""
@@ -3609,6 +3619,7 @@ class MissionLogic:
         alarm = p.alarm
         if alarm is not None:
             if not alarm.acked:
+                actions.extend(self._patrol_silence(p))
                 alarm.acked = True
                 actions.append(PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id))
             p.last_alarm = alarm

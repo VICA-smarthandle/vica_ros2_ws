@@ -534,6 +534,7 @@ def test_ack_stops_the_voice_but_keeps_the_stop(node):
     assert (response.accepted, response.message) == (True, "경보를 확인했습니다.")
     acked = goal_events(node)[-1]
     assert (acked["event"], acked["alarm_id"]) == ("patrol_acked", "20261114_203455_intruder")
+    assert node.pub_tts.msgs[-1].data == "control:stop"          # 재생 중인 경보 음성을 끊는다
     said = len(node.pub_tts.msgs)
     for t in (10.0, 20.0, 30.0):
         tick(node, t)
@@ -651,9 +652,10 @@ def test_stop_during_an_alarm_silences_it_and_returns_home(node):
     node.logic.return_destination = HOME
     patrolling(node)
     send(node, INTRUDER)
-    said = len(node.pub_tts.msgs)
     assert call(node._on_patrol_stop).message == "경비를 종료했습니다."
     assert node.logic.state == State.RETURNING
+    assert node.pub_tts.msgs[-1].data == "control:stop"    # 재생 중인 "침입자 발생"을 끊는다
+    said = len(node.pub_tts.msgs)
     for t in (5.0, 12.0, 22.0):
         tick(node, t)
     assert len(node.pub_tts.msgs) == said                  # "침입자 발생" 반복이 멈췄다
