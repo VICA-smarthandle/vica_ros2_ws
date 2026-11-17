@@ -216,7 +216,7 @@ def test_waits_for_the_detector_before_the_first_leg():
     assert actions == [
         PatrolEvent("patrol_waypoint", destination=A, index=0, lap=1, count=3),
         SetNavSpeedCap(0.6),
-        Navigate(patrol_leg_destination(A)),
+        Navigate(patrol_leg_destination(A, B)),
     ]
 
 
@@ -257,7 +257,7 @@ def test_intruder_from_the_detector_during_arming_proves_it_is_ready():
     logic.on_patrol_event(DETECTOR_OK, 21.0)
     actions, reason = logic.on_resume_request(True, 21.5)
     assert reason == GateReason.OK
-    assert navigates(actions) == [Navigate(patrol_leg_destination(A))]
+    assert navigates(actions) == [Navigate(patrol_leg_destination(A, B))]
 
 
 def test_light_from_the_detector_during_arming_is_taken_too():
@@ -278,19 +278,18 @@ def test_once_ready_sound_is_taken_as_before():
 # ---- 구간 goal --------------------------------------------------------------
 
 
-def test_leg_goal_faces_the_saved_heading():
-    """2026-11-16: 지점에서는 저장한 방향을 본다(불 켜짐을 보려고 문 쪽) — 다음 지점 쪽이 아니다."""
-    leg = patrol_leg_destination(A)
+def test_leg_goal_faces_the_next_place_not_the_saved_heading():
+    leg = patrol_leg_destination(A, B)
     assert leg.id == PATROL_DESTINATION_PREFIX + "a" and leg.name == "로비"
-    assert (leg.pose.x, leg.pose.y, leg.pose.yaw_deg) == (1.0, 0.0, 10.0)
-    assert patrol_leg_destination(B).pose.yaw_deg == 20.0
-    assert patrol_leg_destination(C).pose.yaw_deg == 30.0
+    assert (leg.pose.x, leg.pose.y) == (1.0, 0.0)
+    assert leg.pose.yaw_deg == pytest.approx(90.0)                          # A(1,0) → B(1,2)
+    assert patrol_leg_destination(B, C).pose.yaw_deg == pytest.approx(180.0)
+    assert patrol_leg_destination(C, A).pose.yaw_deg == pytest.approx(-45.0)   # 끝 다음은 처음
 
 
-def test_leg_goal_prefers_the_door_heading():
-    door = Destination(id="d", name="409호", pose=Pose2D(29.0, 1.1, 0.0, "map"), calibrated=True,
-                       door_yaw_deg=270.0)
-    assert patrol_leg_destination(door).pose.yaw_deg == 270.0
+def test_leg_goal_keeps_the_saved_heading_when_places_overlap():
+    twin = Destination(id="t", name="같은 자리", pose=Pose2D(1.0, 0.0, 77.0, "map"), calibrated=True)
+    assert patrol_leg_destination(A, twin).pose.yaw_deg == 10.0
 
 
 def test_patrol_legs_never_carry_a_destination_for_goal_events():
@@ -321,7 +320,7 @@ def test_dwells_three_seconds_at_each_place_then_goes_on():
     assert actions == [
         PatrolEvent("patrol_waypoint", destination=B, index=1, lap=1, count=3),
         SetNavSpeedCap(0.6),
-        Navigate(patrol_leg_destination(B)),
+        Navigate(patrol_leg_destination(B, C)),
     ]
 
 
@@ -336,7 +335,7 @@ def test_after_the_last_place_comes_the_first_and_the_lap_counts_up():
         seen += tick(logic, t, NavStatus.NONE)
     waypoints = [(a.index, a.lap) for a in seen if isinstance(a, PatrolEvent)]
     assert waypoints == [(1, 1), (2, 1), (0, 2), (1, 2)]
-    assert navigates(seen)[2].destination == patrol_leg_destination(A)
+    assert navigates(seen)[2].destination == patrol_leg_destination(A, B)
 
 
 def test_speed_cap_is_optional():
@@ -357,7 +356,7 @@ def test_a_failed_leg_skips_to_the_next_place_without_dwelling():
         SetNavSpeedLimit(0.0),
         PatrolEvent("patrol_waypoint", destination=B, index=1, lap=1, count=3),
         SetNavSpeedCap(0.6),
-        Navigate(patrol_leg_destination(B)),
+        Navigate(patrol_leg_destination(B, C)),
     ]
 
 
@@ -687,7 +686,7 @@ def test_resume_from_an_alarm_on_the_way_acks_and_goes_to_the_same_place():
         PatrolEvent("patrol_resumed"),
         PatrolEvent("patrol_waypoint", destination=A, index=0, lap=1, count=3),
         SetNavSpeedCap(0.6),
-        Navigate(patrol_leg_destination(A)),
+        Navigate(patrol_leg_destination(A, B)),
     ]
 
 
@@ -705,7 +704,7 @@ def test_resume_from_an_alarm_at_a_place_goes_to_the_next_place():
     logic.on_patrol_event(DETECTOR_OK, 20.0)
     actions, reason = logic.on_resume_request(True, 20.5)
     assert reason == GateReason.OK
-    assert navigates(actions) == [Navigate(patrol_leg_destination(B))]
+    assert navigates(actions) == [Navigate(patrol_leg_destination(B, C))]
 
 
 def test_resume_is_refused_while_the_camera_is_down_or_nav2_is_not_ready():
@@ -741,7 +740,7 @@ def test_pause_on_the_way_then_resume_to_the_same_place():
         PatrolEvent("patrol_resumed"),
         PatrolEvent("patrol_waypoint", destination=A, index=0, lap=1, count=3),
         SetNavSpeedCap(0.6),
-        Navigate(patrol_leg_destination(A)),
+        Navigate(patrol_leg_destination(A, B)),
     ]
 
 
@@ -751,7 +750,7 @@ def test_pause_at_a_place_then_resume_to_the_next_place():
     assert (actions, reason) == ([PatrolEvent("patrol_paused")], GateReason.OK)
     logic.on_patrol_event(DETECTOR_OK, 30.0)
     assert navigates(logic.on_resume_request(True, 30.5)[0]) == [
-        Navigate(patrol_leg_destination(B))]
+        Navigate(patrol_leg_destination(B, C))]
 
 
 def test_pause_during_arming_then_resume_starts_at_the_first_place():
@@ -762,7 +761,7 @@ def test_pause_during_arming_then_resume_starts_at_the_first_place():
     logic.on_patrol_event(DETECTOR_OK, 31.0)
     actions, reason = logic.on_resume_request(True, 31.5)
     assert reason == GateReason.OK
-    assert navigates(actions) == [Navigate(patrol_leg_destination(A))]
+    assert navigates(actions) == [Navigate(patrol_leg_destination(A, B))]
 
 
 def test_pause_is_refused_during_an_alarm_or_when_already_paused():

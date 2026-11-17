@@ -1427,14 +1427,15 @@ def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
 # ---- 경비(순찰) 문맥 (2026-11-14) ----------------------------------------------
 
 
-def patrol_leg_destination(target: Destination) -> Destination:
-    """순찰 구간 goal. 도착 방향은 **장소에 저장한 방향**(입구 방향이 있으면 그것)이다.
+def patrol_leg_destination(target: Destination, following: Destination) -> Destination:
+    """순찰 구간 goal. 도착 방향은 저장 방향이 아니라 **다음 지점을 바라보는 방향**이다.
 
-    2026-11-16 사용자 결정: 지점에서 3초 서 있는 동안 카메라가 문을 바라봐야 불 켜짐을 본다.
-    배송 도착(with_door_yaw)과 같은 규칙 — door_yaw 가 있으면 그것, 없으면 pose.yaw.
-    종전(11-14)에는 다음 지점을 바라보게 했다. 다음 구간은 출발할 때 Nav2 가 돌려 세운다.
+    두 지점이 겹치면(5 cm 안) 방향을 정할 수 없어 저장 방향을 쓴다.
     """
-    yaw = target.door_yaw_deg if target.door_yaw_deg is not None else target.pose.yaw_deg
+    dx = following.pose.x - target.pose.x
+    dy = following.pose.y - target.pose.y
+    yaw = (math.degrees(math.atan2(dy, dx)) if math.hypot(dx, dy) >= 0.05
+           else target.pose.yaw_deg)
     return Destination(
         id=PATROL_DESTINATION_PREFIX + target.id,
         name=target.name,
@@ -3544,7 +3545,7 @@ class MissionLogic:
                 p.index = 0
                 p.lap += 1
         target = p.route[p.index]
-        leg = patrol_leg_destination(target)
+        leg = patrol_leg_destination(target, p.route[(p.index + 1) % count])
         p.arrived = False
         p.dwell_until = None
         self.state = State.PATROLLING
