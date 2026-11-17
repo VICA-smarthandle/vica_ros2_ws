@@ -168,6 +168,7 @@ robot_health_monitor_node:
     # [부분 관측] 2026-08-31 초음파 연동으로 **상향 통신이 생겼다.** 아두이노가
     # 4.8Hz 로 초음파 프레임을 올려보내므로, 핸들이 물려 있고 펌웨어가 도는지는
     # 이제 볼 수 있다(probes.yaml 의 handle_state·handle_uplink).
+    # 2026-11-17 부터는 handle_state 하나로 본다 — 주기(드라이버) + uplink_fresh·connected 칸.
     #
     # **여전히 못 보는 것**: 서보·LED가 실제로 움직였는지. 되돌아오는 신호가
     # 없어 SmartHandleState 의 servo_ok·led_ok 는 connected 를 복사한 값이다
