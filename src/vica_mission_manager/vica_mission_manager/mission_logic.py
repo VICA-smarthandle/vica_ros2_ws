@@ -2482,9 +2482,8 @@ class MissionLogic:
     ) -> list:
         # LLM 이 뭐든 intent 를 만들어 왔다는 것 자체가 대화를 넘겨받았다는
         # 뜻이라 온보딩 되묻기 사다리부터 청산한다 — navigate 가 아닌 것도
-        # 포함한다. LLM-unknown("안내와 관련된 요청이 아니에요")은 음성
-        # 노드가 스스로 되묻고 재청취를 열므로, 미션까지 겹쳐 되물으면 두
-        # 번 묻는 사고가 난다.
+        # 포함한다. LLM 의 되묻기("어떤 서류를 내러 가시나요?")는 음성이 넘기고 미션이
+        # 말한다(3-가 한 목소리, _say_handed_question) — 온보딩 되묻기까지 남기면 두 번 묻는다.
         self._note_user_present(now)
         self._forget_dest_prompt()
         if self._return_interrupted and self.state == State.IDLE:
