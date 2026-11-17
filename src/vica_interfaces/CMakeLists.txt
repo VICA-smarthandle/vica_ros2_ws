@@ -22,6 +22,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotEvent.msg"
   "msg/RobotHealth.msg"
   "msg/PersonDetection.msg"
+  "msg/VicaQuestion.msg"
   "srv/RequestDestination.srv"
   "srv/MissionCommand.srv"
   "srv/DeleteMap.srv"
