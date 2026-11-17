@@ -49,6 +49,10 @@ from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 from vica_interfaces.msg import EmergencyEvent, RobotState, VicaIntent
 from vica_interfaces.msg import PersonDetection, SmartHandleState
+try:        # 질문 기록(2026-11-17). 옛 vica_interfaces 설치본이면 발행만 건너뛴다 — 미션은 떠야 한다
+    from vica_interfaces.msg import VicaQuestion
+except ImportError:
+    VicaQuestion = None
 from vica_interfaces.srv import (
     DeleteHome,
     GetHome,
@@ -137,6 +141,7 @@ from .mission_logic import (
     nav_behavior_tree,
     yaw_deg_to_quaternion,
 )
+from .question_record import QuestionRecord, QuestionTracker
 from .obstacle_inputs import (
     BASE_FRAME,
     LASER_DEFAULT,
@@ -651,10 +656,7 @@ class MissionManagerNode(Node):
         # on_listen_state 주석, 2026-08-30). 빈손(empty:*)은 온보딩 되묻기
         # 사다리도 전진시키므로(2026-09-11) 반환값을 버리지 않고 실행한다.
         self.create_subscription(
-            String, "/vica/listen_state",
-            lambda msg: self._run_actions(
-                self.logic.on_listen_state(msg.data, self._now())),
-            10,
+            String, "/vica/listen_state", self._on_listen_state, 10,
             callback_group=self._main_group,
         )
         # LLM 이 사용자 말을 판단하는 중(2026-10-10 사용자 결정) — 켜진 동안은 대답 대기 시계를 잡는다.
@@ -692,6 +694,17 @@ class MissionManagerNode(Node):
         # 질문(Say.expects_reply)을 말할 때 true — 웨이크워드 노드가 질문 TTS 종료
         # 직후 재청취 창을 연다 ("비카야" 재호출 없이 "네/아니요"로 답하게).
         self.pub_listen_request = self.create_publisher(Bool, "/vica/listen_request", 10)
+        # 질문 기록(설계 2026-11-14 4.1) — 대답을 기다리는 말마다 낸다. 늦게 뜬 음성 노드도 마지막 기록을 받는다.
+        self._questions = QuestionTracker(prefix=f"q{int(time.time())}")
+        self._question_lock = threading.Lock()
+        self.pub_question = None
+        if VicaQuestion is not None:
+            self.pub_question = self.create_publisher(
+                VicaQuestion, "/vica/question",
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        else:
+            self.get_logger().warn("질문 기록 없음(옛 vica_interfaces) — /vica/question 발행 안 함")
         # "비카야" 판정 (2026-10-07, 호출 반응표). "listen"/"ignore" — 웨이크워드 노드가
         # 호출 창에서 들은 말을 쥐고 기다리다 listen 이면 LLM 으로 넘기고 ignore 면 버린다.
         # 이 노드가 멈추면 판정이 안 가고, 음성 쪽이 시간을 넘겨 버린다(대답 없음).
@@ -920,6 +933,7 @@ class MissionManagerNode(Node):
             speaker_joined=float(getattr(msg, "speaker_score_joined", -1.0)),
         )
         before = self.logic.state
+        self._close_question("answer")     # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
         actions = self.logic.on_voice_intent(
             intent, self._now(), self._lookup_destination,
             bounds=self.map_bounds, nav_ready=self._nav2_ready())
@@ -2281,6 +2295,10 @@ class MissionManagerNode(Node):
         self._run_actions(actions)
 
     def _tick(self) -> None:
+        with self._question_lock:
+            closed = self._questions.tick(self.logic.state.value, self._now())
+        if closed is not None:
+            self._close_question(closed[1], closed[0])
         before = self.logic.state
         status = self._poll_nav_status()
         distance = (
@@ -2357,6 +2375,54 @@ class MissionManagerNode(Node):
             setattr(msg, key, value)
         self.pub_state.publish(msg)
 
+    # -- 질문 기록 (설계 2026-11-14 4.1) -------------------------------------------
+
+    def _on_listen_state(self, msg: String) -> None:
+        """음성의 듣기 결과. 빈손으로 끝났으면 열린 질문을 먼저 닫는다 — 뒤이은 되묻기가 새 질문을 연다."""
+        with self._question_lock:
+            closed = self._questions.on_listen_state(msg.data)
+        if closed is not None:
+            self._close_question("silence", closed)
+        self._run_actions(self.logic.on_listen_state(msg.data, self._now()))
+
+    def _publish_question(self, record: Optional[QuestionRecord]) -> None:
+        """기록을 /vica/question 으로 낸다. None 이면 빈 기록(열린 질문 없음)."""
+        if self.pub_question is None:
+            return
+        msg = VicaQuestion()
+        if record is not None:
+            msg.id, msg.kind, msg.text = record.id, record.kind, record.text
+            msg.option_ids = [o[0] for o in record.options]
+            msg.option_names = [o[1] for o in record.options]
+            msg.step, msg.on_silence = record.step, record.on_silence
+            msg.opened_at = self.get_clock().now().to_msg()
+        self.pub_question.publish(msg)
+
+    def _open_question(self, say: Say) -> None:
+        if not say.kind:
+            self.get_logger().warn(f"[질문] kind 없음 — open 으로 냄: {say.text}")
+        with self._question_lock:
+            old, record = self._questions.open(say, self.logic.state.value, self._now())
+        if old is not None:
+            self._log_question_closed(old, "replaced")
+        self._publish_question(record)
+        self.get_logger().info(
+            f"[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} 글자={record.text}")
+
+    def _close_question(self, reason: str, record: Optional[QuestionRecord] = None) -> None:
+        """열린 질문을 닫고 빈 기록을 낸다. record 를 주면 이미 닫힌 것을 알리기만 한다."""
+        if record is None:
+            with self._question_lock:
+                record = self._questions.close(reason)
+        if record is None:
+            return
+        self._log_question_closed(record, reason)
+        self._publish_question(None)
+
+    def _log_question_closed(self, record: QuestionRecord, reason: str) -> None:
+        log = self.get_logger().warn if reason == "fault" else self.get_logger().info
+        log(f"[질문] 닫힘 id={record.id} 사유={reason} 열린 시간={self._now() - record.opened_at:.1f}s")
+
     # -- Action 실행 -------------------------------------------------------------
 
     def _run_actions(self, actions) -> None:
@@ -2367,6 +2433,8 @@ class MissionManagerNode(Node):
                 out.data = f"{action.priority}:{action.text}"
                 self.pub_tts.publish(out)
                 self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
+                if action.kind or getattr(action, "expects_reply", False):
+                    self._open_question(action)
                 if getattr(action, "expects_reply", False):
                     self.pub_listen_request.publish(Bool(data=True))
                     self.logic.note_question_asked(action.text, self._now())

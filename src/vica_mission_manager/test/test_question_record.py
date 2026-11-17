@@ -83,3 +83,50 @@ def test_missing_or_unknown_kind_becomes_open():
     _, a = t.open(Say("네?", priority="response", expects_reply=True), "idle", 1.0)
     _, b = t.open(ask(kind="maybe"), "idle", 2.0)
     assert (a.kind, b.kind) == ("open", "open")
+
+
+# ---- 노드 연결(소스 검사 — rclpy 없이) ------------------------------------------------
+from pathlib import Path  # noqa: E402
+
+NODE = (Path(__file__).resolve().parents[1] / "vica_mission_manager" / "mission_manager_node.py").read_text(encoding="utf-8")
+
+
+def _body(name: str) -> str:
+    start = NODE.index(f"    def {name}(")
+    end = NODE.find("\n    def ", start + 1)
+    return NODE[start: end if end != -1 else len(NODE)]
+
+
+def test_node_publishes_the_question_topic_latched():
+    at = NODE.index('"/vica/question"')
+    assert "TRANSIENT_LOCAL" in NODE[at: at + 300] and "depth=1" in NODE[at: at + 300]
+
+
+def test_node_survives_an_old_interface_install():
+    assert "except ImportError" in NODE[NODE.index("import VicaQuestion"): NODE.index("import VicaQuestion") + 200]
+    assert "if self.pub_question is None" in _body("_publish_question")
+
+
+def test_node_opens_a_question_for_every_spoken_question():
+    body = _body("_run_actions")
+    assert "action.kind or" in body and "self._open_question(action)" in body
+
+
+def test_node_closes_the_question_before_handling_the_intent():
+    body = _body("_on_intent")
+    assert body.index('self._close_question("answer")') < body.index("self.logic.on_voice_intent(")
+
+
+def test_node_closes_on_silent_listen_result_before_the_reask():
+    body = _body("_on_listen_state")
+    assert body.index("self._questions.on_listen_state(") < body.index("self.logic.on_listen_state(")
+
+
+def test_node_tick_closes_on_state_change_or_fault():
+    assert "self._questions.tick(" in _body("_tick")
+
+
+def test_node_log_lines_match_the_audit_tool():
+    assert "[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} 글자={record.text}" in NODE
+    assert "[질문] 닫힘 id={record.id} 사유={reason} 열린 시간=" in NODE
+    assert "[질문] kind 없음 — open 으로 냄" in NODE
