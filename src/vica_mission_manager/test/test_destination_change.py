@@ -74,10 +74,10 @@ def asked_change(t=1.0):
 
 
 class TestProposalStopsSilently:
-    def test_stops_remembers_and_says_nothing(self):
+    def test_stops_remembers_and_asks(self):
         logic, actions = asked_change()
-        # 제안 단계 침묵 — 질문은 음성 쪽(LLM)이 이미 했다.
-        assert _say(actions) == []
+        # 확인 질문은 미션이 한다(3-가 결정 A — 예전엔 음성이 묻고 미션은 말없이 멈췄다).
+        assert _say(actions) == ["화장실로 안내해드릴까요?"]
         cancels = [a for a in actions if isinstance(a, CancelNav)]
         assert len(cancels) == 1 and cancels[0].event == "goal_paused"
         assert cancels[0].destination == ROOM
@@ -142,7 +142,8 @@ class TestAnswers:
     def test_new_proposal_while_asking_keeps_original_memory(self):
         """"아니 식당으로 가자"(새 제안) — 질문이 식당으로 바뀌고, 거절하면 여전히 409호."""
         logic, _ = asked_change()
-        assert logic.on_intent(_intent(CAFE.id, need_confirm=True), CAFE, BOUNDS, True, 2.0) == []
+        assert _say(logic.on_intent(_intent(CAFE.id, need_confirm=True), CAFE, BOUNDS, True, 2.0)) == [
+            "식당으로 모실까요?"]
         assert logic.confirming_dest_id == CAFE.id
         actions = logic.on_confirm_answer(False, None, BOUNDS, True, 3.0)
         assert logic.active_destination == ROOM
@@ -205,10 +206,11 @@ class TestConfirmedWithoutProposal:
 class TestAppDriveIsNotChanged:
     """관리자 주행(원격·배송)은 음성으로 바꾸지 않는다 — 지나가던 사람이 가로채면 안 된다."""
 
-    def test_proposal_is_silent_and_confirmed_is_busy(self):
+    def test_proposal_and_confirmed_are_both_busy(self):
+        """3-가 결정 D — 음성이 확인 질문을 하지 않으니 제안에도 확정과 같은 거절을 한다."""
         logic = MissionLogic()
         logic.on_app_destination(ROOM, BOUNDS, True, 0.0)
-        assert logic.on_intent(_intent(TOILET.id, need_confirm=True), TOILET, BOUNDS, True, 1.0) == []
+        assert _say(logic.on_intent(_intent(TOILET.id, need_confirm=True), TOILET, BOUNDS, True, 1.0)) == [MSG_BUSY]
         assert _say(logic.on_intent(_intent(TOILET.id), TOILET, BOUNDS, True, 2.0)) == [MSG_BUSY]
         assert logic.state == State.NAVIGATING and logic.active_destination == ROOM
 
@@ -257,10 +259,12 @@ class TestCommandsWhileAsking:
 
 
 class TestApproachProposalSilence:
-    def test_proposal_silent_confirmed_rejected(self):
+    def test_proposal_and_confirmed_both_rejected(self):
+        """3-가 결정 D — 음성이 확인 질문을 하지 않으니 제안에도 확정과 같은 거절을 한다."""
         logic = MissionLogic()
         logic.state = State.APPROACHING
-        assert logic.on_intent(_intent(TOILET.id, need_confirm=True), TOILET, BOUNDS, True, 1.0) == []
+        assert _say(logic.on_intent(_intent(TOILET.id, need_confirm=True), TOILET, BOUNDS, True, 1.0)) == [
+            MSG_APPROACH_BUSY]
         assert _say(logic.on_intent(_intent(TOILET.id), TOILET, BOUNDS, True, 2.0)) == [MSG_APPROACH_BUSY]
 
 

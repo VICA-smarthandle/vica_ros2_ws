@@ -111,3 +111,14 @@ def test_kind_is_one_of_the_six():
 
 def test_plain_speech_has_no_kind():
     assert Say("안내를 시작합니다.").kind == "" and Say("안내를 시작합니다.").options == ()
+
+
+def test_proposal_question_is_confirm_kind():
+    """3-가 한 목소리 — 목적지 제안의 확인 질문은 미션이 confirm_prompt 로 묻는다(결정 A)."""
+    from reaction_states import BOUNDS as RB, ELEV, idle, intent as rintent, lookup as rlookup
+
+    logic, now = idle()
+    acts = logic.on_voice_intent(rintent(matched_destination_id=ELEV.id, need_confirm=True), now, rlookup, RB, True)
+    (say,) = [a for a in acts if isinstance(a, mission_logic.Say)]
+    assert (say.text, say.expects_reply, say.kind, say.options) == (
+        "엘리베이터로 안내해드릴까요?", True, "confirm", (("elev", "엘리베이터"),))

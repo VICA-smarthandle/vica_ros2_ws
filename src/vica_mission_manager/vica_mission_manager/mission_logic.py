@@ -2528,11 +2528,10 @@ class MissionLogic:
             # 요청인지 알 수 없게 된다(설계 4절). TURNING·SEEKING 은 진행 중인
             # SpinInPlace 를 취소하지 않은 채 Navigate 가 나가는 사고를 막는다
             # (설계 4절, 2026-09-10).
-            # 제안(확인 질문 단계)에는 거절하지 않는다(2026-10-07 사용자 결정 '제안 단계
-            # 침묵') — 음성 쪽이 이미 확인 질문을 했는데 그 위에 거절을 얹으면 두 목소리가
-            # 연달아 나고, 로봇이 자기 거절을 다시 들었다(09-24 11:30 실기). 거절은 확정
-            # 요청에만 한다.
-            if intent.need_confirm:
+            # 제안도 확정과 같이 거절한다(3-가 결정 D, 2026-11-17 사용자) — 10-07 '제안 단계 침묵'은 음성이
+            # 확인 질문을 이미 해서였는데, 이제 음성은 확인 질문을 하지 않는다. 다가가는 중·찾는 중만이고,
+            # 그 밖의 접근 상태(질문·회전·복귀)의 제안은 지금처럼 말하지 않는다.
+            if intent.need_confirm and self.state not in (State.APPROACHING, State.SEEKING):
                 return []
             return [Say(MSG_APPROACH_BUSY, priority="response")]
 
@@ -2547,9 +2546,8 @@ class MissionLogic:
                 # 포함 (need_confirm 그대로 흘리면 게이트가 거부한다).
                 return self.on_confirm_answer(True, dest, bounds, nav_ready, now)
             else:
-                # 확인 대기 시작/갱신. 확인 질문(confirm_prompt)은 LLM reply 로
-                # ros_tts_node 가 이미 재생하므로 여기서 중복 발화하지 않는다.
-                from_wait = self.state in _WAIT_STATES
+                # 확인 대기 시작/갱신. 확인 질문은 미션이 목적지 confirm_prompt 로 한다(3-가 결정 A —
+                # 음성은 확인 질문을 말하지 않는다).
                 if self.state in _WAIT_STATES and self._wait_hold is None:
                     # 대기 중의 새 목적지 제안. 출발이 확정될 때까지 대기를 끝내지
                     # 않는다 — 거절·무응답이면 이 대기로 돌아간다(2026-10-07).
@@ -2560,10 +2558,9 @@ class MissionLogic:
                 self._arm_confirm(now)
                 self._confirm_prompt = self._confirm_prompt_for(dest)
                 self._confirm_options = self._options_for(dest)
-                if self.speaker_gate and from_wait:
-                    # 대기 중 본인 확인(B5) — 음성 쪽은 이 reply 를 지웠다. 확인 질문은 미션이 말한다.
-                    return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
-                return []
+                if not self._confirm_prompt:
+                    return []          # 미션이 모르는 목적지 — 물을 문장이 없다
+                return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
 
         # need_confirm == false (확정 요청)
         if (
@@ -2655,25 +2652,24 @@ class MissionLogic:
         ("화장실로 안내해드릴까요?")과 이 거절이 연달아 나왔고, 로봇이 자기 거절을 다시
         들어 "안내를 취소할까요?"를 물었다. 이제는:
 
-        - 제안(need_confirm): 질문은 음성 쪽이 이미 했다("지금 409호로 가는 중이에요.
-          화장실로 바꿀까요?"). 미션은 말없이 멈추고 물은 목적지를 기억한다.
-        - 확정(need_confirm=false): 아무도 묻지 않았다. 관문을 먼저 보고 못 가는 곳이면
-          거절만 하고 하던 안내를 계속한다. 갈 수 있으면 멈추고 미션이 확인 질문을 한다.
+        - 제안(need_confirm): 멈추고 미션이 확인 질문(confirm_prompt)을 한다(3-가 결정 A — 예전엔 음성이
+          "지금 409호로 가는 중이에요. 화장실로 바꿀까요?"를 묻고 미션은 말없이 멈췄다).
+        - 확정(need_confirm=false): 관문을 먼저 보고 못 가는 곳이면 거절만 하고 하던 안내를
+          계속한다. 갈 수 있으면 멈추고 같은 확인 질문을 한다.
 
         답은 CONFIRMING 의 정식 통로가 받는다 — 확정은 새 목적지로(on_intent 시작 블록),
         아니요·무응답·호출은 원래 목적지로 다시 출발(_fold_confirming).
 
         관리자 주행(원격·배송·가보기, _nav_from_app)은 바꾸지 않는다 — 손잡이 사용자가
         없고, 지나가던 사람이 배송을 가로채면 안 된다(지나가던 사람의 목적지 말은 이번
-        범위 밖, 작업 계획 탭 '고려하지 않는 것'). 그때는 옛 정책에 '제안 단계 침묵'만 얹는다.
+        범위 밖, 작업 계획 탭 '고려하지 않는 것'). 그때는 제안·확정 모두 옛 정책 MSG_BUSY 다(3-가 결정 D).
         """
         current = self.active_destination
         if self._nav_from_app or current is None:
-            return [] if intent.need_confirm else [Say(MSG_BUSY, priority="response")]
+            return [Say(MSG_BUSY, priority="response")]
         new_id = intent.matched_destination_id or ""
         if new_id and new_id == current.id:
             return []          # 이미 그리로 가는 중이다 — 하던 안내를 그대로 한다.
-        ask: list = []
         if not intent.need_confirm:
             # 확정 요청은 관문부터 — 못 가는 곳(모르는 곳 포함)이면 거절만 하고 계속 간다.
             reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
@@ -2681,14 +2677,11 @@ class MissionLogic:
                 msg = _REJECT_MESSAGES.get(reason)
                 return [Say(msg, priority="response")] if msg else []
             assert dest is not None  # check_gate 가 보장
-            prompt = (dest.confirm_prompt
-                      or say_destination(MSG_CONFIRM_PROMPT_FALLBACK, dest.name))
-            ask = [Say(prompt, priority="response", expects_reply=True, kind="confirm",
-                       options=self._options_for(dest))]
         elif dest is None or not new_id:
             # 미션이 모르는 곳의 제안 — 멈추지 않는다. 멈추면 확인 답이 와도 출발할 곳이
-            # 없어 30초를 그냥 선다. 제안 단계라 말하지도 않는다.
+            # 없어 30초를 그냥 선다. 물을 문장도 없다.
             return []
+        ask = [self._ask(self._confirm_prompt_for(dest), "confirm", self._options_for(dest))]
         # 멈춘다. 일시정지와 같은 취소(goal_paused)라 앱이 '주행 끝'으로 오해하지 않고,
         # 원래 목적지는 _change_from 이 든다.
         actions: list = [
@@ -3278,10 +3271,14 @@ class MissionLogic:
             self._help_cancel_reasked = False
             return [self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno")]
         if kind == "navigate" and intent.need_confirm:
-            # 다른 목적지 제안 — 확인 질문은 음성이 이미 했다. 확인 상태로 넘어가지 않고 일시정지를
-            # 그대로 둔다(10-16 결정 1). 넘어가면 "아니요"·무응답에 _to_idle 이 보관한 목적지를 지워
-            # 관리자 앱의 "다시 출발"이 듣지 않는다.
-            return []
+            # 다른 목적지 제안 — 확인 상태로 넘어가지 않고 일시정지를 그대로 둔다(10-16 결정 1). 넘어가면
+            # "아니요"·무응답에 _to_idle 이 보관한 목적지를 지워 관리자 앱의 "다시 출발"이 듣지 않는다.
+            # 확인 질문은 미션이 한다(3-가 결정 A). 관리자가 오는 중이면 확정과 같은 말(결정 D).
+            if self.help_phase == "acknowledged":
+                return [Say(MSG_HELP_COMING, priority="response")]
+            proposed = lookup(intent.matched_destination_id or "")
+            prompt = self._confirm_prompt_for(proposed)
+            return [self._ask(prompt, "confirm", self._options_for(proposed))] if prompt else []
         if kind in ("resume", "navigate") and self.help_phase == "acknowledged":
             # 관리자가 오는 중 — 사용자 말로는 움직이지 않는다(R9). 출발·종료는 앱 버튼이 한다.
             return [Say(MSG_HELP_COMING, priority="response")]

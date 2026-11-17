@@ -55,7 +55,7 @@ COLS = ("navp", "navc", "wait", "finish", "cancel", "pause", "resume", "yes", "n
 
 EXPECT = {
     "IDLE": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((MSG_NOT_NAVIGATING,), State.IDLE),
         "finish": ((MSG_NOT_NAVIGATING,), State.IDLE),
@@ -67,7 +67,7 @@ EXPECT = {
         "talk": ((), State.IDLE),
     },
     "IDLE_BRAKED": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2P_FRONT,), State.MOVING_BACK_TO_DEST),
         "finish": ((MSG_FINISH,), State.RETURNING),
@@ -79,7 +79,7 @@ EXPECT = {
         "talk": ((), State.IDLE),
     },
     "IDLE_BRAKED_SPOT": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2P_RIGHT,), State.WAITING_RELEASE),
         "finish": ((MSG_FINISH,), State.RETURNING),
@@ -91,7 +91,7 @@ EXPECT = {
         "talk": ((), State.IDLE),
     },
     "CONFIRMING": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((SWITCH_ELEV,), State.CONFIRMING),
         "wait": ((MSG_CONFIRM_TIMEOUT,), State.IDLE),
         "finish": ((MSG_CONFIRM_TIMEOUT,), State.IDLE),
@@ -103,7 +103,7 @@ EXPECT = {
         "talk": ((), State.CONFIRMING),
     },
     "CONFIRMING_CHANGE": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((SWITCH_ELEV,), State.CONFIRMING),
         # "기다려"도 "잠깐"처럼 선다 — 원래 목적지는 보관(2026-10-09 사용자 결정, 검토 M-5).
         "wait": ((MSG_PAUSED,), State.PAUSED),
@@ -116,7 +116,7 @@ EXPECT = {
         "talk": ((), State.CONFIRMING),
     },
     "NAVIGATING": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((ASK_ELEV,), State.CONFIRMING),
         "wait": ((MSG_PAUSED,), State.PAUSED),
         "finish": ((MSG_CANCEL_CONFIRM,), State.NAVIGATING),
@@ -128,7 +128,7 @@ EXPECT = {
         "talk": ((), State.NAVIGATING),
     },
     "PAUSED": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((MSG_PAUSED,), State.PAUSED),
         "finish": ((MSG_CANCEL_CONFIRM,), State.PAUSED),
@@ -140,7 +140,7 @@ EXPECT = {
         "talk": ((), State.PAUSED),
     },
     "FAILED": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((), State.FAILED),
         "finish": ((), State.FAILED),
@@ -152,7 +152,7 @@ EXPECT = {
         "talk": ((), State.FAILED),
     },
     "ARRIVED": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((), State.ARRIVED),
         "finish": ((), State.ARRIVED),
@@ -164,7 +164,7 @@ EXPECT = {
         "talk": ((), State.ARRIVED),
     },
     "ASKING_NEXT": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((MSG_WAIT_DEFAULT,), State.WAITING),
         "finish": ((MSG_FINISH,), State.RETURNING),
@@ -176,7 +176,7 @@ EXPECT = {
         "talk": ((), State.ASKING_NEXT),
     },
     "ASKING_WAIT_TIME": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((MSG_ASK_WAIT_TIME,), State.ASKING_WAIT_TIME),
         "finish": ((MSG_FINISH,), State.RETURNING),
@@ -188,7 +188,7 @@ EXPECT = {
         "talk": ((), State.ASKING_WAIT_TIME),
     },
     "WAITING_RELEASE": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2_RIGHT_10,), State.WAITING_RELEASE),
         "finish": ((MSG_WAIT_FINISH_ASK,), State.WAITING_RELEASE),
@@ -212,7 +212,7 @@ EXPECT = {
         "talk": ((), State.MOVING_TO_WAIT_SPOT),
     },
     "WAITING": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2_RIGHT_10,), State.WAITING),
         "finish": ((MSG_WAIT_FINISH_ASK,), State.WAITING),
@@ -224,7 +224,7 @@ EXPECT = {
         "talk": ((), State.WAITING),
     },
     "WAITING_ASKED": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2_RIGHT_10,), State.WAITING),
         "finish": ((MSG_FINISH,), State.RETURNING),
@@ -248,7 +248,7 @@ EXPECT = {
         "talk": ((), State.MOVING_BACK_TO_DEST),
     },
     "APPROACHING": {
-        "navp": ((), State.APPROACHING),
+        "navp": ((MSG_APPROACH_BUSY,), State.APPROACHING),
         "navc": ((MSG_APPROACH_BUSY,), State.APPROACHING),
         "wait": ((), State.APPROACHING),
         "finish": ((), State.APPROACHING),
@@ -286,7 +286,7 @@ EXPECT = {
         "talk": ((), State.TURNING),
     },
     "SEEKING": {
-        "navp": ((), State.SEEKING),
+        "navp": ((MSG_APPROACH_BUSY,), State.SEEKING),
         "navc": ((MSG_APPROACH_BUSY,), State.SEEKING),
         "wait": ((), State.SEEKING),
         "finish": ((), State.SEEKING),
@@ -298,7 +298,7 @@ EXPECT = {
         "talk": ((), State.SEEKING),
     },
     "RETURNING": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2P_FRONT,), State.MOVING_BACK_TO_DEST),
         "finish": ((MSG_FINISH,), State.RETURNING),
@@ -310,7 +310,7 @@ EXPECT = {
         "talk": ((), State.RETURNING),
     },
     "RETURNING_LATE": {
-        "navp": ((), State.CONFIRMING),
+        "navp": ((ASK_ELEV,), State.CONFIRMING),
         "navc": ((START_ELEV,), State.NAVIGATING),
         "wait": ((M2P_FRONT,), State.MOVING_BACK_TO_DEST),
         "finish": ((MSG_FINISH,), State.RETURNING),
