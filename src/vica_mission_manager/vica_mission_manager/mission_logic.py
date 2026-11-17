@@ -216,6 +216,10 @@ class IntentData:
     speaker_verdict: str = ""
     speaker_score: float = -1.0
     speaker_joined: float = -1.0
+    # 질문 넘김(설계 2026-11-14 4.4, 3-가) — 음성이 말하지 않고 넘긴 질문 문장·종류·고르기 후보 id. 미션이 말한다.
+    ask_text: str = ""
+    ask_kind: str = ""
+    ask_option_ids: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -1921,6 +1925,32 @@ class MissionLogic:
 
     # -- 음성 요청 반응 (미션 요청 반응표, 2026-10-08) -------------------------
     def on_voice_intent(
+        self,
+        intent: IntentData,
+        now: float,
+        lookup: Callable[[str], Optional[Destination]],
+        bounds: Optional[MapBounds] = None,
+        nav_ready: bool = True,
+    ) -> list:
+        """음성 요청 하나에 대한 반응 + 음성이 넘긴 질문 문장(3-가 한 목소리)."""
+        actions = self._react_voice_intent(intent, now, lookup, bounds, nav_ready)
+        return self._say_handed_question(intent, actions, lookup)
+
+    def _say_handed_question(self, intent: IntentData, actions: list,
+                             lookup: Callable[[str], Optional[Destination]]) -> list:
+        """음성이 넘긴 질문(ask_text)을 미션이 말한다 — 질문 기록·듣기 요청이 함께 나간다(설계 4.4).
+        미션이 이 요청에 이미 말하면 버린다(한 번에 한 문장). 순찰 중에는 말하지 않는다."""
+        if not intent.ask_text or self.state in _PATROL_STATES:
+            return actions
+        if any(isinstance(a, Say) for a in actions):
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "미션이 이미 말해 넘겨받은 질문 버림")))
+            return actions
+        kind = intent.ask_kind if intent.ask_kind in QUESTION_KINDS else "open"
+        options = tuple((d.id, d.name) for d in map(lookup, intent.ask_option_ids) if d is not None)
+        self.voice_note = " · ".join(filter(None, (self.voice_note, "넘겨받은 질문")))
+        return [*actions, self._ask(intent.ask_text, kind, options)]
+
+    def _react_voice_intent(
         self,
         intent: IntentData,
         now: float,

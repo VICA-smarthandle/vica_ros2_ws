@@ -932,6 +932,10 @@ class MissionManagerNode(Node):
             speaker_verdict=str(getattr(msg, "speaker_verdict", "")),
             speaker_score=float(getattr(msg, "speaker_score", -1.0)),
             speaker_joined=float(getattr(msg, "speaker_score_joined", -1.0)),
+            # 질문 넘김(3-가) — 옛 설치본 메시지에는 없다.
+            ask_text=str(getattr(msg, "ask_text", "")),
+            ask_kind=str(getattr(msg, "ask_kind", "")),
+            ask_option_ids=tuple(getattr(msg, "ask_option_ids", ())),
         )
         before = self.logic.state
         self._question_safely(self._close_question, "answer")   # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
