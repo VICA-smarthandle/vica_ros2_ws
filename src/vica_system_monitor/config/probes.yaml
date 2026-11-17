@@ -71,7 +71,6 @@ external_diagnostics_node:
       - odom
       - wheel_odom
       - handle_state
-      - handle_uplink
       - app_bridge
 
     # [정지 실측 2026-08-01] 11.81 / 11.92 Hz. 720점, 유효 81 %, 0.38~7.46 m.
@@ -230,10 +229,10 @@ external_diagnostics_node:
     # "아두이노 -> 젯슨 상향 통신이 없다" 였는데 **2026-08-31 초음파 연동으로
     # 상향이 생겼다.** 이제 아두이노가 실제로 답하는지 볼 수 있다.
     #
-    # 두 칸으로 가르는 이유는 카메라(camera_depth / depth_scan)와 같다.
-    #   handle_state 만 끊김   -> 드라이버 노드가 죽었다
-    #   handle_uplink 만 끊김  -> 노드는 살아 있고 아두이노가 답을 안 한다
-    # 한 칸만 보면 이 둘이 같은 얼굴로 보인다.
+    # 세 가지를 가른다(2026-11-17).
+    #   handle_state 주기 끊김   -> 드라이버 노드가 죽었다
+    #   uplink_fresh 거짓        -> 노드는 살아 있고 아두이노가 답을 안 한다
+    #   connected 거짓           -> 포트가 열리지 않았거나 쓰기에 실패했다
     #
     # **둘 다 주행을 막지 않는다.** 핸들이 없어도 로봇은 달린다 — 잃는 것은
     # 방향 안내와 초음파 거리 감지다. 그래서 등급이 DEGRADED 다
@@ -250,24 +249,14 @@ external_diagnostics_node:
       max_hz: 4.0
       fault_code: GUIDANCE_NODE_SILENT
       optional: true
-
-    # [정지 실측 2026-09-02] 4.675 Hz. 펌웨어 상향 프레임 4.8 Hz 와 맞는다.
-    # **이것만이 아두이노가 실제로 살아 있다는 증거다.** 위 handle_state 는
-    # 노드가 혼자 찍어내는 값이라 링크가 끊겨도 계속 나온다.
-    #
-    # front_right 만 본다. front_left 는 2026-09-02 실측에서 25초간 한 건도
-    # 오지 않았다(오른쪽은 정상) — 센서·주소 설정 쪽 문제로 보인다. 고치기
-    # 전에 프로브를 걸면 상시 경고가 되어, 사람이 결함 표시 자체를 무시하게
-    # 된다. 왼쪽이 살아나면 같은 모양으로 한 칸 더 넣는다.
-    handle_uplink:
-      component: guidance
-      topic: /ultrasonic/front_right
-      msg_type: sensor_msgs/msg/Range
-      qos: sensor_data
-      min_hz: 2.0
-      max_hz: 8.0
-      fault_code: GUIDANCE_UPLINK_STALE
-      optional: true
+      # 2026-11-17: 같은 메시지의 두 칸으로 아두이노와 포트를 본다(구독은 위 하나 그대로).
+      #   uplink_fresh — 펌웨어가 50 ms 마다 보내는 상향 프레임이 0.5 s 안에 왔는가(아두이노 생존)
+      #   connected    — 포트가 열려 있고 최근 쓰기에 예외가 없었는가
+      # servo_ok·*_led_ok 는 connected 를 옮긴 값이라 넣지 않는다(SmartHandleState.msg).
+      require_true: [uplink_fresh, connected]
+      require_true_messages:
+        - 핸들 아두이노에서 오는 신호가 끊겼습니다. 주행은 계속할 수 있습니다.
+        - 핸들 USB 포트가 열려 있지 않거나 보내기에 실패했습니다. 주행은 계속할 수 있습니다.
 
     # ===== 관리자 앱 브리지 (2026-09-02) =====
     #
