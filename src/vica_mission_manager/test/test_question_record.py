@@ -109,24 +109,69 @@ def test_node_survives_an_old_interface_install():
 
 def test_node_opens_a_question_for_every_spoken_question():
     body = _body("_run_actions")
-    assert "action.kind or" in body and "self._open_question(action)" in body
+    assert "action.kind or" in body and "self._open_question, action)" in body
 
 
 def test_node_closes_the_question_before_handling_the_intent():
     body = _body("_on_intent")
-    assert body.index('self._close_question("answer")') < body.index("self.logic.on_voice_intent(")
+    assert body.index('self._close_question, "answer")') < body.index("self.logic.on_voice_intent(")
 
 
 def test_node_closes_on_silent_listen_result_before_the_reask():
     body = _body("_on_listen_state")
-    assert body.index("self._questions.on_listen_state(") < body.index("self.logic.on_listen_state(")
+    assert body.index("self._listen_question") < body.index("self.logic.on_listen_state(")
+    assert "self._questions.on_listen_state(" in _body("_listen_question")
 
 
 def test_node_tick_closes_on_state_change_or_fault():
-    assert "self._questions.tick(" in _body("_tick")
+    assert "self._questions.tick(" in _body("_tick_question")
 
 
 def test_node_log_lines_match_the_audit_tool():
-    assert "[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} 글자={record.text}" in NODE
+    assert "[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} " in NODE
+    assert "글자={record.text}" in NODE
     assert "[질문] 닫힘 id={record.id} 사유={reason} 열린 시간=" in NODE
     assert "[질문] kind 없음 — open 으로 냄" in NODE
+
+
+# ---- 최종 검토(11-17) 반영 ------------------------------------------------------------
+import ast  # noqa: E402
+
+LOG_METHODS = {"debug", "info", "warn", "warning", "error", "fatal"}
+
+
+def logger_methods_picked_by_condition(source: str) -> list[int]:
+    """`x.warn if c else x.info` 처럼 로거 메서드를 조건식으로 고르는 줄 번호.
+
+    rclpy 는 같은 호출 줄에서 심각도가 바뀌면 ValueError 를 낸다 — 그 예외가 콜백 밖으로 나가면 노드가 죽는다.
+    """
+    return sorted(n.lineno for n in ast.walk(ast.parse(source)) if isinstance(n, ast.IfExp)
+                  and any(isinstance(b, ast.Attribute) and b.attr in LOG_METHODS for b in (n.body, n.orelse)))
+
+
+def test_checker_catches_a_logger_picked_by_condition():
+    src = "log = self.get_logger().warn if bad else self.get_logger().info\nlog('x')\n"
+    assert logger_methods_picked_by_condition(src) == [1]
+
+
+def test_node_never_picks_a_logger_method_by_condition():
+    assert logger_methods_picked_by_condition(NODE) == []
+
+
+def test_question_record_failure_cannot_stop_the_mission():
+    """질문 기록은 기록일 뿐 — 네 접점 모두 보호 함수를 거친다."""
+    assert "except Exception" in _body("_question_safely")
+    assert "self._question_safely(self._open_question, action)" in _body("_run_actions")
+    assert 'self._question_safely(self._close_question, "answer")' in _body("_on_intent")
+    assert "self._question_safely(self._tick_question)" in _body("_tick")
+    assert "self._question_safely(self._listen_question, msg.data)" in _body("_on_listen_state")
+
+
+def test_node_clears_a_stale_question_at_startup():
+    """미션만 다시 뜨면 음성이 옛 질문을 들고 있다 — 발행자를 만든 직후 빈 기록을 한 번 낸다."""
+    at = NODE.index('"/vica/question"')
+    assert "self._publish_question(None)" in NODE[at: at + 700]
+
+
+def test_open_log_says_whether_a_listen_request_went_out():
+    assert "요청={'y' if say.expects_reply else 'n'}" in NODE

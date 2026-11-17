@@ -705,6 +705,7 @@ class MissionManagerNode(Node):
                            durability=DurabilityPolicy.TRANSIENT_LOCAL))
         else:
             self.get_logger().warn("질문 기록 없음(옛 vica_interfaces) — /vica/question 발행 안 함")
+        self._publish_question(None)       # 미션만 다시 떴을 때 음성이 들고 있는 옛 질문을 지운다
         # "비카야" 판정 (2026-10-07, 호출 반응표). "listen"/"ignore" — 웨이크워드 노드가
         # 호출 창에서 들은 말을 쥐고 기다리다 listen 이면 LLM 으로 넘기고 ignore 면 버린다.
         # 이 노드가 멈추면 판정이 안 가고, 음성 쪽이 시간을 넘겨 버린다(대답 없음).
@@ -933,7 +934,7 @@ class MissionManagerNode(Node):
             speaker_joined=float(getattr(msg, "speaker_score_joined", -1.0)),
         )
         before = self.logic.state
-        self._close_question("answer")     # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
+        self._question_safely(self._close_question, "answer")   # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
         actions = self.logic.on_voice_intent(
             intent, self._now(), self._lookup_destination,
             bounds=self.map_bounds, nav_ready=self._nav2_ready())
@@ -2295,10 +2296,7 @@ class MissionManagerNode(Node):
         self._run_actions(actions)
 
     def _tick(self) -> None:
-        with self._question_lock:
-            closed = self._questions.tick(self.logic.state.value, self._now())
-        if closed is not None:
-            self._close_question(closed[1], closed[0])
+        self._question_safely(self._tick_question)
         before = self.logic.state
         status = self._poll_nav_status()
         distance = (
@@ -2379,11 +2377,28 @@ class MissionManagerNode(Node):
 
     def _on_listen_state(self, msg: String) -> None:
         """음성의 듣기 결과. 빈손으로 끝났으면 열린 질문을 먼저 닫는다 — 뒤이은 되묻기가 새 질문을 연다."""
+        self._question_safely(self._listen_question, msg.data)
+        self._run_actions(self.logic.on_listen_state(msg.data, self._now()))
+
+    def _question_safely(self, fn, *args) -> None:
+        """질문 기록은 기록일 뿐이다 — 여기서 난 예외가 미션의 말·동작을 막거나 노드를 죽이지 않게 한다."""
+        try:
+            fn(*args)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"[질문] 기록 실패 — 미션은 계속: {exc!r}")
+
+    def _listen_question(self, state: str) -> None:
         with self._question_lock:
-            closed = self._questions.on_listen_state(msg.data)
+            closed = self._questions.on_listen_state(state)
         if closed is not None:
             self._close_question("silence", closed)
-        self._run_actions(self.logic.on_listen_state(msg.data, self._now()))
+
+    def _tick_question(self) -> None:
+        """상태가 바뀌었거나 닫는 신호 없이 오래 열려 있으면 닫는다."""
+        with self._question_lock:
+            closed = self._questions.tick(self.logic.state.value, self._now())
+        if closed is not None:
+            self._close_question(closed[1], closed[0])
 
     def _publish_question(self, record: Optional[QuestionRecord]) -> None:
         """기록을 /vica/question 으로 낸다. None 이면 빈 기록(열린 질문 없음)."""
@@ -2407,7 +2422,8 @@ class MissionManagerNode(Node):
             self._log_question_closed(old, "replaced")
         self._publish_question(record)
         self.get_logger().info(
-            f"[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} 글자={record.text}")
+            f"[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} "
+            f"요청={'y' if say.expects_reply else 'n'} 글자={record.text}")
 
     def _close_question(self, reason: str, record: Optional[QuestionRecord] = None) -> None:
         """열린 질문을 닫고 빈 기록을 낸다. record 를 주면 이미 닫힌 것을 알리기만 한다."""
@@ -2420,8 +2436,12 @@ class MissionManagerNode(Node):
         self._publish_question(None)
 
     def _log_question_closed(self, record: QuestionRecord, reason: str) -> None:
-        log = self.get_logger().warn if reason == "fault" else self.get_logger().info
-        log(f"[질문] 닫힘 id={record.id} 사유={reason} 열린 시간={self._now() - record.opened_at:.1f}s")
+        text = f"[질문] 닫힘 id={record.id} 사유={reason} 열린 시간={self._now() - record.opened_at:.1f}s"
+        # 심각도마다 다른 줄에서 부른다 — rclpy 는 같은 호출 줄에서 심각도가 바뀌면 ValueError 를 낸다.
+        if reason == "fault":
+            self.get_logger().warn(text)
+        else:
+            self.get_logger().info(text)
 
     # -- Action 실행 -------------------------------------------------------------
 
@@ -2434,7 +2454,7 @@ class MissionManagerNode(Node):
                 self.pub_tts.publish(out)
                 self.get_logger().info(f"TTS[{action.priority}]: {action.text}")
                 if action.kind or getattr(action, "expects_reply", False):
-                    self._open_question(action)
+                    self._question_safely(self._open_question, action)
                 if getattr(action, "expects_reply", False):
                     self.pub_listen_request.publish(Bool(data=True))
                     self.logic.note_question_asked(action.text, self._now())
