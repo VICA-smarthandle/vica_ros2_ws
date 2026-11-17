@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from vica_mission_manager.mission_logic import Say
-from vica_mission_manager.question_record import FAULT_CLOSE_SEC, QuestionRecord, QuestionTracker
+from vica_mission_manager.question_record import NO_SIGNAL_CLOSE_SEC, QuestionRecord, QuestionTracker
 
 
 def ask(text="여기서 대기할까요?", kind="yesno", options=()):
@@ -45,18 +45,18 @@ def test_empty_listen_state_closes():
     for state in ("empty", "empty:reject '어'", "empty:wake-ignored"):
         t = QuestionTracker("q")
         _, r = t.open(ask(), "asking_next", 10.0)
-        assert t.on_listen_state(state) == r and t.current is None
+        assert t.on_listen_state(state, 12.0) == r and t.current is None
 
 
 def test_speech_listen_state_keeps_open():
     t = QuestionTracker("q")
     _, r = t.open(ask(), "asking_next", 10.0)
     for state in ("open", "speech", "closed", "wake-rescue '비카야'"):   # 말을 했으면 의도가 뒤따라 온다
-        assert t.on_listen_state(state) is None and t.current == r
+        assert t.on_listen_state(state, 12.0) is None and t.current == r
 
 
 def test_listen_state_without_question_is_nothing():
-    assert QuestionTracker("q").on_listen_state("empty") is None
+    assert QuestionTracker("q").on_listen_state("empty", 1.0) is None
 
 
 def test_tick_closes_on_state_change():
@@ -65,17 +65,28 @@ def test_tick_closes_on_state_change():
     assert t.tick("navigating", 11.0) == (r, "state") and t.current is None
 
 
-def test_fault_close_after_30s():
-    assert FAULT_CLOSE_SEC == 30.0
+def test_no_signal_close_counts_from_the_question_when_voice_is_silent():
+    """음성에서 신호가 하나도 안 오면(노드가 죽음) 연 때부터 45 s 뒤 닫는다 — 사유 no_signal."""
+    assert NO_SIGNAL_CLOSE_SEC == 45.0
     t = QuestionTracker("q")
     _, r = t.open(ask(), "asking_next", 10.0)
-    assert t.tick("asking_next", 40.1) == (r, "fault")
+    assert t.tick("asking_next", 54.9) is None
+    assert t.tick("asking_next", 55.1) == (r, "no_signal")
 
 
-def test_tick_keeps_open_before_30s():
+def test_no_signal_close_counts_from_the_last_voice_signal():
+    """음성이 살아 있으면 마지막 신호부터 센다 — 질문 뒤 듣기(지금 최대 30 s)가 끝나기 전에 먼저 닫지 않는다.
+
+    11-17 최종 검토: 연 때부터 30 s 로 세면 '취소할까요?' 무응답에서 음성의 empty(재생 끝 + 30 s)보다 먼저 터졌다.
+    """
     t = QuestionTracker("q")
-    _, r = t.open(ask(), "asking_next", 10.0)
-    assert t.tick("asking_next", 39.9) is None and t.current == r
+    _, r = t.open(ask("안내를 취소할까요?"), "navigating", 20.0)
+    assert t.on_listen_state("open", 22.0) is None            # 질문 재생이 끝나 음성이 듣기 시작
+    assert t.tick("navigating", 51.9) is None                 # 연 지 31.9 s — 음성은 아직 듣는 중
+    assert t.on_listen_state("empty", 52.0) == r              # 30 s 를 다 듣고 빈손 → 정상으로 닫힘
+    _, r2 = t.open(ask("안내를 취소할까요?"), "navigating", 60.0)
+    t.on_listen_state("open", 62.0)
+    assert t.tick("navigating", 106.9) is None and t.tick("navigating", 107.1) == (r2, "no_signal")
 
 
 def test_missing_or_unknown_kind_becomes_open():

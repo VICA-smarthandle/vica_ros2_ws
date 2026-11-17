@@ -2389,12 +2389,12 @@ class MissionManagerNode(Node):
 
     def _listen_question(self, state: str) -> None:
         with self._question_lock:
-            closed = self._questions.on_listen_state(state)
+            closed = self._questions.on_listen_state(state, self._now())
         if closed is not None:
             self._close_question("silence", closed)
 
     def _tick_question(self) -> None:
-        """상태가 바뀌었거나 닫는 신호 없이 오래 열려 있으면 닫는다."""
+        """상태가 바뀌었거나 음성에서 아무 신호 없이 오래 열려 있으면 닫는다."""
         with self._question_lock:
             closed = self._questions.tick(self.logic.state.value, self._now())
         if closed is not None:
@@ -2438,7 +2438,7 @@ class MissionManagerNode(Node):
     def _log_question_closed(self, record: QuestionRecord, reason: str) -> None:
         text = f"[질문] 닫힘 id={record.id} 사유={reason} 열린 시간={self._now() - record.opened_at:.1f}s"
         # 심각도마다 다른 줄에서 부른다 — rclpy 는 같은 호출 줄에서 심각도가 바뀌면 ValueError 를 낸다.
-        if reason == "fault":
+        if reason == "no_signal":
             self.get_logger().warn(text)
         else:
             self.get_logger().info(text)
