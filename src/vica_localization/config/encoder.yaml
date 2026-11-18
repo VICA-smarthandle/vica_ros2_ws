@@ -83,4 +83,9 @@ encoder_feedback:
     # During driving, the motor node requests C5 feedback with RET_TYPE_ODOM=5.
     # Enabling this option sends a separate zero-RPM request and is bench-only.
     request_position_feedback: false
+    # [2026-10-20] 이 값은 CAN 을 확인하는 주기일 뿐 속도의 분모가 아니다.
+    # 모터 응답(C5)은 일정 속도에서 67 ms·가속 중 33 ms 마다 오는데, 예전에는 이
+    # 타이머 시각(50·100 ms 칸)으로 나눠 속도 표본이 1.05~1.09 배로 부풀었고 EKF 가
+    # 직진 거리를 약 10 % 길게 셌다. 지금은 프레임 수신 시각 간격으로 나눈다
+    # (encoder_feedback.pick_dt, CAN 기록 모의 1.05 -> 1.00).
     request_hz: 20.0
