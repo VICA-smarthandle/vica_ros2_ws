@@ -19,6 +19,7 @@ from vica_mission_manager.mission_logic import (
     MSG_CANCELED,
     MSG_FINISH,
     MSG_HANDLE_HEIGHT,
+    MSG_PAUSE_KEPT,
     MSG_PRIVATE_DEST,
     MSG_RESUMED,
     MSG_START,
@@ -27,6 +28,7 @@ from vica_mission_manager.mission_logic import (
     MSG_WAIT_NEED_ASK,
     MSG_WAIT_SPOT_CONFIRM,
     MSG_WAIT_SPOT_DEFAULT,
+    MSG_WAKE_GREETING,
     CancelNav,
     Navigate,
     NavStatus,
@@ -399,3 +401,70 @@ def test_unknown_place_while_paused_keeps_the_pause():
     logic, t = paused()
     logic.on_voice_intent(intent(matched_destination_id="nowhere"), t, lookup, BOUNDS, True)
     assert logic.state == State.PAUSED
+
+
+
+# ---- 일시정지 중 목적지 제안이 접히면 일시정지로 돌아간다 (3-나-1 설계 4.4, 11-18 사용자) ----------
+# 대기 보류(_wait_hold)·주행 중 바꾸기(_change_from)와 같은 틀. 예전엔 쉬는 상태로 가 보관한 목적지가 사라졌다.
+
+ASK_ELEV_WHILE_PAUSED = say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")
+
+
+def _propose_while_paused():
+    logic, t = paused()
+    acts = logic.on_voice_intent(intent(matched_destination_id=ELEV.id, need_confirm=True), t,
+                                 lookup, BOUNDS, True)
+    assert _says(acts) == [ASK_ELEV_WHILE_PAUSED]
+    assert logic.state == State.CONFIRMING
+    return logic, t
+
+
+def _resumes_the_paused_guidance(logic, t):
+    acts = logic.on_voice_intent(intent("resume"), t, lookup, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_RESUMED, "409호")]
+    assert logic.state == State.NAVIGATING
+
+
+def test_declined_proposal_while_paused_returns_to_the_pause():
+    logic, t = _propose_while_paused()
+    acts = logic.on_voice_intent(intent("deny"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [MSG_PAUSE_KEPT]
+    assert MSG_PAUSE_KEPT == "알겠습니다. 다시 출발하려면 말씀해 주세요."   # 사용자 11-18 지정
+    assert logic.state == State.PAUSED
+    _resumes_the_paused_guidance(logic, t + 4)
+
+
+def test_unanswered_proposal_while_paused_returns_to_the_pause():
+    logic, t = _propose_while_paused()
+    assert _says(logic.on_tick(t + 16, NavStatus.NONE)) == [ASK_ELEV_WHILE_PAUSED]   # 한 번 다시 묻는다
+    acts = logic.on_tick(t + 16 + logic.confirm_timeout_sec, NavStatus.NONE)
+    assert _says(acts) == [MSG_PAUSE_KEPT]
+    assert logic.state == State.PAUSED
+    _resumes_the_paused_guidance(logic, t + 60)
+
+
+def test_wake_call_during_paused_proposal_returns_to_the_pause_without_extra_words():
+    logic, t = _propose_while_paused()
+    acts = logic.on_wake_call(t + 2)
+    assert _says(acts) == [MSG_WAKE_GREETING]
+    assert logic.state == State.PAUSED
+    _resumes_the_paused_guidance(logic, t + 8)
+
+
+def test_accepted_proposal_while_paused_starts_the_new_place():
+    logic, t = _propose_while_paused()
+    acts = logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_START, "엘리베이터")]
+    assert logic.state == State.NAVIGATING and logic.active_destination == ELEV
+
+
+def test_no_stale_pause_after_the_new_guidance_is_cancelled():
+    """새 목적지로 떠난 뒤에는 옛 일시정지로 돌아가지 않는다 — 다음 제안의 거절은 평소처럼 쉬는 상태다."""
+    logic, t = _propose_while_paused()
+    logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    logic.on_voice_intent(intent("cancel"), t + 4, lookup, BOUNDS, True)
+    logic.on_voice_intent(intent("affirm"), t + 6, lookup, BOUNDS, True)
+    assert logic.state == State.IDLE
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id, need_confirm=True), t + 8, lookup, BOUNDS, True)
+    logic.on_voice_intent(intent("deny"), t + 10, lookup, BOUNDS, True)
+    assert logic.state == State.IDLE
