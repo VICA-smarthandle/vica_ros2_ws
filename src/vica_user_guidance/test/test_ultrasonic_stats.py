@@ -146,19 +146,21 @@ def _cfg_and_levels():
 
 
 def test_front_physical_30_draw_20_for_global():
-    """10-09 run80 뒤: 앞 두 개(ch1·ch2)는 물리 30°(레벨 1)·그리는 폭 20°, 나머지는 레벨 3·공통 30°."""
+    """10-09 run80 뒤: 앞 두 개(ch1·ch2)는 물리 30°(레벨 1)·그리는 폭 20°, 나머지는 레벨 3·공통 30°.
+    11-18(도킹 후진·회전): 뒤 두 개(ch5·ch6)와 뒷바퀴 옆 두 개(ch4·ch7)는 물리 60°(레벨 4)·그리는 폭 60°."""
     p, levels = _cfg_and_levels()
     fov = resolve_channel_fov(p["ultrasonic_fov_rad"], p["ultrasonic_fov_rad_per_channel"], 8)
-    assert levels == [3, 1, 1, 3, 3, 3, 3, 3]
-    assert fov == pytest.approx([0.524, 0.349, 0.349, 0.524, 0.524, 0.524, 0.524, 0.524])
+    assert levels == [3, 1, 1, 3, 4, 4, 4, 4]
+    assert fov == pytest.approx([0.524, 0.349, 0.349, 0.524, 1.047, 1.047, 1.047, 1.047])
 
 
 def test_side_max_range_040_others_common():
-    """10-09: 바퀴 옆(ch0·ch3)만 0.40 m, 나머지는 공통 최대 거리."""
+    """10-09: 바퀴 옆(ch0·ch3)만 0.40 m, 나머지는 공통 최대 거리.
+    11-18(도킹 후진·회전): 뒤 두 개(ch5·ch6)·뒷바퀴 옆 두 개(ch4·ch7)는 0.70 m."""
     p, _ = _cfg_and_levels()
     r = resolve_channel_fov(p["ultrasonic_max_range_m"], p["ultrasonic_max_range_m_per_channel"], 8,
                             name="ultrasonic_max_range_m_per_channel")
-    assert r == pytest.approx([0.40, 1.5, 1.5, 0.40, 1.5, 1.5, 1.5, 1.5])
+    assert r == pytest.approx([0.40, 1.5, 1.5, 0.40, 0.70, 0.70, 0.70, 0.70])
 
 
 def test_channel_enabled_matches_firmware_and_delays():

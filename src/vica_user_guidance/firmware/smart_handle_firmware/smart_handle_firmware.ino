@@ -115,6 +115,12 @@
 #define STATE_PATROL_LIGHT  9   // 불 켜짐: 진노랑 상시
 #define STATE_PATROL_ALARM 10   // 사람·큰 소리·카메라 끊김: 빨강 점멸(BLINK_MS)
 #define STATE_PATROL_MIN  STATE_PATROL
+// ── 도킹 연결 표시 (2026-11-18 사용자 시연 요청) ── 6 = 도킹(연결됨): 연두 숨쉬기. 7 은 아직 예약.
+#define STATE_DOCKED      6
+#define DOCK_BREATH_MS    2400   // 한 번 밝아졌다 어두워지는 주기
+#define DOCK_STEP_MS      40     // 밝기 갱신 간격(25 Hz)
+#define DOCK_MIN_PCT      8      // 가장 어두울 때(LIME 대비 %)
+#define DOCK_MAX_PCT      60     // 가장 밝을 때 — '은은하게'
 #define STATE_PATROL_MAX  STATE_PATROL_ALARM
 
 // ── 워치독: 이 시간 동안 신호 없으면 통신두절로 판단 ──
@@ -140,7 +146,7 @@ const uint32_t LIME         = Adafruit_NeoPixel::Color(110, 255, 0  );   // 순�
 // ORANGE(255,80,0) 와는 초록 값으로 구분한다.
 const uint32_t DEEP_YELLOW  = Adafruit_NeoPixel::Color(255, 170, 0  );   // 불 켜짐
 
-enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE, BLINK_ALARM };
+enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE, BLINK_ALARM, BREATHE_DOCK };
 Mode    currentMode  = NORMAL;
 uint8_t currentState = STATE_NORMAL;
 
@@ -234,7 +240,11 @@ bool arriveTailPending = false;
 // 좁힌다. 50° 빔은 옆 0.7 m 벽 메아리를 정면에 그려 레일 막힘 판정(IsRailAheadClear)을 거짓으로 켤 수 있다.
 // 드라이버 그리는 폭은 20°(0.349) — 틀어짐 최대 ±5°. 나머지 채널은 꺼져 있어(US_CH_ON) 레벨 3 그대로.
 // 되돌리기: { 3, 3, 3, 3, 3, 3, 3, 3 }.
-const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 3, 1, 1, 3, 3, 3, 3, 3 };
+// 2026-11-18 사용자(도킹 후진): 뒤 두 개(ch5·ch6)를 레벨 4(60°)로 — 0.25 m 에서 차체 폭 0.45 m 를 다 덮는다
+// (50° 는 딱 맞고 30° 는 가운데 8 cm·양 끝 5 cm 가 빔 밖). 되돌리기: ch5·ch6 을 3 으로.
+// 2026-11-18 사용자(도킹 회전): 뒷바퀴 옆 두 개(ch4·ch7)도 레벨 4(60°) — 바퀴 옆(ch0·ch3) 09-24 정지 시험과 같은 값.
+// 되돌리기: ch4·ch7 을 3 으로.
+const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 3, 1, 1, 3, 4, 4, 4, 4 };
 #define US_GAP_MS     5     // 채널 사이 간격. 앞 채널 잔향이 다음 측정에 남지 않게
 #define US_REG_DIST   0x02
 #define US_REG_CMD    0x10
@@ -429,7 +439,15 @@ const uint8_t US_ROUND_CH[US_ROUNDS][US_PER_ROUND] = {
 // 엘리베이터·로봇팔 주행 때 전부 켜기: 모두 1 로 + 드라이버 delay [210, 420, 315, 210, 105, 420, 315, 105].
 // 2026-10-30·11-14 사용자: 앞 두 개도 끈다(전부 0). 켜진 라운드가 없으면 라운드 D 자리에서 105 ms 마다 빈 8채널
 // 프레임만 나간다(트리거·읽기 없음). 되돌리기 { 0, 1, 1, 0, 0, 0, 0, 0 } + 드라이버 enabled 앞 두 칸 true.
-const uint8_t US_CH_ON[US_N] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+// 2026-11-18 사용자(도킹 후진 시험): 뒤 두 개(ch5 뒤 오른쪽·ch6 뒤 왼쪽)만 켠다. 라운드 A·B 둘 = 210 ms/바퀴,
+// 프레임은 B 뒤 → 드라이버 delay 뒤 오른쪽 210·뒤 왼쪽 105. 드라이버는 이 둘을 /ultrasonic/dock_rear_* 로 낸다
+// (costmap 의 rear 층이 구독하는 /ultrasonic/rear_* 가 아니다 — 손잡이 잡은 사용자가 장애물로 찍히지 않게).
+// 되돌리기: 전부 0.
+// 2026-11-18 사용자(도킹 회전): 뒷바퀴 옆 두 개(ch4 오른쪽·ch7 왼쪽)도 켠다 — 회전 중 옆뒤 사각(라이다 ±120° 와 뒤 원뿔
+// 사이) 거리 감시용. 켜진 라운드 A(ch5)·B(ch6)·D(ch7·ch4) = 315 ms/바퀴, 프레임은 D 뒤 →
+// 드라이버 delay ch5 315·ch6 210·ch4/ch7 105. 드라이버는 /ultrasonic/dock_*_rear_wheel 로 낸다(costmap 구독 이름 아님).
+// 되돌리기(뒤 둘만): { 0, 0, 0, 0, 0, 1, 1, 0 }.
+const uint8_t US_CH_ON[US_N] = { 0, 0, 0, 0, 1, 1, 1, 1 };
 #define US_LEGACY_CH0 1   // 옛 프레임 d0 = 앞 왼쪽
 #define US_LEGACY_CH1 2   // 옛 프레임 d1 = 앞 오른쪽
 
@@ -862,6 +880,11 @@ void applyState(uint8_t state) {
       servoMoveTo(SERVO_CENTER);
       break;
 
+    case STATE_DOCKED:            // 2026-11-18: 도킹 연결 — 연두 숨쉬기. 서보 가운데, 진동 없음
+      currentMode = BREATHE_DOCK;
+      servoMoveTo(SERVO_CENTER);
+      break;
+
     case STATE_PATROL_ALARM:
       currentMode = BLINK_ALARM;
       blinkState  = true;   // 빨강부터 켠다. 경보는 들어오자마자 보여야 한다
@@ -951,7 +974,8 @@ void loop() {
       usAngleLv[US_SIDE_CH_R] = b - US_CMD_SIDE_ANGLE_BASE;
       usCfgPending = true;
     } else if ((b >= STATE_MIN && b <= STATE_MAX) ||
-               (b >= STATE_PATROL_MIN && b <= STATE_PATROL_MAX)) {   // 2026-11-14 순찰 8~10
+               (b >= STATE_PATROL_MIN && b <= STATE_PATROL_MAX) ||   // 2026-11-14 순찰 8~10
+               b == STATE_DOCKED) {                                   // 2026-11-18 도킹 연결 6
       lastRxMillis    = now;
       watchdogTripped = false;
       everConnected   = true;   // 최초 1회만 의미 있음
@@ -1006,6 +1030,14 @@ void loop() {
     lastBlink  = now;
     blinkState = !blinkState;
     setBoth(blinkState ? ORANGE : OFF);
+  }
+
+  // ── 도킹 연결 숨쉬기 (2026-11-18) ───────
+  if (currentMode == BREATHE_DOCK && now - lastBlink >= DOCK_STEP_MS) {
+    lastBlink = now;
+    float ph  = (float)(now % DOCK_BREATH_MS) / DOCK_BREATH_MS;
+    float lvl = (DOCK_MIN_PCT + (DOCK_MAX_PCT - DOCK_MIN_PCT) * (0.5f - 0.5f * cos(6.2831853f * ph))) / 100.0f;
+    setBoth(Adafruit_NeoPixel::Color((uint8_t)(110 * lvl), (uint8_t)(255 * lvl), 0));   // LIME 을 밝기만 바꿔
   }
 
   // ── 순찰 경보 점멸 (2026-11-14) ─────────
