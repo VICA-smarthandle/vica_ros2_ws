@@ -447,7 +447,10 @@ const uint8_t US_ROUND_CH[US_ROUNDS][US_PER_ROUND] = {
 // 사이) 거리 감시용. 켜진 라운드 A(ch5)·B(ch6)·D(ch7·ch4) = 315 ms/바퀴, 프레임은 D 뒤 →
 // 드라이버 delay ch5 315·ch6 210·ch4/ch7 105. 드라이버는 /ultrasonic/dock_*_rear_wheel 로 낸다(costmap 구독 이름 아님).
 // 되돌리기(뒤 둘만): { 0, 0, 0, 0, 0, 1, 1, 0 }.
-const uint8_t US_CH_ON[US_N] = { 0, 0, 0, 0, 1, 1, 1, 1 };
+// 2026-11-18 사용자(앱 '전방 초음파' 스위치): 앞 둘(ch1·ch2)도 켠다 — 늘 재고, 끄고 켜기는 드라이버가 발행에서 한다.
+// 앞은 뒤와 같은 라운드 A·B 를 나눠 써서 바퀴는 315 ms 그대로. 드라이버 delay 앞 왼쪽 315·앞 오른쪽 210.
+// 되돌리기(도킹만): { 0, 0, 0, 0, 1, 1, 1, 1 }.
+const uint8_t US_CH_ON[US_N] = { 0, 1, 1, 0, 1, 1, 1, 1 };
 #define US_LEGACY_CH0 1   // 옛 프레임 d0 = 앞 왼쪽
 #define US_LEGACY_CH1 2   // 옛 프레임 d1 = 앞 오른쪽
 

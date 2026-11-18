@@ -61,6 +61,50 @@ struct DriverParams
   std::string ultrasonic_tf_target_frame = "odom";
 };
 
+// 실행 중 채널 끄기·켜기(2026-11-18 사용자: 앱 시스템 진단 '전방 초음파'). 끄면 '없음'(max_range)을
+// kClearFrames 번 더 보내 costmap 초음파 층이 빔 안을 지우게 한 뒤 발행을 멈춘다. 켜면 다음 프레임부터 낸다.
+class RuntimeChannelSwitch
+{
+public:
+  enum class Action { Normal, Clear, Skip };
+  static constexpr int kClearFrames = 3;
+
+  explicit RuntimeChannelSwitch(int channels)
+  : off_(static_cast<std::size_t>(channels), false), clears_(static_cast<std::size_t>(channels), 0) {}
+
+  // 상태가 바뀐 채널이 하나라도 있으면 true.
+  bool set(const std::vector<int> & channels, bool on)
+  {
+    bool changed = false;
+    for (int ch : channels) {
+      if (ch < 0 || static_cast<std::size_t>(ch) >= off_.size()) {continue;}
+      const auto i = static_cast<std::size_t>(ch);
+      if (off_[i] == !on) {continue;}
+      off_[i] = !on;
+      clears_[i] = on ? 0 : kClearFrames;
+      changed = true;
+    }
+    return changed;
+  }
+  bool on(int ch) const {return !off_.at(static_cast<std::size_t>(ch));}
+  Action action(int ch) const
+  {
+    const auto i = static_cast<std::size_t>(ch);
+    if (!off_.at(i)) {return Action::Normal;}
+    return clears_[i] > 0 ? Action::Clear : Action::Skip;
+  }
+  // '없음'을 한 번 보냈다.
+  void cleared(int ch)
+  {
+    auto & c = clears_.at(static_cast<std::size_t>(ch));
+    if (c > 0) {--c;}
+  }
+
+private:
+  std::vector<bool> off_;
+  std::vector<int> clears_;
+};
+
 // sensor_msgs/Range 한 건(float32 칸은 이미 float 로 바꾼 값).
 struct RangeOut
 {
@@ -138,7 +182,14 @@ public:
   const std::vector<std::string> & ultrasonic_topics() const {return us_topics_;}
   const std::vector<bool> & ultrasonic_channel_on() const {return us_on_;}
 
+  // 앱 시스템 진단 '전방 초음파'(2026-11-18). 전방 채널 = 토픽 이름 끝이 front_ 로 시작하고 설정에서
+  // 켜진 채널. 그런 채널이 없으면 false 와 까닭을 message 에 담는다.
+  bool set_front_ultrasonic(bool on, std::string & message);
+  // 설정에서 켜진 전방 채널이 있고 모두 켜져 있으면 true.
+  bool front_ultrasonic_on() const;
+
 private:
+  std::vector<int> front_channels() const;
   void warn_if_arrival_hold_too_short();
   void setup_ultrasonic();
   void log_on_change(const GuidanceOutcome & outcome);
@@ -197,6 +248,7 @@ private:
   bool us_tf_gate_enabled_ = true;
   std::string us_tf_target_;
   RangeTfGate us_gate_{protocol::US_CHANNELS};
+  RuntimeChannelSwitch us_switch_{protocol::US_CHANNELS};
 };
 
 }  // namespace vica_guidance
