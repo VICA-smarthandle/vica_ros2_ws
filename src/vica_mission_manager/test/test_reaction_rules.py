@@ -20,6 +20,7 @@ from vica_mission_manager.mission_logic import (
     MSG_FINISH,
     MSG_HANDLE_HEIGHT,
     MSG_PRIVATE_DEST,
+    MSG_RESUMED,
     MSG_START,
     MSG_WAIT_DEFAULT,
     MSG_WAIT_FINISH_ASK,
@@ -378,3 +379,23 @@ def test_llm_clarify_is_not_a_strange_answer():
     logic, t = confirming()
     assert logic.on_voice_intent(intent("clarify"), t, lookup, BOUNDS, True) == []
     assert logic.state == State.CONFIRMING
+
+
+def test_rejected_request_while_paused_keeps_the_pause():
+    """일시정지 중 갈 수 없는 곳 요청 — 거절만 말하고 일시정지는 둔다(11-18 실기 13:15:52: paused → idle 로
+    보관한 목적지가 사라져 "다시 가자"가 "다시 출발할 안내가 없습니다"가 됐다)."""
+    closed = ROOM.__class__(**{**ROOM.__dict__, "id": "vip", "name": "원장실", "authorization": "private"})
+    look = lambda i: closed if i == "vip" else lookup(i)   # noqa: E731
+    logic, t = paused()
+    acts = logic.on_voice_intent(intent(matched_destination_id="vip"), t, look, BOUNDS, True)
+    assert _says(acts) == [MSG_PRIVATE_DEST]
+    assert logic.state == State.PAUSED
+    acts = logic.on_voice_intent(intent("resume"), t + 2, look, BOUNDS, True)
+    assert _says(acts) == [say_destination(MSG_RESUMED, "409호")]
+    assert logic.state == State.NAVIGATING
+
+
+def test_unknown_place_while_paused_keeps_the_pause():
+    logic, t = paused()
+    logic.on_voice_intent(intent(matched_destination_id="nowhere"), t, lookup, BOUNDS, True)
+    assert logic.state == State.PAUSED

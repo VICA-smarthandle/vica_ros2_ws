@@ -2590,8 +2590,9 @@ class MissionLogic:
                 self._hold_change_as_pause()
             elif self.state == State.CONFIRMING:
                 folded = self._fold_confirming(now)
-            elif self.state not in _WAIT_STATES:
-                # 대기 중 확정 요청이 거절되면 대기를 그대로 둔다.
+            elif self.state not in _WAIT_STATES and self.state != State.PAUSED:
+                # 대기 중 확정 요청이 거절되면 대기를 그대로 둔다. 일시정지 중 거절도 그대로 둔다 — 보관한
+                # 목적지로 "다시 가자"가 통해야 한다(11-18 실기 13:15:52: paused → idle 로 안내가 사라졌다).
                 self._to_idle()
             msg = _REJECT_MESSAGES.get(reason)
             # 거절을 먼저 말하고, 바꾸기 질문이었으면 그다음 원래 목적지로 다시 출발한다.
