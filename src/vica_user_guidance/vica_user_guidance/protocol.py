@@ -14,6 +14,11 @@ STATE_LINK_LOST: int = 4
 STATE_ARRIVED: int = 5
 STATE_CHARGING: int = 6   # [TARGET] 펌웨어 미구현. 충전 상태 입력원 미정
 STATE_CHARGED: int = 7    # [TARGET] 펌웨어 미구현
+# 순찰 표시(2026-11-14). 6·7 은 충전용 예약 그대로 비워 둔다.
+STATE_PATROL: int = 8         # 순찰 중 — 연두 상시
+STATE_PATROL_LIGHT: int = 9   # 불 켜짐 — 진노랑 상시
+STATE_PATROL_ALARM: int = 10  # 사람·큰 소리·카메라 끊김 — 빨강 300ms 점멸
+STATE_CODE_MAX: int = STATE_PATROL_ALARM   # 상태코드 범위 0~10 의 끝
 
 # ROS가 전송해도 되는 코드 집합.
 #
@@ -29,6 +34,9 @@ SENDABLE_STATE_CODES: FrozenSet[int] = frozenset(
         STATE_RIGHT,
         STATE_ESTOP,
         STATE_ARRIVED,
+        STATE_PATROL,
+        STATE_PATROL_LIGHT,
+        STATE_PATROL_ALARM,
     }
 )
 
@@ -41,6 +49,9 @@ STATE_NAMES = {
     STATE_ARRIVED: "ARRIVED",
     STATE_CHARGING: "CHARGING",
     STATE_CHARGED: "CHARGED",
+    STATE_PATROL: "PATROL",
+    STATE_PATROL_LIGHT: "PATROL_LIGHT",
+    STATE_PATROL_ALARM: "PATROL_ALARM",
 }
 
 # 펌웨어 애니메이션 타이밍. .ino의 ARRIVE_BLINK_MS / ARRIVE_BLINK_COUNT와 일치해야 한다.
@@ -109,7 +120,7 @@ FIRMWARE_TOUCH_PERIOD_MS: int = 50   # 20Hz. 판정 유예 0.5초에 10프레임
 FIRMWARE_TOUCH_HOLD_MS: int = 200    # 시간 브리지. LOW 본 뒤 이만큼은 '잡음'
 
 # ── 하향 햅틱 명령 (젯슨 → 아두이노, 2026-09-04 신설) ──────────────────
-# 상태코드(0~7)와 겹치지 않는 별도 바이트다. applyState()를 거치지 않으므로
+# 상태코드(0~10)와 겹치지 않는 별도 바이트다. applyState()를 거치지 않으므로
 # LED·서보는 그대로이고 D6(2026-10-16 재배선)의 진동모터만 패턴대로 떨린다.
 #
 # 드라이버 노드(user_guidance_driver_node) 자체는 이 바이트를 스스로 보내지

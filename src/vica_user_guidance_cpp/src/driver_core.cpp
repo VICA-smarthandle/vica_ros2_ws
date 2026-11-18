@@ -67,7 +67,9 @@ DriverCore::DriverCore(const DriverParams & params, DriverIo & io, SerialFactory
   }
   if (us_enabled_ || touch_enabled_) {uplink_period_ns_ = timer_period_ns(p_.uplink_rate_hz);}
 
-  io_.log(LogLevel::Info, "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event");
+  io_.log(
+    LogLevel::Info,
+    "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event, /vica/robot_state");
   io_.log(LogLevel::Info, "Publishing: /vica/smart_handle_state + serial");
   io_.log(LogLevel::Info, "This node never publishes /cmd_vel* nor resets the E-stop latch.");
   if (!p_.enable_serial) {
@@ -181,6 +183,13 @@ void DriverCore::on_goal(const std::string & payload)
   }
 }
 
+void DriverCore::on_robot_state(const std::string & dialog_state)
+{
+  // 순찰 여부만 본다. 순찰이 아니면 코드를 비워 기존 판단이 그대로 돈다.
+  patrol_code_ = patrol_state_code(dialog_state);
+  if (patrol_code_ != PATROL_NONE) {patrol_last_ns_ = io_.steady_now_ns();}
+}
+
 void DriverCore::on_haptic(const std::string & data)
 {
   // 10 Hz 상태코드 사이에 끼우는 바이트라 LED·서보에는 영향이 없다. send_raw 라 last_state_code 를 안 건드린다.
@@ -201,7 +210,13 @@ void DriverCore::on_haptic(const std::string & data)
       "' — ['locate', 'long', 'short', 'tick'] 중 하나여야 합니다. 무시합니다.");
     return;
   }
-  const bool ok = link_->send_raw(code, io_.steady_now_ns());
+  const int64_t now = io_.steady_now_ns();
+  if (active_patrol_code(patrol_code_, patrol_last_ns_, now) != PATROL_NONE) {
+    // 순찰 중에는 진동 신호를 내지 않는다(2026-11-14).
+    io_.log(LogLevel::Info, "[HAPTIC] 순찰 중 — " + name + " 무시");
+    return;
+  }
+  const bool ok = link_->send_raw(code, now);
   if (ok) {
     char hex[8];
     std::snprintf(hex, sizeof(hex), "%02X", code);
@@ -225,6 +240,8 @@ void DriverCore::send_loop()
   in.turn_direction = turn_direction_;
   in.turn_last_ns = turn_last_ns_;
   in.arrival_started_ns = arrival_started_ns_;
+  in.patrol_code = patrol_code_;
+  in.patrol_last_ns = patrol_last_ns_;
   const GuidanceOutcome outcome = resolve_state_code(
     in, now, estop_timeout_ns_, cue_timeout_ns_, arrival_hold_ns_, estop_required_);
   link_->send(outcome.state_code, now);

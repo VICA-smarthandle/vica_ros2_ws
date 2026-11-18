@@ -1,5 +1,6 @@
 """프로토콜 상수와 펌웨어 결합 고정 테스트."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -39,9 +40,94 @@ def test_unimplemented_charging_codes_are_not_sendable():
     assert protocol.is_sendable(protocol.STATE_CHARGED) is False
 
 
-def test_sendable_codes_are_exactly_five():
-    """전송 가능한 코드는 0,1,2,3,5 다섯 개다."""
-    assert protocol.SENDABLE_STATE_CODES == frozenset({0, 1, 2, 3, 5})
+def test_sendable_codes_are_exactly_eight():
+    """전송 가능한 코드는 0,1,2,3,5 와 순찰 8,9,10 여덟 개다(2026-11-14 순찰 3개 추가)."""
+    assert protocol.SENDABLE_STATE_CODES == frozenset({0, 1, 2, 3, 5, 8, 9, 10})
+
+
+# ── 순찰 표시 (2026-11-14, 경비 모드 명세 4.D) ─────────
+
+
+def _ino_code() -> str:
+    """주석을 뺀 펌웨어 소스."""
+    return re.sub(r"//[^\n]*", "", FIRMWARE_INO.read_text(encoding="utf-8"))
+
+
+def test_patrol_codes_match_firmware_defines():
+    """순찰 코드 8·9·10 은 펌웨어 #define 과 같다. 6·7(충전 예약)은 그대로 비어 있다."""
+    assert (protocol.STATE_PATROL, protocol.STATE_PATROL_LIGHT,
+            protocol.STATE_PATROL_ALARM) == (8, 9, 10)
+    assert (protocol.STATE_CHARGING, protocol.STATE_CHARGED) == (6, 7)
+    assert protocol.STATE_CODE_MAX == 10
+    code = _ino_code()
+    assert re.search(r"#define\s+STATE_PATROL\s+8\b", code)
+    assert re.search(r"#define\s+STATE_PATROL_LIGHT\s+9\b", code)
+    assert re.search(r"#define\s+STATE_PATROL_ALARM\s+10\b", code)
+    assert protocol.STATE_NAMES[8] == "PATROL"
+    assert protocol.STATE_NAMES[9] == "PATROL_LIGHT"
+    assert protocol.STATE_NAMES[10] == "PATROL_ALARM"
+
+
+def test_patrol_codes_do_not_collide_with_other_downlink_bytes():
+    """상태코드 0~10 은 진동(0x10~0x13)·초음파 시험 명령(0x30~)과 겹치지 않는다."""
+    others = {protocol.HAPTIC_CMD_SHORT, protocol.HAPTIC_CMD_LONG, protocol.HAPTIC_CMD_TICK,
+              protocol.HAPTIC_CMD_LOCATE, protocol.US_CMD_RESET}
+    assert min(others) > protocol.STATE_CODE_MAX
+
+
+def test_firmware_accepts_patrol_codes_but_not_reserved_6_7():
+    """펌웨어 수신 범위는 0~5 와 8~10 두 구간이다. 6·7 은 버린다."""
+    code = _ino_code()
+    assert re.search(r"#define\s+STATE_MAX\s+STATE_ARRIVED\b", code)
+    assert re.search(r"#define\s+STATE_PATROL_MIN\s+STATE_PATROL\b", code)
+    assert re.search(r"#define\s+STATE_PATROL_MAX\s+STATE_PATROL_ALARM\b", code)
+    assert re.search(
+        r"\(b >= STATE_MIN && b <= STATE_MAX\)\s*\|\|\s*"
+        r"\(b >= STATE_PATROL_MIN && b <= STATE_PATROL_MAX\)", code)
+
+
+def test_firmware_patrol_colors_are_the_confirmed_ones():
+    """연두·빨강은 2026-11-11 실물로 확정. 불 켜짐은 2026-11-16 진노랑으로 바꿈(사용자)."""
+    code = _ino_code()
+    assert re.search(r"LIME\s*=\s*Adafruit_NeoPixel::Color\(\s*110,\s*255,\s*0\s*\)", code)
+    assert re.search(r"DEEP_YELLOW\s*=\s*Adafruit_NeoPixel::Color\(\s*255,\s*170,\s*0\s*\)", code)
+    assert re.search(r"RED\s*=\s*Adafruit_NeoPixel::Color\(\s*255,\s*0,\s*0\s*\)", code)
+    assert "#define BLINK_MS    300" in code
+
+
+def _case_body(src: str, case: str) -> str:
+    m = re.search(rf"case {case}:(.*?)break;", src, re.S)
+    assert m, f"applyState() 에 case {case} 가 없다"
+    return m.group(1)
+
+
+def test_firmware_patrol_patterns():
+    """연두 상시 · 진노랑 상시 · 빨강 300ms 점멸. 셋 다 서보 가운데, 진동 없음."""
+    code = _ino_code()
+    steady = _case_body(code, "STATE_PATROL")
+    assert "setBoth(LIME)" in steady and "currentMode = NORMAL" in steady
+    light = _case_body(code, "STATE_PATROL_LIGHT")
+    assert "setBoth(DEEP_YELLOW)" in light and "currentMode = NORMAL" in light
+    alarm = _case_body(code, "STATE_PATROL_ALARM")
+    assert "currentMode = BLINK_ALARM" in alarm and "setBoth(RED)" in alarm
+    for body in (steady, light, alarm):
+        assert "servoMoveTo(SERVO_CENTER)" in body
+        assert "hapticStart" not in body
+    # 점멸 주기는 비상정지와 같은 BLINK_MS(300ms), 색만 빨강이다.
+    assert re.search(
+        r"currentMode == BLINK_ALARM && now - lastBlink >= BLINK_MS\)\s*\{[^}]*"
+        r"setBoth\(blinkState \? RED : OFF\);", code)
+
+
+def test_firmware_estop_and_link_lost_patterns_unchanged():
+    """순찰을 넣으며 비상정지(주황 점멸)·통신 끊김(빨강 상시) 표시는 건드리지 않았다."""
+    code = _ino_code()
+    assert re.search(
+        r"currentMode == BLINK_BOTH && now - lastBlink >= BLINK_MS\)\s*\{[^}]*"
+        r"setBoth\(blinkState \? ORANGE : OFF\);", code)
+    lost = _case_body(code, "STATE_LINK_LOST")
+    assert "setBoth(RED)" in lost and "currentMode = NORMAL" in lost
+    assert "applyState(STATE_LINK_LOST);" in code
 
 
 def test_firmware_arrival_duration_is_3_5_seconds():

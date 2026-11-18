@@ -250,6 +250,8 @@ int main()
         core->on_estop(arg == "1");
       } else if (cmd == "goal") {
         core->on_goal(text(arg));
+      } else if (cmd == "rstate") {
+        core->on_robot_state(text(arg));
       } else if (cmd == "haptic") {
         core->on_haptic(text(arg));
       } else if (cmd == "send") {

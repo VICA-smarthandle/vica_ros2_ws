@@ -51,7 +51,7 @@ bool SerialLink::send(int state_code, int64_t now_ns)
 
 bool SerialLink::send_raw(int byte, int64_t now_ns)
 {
-  if (0 <= byte && byte <= protocol::STATE_CHARGED) {
+  if (0 <= byte && byte <= protocol::STATE_CODE_MAX) {
     throw PyError(
             "ValueError", "상태코드 범위(" + std::to_string(byte) +
             ")는 send_raw 로 보내지 않는다. send() 를 쓸 것.");

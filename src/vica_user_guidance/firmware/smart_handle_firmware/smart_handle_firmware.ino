@@ -31,6 +31,10 @@
 // I2C 호출(Wire.begin()·setWireTimeout) 세 가지다.
 // 빌드: arduino-cli compile --fqbn arduino:avr:nano firmware/smart_handle_firmware
 //
+// ── 2026-11-14 순찰 표시 (경비 모드) ──
+// 상태코드 8(연두 상시)·9(진노랑 상시)·10(빨강 300ms 점멸)을 더했다. LED 만 바뀐다 —
+// 서보는 가운데, 진동은 없다. 워치독·비상정지·초음파·터치는 그대로다.
+//
 // [주의] 이 장치는 안내 전용이다. 서보는 로봇을 조향하지 않고,
 //        LED 표시는 모터 정지를 보장하지 않는다. 정지 권한은 Safety 계층에 있다.
 
@@ -105,6 +109,14 @@
 #define STATE_MIN  STATE_NORMAL
 #define STATE_MAX  STATE_ARRIVED
 
+// ── 순찰 표시 (2026-11-14) ────────────────
+// 6·7 은 충전용 예약이라 건너뛴다(받아도 버린다). 수신 범위는 0~5 와 8~10 두 구간이다.
+#define STATE_PATROL        8   // 순찰 중: 연두 상시
+#define STATE_PATROL_LIGHT  9   // 불 켜짐: 진노랑 상시
+#define STATE_PATROL_ALARM 10   // 사람·큰 소리·카메라 끊김: 빨강 점멸(BLINK_MS)
+#define STATE_PATROL_MIN  STATE_PATROL
+#define STATE_PATROL_MAX  STATE_PATROL_ALARM
+
 // ── 워치독: 이 시간 동안 신호 없으면 통신두절로 판단 ──
 #define WATCHDOG_TIMEOUT_MS  1500
 
@@ -122,8 +134,13 @@ const uint32_t GREEN  = Adafruit_NeoPixel::Color(0,   255, 0  );
 // 직진과 색이 같으므로 구분은 전적으로 움직임에 의존한다.
 //   직진 = 상시 점등 / 도착 = 3회 점멸 후 직진 상태로 복귀
 const uint32_t OFF    = Adafruit_NeoPixel::Color(0,   0,   0  );
+// 순찰 색(2026-11-11 실물로 확정). 연두는 충전 예약 GREEN 과 다른 값이다.
+const uint32_t LIME         = Adafruit_NeoPixel::Color(110, 255, 0  );   // 순찰 중
+// 불 켜짐은 2026-11-16 에 연노랑(255,210,60)에서 진노랑으로 바꿨다. 실물에서 거의 흰색으로 보였다(사용자).
+// ORANGE(255,80,0) 와는 초록 값으로 구분한다.
+const uint32_t DEEP_YELLOW  = Adafruit_NeoPixel::Color(255, 170, 0  );   // 불 켜짐
 
-enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE };
+enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE, BLINK_ALARM };
 Mode    currentMode  = NORMAL;
 uint8_t currentState = STATE_NORMAL;
 
@@ -829,6 +846,26 @@ void applyState(uint8_t state) {
       // 2026-09-30: 도착 = 짧게 ×3. 홈 복귀 도착에도 울린다 — 해롭지 않아 둔다.
       hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
       break;
+
+    // ── 순찰 (2026-11-14). LED 만 바꾼다 — 서보는 가운데, 진동은 걸지 않는다 ──
+    case STATE_PATROL:
+      currentMode = NORMAL;
+      setBoth(LIME);
+      servoMoveTo(SERVO_CENTER);
+      break;
+
+    case STATE_PATROL_LIGHT:
+      currentMode = NORMAL;
+      setBoth(DEEP_YELLOW);
+      servoMoveTo(SERVO_CENTER);
+      break;
+
+    case STATE_PATROL_ALARM:
+      currentMode = BLINK_ALARM;
+      blinkState  = true;   // 빨강부터 켠다. 경보는 들어오자마자 보여야 한다
+      setBoth(RED);
+      servoMoveTo(SERVO_CENTER);
+      break;
   }
 }
 
@@ -911,7 +948,8 @@ void loop() {
       usAngleLv[US_SIDE_CH_L] = b - US_CMD_SIDE_ANGLE_BASE;
       usAngleLv[US_SIDE_CH_R] = b - US_CMD_SIDE_ANGLE_BASE;
       usCfgPending = true;
-    } else if (b >= STATE_MIN && b <= STATE_MAX) {
+    } else if ((b >= STATE_MIN && b <= STATE_MAX) ||
+               (b >= STATE_PATROL_MIN && b <= STATE_PATROL_MAX)) {   // 2026-11-14 순찰 8~10
       lastRxMillis    = now;
       watchdogTripped = false;
       everConnected   = true;   // 최초 1회만 의미 있음
@@ -966,6 +1004,14 @@ void loop() {
     lastBlink  = now;
     blinkState = !blinkState;
     setBoth(blinkState ? ORANGE : OFF);
+  }
+
+  // ── 순찰 경보 점멸 (2026-11-14) ─────────
+  // 비상정지와 같은 주기(BLINK_MS)에 색만 빨강이다. 통신 끊김(빨강 상시)과는 깜빡임으로 가른다.
+  if (currentMode == BLINK_ALARM && now - lastBlink >= BLINK_MS) {
+    lastBlink  = now;
+    blinkState = !blinkState;
+    setBoth(blinkState ? RED : OFF);
   }
 
   // ── 도착 점멸 (3회 후 자동 종료) ────────

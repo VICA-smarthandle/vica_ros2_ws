@@ -86,7 +86,11 @@ def test_default_config_matches_python_line_by_line():
                     'L W [초음파]', 'L I [초음파]', 'L I [HAPTIC]', 'L W [HAPTIC] 모르는',
                     'L W [HAPTIC] ', 'L I [HANDLE] ARRIVED', 'L I [HANDLE] LEFT',
                     'L I [HANDLE] RIGHT', 'L W [HANDLE] ESTOP(3) reason=estop_stale',
-                    'L W 초음파 프레임 수신 끊김', 'X '):
+                    'L W 초음파 프레임 수신 끊김', 'X ',
+                    # 순찰 표시(2026-11-14)
+                    'W 08', 'W 09', 'W 0a', 'L I [HANDLE] PATROL(8)',
+                    'L I [HANDLE] PATROL_LIGHT(9)', 'L I [HANDLE] PATROL_ALARM(10)',
+                    'L I [HAPTIC] 순찰 중'):
             total[key] = total.get(key, 0) + count(py, key)
     # 시험이 실제로 각 길을 지나갔는지 확인한다(빈 시나리오끼리 같아서 통과하는 일을 막는다).
     for key, n in total.items():
@@ -175,6 +179,51 @@ def test_other_configs_match_python(overrides):
     for seed in (7, 8):
         py, cpp = both(scenario(seed, 600, overrides))
         assert py == cpp, f'[{overrides}] seed {seed}: {first_difference(py, cpp)}'
+
+
+def test_patrol_priority_and_timeout_scenario():
+    """순찰 표시(2026-11-14) — 두 판이 같고, 나간 바이트가 명세(4.D)대로인지 손으로 짠 순서로 본다.
+
+    비상정지 > 순찰(8·9·10) > 도착·회전·기본, 순찰 중 진동 요청 무시,
+    /vica/robot_state 가 3 s 넘게 끊기면 기존 판단으로.
+    """
+    t0 = 1_000_000_000_000
+    sec = 1_000_000_000
+
+    def hx(s):
+        return s.encode().hex()
+
+    lines = ['P ' + json.dumps(base_params(), ensure_ascii=False),
+             f'T {t0}', 'R 1791000000000000000', 'start',
+             'estop 0', 'send',                                    # 00 기본
+             'rstate ' + hx('navigating'), 'turn 1', 'send',       # 01 순찰이 아니면 그대로
+             'rstate ' + hx('patrolling'), 'send',                 # 08 방향지시 안 냄
+             'goal ' + hx('{"event": "goal_succeeded"}'), 'send',  # 08 도착 깜빡임 안 냄
+             'haptic ' + hx('long'),                               # 진동 무시(11 안 나감)
+             'rstate ' + hx('patrol_dwell'), 'send',               # 08
+             'rstate ' + hx('patrol_paused'), 'send',              # 08
+             f'T {t0 + 5 * sec}', 'estop 0',                       # 도착 표시 시한(4 s)을 넘긴다
+             'rstate ' + hx('patrol_light'), 'send',               # 09
+             'rstate ' + hx('patrol_alarm'), 'send',               # 0a
+             'estop 1', 'send',                                    # 03 비상정지가 위
+             'estop 0', 'send',                                    # 0a
+             f'T {t0 + 8 * sec}', 'estop 0', 'send',               # 0a 딱 3 s 까지는 유지
+             f'T {t0 + 8 * sec + 1}', 'send',                      # 00 끊김 → 기존 판단
+             'turn 2', 'send',                                     # 02
+             'haptic ' + hx('long'),                               # 11 진동도 다시 나감
+             'rstate ' + hx('patrolling'), 'send',                 # 08 다시 오면 다시 켠다
+             'rstate ' + hx('idle'), 'turn 0', 'send',             # 00 순찰이 끝나면 바로
+             'shutdown']                                           # 00
+    py, cpp = both('\n'.join(lines) + '\n')
+    assert py == cpp, first_difference(py, cpp)
+    out = py.splitlines()
+    written = [line[2:] for line in out if line.startswith('W ')]
+    assert written == ['00', '01', '08', '08', '08', '08', '09', '0a', '03', '0a', '0a', '00',
+                       '02', '11', '08', '00', '00'], written
+    assert 'L I [HAPTIC] 순찰 중 — long 무시' in out
+    assert 'L I [HANDLE] PATROL(8) reason=patrol' in out
+    assert 'L I [HANDLE] PATROL_LIGHT(9) reason=patrol_light' in out
+    assert 'L I [HANDLE] PATROL_ALARM(10) reason=patrol_alarm' in out
 
 
 def test_startup_errors_are_the_python_errors():
