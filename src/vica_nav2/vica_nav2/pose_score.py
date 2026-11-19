@@ -28,6 +28,7 @@ ROS 배선은 pose_bootstrap_node 가 한다.
 
 from dataclasses import dataclass
 import math
+import zlib
 
 import numpy as np
 
@@ -210,6 +211,20 @@ class MatchResult:
     moved_m: float
     moved_deg: float
     at_yaw_edge: bool
+
+
+def map_fingerprint(width, height, resolution, origin_x, origin_y, data) -> tuple:
+    """같은 지도인지 가르는 열쇠. 크기·원점이 같아도 칸 내용이 다르면 달라진다.
+
+    pose_bootstrap_node 가 "같은 지도면 거리표를 다시 만들지 않는다"에 쓴다. 종전 열쇠는
+    크기·원점뿐이었는데, 앱의 지도 수정(2026-11-19)은 크기·원점을 그대로 두고 칸만 바꿔
+    load_map 으로 다시 읽힌다. 내용 지문(crc32)을 넣지 않으면 옛 거리표로 계속 채점한다.
+    """
+    cells = np.asarray(data, dtype=np.int8)
+    return (
+        int(width), int(height), float(resolution), float(origin_x), float(origin_y),
+        int(cells.size), zlib.crc32(cells.tobytes()),
+    )
 
 
 def filter_beams(
