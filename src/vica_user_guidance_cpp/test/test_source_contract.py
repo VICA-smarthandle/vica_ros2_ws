@@ -28,8 +28,12 @@ def test_sources_never_touch_drive_command_path():
 def test_estop_state_is_subscribed_never_published():
     node = (PKG / 'src' / 'user_guidance_driver_node.cpp').read_text(encoding='utf-8')
     assert re.search(r'create_subscription<std_msgs::msg::Bool>\(\s*"/estop_state"', node)
+    # 글자로 이름을 박은 발행자는 상태 둘뿐이다. /vica/ultrasonic/front_enabled 는 앱 '전방 초음파'
+    # 스위치의 현재 값(2026-11-18) — /estop_state 를 내지 않는다는 이 시험의 뜻은 그대로다.
+    allowed = {'"/vica/smart_handle_state"', '"/vica/ultrasonic/front_enabled"'}
     for call in re.finditer(r'create_publisher<[^>]*>\(\s*("[^"]*")', node):
-        assert call.group(1) == '"/vica/smart_handle_state"', call.group(0)
+        assert call.group(1) in allowed, call.group(0)
+    assert '"/estop_state"' not in re.findall(r'create_publisher<[^>]*>\(\s*("[^"]*")', node)
 
 
 def test_robot_state_is_subscribed_like_python():

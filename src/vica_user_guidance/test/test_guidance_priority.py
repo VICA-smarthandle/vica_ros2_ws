@@ -373,9 +373,9 @@ def test_patrol_never_received_or_time_reversed_is_ignored():
     ).state_code == protocol.STATE_NORMAL
 
 
-@pytest.mark.parametrize("code", [1, 3, 4, 5, 6, 7, 11, -1, 255])
+@pytest.mark.parametrize("code", [1, 3, 4, 5, 7, 11, -1, 255])
 def test_non_patrol_code_in_patrol_slot_is_ignored(code):
-    """순찰 칸에 8·9·10 이 아닌 값이 와도 그대로 내보내지 않는다(특히 4·6·7)."""
+    """순찰 칸에 6·8·9·10 이 아닌 값이 와도 그대로 내보내지 않는다(특히 4·7). 6 은 2026-11-18 도킹(docked)."""
     assert active_patrol_code(code, NOW, NOW) == PATROL_NONE
     assert resolve_patrol(code).state_code == protocol.STATE_NORMAL
 
@@ -412,3 +412,9 @@ def test_all_outputs_are_sendable():
         for patrol in (0, 4, 6, 7, 8, 9, 10, 11):
             out = resolve_patrol(patrol, **case)
             assert protocol.is_sendable(out.state_code), f"{case} patrol={patrol} -> {out}"
+
+
+def test_docked_sits_in_patrol_slot_below_estop():
+    """2026-11-18 도킹: docked(6)는 순찰 자리 — 도착·회전보다 위, 비상정지보다 아래."""
+    assert active_patrol_code(protocol.STATE_DOCKED, NOW, NOW) == protocol.STATE_DOCKED
+    assert resolve_patrol(protocol.STATE_DOCKED).state_code == protocol.STATE_DOCKED

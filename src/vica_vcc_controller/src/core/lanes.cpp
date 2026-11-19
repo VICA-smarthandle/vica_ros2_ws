@@ -9,6 +9,12 @@ namespace vica_vcc_controller::core
 namespace
 {
 bool same(double a, double b) {return std::abs(a - b) < 1e-6;}
+
+// 지금 목표보다 레일 쪽(같은 편)인 후보인가. 목표가 레일(0)이면 늘 false.
+bool towardRail(double cand, double target)
+{
+  return std::abs(cand) < std::abs(target) - 1e-9 && cand * target >= -1e-9;
+}
 }
 
 void LaneSelector::reset()
@@ -102,6 +108,14 @@ void LaneSelector::update(
       pending_count_ = 0;
     } else if (!same(best->offset, target_) && best->score < cur->score - p_.switch_margin) {
       if (same(pending_, best->offset) && pending_count_ > 0) {
+        ++pending_count_;
+      } else if (pending_count_ > 0 && towardRail(pending_, target_) &&
+        towardRail(best->offset, target_))
+      {
+        // 레일 쪽 후보끼리 1등만 바뀌었다 — 기다린 시간을 처음부터 다시 세지 않고 이어서 센다.
+        // run102(10-21): 0.3 ↔ 0 이 번갈아 1등이 되며 1 s 를 다시 세느라 복귀가 4~5 s 걸렸다
+        // (2026-11-14 사용자 결정). 20 cm 여유 규칙과 바깥쪽 전환(persist_cycles)은 그대로다.
+        pending_ = best->offset;
         ++pending_count_;
       } else {
         pending_ = best->offset;

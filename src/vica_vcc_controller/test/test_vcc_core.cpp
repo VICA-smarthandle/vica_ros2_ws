@@ -446,6 +446,88 @@ TEST(VccCore, TurnExitKeepsNearestLaneAsTarget)
   EXPECT_NEAR(out.offset, 0.4, 0.011);
 }
 
+namespace
+{
+// 유턴을 마치고 레일 왼쪽 0.4 m 에 나온 상태(target 0.4·offset 0.4)를 만든다 — 빈 곳에서 target ≠ 0 을 얻는 길.
+CoreOutput exitTurnAtLeft04(VccCore & c, const World & w, double & t)
+{
+  Path back;
+  for (double s = 0.0; s <= 0.1; s += 0.05) {back.push_back({s, 0.0, 0.0});}
+  for (double s = 0.05; s <= 2.0; s += 0.05) {back.push_back({0.1 - s, 0.0, M_PI});}
+  CoreOutput out = c.step(inputs(back, w, t, 0.3));
+  for (int i = 1; i <= 10 && out.state != State::Track; ++i) {
+    t += 0.1;
+    out = c.step(inputs(line(-0.4, 0.0), w, t, 0.4));
+  }
+  return out;
+}
+}  // namespace
+
+TEST(VccCore, NewPathFromRobotDoesNotPushTheLaneAgain)
+{
+  // run106(11-14): 경로가 1 s 마다 로봇 자리에서 다시 그려지는데 d 만 다시 맞추고 목표 0.4 는 그대로라
+  // 새 경로에서 또 0.4 옆으로 갔다(7 s 에 레일에서 0.25 -> 0.85 m). 목표도 같은 만큼 옮겨 지금 자리를 지킨다.
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out = exitTurnAtLeft04(c, w, t);
+  ASSERT_EQ(out.state, State::Track);
+  ASSERT_NEAR(out.target, 0.4, 1e-9);
+  c.onNewPath();                                       // 새 경로: 로봇 자리(옆 0)에서 시작
+  out = c.step(inputs(line(0.0, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(0.0, 0.0), w, t += 0.1, 0.4));
+  EXPECT_NEAR(out.offset, 0.0, 0.011);
+  EXPECT_NEAR(out.target, 0.0, 1e-9) << "예전 코드는 0.4 — 새 경로에서 또 0.4 옆으로 감";
+}
+
+TEST(VccCore, LagResyncWithoutNewPathKeepsTheTarget)
+{
+  // 새 경로 없이 로봇이 차선을 늦게 따라와 d 를 다시 맞춘 경우(run48 기록: 다시 맞춤의 36 %)는 목표를
+  // 옮기지 않는다 — 옮기면 피하던 폭이 줄어든다(부작용 ①).
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out = exitTurnAtLeft04(c, w, t);
+  ASSERT_NEAR(out.target, 0.4, 1e-9);
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  ASSERT_NEAR(out.offset, 0.1, 0.011);
+  EXPECT_NEAR(out.target, 0.4, 1e-9);
+}
+
+TEST(VccCore, NewPathShiftsThePartlyDoneLane)
+{
+  // 목표 0.4 인데 실제로는 0.1 에 있는 상태(늦게 따라옴, d 맞춤 0.1)에서 새 경로가 로봇 자리보다 0.3 왼쪽에서
+  // 시작하면(로봇은 새 경로 오른쪽 0.3), 목표의 세계 위치를 지켜 새 경로 기준 0.4 + (−0.3 − 0.1) = 0.0 이 된다.
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out = exitTurnAtLeft04(c, w, t);
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  ASSERT_NEAR(out.offset, 0.1, 0.011);
+  c.onNewPath();
+  out = c.step(inputs(line(0.3, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(0.3, 0.0), w, t += 0.1, 0.4));
+  EXPECT_NEAR(out.offset, -0.3, 0.011);
+  EXPECT_NEAR(out.target, 0.0, 1e-9);
+}
+
+TEST(VccCore, NewPathWithRailTargetStaysOnTheNewPath)
+{
+  // 목표가 레일(0)이면 '경로를 따른다'는 뜻 — 새 경로로 d 를 맞춰도 목표는 0 그대로.
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out;
+  for (int i = 0; i < 3; ++i, t += 0.1) {out = c.step(inputs(line(0.0, 0.0), w, t, 0.3));}
+  c.onNewPath();
+  out = c.step(inputs(line(-0.4, 0.0), w, t, 0.3));
+  out = c.step(inputs(line(-0.4, 0.0), w, t + 0.1, 0.3));
+  EXPECT_NEAR(out.offset, 0.4, 0.011);
+  EXPECT_NEAR(out.target, 0.0, 1e-9);
+}
+
 TEST(VccCore, StopsInsideTheGoalCheckerCircle)
 {
   // 멈춤 반경은 checker 원(xy_tol)보다 arrive_margin 안쪽이다. 경계 0.14 에서는 아직 다가간다 —

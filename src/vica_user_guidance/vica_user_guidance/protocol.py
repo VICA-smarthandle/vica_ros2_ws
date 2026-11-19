@@ -12,9 +12,10 @@ STATE_RIGHT: int = 2
 STATE_ESTOP: int = 3
 STATE_LINK_LOST: int = 4
 STATE_ARRIVED: int = 5
-STATE_CHARGING: int = 6   # [TARGET] 펌웨어 미구현. 충전 상태 입력원 미정
+# 도크에 들어가 있음(2026-11-18) — 연두 숨쉬기(펌웨어 da11eee STATE_DOCKED). 옛 이름 STATE_CHARGING(예약)을 대신한다.
+STATE_DOCKED: int = 6
 STATE_CHARGED: int = 7    # [TARGET] 펌웨어 미구현
-# 순찰 표시(2026-11-14). 6·7 은 충전용 예약 그대로 비워 둔다.
+# 순찰 표시(2026-11-14).
 STATE_PATROL: int = 8         # 순찰 중 — 연두 상시
 STATE_PATROL_LIGHT: int = 9   # 불 켜짐 — 진노랑 상시
 STATE_PATROL_ALARM: int = 10  # 사람·큰 소리·카메라 끊김 — 빨강 300ms 점멸
@@ -26,7 +27,7 @@ STATE_CODE_MAX: int = STATE_PATROL_ALARM   # 상태코드 범위 0~10 의 끝
 # 발동하는 코드다. ROS가 이를 전송하면 펌웨어의 lastRxMillis가 갱신되어 실제 통신
 # 단절을 영원히 감지하지 못하게 된다.
 #
-# 코드 6·7은 펌웨어에 아직 없으므로 제외한다. 보내도 펌웨어가 버린다.
+# 코드 7은 펌웨어에 아직 없으므로 제외한다. 보내도 펌웨어가 버린다.
 SENDABLE_STATE_CODES: FrozenSet[int] = frozenset(
     {
         STATE_NORMAL,
@@ -34,6 +35,7 @@ SENDABLE_STATE_CODES: FrozenSet[int] = frozenset(
         STATE_RIGHT,
         STATE_ESTOP,
         STATE_ARRIVED,
+        STATE_DOCKED,
         STATE_PATROL,
         STATE_PATROL_LIGHT,
         STATE_PATROL_ALARM,
@@ -47,7 +49,7 @@ STATE_NAMES = {
     STATE_ESTOP: "ESTOP",
     STATE_LINK_LOST: "LINK_LOST",
     STATE_ARRIVED: "ARRIVED",
-    STATE_CHARGING: "CHARGING",
+    STATE_DOCKED: "DOCKED",
     STATE_CHARGED: "CHARGED",
     STATE_PATROL: "PATROL",
     STATE_PATROL_LIGHT: "PATROL_LIGHT",

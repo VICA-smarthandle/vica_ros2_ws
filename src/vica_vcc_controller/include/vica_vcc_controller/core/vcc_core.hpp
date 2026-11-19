@@ -148,6 +148,7 @@ private:
   double stopped_since_{-1.0};
   int resync_count_{0};          // 옆 오차가 문턱을 넘은 연속 주기 수
   bool resync_primed_{false};    // reset 뒤 첫 경로를 받았는가(첫 주기는 바로 맞춘다)
+  bool resync_new_path_{false};  // 지금 어긋남이 새 경로 첫 주기에 시작됐나(목표 차선도 옮길지)
   double align_failed_since_{-1.0};   // 도착 정렬 Failed 가 시작된 시각(재무장용)
   double need_since_{-1.0};      // 조준각이 Turn 진입 문턱을 넘기 시작한 시각(C 진입 지속)
   double turn_target_{0.0};      // Turn 에서 붙든 지도 기준 목표 방향

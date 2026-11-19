@@ -12,8 +12,8 @@ IDENTITY = "아까 화장실 입구에 가자고 하신 사용자님이신가요
 REJECT = "죄송합니다. 다른 분을 안내 중이라 지금은 이용하실 수 없어요."
 
 
-def waiting(gate: bool = True):
-    logic, _ = arrive(speaker_gate=gate)
+def waiting(gate: bool = True, grip_check: bool = False):
+    logic, _ = arrive(speaker_gate=gate, speaker_gate_grip=grip_check)
     released(logic, now=3.0)
     logic.on_tick(10.0, NavStatus.SUCCEEDED)
     assert logic.state == State.WAITING
@@ -48,8 +48,23 @@ def test_wait_first_wake_in_use_ment():
     assert MSG_WAIT_LOCATE in said(waiting(gate=False).on_wake_call(20.0))
 
 
-def test_no_grip_handle_hint():
+def test_grip_check_off_by_default_judges_by_voice_only():
+    """2026-11-14 실기: 대기 중 명령 8건 중 5건이 손잡이 안내로 막힘(사용자 "너무 불편") → 손잡이 조건 기본 꺼짐."""
     logic = waiting()
+    grip(logic, 19.5, contact=False)
+    acts = voice(logic, it("cancel", "pass"), 20.0)
+    assert said(acts) == [MSG_WAIT_NEED_ASK] and not any(isinstance(a, Haptic) for a in acts)
+
+
+def test_grip_check_off_voice_fail_goes_to_reask_not_hint():
+    logic = waiting()
+    grip(logic, 19.5, contact=False)
+    acts = voice(logic, it("cancel", "fail"), 20.0)
+    assert said(acts) == [REASK] and not any(isinstance(a, Haptic) for a in acts)
+
+
+def test_no_grip_handle_hint():
+    logic = waiting(grip_check=True)
     grip(logic, 19.5, contact=False)
     acts = voice(logic, it("cancel", "pass"), 20.0)
     assert said(acts) == [MSG_HANDLE_HINT] and any(isinstance(a, Haptic) for a in acts)
@@ -57,7 +72,7 @@ def test_no_grip_handle_hint():
 
 
 def test_sensor_stale_skips_grip():
-    logic = waiting()
+    logic = waiting(grip_check=True)
     grip(logic, 10.0, contact=False)                       # 마지막 메시지가 10 s 전 — 보드 끊김
     assert said(voice(logic, it("cancel", "pass"), 20.0)) == [MSG_WAIT_NEED_ASK]
 

@@ -222,7 +222,9 @@ class TestTransitions:
 
     def test_confirm_then_same_dest_navigates(self):
         logic = MissionLogic()
-        assert logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0) == []
+        asked = logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        # 확인 질문은 미션이 한다(3-가 결정 A — 예전엔 음성이 묻고 미션은 말이 없었다).
+        assert [(a.expects_reply, a.kind) for a in asked] == [(True, "confirm")]
         assert logic.state == State.CONFIRMING
         actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 5.0)
         assert logic.state == State.NAVIGATING

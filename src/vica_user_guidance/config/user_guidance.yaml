@@ -176,15 +176,20 @@ user_guidance_driver_node:
     #   1 왼쪽 바퀴 옆 0x68 · 2 앞 왼쪽 0x69 · 3 앞 오른쪽 0x6A · 4 오른쪽 바퀴 옆 0x6B
     #   5 오른쪽 뒷바퀴 옆 0x6F · 6 후방 오른쪽 0x6E · 7 후방 왼쪽 0x6D · 8 왼쪽 뒷바퀴 옆 0x6C
     # 토픽 이름은 nav2_params.yaml 의 range_sensor_* 레이어와 짝이다.
+    # 2026-11-18 사용자(도킹 후진, A안): 뒤 두 개(6·7번)는 /ultrasonic/dock_rear_* 로 낸다. costmap 의 rear 층은
+    # /ultrasonic/rear_* 를 구독하므로 이름을 바꿔 두면 손잡이 잡은 사용자가 장애물로 찍히지 않는다. 도킹 후진 때만 읽는다.
+    # 되돌리기: /ultrasonic/rear_right · /ultrasonic/rear_left.
+    # 같은 날 뒷바퀴 옆 두 개(5·8번)도 회전 중 감시용으로 /ultrasonic/dock_*_rear_wheel (costmap 은 *_rear_wheel 구독).
+    # 되돌리기: /ultrasonic/right_rear_wheel · /ultrasonic/left_rear_wheel.
     ultrasonic_topics:
       - /ultrasonic/left_wheel
       - /ultrasonic/front_left
       - /ultrasonic/front_right
       - /ultrasonic/right_wheel
-      - /ultrasonic/right_rear_wheel
-      - /ultrasonic/rear_right
-      - /ultrasonic/rear_left
-      - /ultrasonic/left_rear_wheel
+      - /ultrasonic/dock_right_rear_wheel
+      - /ultrasonic/dock_rear_right
+      - /ultrasonic/dock_rear_left
+      - /ultrasonic/dock_left_rear_wheel
     # URDF 링크 이름과 반드시 일치해야 한다. 다르면 TF 를 못 찾아 costmap 이 버린다.
     # (vica_description/urdf/VICA.xacro 초음파 절)
     ultrasonic_frame_ids:
@@ -247,12 +252,19 @@ user_guidance_driver_node:
     # 레벨 3)·그리는 폭 30° 로 옛 A/B 설정(2026-09-02)과 같게. 되돌리기: [1.047, 0.524, 0.524, 1.047, -1, -1, -1, -1].
     # 2026-10-09 run80 뒤(사용자 결정 B): 앞 두 개는 물리 30°(펌웨어 레벨 1)·그리는 폭 20°(0.349). global costmap 에도
     # 들어가 레일 막힘 판정까지 번지므로 물리 빔을 좁혔다. 1.5 m 에서 칠하는 폭 0.80 -> 0.53 m. 되돌리기: 전부 -1.0.
-    ultrasonic_fov_rad_per_channel: [-1.0, 0.349, 0.349, -1.0, -1.0, -1.0, -1.0, -1.0]
+    # 2026-11-18 사용자(도킹 후진): 뒤 두 개 60°(1.047) — 펌웨어 레벨 4 와 짝. 되돌리기: 그 두 칸 -1.0.
+    # 같은 날 뒷바퀴 옆 두 개(ch4·ch7)도 60°. 되돌리기: 그 두 칸 -1.0.
+    ultrasonic_fov_rad_per_channel: [-1.0, 0.349, 0.349, -1.0, 1.047, 1.047, 1.047, 1.047]
     ultrasonic_min_range_m: 0.02
     ultrasonic_max_range_m: 1.50
     # 채널별 최대 거리(순서 = ultrasonic_topics, 0 이하 = 위 공통값). 2026-10-09: 바퀴 옆 두 개는 0.40 m —
     # VCC 직접 읽기 때 쓰던 us_max_range_per_topic 0.40 과 같은 범위로 costmap 에 칠해 공정하게 비교한다.
-    ultrasonic_max_range_m_per_channel: [0.40, -1.0, -1.0, 0.40, -1.0, -1.0, -1.0, -1.0]
+    # 2026-11-18 사용자(도킹 후진): 뒤 두 개 0.70 m — 출발 전 확인 거리(후진 0.50 + 손잡이 0.11 + 여유 0.09).
+    # 그보다 먼 것은 '없음'(max_range)으로 낸다. 되돌리기: 그 두 칸 -1.0.
+    # 같은 날 뒷바퀴 옆 두 개(ch4·ch7)도 0.70 m(회전 감시, 정지 0.25·재출발 0.30). 되돌리기: 그 두 칸 -1.0.
+    # 같은 날 사용자: 후진 85 cm(≈0.71 m)로 늘어 뒤 두 개(ch5·ch6)만 0.80 m. 0.96 m(후진+0.25)는 다 못 보지만
+    # 너무 올리지 않기로 함 — 0.80~0.96 m 물체는 후진 10~16 cm 뒤 보여 그때 대기. 되돌리기: 그 두 칸 0.70.
+    ultrasonic_max_range_m_per_channel: [0.40, -1.0, -1.0, 0.40, 0.70, 0.80, 0.80, 0.70]
     # 라운드 발사라 채널별 측정 시점이 다르다. 8채널 프레임은 라운드 D 를 읽은 직후
     # 나가고, 각 채널은 자기 라운드의 트리거 시각(GAP 5 + WAIT 100 = 105ms 단위)만큼
     # 과거다: A(앞 왼쪽·후방 오른쪽) 420 / B(앞 오른쪽·후방 왼쪽) 315 /
@@ -261,7 +273,19 @@ user_guidance_driver_node:
     # 2026-10-09 run79 뒤(사용자 결정): 앞 두 개만 켬(펌웨어 US_CH_ON) → A·B 2라운드, 프레임은 B 뒤.
     # 앞 왼쪽(A) 210·앞 오른쪽(B) 105. 꺼진 채널 값은 쓰이지 않아 옛 값 그대로 둔다.
     # 전부 켜기(엘리베이터·로봇팔): [210, 420, 315, 210, 105, 420, 315, 105] + 아래 enabled 전부 true + 펌웨어 US_CH_ON 전부 1.
-    ultrasonic_measurement_delay_ms: [210, 210, 105, 210, 105, 420, 315, 105]
+    # 2026-11-18(도킹 후진): 뒤 두 개만 켬 → A·B 2라운드, 프레임은 B 뒤 → 뒤 오른쪽(A) 210·뒤 왼쪽(B) 105.
+    # 같은 날 뒷바퀴 옆 두 개 추가 → 켜진 라운드 A·B·D, 프레임은 D 뒤 → ch5(A) 315·ch6(B) 210·ch4/ch7(D) 105.
+    # 2026-11-18 사용자(앱 '전방 초음파' 스위치): 앞 둘도 다시 켬 → 라운드는 A·B·D 그대로(앞은 뒤와 같은
+    # 라운드를 나눠 씀), 프레임은 D 뒤 → 앞 왼쪽(A) 315·앞 오른쪽(B) 210. 앞은 315 ms 마다 한 번(3.2 Hz).
+    ultrasonic_measurement_delay_ms: [210, 315, 210, 210, 105, 315, 210, 105]
     # 채널별 켜기(순서 = ultrasonic_topics). 2026-10-09: 주행에는 앞 두 개만 — 바퀴 옆·뒤는 주행에 영향 없게 끈다.
-    ultrasonic_channel_enabled: [false, true, true, false, false, false, false, false]
+    # 2026-10-30·11-14 사용자: 앞 두 개도 끈다(펌웨어 US_CH_ON 전부 0). 되돌리기 [false, true, true, false, false, false, false, false].
+    # 끄면 /ultrasonic/front_right 가 안 나와 system_monitor handle_uplink 가 GUIDANCE_UPLINK_STALE(DEGRADED)를 낸다.
+    # 2026-11-18 사용자(도킹 후진): 뒤 두 개(6·7번)만 켠다. 펌웨어 US_CH_ON {0,0,0,0,0,1,1,0} 와 짝.
+    # 되돌리기: 전부 false + 펌웨어 전부 0.
+    # 같은 날 뒷바퀴 옆 두 개(5·8번)도 켬. 펌웨어 US_CH_ON {0,0,0,0,1,1,1,1} 와 짝.
+    # 2026-11-18 사용자: 주행 기본은 앞 두 개 켬, 앱 시스템 진단에서 실행 중에 끄고 켠다
+    # (/vica/ultrasonic/front_enable, C++ 판만). 펌웨어 US_CH_ON {0,1,1,0,1,1,1,1} 와 짝.
+    # 뒤 넷은 도킹용 /ultrasonic/dock_* 라 costmap 에 들어가지 않는다.
+    ultrasonic_channel_enabled: [false, true, true, false, true, true, true, true]
     ultrasonic_stale_warn_sec: 2.0

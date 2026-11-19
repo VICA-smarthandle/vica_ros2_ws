@@ -8,10 +8,13 @@
     ros2 launch vica_mission_manager mission_manager.launch.py \
         destinations_yaml:=/path/to/destinations.yaml map_yaml:=/path/to/map.yaml
 """
+import os
 from typing import List
 
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import (
     EnvironmentVariable,
     LaunchConfiguration,
@@ -19,6 +22,37 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def _docking_nodes(map_id) -> List[Node]:
+    """도킹 노드(2026-11-18) — 미션이 유일한 지휘자라 미션과 같이 뜨고 같이 내린다.
+
+    같은 목적지 파일 경로·지도 이름을 받아 같은 폴더의 dock.yaml 을 쓴다. 평소 구독 0개.
+    vica_docking 이 빌드되지 않은 설치본이면 조용히 뺀다(미션은 도킹 없이 그대로 돈다).
+    """
+    try:
+        share = get_package_share_directory("vica_docking")
+    except PackageNotFoundError:
+        return []
+    return [
+        Node(
+            package="vica_docking",
+            executable="vica_docking_node",
+            name="vica_docking",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_docking")),
+            parameters=[
+                os.path.join(share, "config", "docking.yaml"),
+                {
+                    "destinations_path": ParameterValue(
+                        LaunchConfiguration("destinations_yaml"), value_type=str),
+                    "map_id": ParameterValue(map_id, value_type=str),
+                    "trace_dir": ParameterValue(
+                        LaunchConfiguration("docking_trace_dir"), value_type=str),
+                },
+            ],
+        )
+    ]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -42,6 +76,9 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=default_destinations,
             ),
             DeclareLaunchArgument("map_yaml", default_value=""),
+            # 도킹(2026-11-18). false 면 도킹 노드를 띄우지 않는다. 시험 기록 폴더는 비우면 남기지 않는다.
+            DeclareLaunchArgument("use_docking", default_value="true"),
+            DeclareLaunchArgument("docking_trace_dir", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
             # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 100 % = 0.5 m/s.
@@ -175,6 +212,8 @@ def generate_launch_description() -> LaunchDescription:
             # (2026-11-11 설계 speaker-follow). 음성 쪽 VICA_SPK_FOLLOW=on 과 함께 켠다. 기본 꺼짐 = 지금 그대로.
             DeclareLaunchArgument("speaker_gate", default_value="false"),
             DeclareLaunchArgument("spk_joined_threshold", default_value="0.50"),
+            # speaker_gate_grip: 대기 중 명령에 손잡이 접촉(최근 10 s)도 요구. 2026-11-14 실기에서 불편해 기본 꺼짐.
+            DeclareLaunchArgument("speaker_gate_grip", default_value="false"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # 경비(순찰) 모드(2026-11-14, ~/vica_data/patrol_plan/SPEC.md 4.A). 값은 사용자 결정·11-10·11 실기 근거.
@@ -298,6 +337,10 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("spk_joined_threshold"),
                             value_type=float,
                         ),
+                        "speaker_gate_grip": ParameterValue(
+                            LaunchConfiguration("speaker_gate_grip"),
+                            value_type=bool,
+                        ),
                         "obstacle_narration": ParameterValue(
                             LaunchConfiguration("obstacle_narration"),
                             value_type=bool,
@@ -329,5 +372,6 @@ def generate_launch_description() -> LaunchDescription:
                 output="screen",
                 parameters=[{"pulse_sec": LaunchConfiguration("estop_pulse_sec")}],
             ),
+            *_docking_nodes(map_id),
         ]
     )

@@ -36,13 +36,13 @@ def test_link_lost_is_not_sendable():
 
 def test_unimplemented_charging_codes_are_not_sendable():
     """코드 6·7은 펌웨어 미구현이므로 전송 대상이 아니다."""
-    assert protocol.is_sendable(protocol.STATE_CHARGING) is False
+    assert protocol.is_sendable(protocol.STATE_DOCKED) is True   # 2026-11-18 도킹 LED
     assert protocol.is_sendable(protocol.STATE_CHARGED) is False
 
 
 def test_sendable_codes_are_exactly_eight():
     """전송 가능한 코드는 0,1,2,3,5 와 순찰 8,9,10 여덟 개다(2026-11-14 순찰 3개 추가)."""
-    assert protocol.SENDABLE_STATE_CODES == frozenset({0, 1, 2, 3, 5, 8, 9, 10})
+    assert protocol.SENDABLE_STATE_CODES == frozenset({0, 1, 2, 3, 5, 6, 8, 9, 10})
 
 
 # ── 순찰 표시 (2026-11-14, 경비 모드 명세 4.D) ─────────
@@ -57,7 +57,7 @@ def test_patrol_codes_match_firmware_defines():
     """순찰 코드 8·9·10 은 펌웨어 #define 과 같다. 6·7(충전 예약)은 그대로 비어 있다."""
     assert (protocol.STATE_PATROL, protocol.STATE_PATROL_LIGHT,
             protocol.STATE_PATROL_ALARM) == (8, 9, 10)
-    assert (protocol.STATE_CHARGING, protocol.STATE_CHARGED) == (6, 7)
+    assert (protocol.STATE_DOCKED, protocol.STATE_CHARGED) == (6, 7)
     assert protocol.STATE_CODE_MAX == 10
     code = _ino_code()
     assert re.search(r"#define\s+STATE_PATROL\s+8\b", code)
@@ -163,3 +163,15 @@ def test_firmware_constants_match_ino_source():
         in source
     )
     assert f"Serial.begin({protocol.FIRMWARE_BAUDRATE})" in source
+
+
+def test_docked_code_matches_firmware_define():
+    """2026-11-18 도킹: dialog_state "docked" → 6(연두 숨쉬기). 펌웨어 STATE_DOCKED 와 같은 값."""
+    from pathlib import Path
+    from vica_user_guidance.guidance_priority import patrol_state_code
+    ino = (Path(__file__).resolve().parents[1] / "firmware" / "smart_handle_firmware"
+           / "smart_handle_firmware.ino").read_text(encoding="utf-8")
+    assert "#define STATE_DOCKED      6" in ino
+    assert patrol_state_code("docked") == protocol.STATE_DOCKED == 6
+    assert patrol_state_code("docking") == 0      # 들어가는 중은 평상시 표시
+    assert patrol_state_code("undocking") == 0

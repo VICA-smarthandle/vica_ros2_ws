@@ -34,3 +34,7 @@ int32 wait_minutes             # wait 의 요청 시간(분). 없거나 무관�
 string speaker_verdict         # pass / fail / short / no_target, 판정 없으면 ""
 float32 speaker_score          # 등록 목소리와의 점수(0~1), 없으면 -1
 float32 speaker_score_joined   # 직전 발화와 이어 붙인 점수(되묻기용), 없으면 -1
+# 질문 넘김(설계 2026-11-14 4.2·4.4, 3-가) — 음성이 말하지 않은 질문 문장. 미션이 말하고 질문 기록을 낸다.
+string ask_text                # 미션이 말할 질문 문장. 없으면 ""
+string ask_kind                # open / confirm / choice / yesno / yesno_inverted / minutes
+string[] ask_option_ids        # 고르기 후보 목적지 id

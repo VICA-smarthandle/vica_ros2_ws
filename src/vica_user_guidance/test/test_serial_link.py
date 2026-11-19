@@ -166,7 +166,7 @@ def test_unimplemented_charging_codes_rejected():
         serial_factory=lambda **kw: port,
     )
     with pytest.raises(ValueError):
-        link.send(protocol.STATE_CHARGING, NOW)
+        link.send(protocol.STATE_CHARGED, NOW)
 
 
 @pytest.mark.parametrize(
