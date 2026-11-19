@@ -990,7 +990,7 @@ def test_get_for_a_missing_file_says_everything_is_watched(node):
 
 
 def test_patrol_adds_exactly_one_subscription_and_no_timer_or_thread():
-    assert NODE_SRC.count("create_subscription(") == 25      # 순찰 전 24 + /vica/patrol/event
+    assert NODE_SRC.count("create_subscription(") == 26      # 순찰 전 24 + /vica/patrol/event + /vica/dock/state(11-18 도킹)
     assert NODE_SRC.count('"/vica/patrol/event"') == 1
     assert NODE_SRC.count('"/vica/patrol/watch"') == 1       # 감시 항목 알림 — 발행자 하나, 구독 없음
     assert NODE_SRC.count("create_timer(") == 3              # 틱·robot_state·장애물 판정 — 그대로

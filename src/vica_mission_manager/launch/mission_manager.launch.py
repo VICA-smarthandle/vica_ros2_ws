@@ -8,10 +8,13 @@
     ros2 launch vica_mission_manager mission_manager.launch.py \
         destinations_yaml:=/path/to/destinations.yaml map_yaml:=/path/to/map.yaml
 """
+import os
 from typing import List
 
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import (
     EnvironmentVariable,
     LaunchConfiguration,
@@ -19,6 +22,37 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def _docking_nodes(map_id) -> List[Node]:
+    """도킹 노드(2026-11-18) — 미션이 유일한 지휘자라 미션과 같이 뜨고 같이 내린다.
+
+    같은 목적지 파일 경로·지도 이름을 받아 같은 폴더의 dock.yaml 을 쓴다. 평소 구독 0개.
+    vica_docking 이 빌드되지 않은 설치본이면 조용히 뺀다(미션은 도킹 없이 그대로 돈다).
+    """
+    try:
+        share = get_package_share_directory("vica_docking")
+    except PackageNotFoundError:
+        return []
+    return [
+        Node(
+            package="vica_docking",
+            executable="vica_docking_node",
+            name="vica_docking",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_docking")),
+            parameters=[
+                os.path.join(share, "config", "docking.yaml"),
+                {
+                    "destinations_path": ParameterValue(
+                        LaunchConfiguration("destinations_yaml"), value_type=str),
+                    "map_id": ParameterValue(map_id, value_type=str),
+                    "trace_dir": ParameterValue(
+                        LaunchConfiguration("docking_trace_dir"), value_type=str),
+                },
+            ],
+        )
+    ]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -42,6 +76,9 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=default_destinations,
             ),
             DeclareLaunchArgument("map_yaml", default_value=""),
+            # 도킹(2026-11-18). false 면 도킹 노드를 띄우지 않는다. 시험 기록 폴더는 비우면 남기지 않는다.
+            DeclareLaunchArgument("use_docking", default_value="true"),
+            DeclareLaunchArgument("docking_trace_dir", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
             # 사람에게 다가가는 구간의 최대속도(주행 상한의 %). 기본 100 % = 0.5 m/s.
@@ -335,5 +372,6 @@ def generate_launch_description() -> LaunchDescription:
                 output="screen",
                 parameters=[{"pulse_sec": LaunchConfiguration("estop_pulse_sec")}],
             ),
+            *_docking_nodes(map_id),
         ]
     )

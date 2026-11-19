@@ -534,6 +534,13 @@ MSG_WAKE_GREETING = "네?"
 # 비상 정지 중 호출 — "네?" 없이 이 한 마디만 하고 듣지 않는다(사용자 결정).
 # MSG_ESTOP_REJECT 의 앞 문장이다: 무엇을 말해도 받지 못하므로 "다시 말씀해 주세요"는 뺀다.
 MSG_ESTOP_WAKE = "지금은 비상 멈춤 상태입니다."
+# 도크에 들어가 있을 때(들어가는 중 포함) "비카야"에 하는 말 — 듣기 창은 열지 않는다(2026-11-18 사용자 지정 문구,
+# "일단 그렇게, 나중에 바꿀거야"). 음성 mission_phrases.DOCK_WAKE 가 같은 글자로 미리 합성한다.
+MSG_DOCK_WAKE = "비카가 밥 먹고 있어요. 밥 먹을때는 개도 안 건드린다는 속담이 있죠"
+# 앱 '도킹 시작'이 받아들여져 도크로 가기 시작할 때 한 번(2026-11-19 사용자 지정 문구).
+MSG_DOCK_GO = "도킹 위치로 복귀합니다"
+# 도크에서 나오다 멈춘 상태(중지·비상정지)에서 부르면(2026-11-19 사용자 지정 문구). 음성 요청은 받지 않는다.
+MSG_DOCK_WAIT = "비카가 아직 밥을 덜 먹었어요. 조금만 기다려주세요"
 # 확인 질문 문구가 빈 목적지를 미션이 직접 물을 때(주행 중 바로 온 확정 요청). 음성
 # destination_loader._fill_defaults 의 기본 확인 문구와 같은 글자 — 그쪽이 미리 합성해 둔다.
 MSG_CONFIRM_PROMPT_FALLBACK = "{name}{josa} 안내해드릴까요?"
@@ -1848,6 +1855,17 @@ class MissionLogic:
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
+        # 도킹(2026-11-18): 노드의 DockFlow 가 넣는다. ""·"docking"·"docked"·"undocking".
+        # 도킹 흐름 동안 이 상태 기계는 IDLE 이고, 이 값으로 음성·접근·고개 돌리기·홈 알림을 막고
+        # dialog_state 를 도킹 값으로 바꿔 낸다(앱 화면·손잡이 LED 6). 원격(앱) 주행은 막지 않는다 —
+        # 노드가 그 주행을 잡아 두고 도크에서 먼저 나온 뒤 보낸다.
+        self.dock_mode: str = ""
+        # 도크에서 나오다 멈춘 상태(2026-11-19): 음성·고개 돌리기는 막고, 앱 원격 주행은 그대로 받는다.
+        # dialog_state 는 바꾸지 않는다 — 앱은 도킹 노드 상태로 '도크에서 나오기' 버튼을 더 보인다.
+        self.dock_pending: bool = False
+        # 도킹을 중지해 도크 바로 앞(범퍼~꼭짓점 85 cm 안)에 서 있다(2026-11-19 검토). 음성은 받지만 부른 쪽으로
+        # 고개를 돌리지는 않는다 — 여기서 돌면 구조물에 닿아, 노드가 먼저 도크에서 나오게 된다(스스로 움직임).
+        self.dock_near: bool = False
         self.active_destination: Optional[Destination] = None
         # 일시정지로 보관한 목적지. active_destination 은 _to_idle/_enter_estopped 에서
         # 비워지므로 재개할 목적지는 따로 들고 있어야 한다.
@@ -2480,6 +2498,8 @@ class MissionLogic:
         nav_ready: bool,
         now: float,
     ) -> list:
+        if self.dock_mode or self.dock_pending:
+            return []   # 도킹 중·나오다 멈춤에는 음성 요청을 받지 않는다(2026-11-18·19 사용자). 듣기 창도 열지 않는다.
         # LLM 이 뭐든 intent 를 만들어 왔다는 것 자체가 대화를 넘겨받았다는
         # 뜻이라 온보딩 되묻기 사다리부터 청산한다 — navigate 가 아닌 것도
         # 포함한다. LLM 의 되묻기("어떤 서류를 내러 가시나요?")는 음성이 넘기고 미션이
@@ -3934,6 +3954,10 @@ class MissionLogic:
         대부분 state.value 그대로다. 두 곳만 더 잘게 가른다(설계 4.7) — 잡기
         대기(IDLE 의 하위 단계)와 손 놓침 PAUSED. is_paused 의 뜻은 그대로다.
         """
+        if self.dock_mode == "undocking":
+            return self.dock_mode   # 원격 주행을 잡아 두고 나오는 중이어도 앱은 '나오는 중'을 보인다
+        if self.state == State.IDLE and self.dock_mode:
+            return self.dock_mode
         if self.state == State.IDLE and self._grip_wait_since is not None:
             return DIALOG_GRIP_WAIT
         if self.state == State.PAUSED and self._handle_pause:
@@ -4167,7 +4191,8 @@ class MissionLogic:
         경로가 관여할 일이 아니다 — 그 거리는 접근 goal(1.1 m)을 만들 수 있는
         자리라 기존 탐지→요청→접근 경로가 담당한다.
         """
-        if self.state != State.IDLE or self._seek_deadline is None:
+        if (self.state != State.IDLE or self._seek_deadline is None or self.dock_mode
+                or self.dock_pending or self.dock_near):
             return []
         if approachable or not stable:
             return []
@@ -4465,6 +4490,14 @@ class MissionLogic:
                 return [WakeReply(listen=False)]
             self._note_tip_notice(now)
             return [Say(MSG_ESTOP_WAKE, priority="response"), WakeReply(listen=False)]
+        if self.dock_mode in ("docking", "docked"):
+            # 도킹 중에는 음성으로 서비스를 받지 않는다(2026-11-18 사용자) — 정해 준 말만 하고 듣지 않는다
+            return [Say(MSG_DOCK_WAKE, priority="response"), WakeReply(listen=False)]
+        if self.dock_mode:
+            return [WakeReply(listen=False)]   # 원격 주행으로 도크에서 나오는 중
+        if self.dock_pending:
+            # 나오다 멈춘 상태 — 정해 준 말만 하고 듣지 않는다(2026-11-19 사용자). 음성 안내 주행은 없다.
+            return [Say(MSG_DOCK_WAIT, priority="response"), WakeReply(listen=False)]
         if self.state in _WAKE_IGNORE_STATES:
             return [WakeReply(listen=False)]
         if self.state == State.AWAITING_USER:
@@ -4509,6 +4542,8 @@ class MissionLogic:
         """
         if self.state in _PATROL_STATES:
             return []   # 순찰 중에는 호출로 아무것도 바꾸지 않는다(2026-11-14)
+        if self.dock_mode or self.dock_pending:
+            return []   # 도킹 중·나오다 멈춤 — 음성으로 아무것도 바꾸지 않는다(2026-11-18·19)
         self._note_user_present(now)
         # 새 대화다 — 온보딩 되묻기 사다리가 돌고 있었다면 청산한다.
         self._forget_dest_prompt()
@@ -4630,6 +4665,8 @@ class MissionLogic:
         """
         if self.state != State.IDLE or self.estop_active or not nav_ready:
             return []
+        if self.dock_mode or self.dock_pending or self.dock_near:
+            return []   # 도크 안·바로 앞에서 돌면 구조물에 닿는다(2026-11-18·19)
         if self._return_interrupted:
             return []
         if self.wake_guard_active(now):
@@ -4948,7 +4985,8 @@ class MissionLogic:
         홈을 벗어나거나 IDLE 이 아니게 되면 박자를 지운다(돌아오면 다시 1분부터).
         대화 중이면 건너뛰고 박자는 잇는다 — M3(_beacon_tick)와 같은 규칙이다.
         """
-        if self.home_beacon_interval_sec <= 0 or not self._at_home():
+        if (self.home_beacon_interval_sec <= 0 or self.dock_mode or self.dock_pending
+                or not self._at_home()):
             self._home_beacon_next_at = None
             return []
         if self._home_beacon_next_at is None:
@@ -5145,6 +5183,16 @@ class MissionLogic:
         self._return_interrupted = False
         self._return_resume_deadline = None
         self._return_notice_given = False
+
+    def on_dock_held_dropped(self, now: float) -> list:
+        """도크에서 나온 뒤 보내려고 잡아 둔 주행을 보내지 못했다(나오기 중지·실패·비상정지, 도킹 중이라 버림).
+        미션 주행은 취소로 끝낸다. 순찰이면 순찰을 끝낸다 — 다음 구간으로 넘기면 '나오기 중지' 뒤 로봇이 스스로
+        다시 도크에서 나오거나 다음 지점으로 출발했다(2026-11-19 재검토)."""
+        if self.state in _PATROL_STATES:
+            actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT), *self._patrol_drop("nav_failed")]
+            self._to_idle()
+            return actions
+        return self.on_tick(now, NavStatus.CANCELED)
 
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로.
@@ -5449,6 +5497,16 @@ class MissionLogic:
             # 사다리가 걸려 있지 않다(_to_idle 뒤에 열리고, 온보딩 전이다).
             if self._grip_wait_since is not None:
                 actions.extend(self._grip_wait_tick(now))
+            if self.dock_mode or self.dock_pending or self.dock_near:
+                # 도킹 관련 중(2026-11-19 검토): 고개 원위치 회전·끊긴 복귀 재개 시계를 접는다.
+                # 안 접으면 '도킹 시작' 뒤 6~18 s 에 제자리 회전이나 홈 주행이 나가 도킹 노드와 다투고,
+                # 도킹이 끝난 뒤면 로봇이 스스로 도크에서 나온다.
+                self._seek_deadline = None
+                self._seek_return_yaw = None
+                if self._return_interrupted:
+                    self._forget_interrupted_return()
+                if self.dock_mode or self.dock_pending:
+                    self._forget_dest_prompt()   # 음성을 안 받는 동안만 — 도크 앞(dock_near)은 음성을 받는다
             # 찾는 창이 닫혔다. 아무도 못 찾았으니 조용히 원래 자세로.
             # 되돌리지 않으면 오작동 한 번에 카메라가 벽만 보는 자세로 굳는다.
             if self._seek_deadline is not None and now >= self._seek_deadline:

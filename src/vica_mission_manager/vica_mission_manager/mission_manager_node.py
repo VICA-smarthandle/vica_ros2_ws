@@ -70,38 +70,50 @@ except ImportError:  # vica_interfaces 를 다시 빌드하기 전 — 미션은
 from .approach_speed import DEFAULT_APPROACH_STAGES, stages_from_lists
 from .destinations import load_destinations, load_home, load_map_bounds
 from .approach_geometry import approach_goal
+from .dock_flow import (CALL_CANCEL, CALL_START, CALL_UNDOCK, DOCK_FAR_COV, DOCK_FAR_M, DockFlow,
+                        classify_start, parse_node_state, staging_relation)
+from .dock_spot import DOCK_DESTINATION_ID, dock_yaml_path, read_dock_spot, staging_destination
 from .home_storage import HomeStorage, build_home
 from .ledger import (COV_UNKNOWN, Ledger, LedgerStore, apply_goal_event, confirm_abort_name,
                      place_here, state_fields)
 from .map_meta import load_map_meta
 from .mission_logic import (
+    APPROACH_BT_FILE,
     APPROACH_TURN_YAW_DEG,
+    ApproachRequest,
+    CancelNav,
+    DEST_RETRY_RETURN_SEC,
     DIALOG_PAUSED_HANDLE,
+    Destination,
     GRIP_ENTER_WINDOW_SEC,
     GRIP_HINT_PULSE_SEC,
     GRIP_RATIO,
     GRIP_RELEASE_GRACE_SEC,
     GRIP_RESUME_WINDOW_SEC,
     GRIP_WAIT_TIMEOUT_SEC,
+    GUIDED_BT_FILE,
+    GUIDED_NO_RAIL_BT_FILE,
+    GateReason,
+    GoalEvent,
     HANDLE_LOST_GIVE_UP_SEC,
     HANDLE_LOST_REPEAT_SEC,
     HANDLE_SIDE_MIN_YAW_RAD,
     HANDLE_STATE_STALE_SEC,
     HOME_BEACON_INTERVAL_SEC,
     Haptic,
+    HelpEvent,
+    IntentData,
     MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_REASK,
     MSG_DEST_RETRY,
-    NEAR_CALL_MAX_M,
-    NEAR_CALL_NO_SPIN_M,
-    PERSON_APPROACH_SPEED_PERCENT,
-    RETURN_RESUME_SEC,
-    DEST_RETRY_RETURN_SEC,
-    APPROACH_BT_FILE,
-    GUIDED_BT_FILE,
-    GUIDED_NO_RAIL_BT_FILE,
+    MSG_DOCK_GO,
+    MissionLogic,
     NAV_TREE_GUIDED,
     NAV_TREE_WAIT,
+    NEAR_CALL_MAX_M,
+    NEAR_CALL_NO_SPIN_M,
+    NavStatus,
+    Navigate,
     PATROL_ALARM_KINDS,
     PATROL_ALARM_RESEND_SEC,
     PATROL_ARMING_TIMEOUT_SEC,
@@ -115,27 +127,19 @@ from .mission_logic import (
     PATROL_SPEED_MPS,
     PATROL_START_REJECT_TEXT,
     PATROL_WATCH_KINDS,
+    PERSON_APPROACH_SPEED_PERCENT,
     PatrolEvent,
     PatrolRecordClip,
-    SetNavSpeedCap,
-    WAIT_SPOT_BT_FILE,
-    ApproachRequest,
-    GoalEvent,
-    HelpEvent,
-    CancelNav,
-    Destination,
-    GateReason,
-    IntentData,
-    MissionLogic,
-    Navigate,
-    NavStatus,
+    Pose2D,
+    RETURN_RESUME_SEC,
     Say,
-    StopSpeech,
-    WakeReply,
+    SetNavSpeedCap,
     SetNavSpeedLimit,
     SpinInPlace,
-    Pose2D,
     State,
+    StopSpeech,
+    WAIT_SPOT_BT_FILE,
+    WakeReply,
     check_gate,
     doa_to_spin_yaw,
     nav_behavior_tree,
@@ -232,6 +236,9 @@ class MissionManagerNode(Node):
     판단은 테스트하기 쉬운 :class:`MissionLogic`에 맡기고, 이 클래스는 ROS2
     메시지 변환·토픽 연결·Nav2 commander 호출 같은 배선만 담당한다.
     """
+
+    # 도킹(2026-11-18). 시험이 __init__ 없이 노드를 만들 때를 위해 클래스 기본값을 둔다.
+    _dock: Optional[DockFlow] = None
 
     def __init__(self) -> None:
         """설정과 목적지를 읽고 intent·긴급정지·Nav2·TTS 토픽을 연결한다."""
@@ -805,6 +812,30 @@ class MissionManagerNode(Node):
                 MissionCommand, f"/vica/mission/{name}", handler,
                 callback_group=self._main_group,
             )
+        # ── 도킹 (2026-11-18) ────────────────────────────────────────────
+        # 실제로 들어가고 나오는 것은 vica_docking 노드다. 미션은 앱 요청(도킹 시작·나오기·중지)을
+        # 받아 시키고, 도크 안에서 원격 주행이 오면 그 주행을 잡아 두고 먼저 나온다(dock_flow.py).
+        # 도킹 노드 서비스는 main 그룹에서 비동기로 부른다 — 응답도 main 그룹에서 받아 다른 콜백과 겹치지 않는다.
+        self._dock = DockFlow()
+        self._dock_lock = threading.RLock()
+        self._dock_far_check_at = 0.0
+        self._dock_clients = {
+            name: self.create_client(Trigger, f"/vica/dock/{name}", callback_group=self._main_group)
+            for name in (CALL_START, CALL_UNDOCK, CALL_CANCEL)
+        }
+        self.create_subscription(
+            String, "/vica/dock/state", self._on_dock_state,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            callback_group=self._main_group,
+        )
+        for name, handler in (("dock_start", self._on_dock_start),
+                              ("dock_undock", self._on_dock_undock),
+                              ("dock_cancel", self._on_dock_cancel)):
+            self.create_service(
+                MissionCommand, f"/vica/mission/{name}", handler,
+                callback_group=self._main_group,
+            )
         if SavePatrolRoute is not None:
             self.create_service(
                 SavePatrolRoute, "/vica/patrol/route/save", self._on_save_patrol_route,
@@ -1302,6 +1333,8 @@ class MissionManagerNode(Node):
         response: MissionCommand.Response,
     ) -> MissionCommand.Response:
         """경비 시작. patrol.yaml 을 읽어 로직에 넘긴다 — 수락하면 감지 노드 준비부터 기다린다."""
+        if self._dock_refuse(response, "경비 시작"):
+            return response
         route, problem, watch_off = self._load_patrol_route()
         pose_known = self._robot_pose is not None and self._pose_cov_xy <= COV_UNKNOWN
         before = self.logic.dialog_state
@@ -1684,6 +1717,8 @@ class MissionManagerNode(Node):
             response.accepted = False
             response.message = "request_id가 canonical UUID 형식이 아닙니다."
             return response
+        if self._dock_refuse(response, "홈 복귀"):
+            return response
 
         before = self.logic.state
         accepted, reason, actions = self.logic.on_return_home_request(
@@ -1969,6 +2004,13 @@ class MissionManagerNode(Node):
         판단(60초 억제·상태·E-stop)은 mission_logic, 기하(1.1 m goal)는
         approach_geometry 가 한다. 여기는 srv 계약의 형식 검증과 배선만 한다.
         """
+        if self._dock is not None and (self._dock.mode or self._dock.undock_pending
+                                       or self._dock.near_dock):
+            # 도킹 중(도크 안·나오다 멈춤 포함)에는 사람에게 다가가지 않는다(2026-11-18·19 사용자: 원격만 받는다).
+            # 도킹을 중지해 도크 바로 앞에 선 때도 같다 — 받으면 로봇이 스스로 도크에서 나와 다가간다(11-19 검토).
+            response.accepted = False
+            response.message = "도킹 중이라 접근하지 않습니다."
+            return response
         try:
             request_id = str(UUID(request.request_id))
         except ValueError:
@@ -2179,6 +2221,8 @@ class MissionManagerNode(Node):
         destination_id = self._check_destination_request(request, response)
         if destination_id is None:
             return response
+        if self._dock_refuse(response, label):
+            return response
         # 앱은 어느 상태든 선점한다(ESTOPPED 예외) — 내부에서 전부 취소 후
         # 즉시 출발 (2026-08-31 사용자 결정, on_app_destination 주석 참고).
         destination = self.destinations.get(destination_id)
@@ -2201,9 +2245,11 @@ class MissionManagerNode(Node):
         # 앞 주행을 선점·취소하는 이벤트가 _run_actions 안에서 먼저 나가므로 그 뒤에 기억한다.
         # 출발이 거부됐으면(_nav_active 거짓) 배송으로 기억하지 않는다.
         self._run_actions(actions)
-        self._delivery_dest_id = (
-            destination_id if is_delivery and self._nav_active else None)
-        response.accepted = self._nav_active
+        # 도크 안이라 잡아 둔 주행(먼저 나온 뒤 보낸다)도 받아들인 것이다 — 거절로 답하면 앱은 실패를 띄우는데
+        # 로봇은 나와서 간다. 배송 기억도 그대로 둔다(11-19 검토).
+        sent = self._nav_active or self._dock_holding()
+        self._delivery_dest_id = destination_id if is_delivery and sent else None
+        response.accepted = sent
         response.message = (
             f"목적지 요청을 수락했습니다: {destination.name}"
             if response.accepted and destination is not None
@@ -2220,6 +2266,8 @@ class MissionManagerNode(Node):
         destination_id = self._check_destination_request(request, response)
         if destination_id is None:
             return response
+        if self._dock_refuse(response, "대기 장소 가보기"):
+            return response
         destination = self.destinations.get(destination_id)
         actions, reason = self.logic.on_app_wait_spot(
             destination, self.map_bounds, self._nav2_ready(), self._now())
@@ -2230,7 +2278,7 @@ class MissionManagerNode(Node):
                 f"대기 장소 가보기 거부: id={destination_id} reason={reason.value}")
             return response
         self._run_actions(actions)
-        response.accepted = self._nav_active
+        response.accepted = self._nav_active or self._dock_holding()
         response.message = (
             f"대기 장소로 이동합니다: {destination.name}-대기"
             if response.accepted and destination is not None
@@ -2289,6 +2337,15 @@ class MissionManagerNode(Node):
         changed = active != self._estop_active
         self._estop_active = active
         actions = self.logic.on_estop(self._estop_active, self._now())
+        if self._dock is not None and active and self._dock.phase == "going":
+            # 준비 위치로 가는 중일 때만 할 일이 있다(Nav2 취소). 도킹 잠금은 기다리지 않는다 — 주 콜백이 Nav2 호출
+            # (goal 수락 대기 등)로 잠금을 쥐고 있으면 비상 콜백 그룹까지 같이 멈춘다(11-19 검토). 못 잡으면 다음
+            # tick(0.2 s)이 한다. 모터는 Safety 가 이미 세웠다.
+            if self._dock_lock.acquire(blocking=False):
+                try:
+                    self._dock_apply(self._dock.on_estop(True))
+                finally:
+                    self._dock_lock.release()
         if actions:
             self.get_logger().warn(
                 f"중앙 estop={self._estop_active} -> state={self.logic.state.value}"
@@ -2303,6 +2360,17 @@ class MissionManagerNode(Node):
         self._question_safely(self._tick_question)
         before = self.logic.state
         status = self._poll_nav_status()
+        if self._dock is not None and self._dock.owns_nav():
+            # 도크 앞(준비 위치)으로 가는 주행 — 결과는 도킹 흐름이 받는다. 로직은 IDLE 이다.
+            with self._dock_lock:
+                self._dock_apply(self._dock.on_nav_status(status.value))
+            status = NavStatus.NONE
+        if self._dock is not None and self._estop_active and self._dock.phase == "going":
+            with self._dock_lock:   # 비상 콜백이 잠금을 못 잡아 남긴 것(_on_estop)
+                self._dock_apply(self._dock.on_estop(True))
+        if self._dock is not None and self._now() >= self._dock_far_check_at:
+            self._dock_far_check_at = self._now() + 1.0
+            self._dock_far_check()
         distance = (
             self._nav_distance_remaining() if status == NavStatus.RUNNING else None
         )
@@ -2450,7 +2518,8 @@ class MissionManagerNode(Node):
     # -- Action 실행 -------------------------------------------------------------
 
     def _run_actions(self, actions) -> None:
-        for action in actions:
+        actions = list(actions)
+        for index, action in enumerate(actions):
             if isinstance(action, Say):
                 out = String()
                 # ros_tts_node 큐 우선순위 접두어 (vica-voice-llm src/tts_queue.py 계약)
@@ -2474,11 +2543,27 @@ class MissionManagerNode(Node):
                 seq = self._wake_reply_seq
                 self.pub_wake_reply.publish(String(data=f"{verdict}:{seq}" if seq else verdict))
             elif isinstance(action, CancelNav):
+                if self._dock is not None and self._dock.held is not None:
+                    # 도크에서 나온 뒤 보내려고 잡아 둔 주행이 취소됐다. 같은 묶음 뒤쪽에 새 주행이 있으면(앱이 다른
+                    # 곳으로 다시 보냄) 나오기는 멈추지 않고 잡아 둔 주행만 바꾼다 — 멈추면 새 주행이 도크 안에서
+                    # 그대로 Nav2 로 나갔다(11-19 검토).
+                    follows = any(isinstance(a, (Navigate, SpinInPlace)) for a in actions[index + 1:])
+                    # 비상 콜백에서도 온다 — 잠금을 오래 기다리지 않는다. 못 잡으면 건너뛴다: 비상정지면 도킹 노드가
+                    # 스스로 멈추고 그 결과로 잡아 둔 주행이 버려진다(release_held 는 비상정지 중에 보내지 않는다).
+                    if self._dock_lock.acquire(timeout=0.2):
+                        try:
+                            self._dock_apply(self._dock.on_mission_cancel(keep_leaving=follows))
+                        finally:
+                            self._dock_lock.release()
+                    else:
+                        self.get_logger().warn("도킹 잠금을 0.2 s 안에 못 잡아 잡아 둔 주행 취소를 건너뛴다")
                 self._cancel_nav(action.destination, action.event)
             elif isinstance(action, Navigate):
-                self._start_nav(action)
+                if not self._dock_hold(action):
+                    self._start_nav(action)
             elif isinstance(action, SpinInPlace):
-                self._start_spin(action)
+                if not self._dock_hold(action):
+                    self._start_spin(action)
             elif isinstance(action, SetNavSpeedLimit):
                 self._publish_nav_speed_limit(action.percent)
             elif isinstance(action, GoalEvent):
@@ -2653,6 +2738,8 @@ class MissionManagerNode(Node):
         # 순찰 구간(2026-11-14)은 목적지 id 로 안다 — 상태는 비상정지 스레드가 그 사이 바꿀 수 있다.
         # 순찰 구간은 goal_* 사건을 내지 않고, 순찰이 끝난 뒤에는 보내지 않는다.
         patrol_leg = dest.id.startswith(PATROL_DESTINATION_PREFIX)
+        # 도크 앞(준비 위치)으로 가는 주행(2026-11-18) — 앱에 일반 주행 알림을 내지 않고, 결과는 도킹 흐름이 받는다.
+        dock_nav = dest.id == DOCK_DESTINATION_ID
         if patrol_leg and self._patrol_leg_stale():
             self.get_logger().warn(f"순찰 구간 전송 안 함 — 그 사이 순찰이 끝났다 ({dest.id})")
             return
@@ -2675,15 +2762,15 @@ class MissionManagerNode(Node):
         # 틱·"비카야" 판정·앱 서비스가 모두 멈춘다. 관문(check_gate)을 거치지 않는
         # 재시도·재개·주행 중 바꾸기의 원래 목적지 재출발도 여기서 함께 막는다.
         if not self._nav2_ready():
-            if not (patrol_leg or self._quiet_goal_events()):
+            if not (patrol_leg or dock_nav or self._quiet_goal_events()):
                 self._publish_goal_event("goal_rejected", dest, "Nav2 가 준비되지 않았습니다.")
             self.get_logger().error(f"NavigateToPose 전송 보류: Nav2 미준비 ({dest.id})")
-            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+            self._nav_send_failed(dock_nav)
             return
         # 앞선 취소가 아직 Nav2 응답을 기다리는 중이면 여기서 영원히 기다리지
         # 않는다. 못 보낸 것을 실패로 처리하는 편이 콜백을 막는 것보다 낫다.
         if not self._nav_lock.acquire(timeout=self._nav_lock_timeout_sec):
-            if not patrol_leg:   # 순찰 구간은 goal_* 사건을 내지 않는다
+            if not (patrol_leg or dock_nav):   # 순찰 구간·도크 앞은 goal_* 사건을 내지 않는다
                 self._publish_goal_event(
                     "goal_rejected", dest, "이전 goal 취소가 아직 처리 중입니다."
                 )
@@ -2691,7 +2778,7 @@ class MissionManagerNode(Node):
                 f"NavigateToPose 전송 보류: 이전 취소가 "
                 f"{self._nav_lock_timeout_sec:.1f}초 안에 끝나지 않았다 ({dest.id})"
             )
-            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+            self._nav_send_failed(dock_nav)
             return
         # 사람 접근 goal 은 접근 트리, 나머지는 Navigate.tree 가 고른 트리
         # (빈 문자열 = 기본 트리). 2026-10-07 안내(위치만)·대기 장소 트리 추가.
@@ -2703,7 +2790,7 @@ class MissionManagerNode(Node):
             bt = self._guided_no_rail_bt
         # 대기 장소로 혼자 가는 주행은 앱에 일반 주행 알림을 내지 않는다 — 앱에는
         # 미션이 따로 내는 wait_spot_blocked·wait_expired 만 뜬다(주행 실패 팝업 중복 방지).
-        quiet = patrol_leg or self._quiet_goal_events()
+        quiet = patrol_leg or dock_nav or self._quiet_goal_events()
         try:
             if bt != self._task_bt:
                 self._finish_task_for_bt_switch()
@@ -2742,7 +2829,7 @@ class MissionManagerNode(Node):
                 self._publish_goal_event("goal_rejected", dest, "Nav2 goal rejected")
             # goal 거부 → 다음 tick 에서 FAILED 처리되도록 상태를 만든다.
             self.get_logger().error(f"NavigateToPose goal 거부됨: {dest.id}")
-            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+            self._nav_send_failed(dock_nav)
 
     def _start_spin(self, action: SpinInPlace) -> None:
         """제자리 회전. BasicNavigator.spin() 은 behavior server 의 Spin 을 부른다.
@@ -2903,6 +2990,241 @@ class MissionManagerNode(Node):
         except Exception:  # noqa: BLE001 - 그래프 조회 실패는 '없음'으로 본다
             return False
         return any(name.rstrip("/").endswith("compute_route") for name, _ in names)
+
+    # ── 도킹 (2026-11-18) ────────────────────────────────────────────────
+    _DOCK_REPLY = {
+        "ok": "도킹을 시작합니다.",
+        "estop": "비상정지 중에는 도킹할 수 없습니다.",
+        "already_docked": "이미 도크에 들어가 있습니다.",
+        "busy": "다른 일을 하는 중이라 지금은 도킹할 수 없습니다.",
+        "no_dock": "도크 위치가 저장되지 않았습니다. 지도 설정에서 먼저 저장하세요.",
+        "nav_not_ready": "Nav2 가 준비되지 않았습니다.",
+        "not_docked": "도크에 들어가 있지 않습니다.",
+        "idle": "멈출 도킹이 없습니다.",
+    }
+
+    def _nav_send_failed(self, dock_nav: bool) -> None:
+        """goal 을 못 보냈다 — 다음 tick 이 아니라 지금 실패로 넘긴다."""
+        if dock_nav:
+            self._dock_apply(self._dock.on_nav_status("failed"))
+        else:
+            self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED))
+
+    def _dock_apply(self, cmds: list) -> None:
+        """도킹 흐름이 낸 명령을 실행하고, 로직에 도킹 단계를 알린다(dialog_state·음성 막기)."""
+        with self._dock_lock:
+            before = self.logic.dock_mode
+            self.logic.dock_mode = self._dock.mode
+            for c in cmds:
+                if c.kind == "call":
+                    self._dock_call(c.arg)
+                elif c.kind == "nav":
+                    self._start_nav(Navigate(c.arg))
+                elif c.kind == "restage":
+                    # 재시도 — 도킹 노드가 고쳐 둔 도크 위치를 다시 읽는다(11-19)
+                    staging = self._dock_staging()
+                    in_zone, near_spin = self._dock_near(staging)
+                    self.get_logger().info("도킹 재시도: 도크 위치를 다시 읽어 준비 위치로")
+                    self._dock_apply(self._dock.restage(staging, near_spin, in_zone))
+                elif c.kind == "spin":
+                    self._start_spin(SpinInPlace(c.arg, reason="도킹: 제자리에서 도크 보기"))
+                    if not self._nav_active:   # Spin 을 못 보냈다 — 다음 tick 을 기다리지 않고 실패로 넘긴다
+                        self._dock_apply(self._dock.on_nav_status("failed"))
+                elif c.kind == "cancel_nav":
+                    self._cancel_nav(None)
+                elif c.kind == "release_held" and self._estop_active:
+                    # 나오기는 끝났는데 그 사이 비상정지가 걸렸다 — 보내지 않는다(비상정지 뒤 자동으로 다시 가지 않는다)
+                    self.get_logger().warn("도크에서 나왔지만 비상정지 중 — 잡아 둔 주행을 취소로 끝낸다")
+                    self._run_actions(self.logic.on_dock_held_dropped(self._now()))
+                elif c.kind == "release_held":
+                    self.get_logger().info("도크에서 나왔다 — 잡아 둔 주행을 보낸다")
+                    if isinstance(c.arg, SpinInPlace):
+                        self._start_spin(c.arg)
+                    else:
+                        self._start_nav(c.arg)
+                elif c.kind == "drop_held":
+                    # 도크에서 못 나왔다 — 미션의 주행은 취소로 끝낸다(재시도하지 않는다, 순찰이면 순찰을 끝낸다)
+                    self.get_logger().warn("도크에서 나오지 못해 잡아 둔 주행을 취소로 끝낸다")
+                    self._run_actions(self.logic.on_dock_held_dropped(self._now()))
+                elif c.kind == "event":
+                    self._publish_goal_event(c.arg, self._dock.staging, c.message)
+                    self.get_logger().info(f"도킹 사건 {c.arg} {c.message}")
+            self.logic.dock_mode = self._dock.mode
+            self.logic.dock_pending = self._dock.undock_pending and not self._dock.mode
+            # 도킹을 중지해 도크 바로 앞에 서 있다 — 부른 쪽으로 고개를 돌리지 않는다(돌리려면 먼저 나와야 한다)
+            self.logic.dock_near = (self._dock.near_dock and not self._dock.mode
+                                    and not self._dock.undock_pending)
+            if self.logic.dock_mode != before:
+                self.get_logger().info(f"도킹 단계: '{before}' → '{self.logic.dock_mode}'")
+                self._publish_robot_state()   # 앱·손잡이 LED 가 1 Hz 를 기다리지 않게
+
+    def _dock_hold(self, action) -> bool:
+        """미션 주행이 나가려 한다 — 도킹 흐름이 가로챌지 정한다. 가로챘으면(잡아 둠·버림) True.
+
+        도크 안·근처에서 쉬는 중이면 잡아 두고 먼저 나온다. 흐름이 도는 중이면: 나오는 중에는 잡아 두고(나온 뒤 보냄),
+        가는 중·들어가는 중·멈추는 중에는 보내지 않는다(DockFlow.intercept).
+        """
+        if self._dock is None:
+            return False
+        if isinstance(action, Navigate) and action.destination.id == DOCK_DESTINATION_ID:
+            return False
+        is_spin = isinstance(action, SpinInPlace)
+        with self._dock_lock:
+            verdict, cmds = self._dock.intercept(action, is_spin)
+            if verdict == "pass":
+                if self._dock.undock_pending and not self._dock.busy():
+                    # 나오다 멈춘 자리(도크 밖)에서 원격 주행 — 관리자가 보고 보낸 것이라 그대로 간다(11-19 사용자).
+                    # 도킹 노드의 '나오다 멈춤' 표시는 접는다(쉬는 중의 cancel).
+                    self.get_logger().info("나오다 멈춘 자리에서 원격 주행 — 그대로 보낸다")
+                    self._dock_call(CALL_CANCEL)
+                return False
+            if verdict == "held":
+                self.get_logger().info("도크 안·나오는 중 — 도크에서 나온 뒤 보낸다")
+                self._dock_apply(cmds)
+                return True
+            phase = self._dock.phase or "도크 앞"
+        # drop — 보내지 않는다. 로직에는 회전이면 실패(회전 없이 넘어간다), 주행이면 취소로 알린다(순찰이면 끝낸다).
+        self.get_logger().warn(
+            f"도킹 관련 중({phase})이라 {'제자리 회전' if is_spin else '주행'}을 보내지 않는다")
+        self._run_actions(self.logic.on_tick(self._now(), NavStatus.FAILED) if is_spin
+                          else self.logic.on_dock_held_dropped(self._now()))
+        return True
+
+    def _dock_holding(self) -> bool:
+        """도킹 흐름이 미션 주행을 잡아 두었는가(도크에서 나온 뒤 보낸다) — 요청은 받아들인 것이다."""
+        return self._dock is not None and self._dock.held is not None
+
+    _DOCK_REFUSE_DOCKING = "도킹 중입니다. '도킹 중지'를 누른 뒤 다시 보내 주세요."
+    _DOCK_REFUSE_STOPPING = "도크에서 나오다 멈추는 중입니다. 잠시 뒤 다시 보내 주세요."
+
+    def _dock_refuse(self, response, label: str) -> bool:
+        """도킹 노드가 로봇을 움직이는 중이라 원격 주행을 받을 수 없으면 거절 응답을 채우고 True.
+
+        가는 중·들어가는 중: 먼저 '도킹 중지'를 눌러야 한다(11-19 검토 — 그대로 받으면 Nav2 와 도킹 노드가
+        /cmd_vel_req 를 다툰다). 나오는 중: 받는다(나온 뒤 보낸다). 나오다 멈추는 중: 결과가 올 때까지만 거절."""
+        d = self._dock
+        if d is None:
+            return False
+        if d.phase in ("going", "entering"):
+            message = self._DOCK_REFUSE_DOCKING
+        elif d.phase == "leaving" and d.canceling:
+            message = self._DOCK_REFUSE_STOPPING
+        else:
+            return False
+        response.accepted = False
+        response.message = message
+        self.get_logger().warn(f"{label} 요청 거부: 도킹 흐름 {d.phase}")
+        return True
+
+    def _dock_call(self, name: str) -> None:
+        cli = self._dock_clients[name]
+        if not cli.service_is_ready():
+            self.get_logger().error(f"/vica/dock/{name} 없음 — vica_docking 노드가 떠 있지 않다")
+            self._dock_apply(self._dock.on_call_result(name, False, "dock_node_down"))
+            return
+        fut = cli.call_async(Trigger.Request())
+        fut.add_done_callback(lambda f, n=name: self._on_dock_call_done(n, f))
+
+    def _on_dock_call_done(self, name: str, fut) -> None:
+        try:
+            res = fut.result()
+            ok, msg = bool(res.success), str(res.message)
+        except Exception as exc:  # noqa: BLE001
+            ok, msg = False, f"call_failed: {exc!r}"
+        if not ok:
+            self.get_logger().warn(f"/vica/dock/{name} 거절: {msg}")
+        with self._dock_lock:   # 응답 콜백은 주 콜백 그룹 밖에서 돌 수 있다 — 흐름을 고치는 것도 잠금 안에서
+            self._dock_apply(self._dock.on_call_result(name, ok, msg))
+
+    def _on_dock_state(self, msg: String) -> None:
+        st = parse_node_state(msg.data)
+        if st is None:
+            return
+        with self._dock_lock:
+            self._dock_apply(self._dock.on_node_state(st))
+
+    def _dock_staging(self):
+        spot = read_dock_spot(dock_yaml_path(self._destinations_path))
+        if spot is None or spot.map_id != self._map_id:
+            return None
+        return staging_destination(spot)
+
+    def _dock_near(self, staging) -> tuple:
+        """(도크 구역 안인가, 준비 위치 바로 옆이면 도크를 보려고 돌 각 rad·아니면 None). 위치를 모르면 (False, None)."""
+        pose = getattr(self, "_robot_pose", None)
+        if staging is None or pose is None:
+            return False, None
+        along, lateral, turn = staging_relation(
+            pose.x, pose.y, pose.yaw_deg, staging.pose.x, staging.pose.y, staging.pose.yaw_deg)
+        kind = classify_start(along, lateral)
+        return kind == "zone", (turn if kind == "spin" else None)
+
+    def _dock_far_check(self) -> None:
+        """도크 근처·나오다 멈춤 표시가 낡았는가(1 s 마다). 도킹 노드는 일이 끝날 때만 이 표시를 고친다 — 그 뒤 앱 수동
+        주행 등으로 로봇이 도크에서 멀어져도 그대로 남아, 다음 원격 주행이 '도크에서 나오기'부터 하다 실패한다.
+        로봇 위치가 도크에서 DOCK_FAR_M 넘게 떨어졌으면 표시를 내린다(위치를 모르면 그대로 둔다)."""
+        d = self._dock
+        if d is None or d.busy() or d.mode or not (d.near_dock or d.undock_pending):
+            return
+        pose = getattr(self, "_robot_pose", None)
+        if pose is None or self._pose_cov_xy > DOCK_FAR_COV:
+            return
+        spot = read_dock_spot(dock_yaml_path(self._destinations_path))
+        if spot is None or spot.map_id != self._map_id:
+            return
+        dist = math.hypot(pose.x - spot.apex_x, pose.y - spot.apex_y)
+        if dist <= DOCK_FAR_M:
+            return
+        with self._dock_lock:
+            if d.busy() or d.mode:
+                return
+            self.get_logger().info(f"도크에서 {dist:.1f} m 떨어졌다 — 도크 근처·나오다 멈춤 표시를 내린다")
+            # 도킹 노드의 표시도 접는다(쉬는 중의 cancel). 안 접으면 다음 상태 발행 때 다시 올라온다(11-19 재검토).
+            self._dock_call(CALL_CANCEL)
+            d.undock_pending = False
+            d.near_dock = False
+            self._dock_apply([])
+
+    def _on_dock_start(self, request: MissionCommand.Request,
+                       response: MissionCommand.Response) -> MissionCommand.Response:
+        """앱 '도킹 시작'(목업 62). 도크 앞 1 m 까지 Nav2 로 간 뒤 들어간다(바로 옆이면 제자리 회전)."""
+        with self._dock_lock:
+            staging = self._dock_staging()
+            in_zone, near_spin = self._dock_near(staging)
+            ok, reason, cmds = self._dock.request_start(
+                self.logic.state == State.IDLE, self._estop_active, self._nav2_ready(),
+                staging, near_spin, in_zone)
+            self._dock_apply(cmds)
+        if ok:
+            # 도크로 가기 시작할 때 한 번 알린다(2026-11-19 사용자 지정 문구)
+            self._run_actions([Say(MSG_DOCK_GO, priority="narration")])
+        response.accepted = ok
+        response.message = self._DOCK_REPLY.get(reason, reason)
+        self.get_logger().info(f"앱 도킹 시작: {reason}")
+        return response
+
+    def _on_dock_undock(self, request: MissionCommand.Request,
+                        response: MissionCommand.Response) -> MissionCommand.Response:
+        """앱 '도크에서 나오기'(목업 67). 후진 → 제자리 회전 → 주행 모드(그 자리)."""
+        with self._dock_lock:
+            ok, reason, cmds = self._dock.request_undock(
+                self.logic.state == State.IDLE, self._estop_active)
+            self._dock_apply(cmds)
+        response.accepted = ok
+        response.message = "도크에서 나옵니다." if ok else self._DOCK_REPLY.get(reason, reason)
+        self.get_logger().info(f"앱 도크에서 나오기: {reason}")
+        return response
+
+    def _on_dock_cancel(self, request: MissionCommand.Request,
+                        response: MissionCommand.Response) -> MissionCommand.Response:
+        """앱 '도킹 중지'·'나오기 중지'(목업 65). 그 자리에 멈추고 다시 하지 않는다."""
+        with self._dock_lock:
+            ok, reason, cmds = self._dock.request_cancel()
+            self._dock_apply(cmds)
+        response.accepted = ok
+        response.message = "멈춥니다." if ok else self._DOCK_REPLY.get(reason, reason)
+        self.get_logger().info(f"앱 도킹 중지: {reason}")
+        return response
 
     def _quiet_goal_events(self) -> bool:
         """지금 주행이 앱에 일반 주행 알림을 내지 않는 주행인가(대기 장소로 혼자 가는 길·순찰 구간).
