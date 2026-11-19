@@ -40,6 +40,7 @@ from .pose_score import (
     build_likelihood_field,
     beam_hits,
     filter_beams,
+    map_fingerprint,
     MapGrid,
     MIN_BEAMS,
     MIN_MARGIN,
@@ -251,12 +252,14 @@ class PoseBootstrapNode(Node):
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         info = msg.info
-        key = (info.width, info.height, info.resolution,
-               info.origin.position.x, info.origin.position.y, len(msg.data))
+        cells = np.asarray(msg.data, dtype=np.int8)
+        # 크기·원점이 같아도 칸 내용이 바뀌면 다른 지도다(앱 지도 수정이 load_map 으로 다시 읽힌다).
+        key = map_fingerprint(info.width, info.height, info.resolution,
+                              info.origin.position.x, info.origin.position.y, cells)
         with self._lock:
             if key == self._map_key and self._field is not None:
                 return
-        data = np.asarray(msg.data, dtype=np.int8).reshape(info.height, info.width)
+        data = cells.reshape(info.height, info.width)
         grid = MapGrid(data, info.resolution, info.origin.position.x, info.origin.position.y)
         # 거리표는 여기서 한 번만 만든다. 이후 채점은 배열 인덱싱이라 사실상 공짜다.
         field = build_likelihood_field(grid)

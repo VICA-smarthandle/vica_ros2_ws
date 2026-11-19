@@ -1,0 +1,62 @@
+# 앱 '지도 수정' 요청 하나. VICA_Supervisor 의 map_fix_node 가 처리한다.
+# 설계서: 루트 docs/superpowers/specs/2026-11-18-map-fix-erase-partial-scan-design.md 6.2
+#
+# 지도를 그린 뒤 고정 장애물이 바뀐 곳만 고친다 — 사각형으로 지우기, 정지 상태 라이다 스캔으로
+# 다시 그리기(부분 스캔), 되돌리기. Nav2 는 재시작하지 않고 map_server 의 load_map 으로 반영한다.
+#
+# 왜 action 문자열 하나로 묶었는가. 요청마다 srv 를 만들면 vica_interfaces 에 타입이 여덟 개
+# 늘고 앱·노드가 함께 따라와야 한다. 이 값들은 앱과 map_fix_node 둘만 읽는다(SaveKeepout.srv 의
+# zones_json 과 같은 판단).
+
+string map_id
+
+# 할 일.
+#   get            잠금 상태와 최근 수정 기록
+#   erase_count    지우면 바뀔 칸 수만 센다(파일은 그대로)
+#   erase          사각형 안의 검은 칸·회색 칸을 빈칸으로
+#   scan_check     지금 스캔으로 자세만 다시 맞춰 '위치 맞춤 %' 와 라이다 점을 낸다
+#   scan_start     부분 스캔 세션 시작(맞춤 → 물러나기 → 스캔 → 미리보기). 진행은 /vica/map_fix/state
+#   scan_cancel    세션 중지
+#   scan_apply     미리보기의 변경된 칸을 지도에 쓴다
+#   scan_discard   미리보기를 버린다
+#   undo           가장 최근 수정을 되돌린다
+string action
+
+# action 별 인자(JSON 객체, 없으면 빈 문자열). 좌표는 ROS map 좌표(m)다.
+#   erase_count · erase   {"rects": [{"x_min": 1.2, "y_min": 2.5, "x_max": 1.8, "y_max": 3.0}, ...]}
+#   scan_start            {"radius_m": 2.0}
+#   scan_cancel · scan_apply · scan_discard   {"session": "<scan_start 가 준 값>"}
+string args_json
+---
+bool accepted
+
+# 사유. 앱이 문구와 분기에 쓴다. '' 이면 통과.
+#   거절(accepted false)
+#     'bad_map_id' 'no_map' 'bad_map' 'io_error'   지도 파일 문제
+#     'bad_action' 'bad_args'                      요청이 틀렸다
+#     'bad_rect' 'too_small' 'too_many' 'out_of_map'   사각형 문제
+#     'busy_driving'      목적지가 살아 있거나 미션이 일하는 중이거나 로봇이 움직인다
+#     'no_status'         로봇 상태(/robot_status)를 못 받아 쉬는 중인지 알 수 없다
+#     'busy_session'      이미 부분 스캔 세션이 있다
+#     'not_current_map'   주행 지도가 아닌데 부분 스캔을 요청했다
+#     'no_pose'           자세·TF·스캔을 못 얻었다(Nav2 꺼짐 포함)
+#     'no_session'        그런 세션이 없거나 미리보기 단계가 아니다
+#     'apply_failed'      Nav2 가 지도를 못 읽었다. 파일은 되돌렸다
+#     'nothing_to_undo'   되돌릴 수정이 없다
+#   통과(accepted true)했지만 Nav2 에는 아직(applied false)
+#     'no_nav2'           Nav2 가 꺼져 있다. 켜질 때 읽는다
+#     'apply_timeout'     Nav2 가 응답하지 않았다. 노드가 다시 건다
+#     'not_current_map'   주행 지도가 아닌 지도를 지웠다. 다음에 그 지도로 주행할 때 읽힌다
+string reason
+string message
+
+# action 별 결과(JSON 객체).
+#   get           {"lock": "" | "busy_driving", "can_scan": bool, "history": [{at, kind, radius_m, added, removed, black, gray, rects, pose}]}
+#   erase_count   {"rects": [{"w_m", "h_m", "black", "gray"}], "black", "gray"}
+#   erase         {"black", "gray", "applied", "mission_stale"}
+#   scan_check    {"ok", "reason", "score", "used_beams", "kept_beams", "ambiguous", "x", "y", "yaw", "hits": [[x, y], ...]}
+#   scan_start    {"session"}
+#   scan_apply    {"added", "removed", "score_before", "score_after", "applied", "mission_stale"}
+#   undo          {"kind", "applied", "mission_stale"}
+# mission_stale 이 true 면 미션이 켜져 있어 미션(장애물 안내)은 다시 켜질 때까지 옛 지도를 쓴다.
+string result_json
