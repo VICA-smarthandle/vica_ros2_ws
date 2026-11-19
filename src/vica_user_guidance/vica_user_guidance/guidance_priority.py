@@ -21,12 +21,15 @@ PATROL_NONE = 0
 PATROL_PREFIX = "patrol"
 PATROL_LIGHT_STATE = "patrol_light"
 PATROL_ALARM_STATE = "patrol_alarm"
+# 도크에 들어가 있음(2026-11-18) — 미션 dialog_state "docked" 를 같은 길(robot_state 코드)로 낸다.
+DOCKED_STATE = "docked"
 # robot_state 가 이만큼 끊기면 순찰 표시를 버린다(미션 발행 1Hz 의 3배).
 PATROL_STATE_TIMEOUT_NS = 3_000_000_000
 PATROL_REASONS = {
     protocol.STATE_PATROL: "patrol",
     protocol.STATE_PATROL_LIGHT: "patrol_light",
     protocol.STATE_PATROL_ALARM: "patrol_alarm",
+    protocol.STATE_DOCKED: "docked",
 }
 
 
@@ -80,7 +83,10 @@ def patrol_state_code(dialog_state: str) -> int:
     """dialog_state → 순찰 상태코드. 순찰이 아니면 PATROL_NONE.
 
     patrolling·patrol_dwell·patrol_paused 는 8, patrol_light 는 9, patrol_alarm 은 10.
+    도크에 들어가 있음(docked)은 6 — 순찰과 같은 우선순위 자리(E-stop 아래)를 쓴다.
     """
+    if dialog_state == DOCKED_STATE:
+        return protocol.STATE_DOCKED
     if not dialog_state.startswith(PATROL_PREFIX):
         return PATROL_NONE
     if dialog_state == PATROL_ALARM_STATE:

@@ -33,8 +33,10 @@ constexpr int64_t PATROL_STATE_TIMEOUT_NS = 3000000000;
 
 // dialog_state → 순찰 상태코드. "patrol" 로 시작하면 순찰이고, 아니면 PATROL_NONE.
 // patrolling·patrol_dwell·patrol_paused 는 8, patrol_light 는 9, patrol_alarm 은 10.
+// 도크에 들어가 있음(docked, 2026-11-18)은 6 — 순찰과 같은 우선순위 자리(E-stop 아래)를 쓴다.
 inline int patrol_state_code(const std::string & dialog_state)
 {
+  if (dialog_state == "docked") {return protocol::STATE_DOCKED;}
   if (dialog_state.rfind("patrol", 0) != 0) {return PATROL_NONE;}
   if (dialog_state == "patrol_alarm") {return protocol::STATE_PATROL_ALARM;}
   if (dialog_state == "patrol_light") {return protocol::STATE_PATROL_LIGHT;}
@@ -48,6 +50,7 @@ constexpr const char * patrol_reason(int code)
     case protocol::STATE_PATROL: return "patrol";
     case protocol::STATE_PATROL_LIGHT: return "patrol_light";
     case protocol::STATE_PATROL_ALARM: return "patrol_alarm";
+    case protocol::STATE_DOCKED: return "docked";
     default: return nullptr;
   }
 }

@@ -18,19 +18,20 @@ constexpr int STATE_RIGHT = 2;
 constexpr int STATE_ESTOP = 3;
 constexpr int STATE_LINK_LOST = 4;   // 펌웨어 워치독 전용 — ROS 는 보내지 않는다
 constexpr int STATE_ARRIVED = 5;
-constexpr int STATE_CHARGING = 6;    // [TARGET] 펌웨어 미구현
+// 도크에 들어가 있음(2026-11-18) — 연두 숨쉬기(펌웨어 da11eee STATE_DOCKED). 옛 STATE_CHARGING(예약) 자리.
+constexpr int STATE_DOCKED = 6;
 constexpr int STATE_CHARGED = 7;     // [TARGET] 펌웨어 미구현
-// 순찰 표시(2026-11-14). 6·7 은 충전용 예약 그대로 비워 둔다.
+// 순찰 표시(2026-11-14).
 constexpr int STATE_PATROL = 8;         // 순찰 중 — 연두 상시
 constexpr int STATE_PATROL_LIGHT = 9;   // 불 켜짐 — 진노랑 상시
 constexpr int STATE_PATROL_ALARM = 10;  // 사람·큰 소리·카메라 끊김 — 빨강 300ms 점멸
 constexpr int STATE_CODE_MAX = STATE_PATROL_ALARM;   // 상태코드 범위 0~10 의 끝
 
-// ROS 가 보내도 되는 코드. 4 는 펌웨어 워치독을 무력화하므로, 6·7 은 펌웨어에 없으므로 뺀다.
+// ROS 가 보내도 되는 코드. 4 는 펌웨어 워치독을 무력화하므로, 7 은 펌웨어에 없으므로 뺀다.
 constexpr bool is_sendable(int code)
 {
   return code == STATE_NORMAL || code == STATE_LEFT || code == STATE_RIGHT ||
-         code == STATE_ESTOP || code == STATE_ARRIVED || code == STATE_PATROL ||
+         code == STATE_ESTOP || code == STATE_ARRIVED || code == STATE_DOCKED || code == STATE_PATROL ||
          code == STATE_PATROL_LIGHT || code == STATE_PATROL_ALARM;
 }
 
@@ -44,7 +45,7 @@ constexpr const char * state_name(int code)
     case STATE_ESTOP: return "ESTOP";
     case STATE_LINK_LOST: return "LINK_LOST";
     case STATE_ARRIVED: return "ARRIVED";
-    case STATE_CHARGING: return "CHARGING";
+    case STATE_DOCKED: return "DOCKED";
     case STATE_CHARGED: return "CHARGED";
     case STATE_PATROL: return "PATROL";
     case STATE_PATROL_LIGHT: return "PATROL_LIGHT";

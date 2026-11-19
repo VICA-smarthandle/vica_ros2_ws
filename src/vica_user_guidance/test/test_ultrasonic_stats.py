@@ -156,11 +156,11 @@ def test_front_physical_30_draw_20_for_global():
 
 def test_side_max_range_040_others_common():
     """10-09: 바퀴 옆(ch0·ch3)만 0.40 m, 나머지는 공통 최대 거리.
-    11-18(도킹 후진·회전): 뒤 두 개(ch5·ch6)·뒷바퀴 옆 두 개(ch4·ch7)는 0.70 m."""
+    11-18(도킹 후진·회전): 뒷바퀴 옆 두 개(ch4·ch7)는 0.70 m, 뒤 두 개(ch5·ch6)는 0.80 m(후진 85 cm)."""
     p, _ = _cfg_and_levels()
     r = resolve_channel_fov(p["ultrasonic_max_range_m"], p["ultrasonic_max_range_m_per_channel"], 8,
                             name="ultrasonic_max_range_m_per_channel")
-    assert r == pytest.approx([0.40, 1.5, 1.5, 0.40, 0.70, 0.70, 0.70, 0.70])
+    assert r == pytest.approx([0.40, 1.5, 1.5, 0.40, 0.70, 0.80, 0.80, 0.70])
 
 
 def test_channel_enabled_matches_firmware_and_delays():

@@ -213,7 +213,7 @@ TEST(Patrol, SitsBetweenEstopAndArrival)
     };
   EXPECT_EQ(run().state_code, protocol::STATE_ARRIVED);   // 순찰 값이 없으면 기존 판단
   in.patrol_last_ns = now;
-  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT,
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT, protocol::STATE_DOCKED,
       protocol::STATE_PATROL_ALARM})
   {
     in.patrol_code = code;
@@ -229,7 +229,7 @@ TEST(Patrol, SitsBetweenEstopAndArrival)
   EXPECT_STREQ(run(false).reason, "patrol_alarm");
   // 순찰 코드가 아닌 값(0·4·6·7 …)은 버린다
   in.estop_last_ns = now;
-  for (int code : {0, 1, 3, 4, 5, 6, 7, 11, -1}) {
+  for (int code : {0, 1, 3, 4, 5, 7, 11, -1}) {   // 6 은 2026-11-18 도킹(docked)
     in.patrol_code = code;
     EXPECT_EQ(run().state_code, protocol::STATE_ARRIVED) << code;
   }
@@ -347,7 +347,6 @@ TEST(SerialLinkRules, RefusesWatchdogAndStateCodesOnRawPath)
     EXPECT_NO_THROW(link.send(code, 0));
     EXPECT_THROW(link.send_raw(code, 0), PyError);
   }
-  EXPECT_THROW(link.send(protocol::STATE_CHARGING, 0), PyError);
   EXPECT_THROW(link.send(protocol::STATE_CHARGED, 0), PyError);
   EXPECT_THROW(link.send(11, 0), PyError);
 }
@@ -372,4 +371,15 @@ TEST(SerialLinkRules, MissingPortIsPortOpenFault)
   SerialLink link("/dev/vica_no_such_handle", 115200, true, 0.05, 2000000000, open_posix_serial);
   EXPECT_FALSE(link.connected());
   EXPECT_EQ(link.fault_code(), FAULT_PORT_OPEN);
+}
+
+// 2026-11-18 도킹: dialog_state "docked" → 6(연두 숨쉬기), 파이썬 판과 같다.
+TEST(Docking, DockedDialogStateMapsToCode6)
+{
+  EXPECT_EQ(patrol_state_code("docked"), protocol::STATE_DOCKED);
+  EXPECT_EQ(protocol::STATE_DOCKED, 6);
+  EXPECT_TRUE(protocol::is_sendable(protocol::STATE_DOCKED));
+  EXPECT_EQ(patrol_state_code("docking"), PATROL_NONE);
+  EXPECT_EQ(patrol_state_code("undocking"), PATROL_NONE);
+  EXPECT_STREQ(patrol_reason(protocol::STATE_DOCKED), "docked");
 }

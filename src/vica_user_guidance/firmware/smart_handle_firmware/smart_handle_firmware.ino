@@ -121,6 +121,11 @@
 #define DOCK_STEP_MS      40     // 밝기 갱신 간격(25 Hz)
 #define DOCK_MIN_PCT      8      // 가장 어두울 때(LIME 대비 %)
 #define DOCK_MAX_PCT      60     // 가장 밝을 때 — '은은하게'
+// 도킹 색(2026-11-19 사용자 "다른 전자 기기가 충전될 때 내는 초록색"): 초록 칩만 켠다(WS2812B 초록 515~530 nm =
+// 요즘 기기 충전 표시의 순초록 ~525 nm 과 같은 계열). 빨강을 섞으면 옛 황록(~570 nm) 쪽으로 간다. 처음 값은 110(순찰 LIME).
+#define DOCK_R            0
+#define DOCK_G            255
+#define DOCK_B            0
 #define STATE_PATROL_MAX  STATE_PATROL_ALARM
 
 // ── 워치독: 이 시간 동안 신호 없으면 통신두절로 판단 ──
@@ -1037,7 +1042,7 @@ void loop() {
     lastBlink = now;
     float ph  = (float)(now % DOCK_BREATH_MS) / DOCK_BREATH_MS;
     float lvl = (DOCK_MIN_PCT + (DOCK_MAX_PCT - DOCK_MIN_PCT) * (0.5f - 0.5f * cos(6.2831853f * ph))) / 100.0f;
-    setBoth(Adafruit_NeoPixel::Color((uint8_t)(110 * lvl), (uint8_t)(255 * lvl), 0));   // LIME 을 밝기만 바꿔
+    setBoth(Adafruit_NeoPixel::Color((uint8_t)(DOCK_R * lvl), (uint8_t)(DOCK_G * lvl), (uint8_t)(DOCK_B * lvl)));   // 밝기만 바꿔
   }
 
   // ── 순찰 경보 점멸 (2026-11-14) ─────────
