@@ -51,6 +51,21 @@ SOURCE_MAP_PICK = "map_pick"
 _SOURCES = {SOURCE_ROBOT_STANDING, SOURCE_MAP_PICK}
 
 
+# 홈 '가 봄' 판정 반경(11-19 사용자: 주행에서 어떻게든 홈에 한 번 가 봤으면 '가 본 적 없음'을
+# 내린다). Nav2 의 xy_goal_tolerance(0.15 m)보다 넉넉하게 — 11-19 11:09 실기에서 로봇은 홈 xy 에
+# 들어왔는데 도크 옆이라 방향을 못 맞춰 '성공'을 못 냈다.
+HOME_VISIT_RADIUS_M = 0.30
+
+# 복귀가 실패해 지금은 홈에 갈 수 없을 때 앱에 보일 말(GetHome.message). 11-19 사용자 문구.
+HOME_UNREACHABLE_MESSAGE = "홈에 접근할 수 없습니다."
+
+
+def near_home(home_x: float, home_y: float, x: float, y: float,
+              radius: float = HOME_VISIT_RADIUS_M) -> bool:
+    """(x, y) 가 홈 반경 안인가."""
+    return math.hypot(x - home_x, y - home_y) <= radius
+
+
 @dataclass(frozen=True)
 class HomePosition:
     """저장된 홈 위치 한 건.
@@ -69,6 +84,9 @@ class HomePosition:
     label: str
     visited_ok: bool
     saved_at: str
+    # 마지막 복귀가 실패해 지금은 홈에 갈 수 없는가(11-19). visited_ok 와 따로 둔다 — 한 번 가 본
+    # 홈이 막혔을 때 '가 본 적 없음'이 아니라 '접근할 수 없음'으로 알리려고. 홈에 다시 들어오면 지운다.
+    reach_failed: bool = False
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -85,6 +103,7 @@ class HomePosition:
             "label": self.label,
             "visited_ok": self.visited_ok,
             "saved_at": self.saved_at,
+            "reach_failed": self.reach_failed,
         }
 
 
@@ -210,6 +229,7 @@ class HomeStorage:
             label=str(data.get("label", "") or ""),
             visited_ok=bool(data.get("visited_ok", False)),
             saved_at=str(data.get("saved_at", "") or ""),
+            reach_failed=bool(data.get("reach_failed", False)),
         )
 
     def write(self, home: HomePosition) -> HomePosition:
@@ -218,13 +238,29 @@ class HomeStorage:
         return home
 
     def mark_visited(self, map_id: str, visited_ok: bool) -> Optional[HomePosition]:
-        """'가보기' 결과를 반영한다. 홈이 없으면 None 을 돌려준다.
+        """'가 봄' 표시를 그대로 정한다(접근 실패 표시는 지운다). 홈이 없으면 None.
 
-        도착에 성공하면 True, 실패하면 False 다. 실패를 기록하는 이유는
-        **한 번 확인된 홈이 나중에 못 가는 자리가 될 수 있기** 때문이다 —
-        가구가 놓이거나 문이 잠기면 좌표는 그대로인데 도달할 수 없게 된다.
+        지도를 다시 그렸을 때 확인을 되돌리는 데 쓴다. 주행 결과는 [record_reach] 로 남긴다.
+        """
+        return self._update(map_id, visited_ok=bool(visited_ok), reach_failed=False)
+
+    def record_reach(self, map_id: str, reached: bool) -> Optional[HomePosition]:
+        """주행 결과를 반영한다. 홈이 없으면 None 을 돌려준다.
+
+        홈에 들어왔으면(복귀 성공이든 30 cm 안에 들어온 것이든) '가 봄'으로 적고 접근 실패를 지운다.
+        복귀가 실패하면 '가 봄'은 그대로 두고 접근 실패만 남긴다(11-19 사용자) — 한 번 가 본 홈이
+        가구·잠긴 문으로 막혔을 때 '가 본 적 없음'이 아니라 '접근할 수 없음'으로 알린다.
         """
         home = self.read(map_id)
+        if home is None:
+            return None
+        if reached:
+            return self._update(map_id, visited_ok=True, reach_failed=False, home=home)
+        return self._update(map_id, visited_ok=home.visited_ok, reach_failed=True, home=home)
+
+    def _update(self, map_id: str, *, visited_ok: bool, reach_failed: bool,
+                home: Optional[HomePosition] = None) -> Optional[HomePosition]:
+        home = home if home is not None else self.read(map_id)
         if home is None:
             return None
         updated = HomePosition(
@@ -235,8 +271,9 @@ class HomeStorage:
             source=home.source,
             score=home.score,
             label=home.label,
-            visited_ok=bool(visited_ok),
+            visited_ok=visited_ok,
             saved_at=home.saved_at,
+            reach_failed=reach_failed,
         )
         self._write_document(updated.map_id, updated.to_document())
         return updated

@@ -7,10 +7,13 @@
 import pytest
 
 from vica_mission_manager.home_storage import (
+    HOME_UNREACHABLE_MESSAGE,
+    HOME_VISIT_RADIUS_M,
     SOURCE_MAP_PICK,
     SOURCE_ROBOT_STANDING,
     HomeStorage,
     build_home,
+    near_home,
     normalize_yaw_deg,
     validate_map_id,
 )
@@ -94,18 +97,56 @@ def test_mark_visited_flips_only_the_flag(storage):
     assert updated.saved_at == saved.saved_at
 
 
-def test_failed_visit_is_recorded_as_false(storage):
-    """한 번 확인된 홈도 나중에 못 가는 자리가 될 수 있다.
+def test_failed_return_keeps_the_visit_and_marks_unreachable(storage):
+    """한 번 가 본 홈은 복귀가 실패해도 '가 본 적 없음'으로 돌아가지 않는다(11-19 사용자).
 
-    가구가 놓이거나 문이 잠기면 좌표는 그대로인데 도달할 수 없게 된다.
+    대신 '접근할 수 없음'을 따로 남긴다 — 가구가 놓이거나 문이 잠기면 좌표는 그대로인데
+    도달할 수 없게 된다. 앱은 '홈에 접근할 수 없습니다.' 를 보인다.
     """
     storage.write(build_home("m1", 1.0, 2.0, 0.0, source=SOURCE_MAP_PICK))
-    storage.mark_visited("m1", True)
+    storage.record_reach("m1", True)
 
-    updated = storage.mark_visited("m1", False)
+    updated = storage.record_reach("m1", False)
 
     assert updated is not None
-    assert updated.visited_ok is False
+    assert updated.visited_ok is True
+    assert updated.reach_failed is True
+    assert storage.read("m1").reach_failed is True     # 파일에 남는다
+
+
+def test_failed_return_on_a_never_visited_home_is_unreachable_too(storage):
+    storage.write(build_home("m1", 1.0, 2.0, 0.0, source=SOURCE_MAP_PICK))
+
+    updated = storage.record_reach("m1", False)
+
+    assert (updated.visited_ok, updated.reach_failed) == (False, True)
+
+
+def test_reaching_home_clears_unreachable(storage):
+    storage.write(build_home("m1", 1.0, 2.0, 0.0, source=SOURCE_MAP_PICK))
+    storage.record_reach("m1", False)
+
+    updated = storage.record_reach("m1", True)
+
+    assert (updated.visited_ok, updated.reach_failed) == (True, False)
+
+
+def test_old_file_without_reach_failed_reads_as_reachable(storage, tmp_path):
+    storage.write(build_home("m1", 1.0, 2.0, 0.0, source=SOURCE_MAP_PICK))
+    path = storage.path_for("m1")
+    path.write_text(path.read_text(encoding="utf-8").replace("reach_failed: false\n", ""), encoding="utf-8")
+    assert "reach_failed" not in path.read_text(encoding="utf-8")
+
+    assert storage.read("m1").reach_failed is False
+
+
+def test_near_home_is_within_thirty_centimetres():
+    """홈 30 cm 안에 한 번이라도 들어오면 가 본 것이다 — Nav2 가 방향을 못 맞춰 '성공'을 못 내도
+    (11-19 11:09 실기: xy 는 들어왔는데 방향을 못 맞춰 4분 뒤 취소)."""
+    assert HOME_VISIT_RADIUS_M == 0.30
+    assert near_home(1.0, 2.0, 1.2, 2.2)          # 0.28 m
+    assert not near_home(1.0, 2.0, 1.25, 2.2)     # 0.32 m
+    assert HOME_UNREACHABLE_MESSAGE == "홈에 접근할 수 없습니다."
 
 
 def test_new_map_keeps_coordinates_but_requires_recheck(storage):
@@ -117,10 +158,13 @@ def test_new_map_keeps_coordinates_but_requires_recheck(storage):
     storage.write(build_home("m1", 1.5, -2.5, 180.0, source=SOURCE_ROBOT_STANDING))
     storage.mark_visited("m1", True)
 
+    storage.record_reach("m1", False)
+
     updated = storage.invalidate_for_new_map("m1")
 
     assert updated is not None
     assert updated.visited_ok is False
+    assert updated.reach_failed is False   # 새 지도에서는 아직 안 가 본 것이지 막힌 것이 아니다
     assert (updated.x, updated.y, updated.yaw) == (1.5, -2.5, 180.0)
 
 
