@@ -686,6 +686,8 @@ LLM_THINKING_TAIL_SEC = 1.0
 # 사고에서만 마지막으로 "결국 홈으로" 원칙을 지킨다(watchdog).
 ASKING_STUCK_FALLBACK_SEC = 30.0
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
+# 일시정지 중 받은 목적지 제안이 아니요·무응답으로 접혔을 때 — 일시정지로 돌아왔다고 알린다(2026-11-18 사용자 지정).
+MSG_PAUSE_KEPT = "알겠습니다. 다시 출발하려면 말씀해 주세요."
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
 MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
@@ -1817,6 +1819,10 @@ class MissionLogic:
         # 원래 가던 목적지를 여기 든다. 확정되면 새 목적지로, 거절·무응답·호출이면 이
         # 목적지로 다시 출발한다(_fold_confirming). 대기 보류(_wait_hold)와 같은 틀이다.
         self._change_from: Optional[Destination] = None
+        # 일시정지 중에 목적지 '제안'이 와서 확인 질문(CONFIRMING)으로 들어갔나(3-나-1 설계 4.4, 2026-11-18).
+        # 거절·무응답·호출이면 그 일시정지로 돌아간다 — 보관한 목적지(paused_destination)는 손대지 않는다.
+        # 예전엔 쉬는 상태로 가 "다시 가자"가 "다시 출발할 안내가 없습니다"가 됐다. 위 두 보류와 같은 틀이다.
+        self._pause_hold = False
         # 접근 질문·돌아서기 중에 사용자가 말한 목적지(2026-10-08 반응표). 손잡이를 내준 뒤
         # 온보딩 대신 이 목적지로 확인 질문을 한다. 그때 쓰고 비운다.
         self._approach_dest: Optional[Destination] = None
@@ -2571,6 +2577,9 @@ class MissionLogic:
                     # 대기 중의 새 목적지 제안. 출발이 확정될 때까지 대기를 끝내지
                     # 않는다 — 거절·무응답이면 이 대기로 돌아간다(2026-10-07).
                     self._wait_hold = self.state
+                if self.state == State.PAUSED:
+                    # 일시정지 중의 제안. 출발이 확정될 때까지 일시정지를 버리지 않는다.
+                    self._pause_hold = True
                 self.state = State.CONFIRMING
                 self._confirm_from_approach = False
                 self._confirming_dest_id = intent.matched_destination_id or None
@@ -2624,6 +2633,8 @@ class MissionLogic:
             self._reset_arrival_dialog()
         # 주행 중 바꾸기가 확정됐다 — 원래 주행은 질문할 때 이미 멈췄다(goal_paused).
         self._change_from = None
+        # 일시정지 중의 제안이 확정됐다 — 새 안내라 옛 일시정지로 돌아갈 일이 없다.
+        self._pause_hold = False
         # 새 안내다 — 옛 주행의 재시도 횟수·예약과 관리자 주행 표시를 넘겨받지 않는다
         # (2026-10-07 검토: 바꾸기·일시정지 뒤 확정은 _to_idle 을 거치지 않는다).
         self._nav_retry_count = 0
@@ -2805,6 +2816,7 @@ class MissionLogic:
         - 안내 주행 중 바꾸기 질문: 원래 목적지로 다시 출발한다(2026-10-07 사용자 결정 —
           아니요·무응답이면 원래 목적지). announce 면 MSG_RESUMED 로 알린다. 호출("비카야")로
           접힐 때는 "네?"가 막 나가는 참이라 말을 보태지 않는다.
+        - 일시정지 중에 들어온 질문: 그 일시정지로(2026-11-18).
         - 그 밖: 평소처럼 IDLE.
         돌려주는 행동은 다시 출발할 때만 있다.
         """
@@ -2826,6 +2838,13 @@ class MissionLogic:
             # 트리는 원래 주행 것 그대로다(_nav_tree 는 질문하는 동안 바뀌지 않는다).
             actions.append(Navigate(change_from, tree=self._nav_tree))
             return actions
+        if self._pause_hold:
+            # 일시정지 중에 들어온 질문 — 그 일시정지로(보관한 목적지 그대로). 말은 부른 쪽이 정한다.
+            self._pause_hold = False
+            self._confirming_dest_id = None
+            self._confirm_deadline = None
+            self.state = State.PAUSED
+            return []
         held = self._wait_hold
         if held is None:
             self._to_idle()
@@ -2884,6 +2903,11 @@ class MissionLogic:
                 return self._fold_confirming(now)
             if self._confirm_from_approach:
                 return self._fold_approach_confirm(now)
+            if self._pause_hold:
+                # 일시정지 중의 제안을 거절 — 일시정지로 돌아가며 다시 출발하는 법을 알린다.
+                # "안내 요청이 취소되었습니다"는 멈춰 둔 안내까지 끝난 것으로 들린다(2026-11-18 사용자).
+                self._fold_confirming(now)
+                return [Say(MSG_PAUSE_KEPT, priority="response")]
             self._fold_confirming(now)
             return [Say(MSG_CONFIRM_TIMEOUT, priority="response")]
         if dest is None or dest.id != (self._confirming_dest_id or ""):
@@ -5365,6 +5389,10 @@ class MissionLogic:
                     actions.extend(self._fold_confirming(now))
                 elif self._confirm_from_approach:
                     actions.extend(self._fold_approach_confirm(now))
+                elif self._pause_hold:
+                    # 일시정지 중의 제안에 답이 없다 — 아니요와 같은 길·같은 멘트.
+                    self._fold_confirming(now)
+                    actions.append(Say(MSG_PAUSE_KEPT))
                 else:
                     self._fold_confirming(now)
                     actions.append(Say(MSG_CONFIRM_TIMEOUT))
@@ -6075,6 +6103,8 @@ class MissionLogic:
         # 주행 중 바꾸기 보류도 같다 — 남으면 E-stop·취소 뒤 평범한 확인 질문의 거절이
         # 엉뚱하게 옛 목적지로의 재출발이 된다.
         self._change_from = None
+        # 일시정지 보류도 같다 — 남으면 E-stop·취소 뒤 확인 질문의 거절이 없는 일시정지로 돌아간다.
+        self._pause_hold = False
         self._wait_place = ""
         self._beacon_next_at = None
         self._release_text = ""

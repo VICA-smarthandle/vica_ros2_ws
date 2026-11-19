@@ -73,7 +73,7 @@ from .approach_geometry import approach_goal
 from .dock_flow import (CALL_CANCEL, CALL_START, CALL_UNDOCK, DOCK_FAR_COV, DOCK_FAR_M, DockFlow,
                         classify_start, parse_node_state, staging_relation)
 from .dock_spot import DOCK_DESTINATION_ID, dock_yaml_path, read_dock_spot, staging_destination
-from .home_storage import HomeStorage, build_home
+from .home_storage import HOME_UNREACHABLE_MESSAGE, HomeStorage, build_home, near_home
 from .ledger import (COV_UNKNOWN, Ledger, LedgerStore, apply_goal_event, confirm_abort_name,
                      place_here, state_fields)
 from .map_meta import load_map_meta
@@ -407,6 +407,9 @@ class MissionManagerNode(Node):
         # 홈은 목적지 카탈로그와 같은 폴더의 home.yaml 이다. 지도별 자료가
         # 흩어지지 않도록 목적지 경로의 부모를 그대로 쓴다.
         self._home_storage = HomeStorage(Path(self._destinations_path).parent.parent)
+        # 아직 '가 봄'이 아니거나 접근 실패가 남은 홈의 (x, y). 위치를 받을 때 홈 30 cm 안인지 본다.
+        # 이미 가 봤고 막힘도 없으면 None — 그때는 위치마다 아무것도 하지 않는다(11-19).
+        self._home_watch: Optional[tuple[float, float]] = None
 
         map_yaml = str(self.get_parameter("map_yaml").value)
         if map_yaml:
@@ -1580,6 +1583,11 @@ class MissionManagerNode(Node):
                 )
         else:
             home = self._home_storage.read(self._map_id)
+        self._home_watch = (
+            (home.x, home.y)
+            if home is not None and (not home.visited_ok or home.reach_failed)
+            else None
+        )
         if home is None:
             return None
         return Destination(
@@ -1664,6 +1672,9 @@ class MissionManagerNode(Node):
         response.label = home.label
         response.visited_ok = home.visited_ok
         response.saved_at = home.saved_at
+        # 마지막 복귀가 실패했으면 그 사실을 사람 말로 싣는다 — 앱이 '가 본 적 없음' 대신 보인다
+        # (11-19 사용자). 공용 계약을 바꾸지 않으려고 기존 message 칸을 쓴다.
+        response.message = HOME_UNREACHABLE_MESSAGE if home.reach_failed else ""
         return response
 
     def _on_delete_home(
@@ -1762,6 +1773,28 @@ class MissionManagerNode(Node):
         self.logic.robot_pose = self._robot_pose
         cov = msg.pose.covariance
         self._pose_cov_xy = float(cov[0] + cov[7]) if len(cov) >= 8 else 0.0
+        self._check_home_reached()
+
+    def _robot_near_home(self) -> bool:
+        """위치를 제대로 잡은 채 홈 30 cm 안에 있는가."""
+        home = self.logic.return_destination
+        pose = self._robot_pose
+        if home is None or pose is None or self._pose_cov_xy > COV_UNKNOWN:
+            return False
+        return near_home(home.pose.x, home.pose.y, pose.x, pose.y)
+
+    def _check_home_reached(self) -> None:
+        """홈 30 cm 안에 들어오면 '가 봄'으로 적는다(11-19 사용자 — 주행에서 어떻게든 홈에 한 번
+        가 봤으면 '가 본 적 없음'을 내린다). Nav2 가 방향을 못 맞춰 '성공'을 못 낸 복귀, 수동 주행,
+        지나가기도 같다. 위치를 아직 못 잡았으면(초기 위치 전) 보지 않는다."""
+        watch = self._home_watch
+        pose = self._robot_pose
+        if watch is None or pose is None or self._pose_cov_xy > COV_UNKNOWN:
+            return
+        if near_home(watch[0], watch[1], pose.x, pose.y):
+            self._home_watch = None
+            self.get_logger().info("홈 30 cm 안에 들어와 '가 봄'으로 기록합니다.")
+            self._record_home_visit(True)
 
     def destroy_node(self) -> bool:
         # 장애물 안내 보조 노드·실행기를 먼저 닫는다 — 본체가 사라진 뒤 판정 타이머가 더 돌지 않게.
@@ -3236,11 +3269,20 @@ class MissionManagerNode(Node):
             State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST, State.PATROLLING)
 
     def _record_home_visit(self, visited_ok: bool) -> None:
-        """복귀 결과를 home.yaml 에 남긴다. 실패해도 주행 판정을 막지 않는다."""
+        """복귀 결과를 home.yaml 에 남긴다. 실패해도 주행 판정을 막지 않는다.
+
+        실패여도 로봇이 홈 30 cm 안에 와 있으면 다녀온 것으로 본다(방향만 못 맞춘 경우, 11-19).
+        정말 실패면 '가 봄'은 그대로 두고 '접근할 수 없음'만 남긴다.
+        """
+        reached = visited_ok or self._robot_near_home()
         try:
-            self._home_storage.mark_visited(self._map_id, visited_ok)
+            home = self._home_storage.record_reach(self._map_id, reached)
         except (ValueError, OSError) as exc:
             self.get_logger().warn(f"홈 확인 상태를 기록하지 못했습니다: {exc}")
+            return
+        self._home_watch = (
+            None if home is None or (home.visited_ok and not home.reach_failed) else (home.x, home.y)
+        )
 
     def _nav_distance_remaining(self):
         """Nav2 feedback 의 남은 거리(m). 아직 없으면 None.

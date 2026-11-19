@@ -14,6 +14,7 @@ add_compile_options(-ffp-contract=off)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
@@ -47,7 +48,7 @@ add_executable(user_guidance_driver_node src/user_guidance_driver_node.cpp)
 target_link_libraries(user_guidance_driver_node vica_guidance_core)
 target_compile_options(user_guidance_driver_node PRIVATE -Wno-pedantic)
 ament_target_dependencies(user_guidance_driver_node
-  rclcpp std_msgs sensor_msgs builtin_interfaces tf2 tf2_ros vica_interfaces)
+  rclcpp std_msgs std_srvs sensor_msgs builtin_interfaces tf2 tf2_ros vica_interfaces)
 
 # 방향지시 노드(2026-10-13). 실행 파일 이름도 파이썬 판과 같다(turn_guide_node).
 add_executable(turn_guide_node src/turn_guide_node.cpp)

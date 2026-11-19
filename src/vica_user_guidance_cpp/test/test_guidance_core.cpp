@@ -12,6 +12,7 @@
 
 #include "gtest/gtest.h"
 
+#include "vica_user_guidance_cpp/driver_core.hpp"
 #include "vica_user_guidance_cpp/frames.hpp"
 #include "vica_user_guidance_cpp/guidance.hpp"
 #include "vica_user_guidance_cpp/pyfmt.hpp"
@@ -382,4 +383,36 @@ TEST(Docking, DockedDialogStateMapsToCode6)
   EXPECT_EQ(patrol_state_code("docking"), PATROL_NONE);
   EXPECT_EQ(patrol_state_code("undocking"), PATROL_NONE);
   EXPECT_STREQ(patrol_reason(protocol::STATE_DOCKED), "docked");
+}
+
+// ── 실행 중 채널 끄기·켜기(앱 '전방 초음파' 스위치, 2026-11-18) ──
+
+TEST(RuntimeSwitch, OffSendsClearThreeTimesThenStops)
+{
+  using A = RuntimeChannelSwitch::Action;
+  RuntimeChannelSwitch s(8);
+  EXPECT_EQ(s.action(1), A::Normal);
+  EXPECT_TRUE(s.set({1, 2}, false));
+  for (int i = 0; i < RuntimeChannelSwitch::kClearFrames; ++i) {
+    EXPECT_EQ(s.action(1), A::Clear) << i;
+    s.cleared(1);
+  }
+  EXPECT_EQ(s.action(1), A::Skip);
+  EXPECT_EQ(s.action(2), A::Clear);   // 채널마다 따로 센다
+  EXPECT_EQ(s.action(5), A::Normal);  // 도킹용 뒤 채널은 그대로
+  EXPECT_FALSE(s.on(1));
+}
+
+TEST(RuntimeSwitch, OnResumesAtOnceAndSameStateIsNoChange)
+{
+  using A = RuntimeChannelSwitch::Action;
+  RuntimeChannelSwitch s(8);
+  EXPECT_FALSE(s.set({1, 2}, true));   // 이미 켜짐
+  s.set({1, 2}, false);
+  EXPECT_FALSE(s.set({1, 2}, false));  // 이미 꺼짐 — '없음' 횟수를 다시 채우지 않는다
+  s.cleared(1);
+  EXPECT_TRUE(s.set({1, 2}, true));
+  EXPECT_EQ(s.action(1), A::Normal);
+  EXPECT_TRUE(s.on(2));
+  EXPECT_FALSE(s.set({9, -1}, false));  // 없는 채널은 무시
 }

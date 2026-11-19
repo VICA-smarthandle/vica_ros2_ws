@@ -10,6 +10,7 @@
 #include "sensor_msgs/msg/range.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 #include "vica_interfaces/msg/robot_state.hpp"
@@ -122,6 +123,22 @@ public:
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this, true);
       }
+      // 앱 시스템 진단 '전방 초음파' 켜기·끄기(2026-11-18 사용자). 주행 중에도 노드를 다시 띄우지 않고
+      // 바꾼다. 상태는 늦게 붙은 앱도 받게 마지막 값을 남긴다. 다시 띄우면 설정값(켜짐)으로 돌아간다.
+      pub_front_on_ = create_publisher<std_msgs::msg::Bool>(
+        "/vica/ultrasonic/front_enabled", rclcpp::QoS(1).transient_local());
+      srv_front_ = create_service<std_srvs::srv::SetBool>(
+        "/vica/ultrasonic/front_enable",
+        [this](
+          const std::shared_ptr<std_srvs::srv::SetBool::Request> req,
+          std::shared_ptr<std_srvs::srv::SetBool::Response> res) {
+          res->success = core_->set_front_ultrasonic(req->data, res->message);
+          publish_front_state();
+        });
+      publish_front_state();
+      // 앱이 드라이버보다 먼저 붙으면 rosbridge 가 VOLATILE 로 구독해 처음 한 번 낸 값을 놓친다
+      // (2026-11-18 검토). 1 s 마다 다시 낸다.
+      timer_front_ = create_wall_timer(std::chrono::seconds(1), [this] {publish_front_state();});
     }
 
     // 타이머는 STEADY_TIME(벽시계) — 파이썬 판 create_timer(…, clock=steady_clock).
@@ -136,6 +153,13 @@ public:
   }
 
   void shutdown_to_neutral() {core_->shutdown_to_neutral();}
+
+  void publish_front_state()
+  {
+    std_msgs::msg::Bool m;
+    m.data = core_->front_ultrasonic_on();
+    pub_front_on_->publish(m);
+  }
 
   // ── DriverIo ──
   int64_t steady_now_ns() override {return steady_clock_.now().nanoseconds();}
@@ -206,9 +230,11 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_haptic_;
   rclcpp::Publisher<vica_interfaces::msg::SmartHandleState>::SharedPtr pub_state_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Range>::SharedPtr> us_pubs_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_front_on_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_front_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  rclcpp::TimerBase::SharedPtr timer_send_, timer_diag_, timer_uplink_;
+  rclcpp::TimerBase::SharedPtr timer_send_, timer_diag_, timer_uplink_, timer_front_;
 };
 
 }  // namespace vica_guidance
