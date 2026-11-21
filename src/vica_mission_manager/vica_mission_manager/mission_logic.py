@@ -2087,9 +2087,10 @@ class MissionLogic:
         kind = intent.ask_kind if intent.ask_kind in QUESTION_KINDS else "open"
         options = tuple((d.id, d.name) for d in map(lookup, intent.ask_option_ids) if d is not None)
         self.voice_note = " · ".join(filter(None, (self.voice_note, "넘겨받은 질문")))
-        if self._resume_question_open():
-            # 원칙 6 — 질문 뒤의 말은 가장 최근 질문의 대답이다. 넘겨받은 질문을 말하면 "다시 출발할까요?"(Task 3.4)는 닫는다 —
-            # 남기면 그 질문에 한 "네"가 재출발이 된다. 꺼져 있으면 열리지 않아 닿지 않는다.
+        if self._resume_question_open() and intent.intent != "unknown":
+            # 원칙 6 — 질문 뒤의 말은 가장 최근 질문의 대답이다. 음성이 넘긴 다른 질문(question·clarify)을 말하면 "다시
+            # 출발할까요?"(Task 3.4)는 닫는다 — 남기면 그 질문에 한 "네"가 재출발이 된다. unknown 이 넘긴 말(호출어만 들린 "네?"·
+            # 옛 사다리 뒤의 "잘 듣지 못했습니다…")은 새 질문이 아니라 질문을 둔다(원칙 9 · 13 — 취소 확인과 같다). 꺼져 있으면 열리지 않는다.
             self._close_resume_question()
         return [*actions, self._ask(intent.ask_text, kind, options)]
 

@@ -579,6 +579,36 @@ def test_p6_handed_question_replaces_the_resume_question(kind, ask):
     assert _says(_voice(logic, t + 21, intent("resume", need_confirm=True))) == [MSG_RESUME_CONFIRM]   # 다시 가자 = 다시 묻는다
 
 
+@pytest.mark.parametrize("flags", [{}, {"reask_ladder": True}, {"wake_revive": True},
+                                   {"reask_ladder": True, "wake_revive": True}],
+                         ids=["ladders_off", "reask_ladder", "wake_revive", "both"])
+def test_p13_wake_greeting_handed_over_keeps_the_resume_question(flags):
+    # 원칙 9 · 13 — 창 안의 "비카야"에 넘긴 "네?"는 새 질문이 아니다(note_question_asked·_resume_reask 와 같은 뜻). 재개 질문은
+    # 남고 다음 "네"(대답 칸 open — 바꿔 읽지 않음)가 그 질문의 승낙이다 — 안내 취소 확인·도움 요청 취소 확인과 같다(Task 3.4 재검토).
+    logic, t = paused_resume_asked(**flags)
+    _voice(logic, t, intent("unknown", ask_text=MSG_WAKE_GREETING, ask_kind="open"))
+    assert logic._resay_open_question(t) is not None
+    assert _navs(_voice(logic, t + 1, intent("affirm", answer="yes", answer_kind="open"))) == [ROOM.id]
+
+
+def test_p8_handed_retry_after_the_old_ladder_keeps_the_resume_question():
+    # 옛 사다리: 둘째 못 알아들은 말에는 미션이 말하지 않아 음성이 넘긴 "잘 듣지 못했습니다…"가 나간다 — 되묻는 말이지 다른 질문이 아니다.
+    retry = intent("unknown", ask_text=MSG_REASK_RETRY, ask_kind="open")
+    logic, t = paused_resume_asked()
+    assert _says(_voice(logic, t, retry)) == [MSG_RESUME_CONFIRM]
+    assert _says(_voice(logic, t + 1, retry)) == [MSG_REASK_RETRY]
+    assert logic._resay_open_question(t + 1) is not None
+    assert _navs(_voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))) == [ROOM.id]
+
+
+def test_p13_wake_call_folds_first_then_handed_wake_greeting_still_asks_again():
+    logic, t = paused_resume_asked(wake_revive=True)  # 호출이 먼저 접은 경우는 그대로 — "응"은 다시 묻는다
+    logic.on_wake_call(t)
+    _voice(logic, t + 1, intent("unknown", ask_text=MSG_WAKE_GREETING, ask_kind="open"))
+    acts = _voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))
+    assert _says(acts) == [MSG_RESUME_CONFIRM] and _navs(acts) == [] and logic.state == State.PAUSED
+
+
 def test_p6_answer_without_a_handed_question_keeps_the_resume_question():
     logic, t = paused_resume_asked()                   # 넘긴 질문 없는 사용자 질문(대답은 음성이 말함)은 재개 질문을 둔다
     assert _voice(logic, t, intent("question", reply="화장실은 2층에 있어요.")) == []
