@@ -4,6 +4,7 @@
 고치지 않는다 — 실제 흐름이 채우는 내부 값(질문 종류·대기 장소·복귀 사다리 등)이 그대로
 남아야 칸의 동작이 실기와 같다. 정본 설계: docs/superpowers/specs/2026-10-08-mission-request-
 reactions-design.md
+일부 함수의 **kw 는 MissionLogic 인자다(예: reask_ladder=True — 세 단계 되묻기, Task 3.8). 안 주면 지금 그대로.
 """
 from vica_mission_manager.mission_logic import (
     WAIT_DEPART_AFTER_SPEECH_SEC,
@@ -60,19 +61,19 @@ def new_logic(**kw) -> MissionLogic:
 
 
 # ---- 상태 ------------------------------------------------------------------
-def idle():
-    return new_logic(), 1.0
+def idle(**kw):
+    return new_logic(**kw), 1.0
 
 
-def navigating(d=ROOM, t=0.0):
-    logic = new_logic()
+def navigating(d=ROOM, t=0.0, **kw):
+    logic = new_logic(**kw)
     logic.on_intent(go(d), d, BOUNDS, True, t)
     return logic, t + 1.0
 
 
-def asking(d=TOILET):
+def asking(d=TOILET, **kw):
     """도착 질문. TOILET(restroom)은 대기형 "다녀오시는 동안 여기서 기다릴까요?"."""
-    logic = new_logic()
+    logic = new_logic(**kw)
     logic.on_intent(go(d), d, BOUNDS, True, 0.0)
     logic.on_tick(1.0, NavStatus.SUCCEEDED)
     logic.on_arrival_question_spoken(2.0)
@@ -108,23 +109,23 @@ def idle_braked_spot():
     return idle_braked(SPOT_DEST)
 
 
-def confirming():
-    logic = new_logic()
+def confirming(**kw):
+    logic = new_logic(**kw)
     logic.on_intent(intent(matched_destination_id=TOILET.id, need_confirm=True),
                     TOILET, BOUNDS, True, 0.0)
     return logic, 1.0
 
 
-def confirming_change():
+def confirming_change(**kw):
     """안내 주행 중 다른 목적지 제안 → 멈추고 바꿀지 묻는 중."""
-    logic, t = navigating(ROOM)
+    logic, t = navigating(ROOM, **kw)
     logic.on_intent(intent(matched_destination_id=TOILET.id, need_confirm=True),
                     TOILET, BOUNDS, True, t)
     return logic, t + 1.0
 
 
-def paused():
-    logic, t = navigating()
+def paused(**kw):
+    logic, t = navigating(**kw)
     logic.on_pause_request(t)
     return logic, t + 1.0
 
@@ -144,15 +145,15 @@ def arrived():
     return logic, 10.5
 
 
-def asking_wait_time():
-    logic, t = asking(dest("reception", id="desk", name="안내데스크"))
+def asking_wait_time(**kw):
+    logic, t = asking(dest("reception", id="desk", name="안내데스크"), **kw)
     logic.on_arrival_answer(intent("affirm"), t)
     logic.on_arrival_question_spoken(t + 1.0)
     return logic, t + 2.0
 
 
-def waiting_release(minutes=10):
-    logic = new_logic()
+def waiting_release(minutes=10, **kw):
+    logic = new_logic(**kw)
     logic.on_intent(go(SPOT_DEST), SPOT_DEST, BOUNDS, True, 0.0)
     logic.on_tick(1.0, NavStatus.SUCCEEDED)
     logic.on_arrival_question_spoken(2.0)
@@ -160,22 +161,22 @@ def waiting_release(minutes=10):
     return logic, 4.0
 
 
-def moving_to_wait_spot():
-    logic, _ = waiting_release()
+def moving_to_wait_spot(**kw):
+    logic, _ = waiting_release(**kw)
     logic.on_wait_speech_spoken(logic._release_text, 7.0)
     logic.on_tick(7.0 + WAIT_DEPART_AFTER_SPEECH_SEC + 0.1, NavStatus.NONE)   # M2 뒤 1초(2026-10-21)
     return logic, 9.5
 
 
-def waiting():
-    logic, _ = moving_to_wait_spot()
+def waiting(**kw):
+    logic, _ = moving_to_wait_spot(**kw)
     logic.on_tick(10.0, NavStatus.SUCCEEDED)
     return logic, 11.0
 
 
-def waiting_asked():
+def waiting_asked(**kw):
     """대기 중 "다 됐어" → "네, 어디로 모실까요?"를 물은 직후(30초 안)."""
-    logic, t = waiting()
+    logic, t = waiting(**kw)
     logic.on_intent(intent("finish"), None, BOUNDS, True, t)
     return logic, t + 1.0
 
@@ -211,8 +212,8 @@ def seeking():
     return logic, 2.0
 
 
-def estopped():
-    logic, t = navigating()
+def estopped(**kw):
+    logic, t = navigating(**kw)
     logic.on_estop(True, t)
     return logic, t + 1.0
 

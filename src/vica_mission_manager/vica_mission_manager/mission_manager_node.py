@@ -354,6 +354,8 @@ class MissionManagerNode(Node):
         self.declare_parameter("speaker_gate", False)
         self.declare_parameter("spk_joined_threshold", 0.50)
         self.declare_parameter("speaker_gate_grip", False)   # 대기 중 명령에 손잡이 접촉도 요구(11-14 기본 꺼짐)
+        # 세 단계 되묻기(원칙 8 · 31, 2026-11-21). 켜면 다시 말씀 → 더 크게 또박또박 → (주행 중) 직원 도움. 기본 꺼짐 = 지금 그대로.
+        self.declare_parameter("reask_ladder", False)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
@@ -476,6 +478,7 @@ class MissionManagerNode(Node):
             speaker_gate=bool(self.get_parameter("speaker_gate").value),
             spk_joined_threshold=float(self.get_parameter("spk_joined_threshold").value),
             speaker_gate_grip=bool(self.get_parameter("speaker_gate_grip").value),
+            reask_ladder=bool(self.get_parameter("reask_ladder").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
             **{name: float(self.get_parameter(name).value) for name in (
@@ -2528,7 +2531,8 @@ class MissionManagerNode(Node):
         self._publish_question(record)
         self.get_logger().info(
             f"[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} "
-            f"요청={'y' if say.expects_reply else 'n'} 글자={record.text}")
+            f"요청={'y' if say.expects_reply else 'n'} 글자={record.text}"
+            + (f" 되묻기={record.step}" if record.step else ""))
 
     def _close_question(self, reason: str, record: Optional[QuestionRecord] = None) -> None:
         """열린 질문을 닫고 빈 기록을 낸다. record 를 주면 이미 닫힌 것을 알리기만 한다."""

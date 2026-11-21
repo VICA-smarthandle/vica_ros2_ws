@@ -56,6 +56,13 @@ def test_message_collection_is_not_empty():
     assert len(_spoken_messages()) >= 10
 
 
+def test_p8_reask_sentences_are_checked():
+    """세 단계 되묻기 ①·② 문장(원칙 8)도 위 긴급어 검사에 든다 — MSG_ 이름이 바뀌어 빠지지 않게."""
+    messages = _spoken_messages()
+    assert {"MSG_REASK_RETRY", "MSG_REASK_LOUDER"} <= set(messages)
+    assert not ({messages["MSG_REASK_RETRY"], messages["MSG_REASK_LOUDER"]} & MIC_OFF_MESSAGES)
+
+
 def test_no_message_leaves_josa_unresolved():
     """"(으)로" 같은 미해결 조사 표기가 멘트에 남아 있지 않은지 본다.
 
