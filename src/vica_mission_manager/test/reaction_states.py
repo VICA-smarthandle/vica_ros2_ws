@@ -4,7 +4,8 @@
 고치지 않는다 — 실제 흐름이 채우는 내부 값(질문 종류·대기 장소·복귀 사다리 등)이 그대로
 남아야 칸의 동작이 실기와 같다. 정본 설계: docs/superpowers/specs/2026-10-08-mission-request-
 reactions-design.md
-일부 함수의 **kw 는 MissionLogic 인자다(예: reask_ladder=True — 세 단계 되묻기, Task 3.8). 안 주면 지금 그대로.
+일부 함수의 **kw 는 MissionLogic 인자다(예: reask_ladder=True — 세 단계 되묻기, Task 3.8 · wake_revive=True — "비카야" 뒤
+처리, Task 3.9). 안 주면 지금 그대로.
 """
 from vica_mission_manager.mission_logic import (
     WAIT_DEPART_AFTER_SPEECH_SEC,
@@ -68,6 +69,20 @@ def idle(**kw):
 def navigating(d=ROOM, t=0.0, **kw):
     logic = new_logic(**kw)
     logic.on_intent(go(d), d, BOUNDS, True, t)
+    return logic, t + 1.0
+
+
+def navigating_cancel_asked(**kw):
+    """안내 주행 중 "취소" → "안내를 취소할까요?"를 물은 채 주행 계속(Task 3.9)."""
+    logic, t = navigating(**kw)
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
+    return logic, t + 1.0
+
+
+def navigating_help_asked(**kw):
+    """안내 주행 중 도움 요청 → "직원의 도움이 필요하신가요?"를 물은 채 주행 계속(Task 3.9)."""
+    logic, t = navigating(**kw)
+    logic.on_voice_intent(intent("help"), t, lookup, BOUNDS, True)
     return logic, t + 1.0
 
 
@@ -187,14 +202,14 @@ def moving_back_to_dest():
     return logic, 41.0
 
 
-def approaching():
-    logic = new_logic()
+def approaching(**kw):
+    logic = new_logic(**kw)
     logic.on_approach_request(APPROACH, BOUNDS, True, 0.0)
     return logic, 1.0
 
 
-def awaiting_user():
-    logic, _ = approaching()
+def awaiting_user(**kw):
+    logic, _ = approaching(**kw)
     logic.on_tick(5.0, NavStatus.SUCCEEDED)
     logic.on_approach_question_spoken(6.0)
     return logic, 7.0

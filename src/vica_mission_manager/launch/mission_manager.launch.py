@@ -217,6 +217,10 @@ def generate_launch_description() -> LaunchDescription:
             # reask_ladder: 세 단계 되묻기(원칙 8 · 31, 2026-11-21) — 못 알아들었거나 대답이 없으면 다시 말씀 → 더 크게
             # 또박또박 → (안내 주행 중만) 직원 도움. 질문이 없을 때의 못 알아들은 말도 되묻는다. 기본 꺼짐 = 지금 그대로.
             DeclareLaunchArgument("reask_ladder", default_value="false"),
+            # wake_revive: "비카야" 뒤 처리(원칙 13 · 3, 2026-11-21) — 호출이 확인 질문·"안내를 취소할까요?"·"직원의 도움이
+            # 필요하신가요?"를 조용히 접고, 40초 안의 "응"에는 실행하지 않고 그 질문을 다시 한다. 호출어만 들린 말은 되묻기
+            # 횟수에 세지 않는다. 기본 꺼짐 = 지금 그대로.
+            DeclareLaunchArgument("wake_revive", default_value="false"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # 경비(순찰) 모드(2026-11-14, ~/vica_data/patrol_plan/SPEC.md 4.A). 값은 사용자 결정·11-10·11 실기 근거.
@@ -346,6 +350,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "reask_ladder": ParameterValue(
                             LaunchConfiguration("reask_ladder"),
+                            value_type=bool,
+                        ),
+                        "wake_revive": ParameterValue(
+                            LaunchConfiguration("wake_revive"),
                             value_type=bool,
                         ),
                         "obstacle_narration": ParameterValue(

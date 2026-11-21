@@ -356,6 +356,8 @@ class MissionManagerNode(Node):
         self.declare_parameter("speaker_gate_grip", False)   # 대기 중 명령에 손잡이 접촉도 요구(11-14 기본 꺼짐)
         # 세 단계 되묻기(원칙 8 · 31, 2026-11-21). 켜면 다시 말씀 → 더 크게 또박또박 → (주행 중) 직원 도움. 기본 꺼짐 = 지금 그대로.
         self.declare_parameter("reask_ladder", False)
+        # "비카야" 뒤 처리(원칙 13 · 3, 2026-11-21). 켜면 호출이 취소·도움 확인도 접고, 40초 안의 "응"엔 그 질문을 다시 한다. 기본 꺼짐 = 지금 그대로.
+        self.declare_parameter("wake_revive", False)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
@@ -479,6 +481,7 @@ class MissionManagerNode(Node):
             spk_joined_threshold=float(self.get_parameter("spk_joined_threshold").value),
             speaker_gate_grip=bool(self.get_parameter("speaker_gate_grip").value),
             reask_ladder=bool(self.get_parameter("reask_ladder").value),
+            wake_revive=bool(self.get_parameter("wake_revive").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
             **{name: float(self.get_parameter(name).value) for name in (
