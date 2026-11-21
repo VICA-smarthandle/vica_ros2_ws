@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from reaction_states import (ROOM, TOILET, asking, awaiting_user, confirming, confirming_change, intent, lookup,
-                             navigating, navigating_cancel_asked, navigating_help_asked, new_logic, waiting)
+from reaction_states import (APPROACH, ELEV, ROOM, TOILET, asking, awaiting_user, confirming, confirming_change, intent,
+                             lookup, navigating, navigating_cancel_asked, navigating_help_asked, new_logic, paused,
+                             waiting)
 from vica_mission_manager.mission_logic import (
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
@@ -510,3 +511,102 @@ def test_p13_confirm_without_a_sentence_is_folded_but_not_remembered(dest_id):
     assert on.on_wake_call(t) == off.on_wake_call(t) and on.state == off.state == State.IDLE
     assert on._wake_folded is None
     assert _voice(on, "affirm", t + 3) == _voice(off, "affirm", t + 3) and on.state == off.state == State.IDLE
+
+
+# ---- 수정 2차(검토 지적): 되살린 의도는 화자 판정을 건너뛴다 · 그 질문을 다시 열 수 있는 상태에서만 되살린다 ----------
+ELEV_ASK = say_destination(MSG_CONFIRM_PROMPT_FALLBACK, "엘리베이터")
+
+
+def _waiting_elev_folded(**kw):
+    """대기 중 "엘리베이터"(제안) → 확인 질문 → "비카야"로 접음(대기로 돌아감)."""
+    logic, t = waiting(wake_revive=True, **kw)
+    acts = _voice(logic, "navigate", t, matched_destination_id=ELEV.id, need_confirm=True, speaker_verdict="pass")
+    assert _says(acts) == [ELEV_ASK] and logic.state == State.CONFIRMING
+    logic.on_wake_call(t + 1)
+    assert logic.state == State.WAITING and logic._wake_folded == ("confirm", ELEV.id, t + 1)
+    return logic, t + 1
+
+
+@pytest.mark.parametrize("joined", [0.8, 0.2])
+def test_p13_revived_yes_skips_the_speaker_gate_and_asks_the_confirm_question(joined):
+    """대기 중 화자 판정(speaker_gate)이 켜져도 되살린 "응"은 판정을 건너뛰고 확인 질문을 한다 — 되묻기·본인 질문 단계에
+    저장되지 않아 뒤의 목적지 말이 '같은 명령 두 번'으로 확인 없이 출발하지 않는다. 그 질문의 대답은 지금처럼 받는다."""
+    logic, t = _waiting_elev_folded(speaker_gate=True)
+    acts = _voice(logic, "affirm", t + 2, speaker_verdict="fail")
+    assert _says(acts) == [ELEV_ASK] and not any(isinstance(a, Navigate) for a in acts)
+    assert logic.state == State.CONFIRMING
+    assert logic._spk_gate.stored is None and logic._spk_gate._stage is None
+    acts = _voice(logic, "navigate", t + 5, matched_destination_id=ELEV.id, need_confirm=True,
+                  speaker_verdict="fail", speaker_joined=joined)    # 확인 질문의 대답(같은 목적지 = 네, 2026-09-01)
+    assert [a.destination.id for a in acts if isinstance(a, Navigate)] == [ELEV.id]
+
+
+def test_p13_revived_yes_skips_the_grip_check_too():
+    """손잡이 조건(speaker_gate_grip)이 켜지고 손잡이 접촉이 없어도 되살린 "응"은 손잡이 안내가 아니라 확인 질문이다."""
+    logic, t = waiting(wake_revive=True, speaker_gate=True, speaker_gate_grip=True)
+    logic.on_handle_state(True, True, t)
+    assert _says(_voice(logic, "navigate", t, matched_destination_id=ELEV.id, need_confirm=True,
+                        speaker_verdict="pass")) == [ELEV_ASK]
+    logic.on_wake_call(t + 1)
+    logic.on_handle_state(False, True, t + 14)
+    assert _says(_voice(logic, "affirm", t + 15, speaker_verdict="pass")) == [ELEV_ASK]
+    assert logic.state == State.CONFIRMING and logic._spk_gate.stored is None
+
+
+@pytest.mark.parametrize("make", [waiting, paused])
+def test_p13_confirm_folded_while_waiting_or_paused_is_asked_again(make):
+    logic, t = make(wake_revive=True)
+    held = logic.state
+    _voice(logic, "navigate", t, matched_destination_id=ELEV.id, need_confirm=True)
+    logic.on_wake_call(t + 1)
+    assert logic.state == held
+    assert _says(_voice(logic, "affirm", t + 3)) == [ELEV_ASK] and logic.state == State.CONFIRMING
+
+
+def test_p13_app_cancel_clears_the_fold_and_yes_stays_silent():
+    """앱 취소(_force_clear_all) 뒤의 "응"은 되살리지 않는다 — 꺼짐과 같이 말이 없다("지금은 안내 중이 아닙니다" 아님)."""
+    outs = []
+    for revive in (False, True):
+        logic, t = navigating_cancel_asked(wake_revive=revive)
+        logic.on_wake_call(t)
+        logic.on_app_cancel(t + 2)
+        assert logic._wake_folded is None
+        outs.append((_says(_voice(logic, "affirm", t + 4)), logic.state))
+    assert outs[1] == outs[0] == ([], State.IDLE)
+
+
+def test_p13_estop_clears_the_fold_and_yes_stays_silent():
+    """비상 정지(_enter_estopped) → 해제 뒤의 "응"은 되살리지 않는다("지금은 도움 요청을 보낼 수 없습니다" 아님)."""
+    outs = []
+    for revive in (False, True):
+        logic, t = navigating_help_asked(wake_revive=revive)
+        logic.on_wake_call(t)
+        logic.on_estop(True, t + 1)
+        assert logic._wake_folded is None
+        logic.on_estop(False, t + 2)
+        for k in range(3, 10):
+            logic.on_tick(t + k, NavStatus.NONE)
+        outs.append((_says(_voice(logic, "affirm", t + 12)), logic.state))
+    assert outs[1] == outs[0] == ([], State.IDLE)
+
+
+@pytest.mark.parametrize("question", ["cancel", "help"])
+def test_p13_no_revive_when_the_state_can_no_longer_ask_it(question):
+    """도착 대화 없이 도착(ARRIVED) — 취소 확인·도움 확인을 다시 열 수 없는 상태라 "응"은 지금처럼 처리한다(거절 멘트 없음)."""
+    outs = []
+    for revive in (False, True):
+        logic, t = navigating(ROOM, wake_revive=revive, arrival_dialog=False)
+        _voice(logic, question, t)
+        logic.on_wake_call(t + 1)
+        logic.on_tick(t + 5, NavStatus.SUCCEEDED)
+        outs.append((_says(_voice(logic, "affirm", t + 8)), logic.state, logic._wake_folded))
+    assert outs[1] == outs[0] and outs[1][2] is None
+
+
+def test_p13_no_revive_of_a_confirm_while_approaching():
+    """확인 질문을 접은 뒤 사람에게 다가가는 중(APPROACHING) — 제안이 "다른 응대 중" 거절이 되는 상태라 되살리지 않는다."""
+    logic, t = confirming(wake_revive=True)
+    logic.on_wake_call(t)
+    logic.on_approach_request(APPROACH, BOUNDS, True, t + 1)
+    assert logic.state == State.APPROACHING
+    assert _says(_voice(logic, "affirm", t + 3)) == [] and logic._wake_folded is None
