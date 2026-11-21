@@ -27,6 +27,7 @@ from .approach_recheck import (
 )
 from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
 from .grip_meter import GripMeter
+from .reask_ladder import SAME as REASK_SAME, ReaskLadder
 from .speaker_gate import GRIP_RECENT_SEC, WaitSpeakerGate
 
 # 하드 긴급어: 즉시 goal 취소 + estopped 진입 (LLM 우회 경로).
@@ -1764,11 +1765,13 @@ class MissionLogic:
         self._help_last_sent_at: Optional[float] = None
         self._help_confirm_reask_at: Optional[float] = None
         self._help_confirm_deadline: Optional[float] = None
-        self._help_confirm_reasked = False
+        # 도움 요청 두 질문(확인·취소 확인)의 되묻기 사다리(원칙 8 — 옛 '이미 다시 물었나' 표시 둘). 확인은 asking 에서만,
+        # 취소 확인은 보낸 뒤(requested·acknowledged)에만 열려 함께 열리지 않으므로 하나를 나눠 쓴다. 미션 질문과는
+        # 겹칠 수 있어(help_phase 는 미션 상태와 따로) 따로 둔다.
+        self._help_ladder = ReaskLadder(three_step=False)
         self.help_cancel_pending = False
         self._help_cancel_reask_at: Optional[float] = None
         self._help_cancel_deadline: Optional[float] = None
-        self._help_cancel_reasked = False
 
         # 도착 후 대화 (arrival-dialog-flow). 꺼져 있으면 도착 후 기존 dwell→
         # idle 로 간다 — 실기 검증 전까지 기본 off, 노드가 파라미터로 켠다.
@@ -1779,7 +1782,9 @@ class MissionLogic:
         # 붙이지 않는다 (2026-08-31 사용자 결정 — 관리 중 소음 제거).
         self._nav_from_app = False
         self._asking_entered_at: Optional[float] = None  # 시계 유실 폴백 기준
-        self._arrival_retried = False    # 무응답 재질문을 이미 한 번 했나
+        # 도착 질문·대기 시간 질문의 되묻기 사다리(원칙 8 — 옛 표시 _arrival_retried '무응답 재질문을 이미 한 번 했나').
+        # 대기 중 질문의 물은 시각이 도착 질문으로 넘어와 남을 수 있어(손 놓기 기다림 "다시 가자" → "아니") 따로 둔다.
+        self._arrival_ladder = ReaskLadder(three_step=False)
         self._asking_question = ""       # 지금 던져 둔 도착 질문(침묵 시 같은 질문을 다시 묻는다)
         self._deny_reconfirmed = False   # 대기형 질문의 거절을 종료형으로 되물었나 (2026-09-20)
         self._asking_where = False       # 도착 질문을 "네, 어디로 모실까요?"로 바꿔 물었나 (2026-10-08)
@@ -1811,8 +1816,9 @@ class MissionLogic:
         self._release_entered_at: Optional[float] = None
         self._wait_finish_asked_at: Optional[float] = None   # 대기 중 "어디로 모실까요?" 시각
         self._wait_need_asked_at: Optional[float] = None     # 대기 중 "안내가 필요 없으신가요?" 시각
-        self._wait_finish_reasked = False   # 대기 중 두 질문을 이미 다시 물었나 (2026-10-08)
-        self._wait_need_reasked = False
+        # 대기 중 두 질문의 되묻기 사다리(원칙 8 — 2026-10-08 의 '이미 다시 물었나' 표시 둘). 한 질문을 물으면 다른
+        # 질문의 물은 시각을 지우므로(_ask_where·_wait_finish ↔ 취소 갈래) 함께 열리지 않아 하나를 나눠 쓴다.
+        self._wait_ladder = ReaskLadder(three_step=False)
         # 대기 중에 목적지 '제안'이 와서 확인 질문(CONFIRMING)으로 들어갔을 때 돌아갈
         # 대기 상태. 거절·시간초과·호출이면 이 상태로 되돌아간다(대기 시간·장소 유지).
         self._wait_hold: Optional[State] = None
@@ -1834,11 +1840,12 @@ class MissionLogic:
         # 지금 확인 질문의 문장(2026-10-08 반응표). "다시 가자"·다시 묻기에서 같은 질문을 한다.
         self._confirm_prompt = ""
         self._confirm_options: tuple = ()   # 확인 질문이 묻는 목적지 ((id, 이름),) — 질문 기록용
-        # 다시 묻기(2026-10-08): 확인 질문·취소 확인을 다시 물을 시각과 이미 다시 물었는지.
+        # 다시 묻기(2026-10-08): 확인 질문·취소 확인을 다시 물을 시각과 되묻기 사다리(원칙 8 — 옛 '이미 다시 물었나'
+        # 표시). 둘은 함께 열릴 수 있고(바꾸기 질문 + "다 됐어"), 확인 질문은 대기 질문 위에도 열려(대기 중 제안) 따로 둔다.
         self._confirm_reask_at: Optional[float] = None
-        self._confirm_reasked = False
+        self._confirm_ladder = ReaskLadder(three_step=False)
         self._cancel_reask_at: Optional[float] = None
-        self._cancel_reasked = False
+        self._cancel_ladder = ReaskLadder(three_step=False)
         # 지금 안내 주행의 행동 트리 종류. 재시도·재개가 같은 트리를 쓰게 한다.
         self._nav_tree: str = NAV_TREE_DEFAULT
         # 귀 상태 (/vica/listen_state). 무응답 판정 전에 귀 사정을 본다.
@@ -2114,9 +2121,8 @@ class MissionLogic:
             return self.on_cancel_confirm_answer(intent.intent == "affirm", now)
         if self.cancel_confirm_pending and intent.intent == "unknown":
             # 취소 확인에 못 알아들은 답 — 한 번 다시 묻고, 그 뒤는 흘려보낸다(다시 묻기).
-            if not self._cancel_reasked:
-                self._cancel_reasked = True
-                return [self._ask(MSG_CANCEL_CONFIRM, "yesno")]
+            if self._ladder_next(self._cancel_ladder) == REASK_SAME:   # 원칙 8
+                return self._resay_cancel()
             return []
         handler = {
             State.IDLE: self._react_idle,
@@ -2150,6 +2156,39 @@ class MissionLogic:
     def _ask(text: str, kind: str, options: tuple = ()) -> Say:
         """대답을 기다리는 말 — 노드가 듣기 창을 연다(expects_reply). kind·options 는 질문 기록에 실린다."""
         return Say(text, priority="response", expects_reply=True, kind=kind, options=tuple(options))
+
+    def _ladder_next(self, ladder: ReaskLadder, can_help: bool = True) -> str:
+        """그 질문의 되묻기 사다리를 한 단 올리고 할 일을 받는다(원칙 8). 옛 방식은 첫 번째만 REASK_SAME(같은 질문
+        한 번 더), 그 뒤는 END(그 질문의 끝 동작). driving·can_help 는 세 단계 되묻기만 쓴다."""
+        return ladder.next(driving=self.state == State.NAVIGATING, can_help=can_help)
+
+    def _resay_open_question(self, now: float) -> Optional[list]:
+        """지금 미션이 쥔 열린 질문을 다시 말하는 동작(원칙 8). 열린 질문이 없으면 None.
+
+        질문마다 다시 묻던 자리가 부르는 '같은 질문을 다시'(_resay_*)를 상태에 따라 고를 뿐이다 — 사다리는 올리지
+        않고(몇 번째인지는 부르는 쪽이 정한다), 자리마다 다른 일(15초 시계의 마감 연장 등)은 그 자리에 남아 있다.
+        고르는 순서는 음성 요청이 질문의 답으로 가는 순서(_react_by_table)와 같다: 도움 요청 → 안내 취소 확인 → 상태별.
+        대기 중 질문은 다시 묻는 자리가 있는 WAITING 만 본다(손 놓기 기다림 WAITING_RELEASE 는 다시 묻지 않는다)."""
+        if self.help_cancel_pending:
+            return self._resay_help_cancel()
+        if self.help_phase == "asking" and self.state == State.NAVIGATING:
+            return self._resay_help_confirm()
+        if self.cancel_confirm_pending:
+            return self._resay_cancel()
+        if self.state == State.CONFIRMING:
+            return self._resay_confirm() if self._confirm_prompt else None
+        if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            return self._resay_arrival(now)
+        if self.state == State.WAITING:
+            if self._wait_need_asked_at is not None:
+                return self._resay_wait_need(now)
+            asked = self._wait_finish_asked_at
+            if asked is not None and now - asked <= WAIT_FINISH_REPEAT_SEC:
+                return self._resay_wait_finish(now)
+            return None
+        if self.state == State.AWAITING_USER:
+            return self._resay_approach(now)
+        return None
 
     def _react_idle(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """안내 없음. 홈 가다 "비카야"로 세운 뒤(복귀 재개 사다리)면 기다려 = 직전 목적지 대기
@@ -2200,9 +2239,8 @@ class MissionLogic:
             # 못 알아들은 답 — 같은 질문을 한 번 다시(2026-10-08 다시 묻기). 그 뒤의 이상한
             # 답은 흘려보내고 시간이 다 되면 지금처럼 접는다. LLM 이 되묻는 중(clarify)이면
             # 끼어들지 않는다 — 그 대화의 답이 곧 온다.
-            if not self._confirm_reasked and self._confirm_prompt:
-                self._confirm_reasked = True
-                return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
+            if self._confirm_prompt and self._ladder_next(self._confirm_ladder) == REASK_SAME:   # 원칙 8
+                return self._resay_confirm()
             return []
         return None
 
@@ -2210,7 +2248,11 @@ class MissionLogic:
         """확인 질문 시계 — 15초 조용하면 같은 질문을 한 번 더, 30초면 접는다(2026-10-08)."""
         self._confirm_deadline = now + self.confirm_timeout_sec
         self._confirm_reask_at = now + QUESTION_REASK_SEC
-        self._confirm_reasked = False
+        self._confirm_ladder.reset()   # 원칙 8
+
+    def _resay_confirm(self) -> list:
+        """확인 질문을 같은 문장으로 다시(원칙 8). 문장(_confirm_prompt)이 있을 때만 부른다."""
+        return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
 
     @staticmethod
     def _confirm_prompt_for(dest: Optional[Destination]) -> str:
@@ -2280,8 +2322,7 @@ class MissionLogic:
         if self.state == State.ASKING_WAIT_TIME and kind == "affirm":
             # "몇 분쯤 걸리실까요?"에 "네"만 — 같은 질문을 한 번 다시 묻는다(결정 2). 다시 물은
             # 뒤에도 "네"면 기다려 달라는 뜻이 분명하니 기본 30분을 기다린다.
-            if not self._arrival_retried:
-                self._arrival_retried = True
+            if self._ladder_next(self._arrival_ladder) == REASK_SAME:   # 원칙 8
                 self._response_deadline = None
                 self._asking_entered_at = now
                 return [self._ask(MSG_ASK_WAIT_TIME, "minutes")]
@@ -2300,7 +2341,7 @@ class MissionLogic:
         self._asking_time_after_yes = False
         self._asking_where = False
         self._asking_question = MSG_ASK_ENTRANCE
-        self._arrival_retried = False
+        self._arrival_ladder.reset()   # 원칙 8
         self._leaving_deadline = None
         self._response_deadline = None
         self._asking_entered_at = now
@@ -2335,15 +2376,13 @@ class MissionLogic:
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         if self._wait_need_asked_at is not None and kind == "unknown":
             # 못 알아들은 답 — 한 번 다시 묻고, 또 그러면 계속 기다린다(다시 묻기).
-            if not self._wait_need_reasked:
-                self._wait_need_reasked = True
-                self._wait_need_asked_at = now
-                return [self._ask(MSG_WAIT_NEED_ASK, "yesno_inverted")]
+            if self._ladder_next(self._wait_ladder) == REASK_SAME:   # 원칙 8
+                return self._resay_wait_need(now)
             self._wait_need_asked_at = None
             return [Say(MSG_CANCEL_KEPT, priority="response")]
         if kind == "cancel":
             self._wait_need_asked_at = now
-            self._wait_need_reasked = False
+            self._wait_ladder.reset()   # 원칙 8
             self._wait_finish_asked_at = None
             return [self._ask(MSG_WAIT_NEED_ASK, "yesno_inverted")]
         asked = self._wait_finish_asked_at
@@ -2354,10 +2393,8 @@ class MissionLogic:
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         if within and kind in ("unknown", "affirm"):
             # "어디로 모실까요?"에 못 알아들은 답·"네" — 한 번 다시 묻는다(다시 묻기).
-            if not self._wait_finish_reasked:
-                self._wait_finish_reasked = True
-                self._wait_finish_asked_at = now
-                return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
+            if self._ladder_next(self._wait_ladder) == REASK_SAME:   # 원칙 8
+                return self._resay_wait_finish(now)
             return []
         return None
 
@@ -2367,26 +2404,33 @@ class MissionLogic:
         if self._ear_holds(now):
             return []
         asked = self._wait_finish_asked_at
-        if (asked is not None and not self._wait_finish_reasked
+        if (asked is not None and self._wait_ladder.step == 0
                 and now - asked >= QUESTION_REASK_SEC):
-            self._wait_finish_reasked = True
-            self._wait_finish_asked_at = now    # 두 번째 "다 됐어"의 30초 창도 다시 연다
-            return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
+            self._ladder_next(self._wait_ladder)   # 원칙 8 — 첫 단이라 REASK_SAME
+            return self._resay_wait_finish(now)
         need = self._wait_need_asked_at
         if need is not None and now - need >= QUESTION_REASK_SEC:
-            if not self._wait_need_reasked:
-                self._wait_need_reasked = True
-                self._wait_need_asked_at = now
-                return [self._ask(MSG_WAIT_NEED_ASK, "yesno_inverted")]
+            if self._ladder_next(self._wait_ladder) == REASK_SAME:   # 원칙 8
+                return self._resay_wait_need(now)
             self._wait_need_asked_at = None
             return [Say(MSG_CANCEL_KEPT, priority="response")]
         return []
+
+    def _resay_wait_need(self, now: float) -> list:
+        """대기 중 "안내가 필요 없으신가요?"를 다시 — 물은 시각도 지금으로(원칙 8)."""
+        self._wait_need_asked_at = now
+        return [self._ask(MSG_WAIT_NEED_ASK, "yesno_inverted")]
+
+    def _resay_wait_finish(self, now: float) -> list:
+        """대기 중 "네, 어디로 모실까요?"를 다시 — 물은 시각도 지금으로(원칙 8). 두 번째 "다 됐어"의 30초 창도 다시 연다."""
+        self._wait_finish_asked_at = now
+        return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
 
     def _ask_where(self, now: float) -> list:
         """대기 중 "다시 가자" — 어디로 갈지 묻는다. "다 됐어"의 첫 질문과 같은 문장이지만
         두 번 말해도 안내를 끝내지 않는다(그건 "다 됐어"만)."""
         self._wait_finish_asked_at = now
-        self._wait_finish_reasked = False
+        self._wait_ladder.reset()   # 원칙 8
         self._wait_need_asked_at = None
         return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
 
@@ -2785,7 +2829,7 @@ class MissionLogic:
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         self._wait_finish_asked_at = now
-        self._wait_finish_reasked = False
+        self._wait_ladder.reset()   # 원칙 8
         self._wait_need_asked_at = None
         return [Say(MSG_WAIT_FINISH_ASK, priority="response", expects_reply=True, kind="open")]
 
@@ -3261,7 +3305,7 @@ class MissionLogic:
         self.cancel_confirm_pending = True
         self._cancel_confirm_deadline = now + self.confirm_timeout_sec
         self._cancel_reask_at = now + QUESTION_REASK_SEC
-        self._cancel_reasked = False
+        self._cancel_ladder.reset()   # 원칙 8
         return [
             Say(MSG_CANCEL_CONFIRM, priority="response", expects_reply=True, kind="yesno")
         ], GateReason.OK
@@ -3270,16 +3314,20 @@ class MissionLogic:
         """"안내를 취소할까요?" 시계. 15초 조용하면 한 번 다시 묻고(2026-10-08 다시 묻기), 시간이
         다 되면 조용히 하던 대로 둔다(2026-09-01 감량, 취소하지 않는다). 예전엔 안내 주행 중에만
         시계를 봐서 일시정지·바꾸기 질문 중에 물은 확인은 끝나지 않았다."""
-        if (not self._cancel_reasked and self._cancel_reask_at is not None
+        if (self._cancel_ladder.step == 0 and self._cancel_reask_at is not None
                 and now >= self._cancel_reask_at and not self._ear_holds(now)):
-            self._cancel_reasked = True
+            self._ladder_next(self._cancel_ladder)   # 원칙 8 — 첫 단이라 REASK_SAME
             self._cancel_confirm_deadline = max(self._cancel_confirm_deadline or now,
                                                 now + QUESTION_REASK_SEC)
-            return [self._ask(MSG_CANCEL_CONFIRM, "yesno")]
+            return self._resay_cancel()
         if self._cancel_confirm_deadline is not None and now >= self._cancel_confirm_deadline:
             self.cancel_confirm_pending = False
             self._cancel_confirm_deadline = None
         return []
+
+    def _resay_cancel(self) -> list:
+        """"안내를 취소할까요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_CANCEL_CONFIRM, "yesno")]
 
     def on_cancel_confirm_answer(self, affirmative: bool, now: float) -> list:
         """취소 재확인에 대한 응답. 긍정이면 실제로 취소한다."""
@@ -3318,9 +3366,8 @@ class MissionLogic:
                 self._close_help_cancel()
                 return []
             if kind == "unknown":                            # 한 번 다시 묻고 흘려보낸다(D7)
-                if not self._help_cancel_reasked:
-                    self._help_cancel_reasked = True
-                    return [self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno")]
+                if self._ladder_next(self._help_ladder, can_help=False) == REASK_SAME:   # 원칙 8
+                    return self._resay_help_cancel()
                 return []
         if self.help_phase == "asking":
             if kind == "affirm":
@@ -3334,9 +3381,8 @@ class MissionLogic:
                 self._drop_help_question()
                 return None
             if kind == "unknown":
-                if not self._help_confirm_reasked:
-                    self._help_confirm_reasked = True
-                    return [self._ask(MSG_HELP_CONFIRM, "yesno")]
+                if self._ladder_next(self._help_ladder, can_help=False) == REASK_SAME:   # 원칙 8
+                    return self._resay_help_confirm()
                 return []
         if kind == "help":
             return self._on_help_intent(now)
@@ -3347,7 +3393,7 @@ class MissionLogic:
             self.help_cancel_pending = True
             self._help_cancel_deadline = now + self.confirm_timeout_sec
             self._help_cancel_reask_at = now + QUESTION_REASK_SEC
-            self._help_cancel_reasked = False
+            self._help_ladder.reset()   # 원칙 8
             return [self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno")]
         if kind == "navigate" and intent.need_confirm:
             # 다른 목적지 제안 — 확인 상태로 넘어가지 않고 일시정지를 그대로 둔다(10-16 결정 1). 넘어가면
@@ -3393,7 +3439,7 @@ class MissionLogic:
         self.help_phase = "asking"
         self._help_confirm_deadline = now + self.confirm_timeout_sec
         self._help_confirm_reask_at = now + QUESTION_REASK_SEC
-        self._help_confirm_reasked = False
+        self._help_ladder.reset()   # 원칙 8
         return [self._ask(MSG_HELP_CONFIRM, "yesno")]
 
     def _send_help(self, now: float) -> list:
@@ -3430,12 +3476,12 @@ class MissionLogic:
         if self.help_phase == "asking":
             if self.state != State.NAVIGATING:
                 self._drop_help_question()                   # D2
-            elif (not self._help_confirm_reasked and self._help_confirm_reask_at is not None
+            elif (self._help_ladder.step == 0 and self._help_confirm_reask_at is not None
                     and now >= self._help_confirm_reask_at and not self._ear_holds(now)):
-                self._help_confirm_reasked = True
+                self._ladder_next(self._help_ladder, can_help=False)   # 원칙 8 — 첫 단이라 REASK_SAME
                 self._help_confirm_deadline = max(self._help_confirm_deadline or now,
                                                   now + QUESTION_REASK_SEC)
-                actions.append(self._ask(MSG_HELP_CONFIRM, "yesno"))
+                actions.extend(self._resay_help_confirm())
             elif self._help_confirm_deadline is not None and now >= self._help_confirm_deadline:
                 self._drop_help_question()                   # 답이 없다 — 말없이 하던 일을 계속(R5)
         elif self.help_phase == "requested" and self.help_id is not None:
@@ -3444,12 +3490,12 @@ class MissionLogic:
                 self._help_last_sent_at = now
                 actions.append(HelpEvent("help_requested", self.help_id))
         if self.help_cancel_pending:
-            if (not self._help_cancel_reasked and self._help_cancel_reask_at is not None
+            if (self._help_ladder.step == 0 and self._help_cancel_reask_at is not None
                     and now >= self._help_cancel_reask_at and not self._ear_holds(now)):
-                self._help_cancel_reasked = True
+                self._ladder_next(self._help_ladder, can_help=False)   # 원칙 8 — 첫 단이라 REASK_SAME
                 self._help_cancel_deadline = max(self._help_cancel_deadline or now,
                                                  now + QUESTION_REASK_SEC)
-                actions.append(self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno"))
+                actions.extend(self._resay_help_cancel())
             elif self._help_cancel_deadline is not None and now >= self._help_cancel_deadline:
                 self._close_help_cancel()                    # 답이 없으면 도움 요청은 그대로
         return actions
@@ -3459,13 +3505,21 @@ class MissionLogic:
         self.help_phase = "none"
         self._help_confirm_reask_at = None
         self._help_confirm_deadline = None
-        self._help_confirm_reasked = False
+        self._help_ladder.reset()   # 원칙 8
+
+    def _resay_help_confirm(self) -> list:
+        """"직원의 도움이 필요하신가요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_HELP_CONFIRM, "yesno")]
+
+    def _resay_help_cancel(self) -> list:
+        """"도움 요청을 취소할까요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno")]
 
     def _close_help_cancel(self) -> None:
         self.help_cancel_pending = False
         self._help_cancel_reask_at = None
         self._help_cancel_deadline = None
-        self._help_cancel_reasked = False
+        self._help_ladder.reset()   # 원칙 8
 
     def _end_help(self, notify_after_ack: bool = False) -> list:
         """도움 요청을 끝낸다(5.6절). 관리자 확인 전이면 앱 팝업이 닫히게 help_canceled 를 낸다.
@@ -4211,10 +4265,14 @@ class MissionLogic:
         self._approach_after_reply = None
         if self._approach_reasks < APPROACH_REASK_MAX:
             self._approach_reasks += 1
-            # 재생이 끝나면(on_approach_question_spoken) 8초를 다시 센다. 그 소식이 안 오면 안전망.
-            self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
-            return [self._ask(MSG_APPROACH_REASK, "yesno")]
+            return self._resay_approach(now)
         return self._approach_leave(MSG_APPROACH_UNANSWERED, now)
+
+    def _resay_approach(self, now: float) -> list:
+        """접근 질문을 "안내를 받으시겠어요?"로 다시(원칙 8). 횟수(_approach_reasks)는 부르는 쪽이 센다."""
+        # 재생이 끝나면(on_approach_question_spoken) 8초를 다시 센다. 그 소식이 안 오면 안전망.
+        self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
+        return [self._ask(MSG_APPROACH_REASK, "yesno")]
 
     def on_approach_reply_spoken(self, text: str, now: float) -> list:
         """접근 질문 중 질문에 LLM 이 답한 말이 재생을 마쳤다(/vica/tts_done) — 이제 다시 묻거나 물러난다."""
@@ -4511,7 +4569,7 @@ class MissionLogic:
         self._asking_is_finish = is_finish
         self._asking_time_after_yes = ask_time
         self._asking_entered_at = now
-        self._arrival_retried = False
+        self._arrival_ladder.reset()   # 원칙 8
         self._asking_question = question
         self._deny_reconfirmed = False
         self._asking_where = False
@@ -4640,7 +4698,7 @@ class MissionLogic:
             # 거둔다. 8초 시계는 "네?" 재생이 끝난 때부터 다시 돈다(노드가 tts_done 마다
             # on_arrival_question_spoken 을 부른다).
             self._leaving_deadline = None
-            self._arrival_retried = False
+            self._arrival_ladder.reset()   # 원칙 8
             self._response_deadline = None
             self._asking_entered_at = now
             self._wake_consumed_at = now
@@ -5082,23 +5140,29 @@ class MissionLogic:
         2026-10-08 다시 묻기: 예전엔 "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해
         주세요."였다 — 사용자는 질문을 다시 들어야 답할 수 있다. 물어 둔 질문이 없으면
         (늦은 답 그물의 대화) 옛 문장을 쓴다."""
-        if not self._arrival_retried:
-            self._arrival_retried = True
-            self._response_deadline = None
-            self._asking_entered_at = now   # 재질문도 새 시계 유실 폴백 기준
-            return [self._ask(self._asking_question or MSG_ARRIVAL_RETRY, self._asking_kind())]
+        if self._ladder_next(self._arrival_ladder) == REASK_SAME:   # 원칙 8
+            return self._resay_arrival(now)
         return self._leaving_notice(now)
 
     def _arrival_silence(self, now: float) -> list:
         """침묵 사다리 (2026-09-20 사용자 결정): 8초 침묵이면 같은 질문을 한 번 더
         묻고, 그래도 침묵이면 떠나기 예고. 옛 동작(침묵 → 바로 예고)은 귀가 답을
         놓쳤을 때(노드 사망·오전사) 사용자가 서 있는데 로봇이 가 버리게 했다."""
-        if not self._arrival_retried and self._asking_question:
-            self._arrival_retried = True
-            self._response_deadline = None
-            self._asking_entered_at = now
-            return [Say(self._asking_question, priority="response", expects_reply=True, kind=self._asking_kind())]
+        if self._asking_question and self._ladder_next(self._arrival_ladder) == REASK_SAME:   # 원칙 8
+            return self._resay_arrival(now)
         return self._leaving_notice(now)
+
+    def _resay_arrival(self, now: float) -> list:
+        """도착 질문을 같은 문장으로 다시(원칙 8). 대답 시계는 재생이 끝난 때부터 다시 돈다 — 재질문도 새 시계
+        유실 폴백 기준이다. 물어 둔 질문이 없으면(늦은 답 그물의 대화) 옛 문장 MSG_ARRIVAL_RETRY."""
+        self._response_deadline = None
+        self._asking_entered_at = now
+        return [self._ask(self._asking_question or MSG_ARRIVAL_RETRY, self._asking_kind())]
+
+    @property
+    def _arrival_retried(self) -> bool:
+        """옛 표시 이름(읽기 전용) — 도착 질문 사다리를 이미 올렸나. test_arrival_dialog 가 읽는다."""
+        return self._arrival_ladder.step > 0
 
     def _leaving_notice(self, now: float) -> list:
         """떠나기 예고 + 유예. 유예 안에 답이 오면 산다(on_arrival_answer)."""
@@ -5192,7 +5256,7 @@ class MissionLogic:
         if quiet:
             self.state = State.ASKING_NEXT
             self._asking_is_finish = False   # "네" = 계속
-            self._arrival_retried = False
+            self._arrival_ladder.reset()   # 원칙 8
             self._response_deadline = None
             self._asking_entered_at = now    # 낡은 진입 시각이면 폴백 즉발
         else:
@@ -5210,7 +5274,7 @@ class MissionLogic:
         self._asking_is_finish = False
         self._asking_time_after_yes = False
         self._asking_entered_at = None
-        self._arrival_retried = False
+        self._arrival_ladder.reset()   # 원칙 8
         self._asking_question = ""
         self._deny_reconfirmed = False
         self._asking_where = False
@@ -5227,8 +5291,7 @@ class MissionLogic:
         self._release_entered_at = None
         self._wait_finish_asked_at = None
         self._wait_need_asked_at = None
-        self._wait_finish_reasked = False
-        self._wait_need_reasked = False
+        self._wait_ladder.reset()   # 원칙 8
         self._wait_hold = None
 
     def _forget_interrupted_return(self) -> None:
@@ -5408,15 +5471,15 @@ class MissionLogic:
             actions.extend(self._cancel_confirm_tick(now))
 
         if self.state == State.CONFIRMING:
-            if (not self._confirm_reasked and self._confirm_prompt
+            if (self._confirm_ladder.step == 0 and self._confirm_prompt
                     and self._confirm_reask_at is not None and now >= self._confirm_reask_at
                     and not self._ear_holds(now)):
                 # 확인 질문에 15초 답이 없다 — 같은 질문을 한 번 더 묻는다(2026-10-08 다시 묻기).
                 # 다시 물은 뒤에도 답할 시간을 남긴다(틱이 늦게 와도).
-                self._confirm_reasked = True
+                self._ladder_next(self._confirm_ladder)   # 원칙 8 — 첫 단이라 REASK_SAME
                 self._confirm_deadline = max(self._confirm_deadline or now,
                                              now + QUESTION_REASK_SEC)
-                actions.append(self._ask(self._confirm_prompt, "confirm", self._confirm_options))
+                actions.extend(self._resay_confirm())
             elif self._confirm_deadline is not None and now >= self._confirm_deadline:
                 if self._change_from is not None:
                     # 주행 중 바꾸기 질문에 답이 없다 — 원래 목적지로 다시 출발한다
