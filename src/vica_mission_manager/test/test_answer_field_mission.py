@@ -624,3 +624,14 @@ def test_p3_off_paused_resume_and_answers_are_as_now():
         assert _voice(logic, t, intent(kind)) == [] and logic.state == State.PAUSED
     logic, t = paused()
     assert _says(_voice(logic, t, intent("dismiss"))) == [MSG_CANCEL_CONFIRM]
+
+
+def test_p3_off_resume_proposal_does_not_start():
+    """음성만 켬(VICA_ANSWER=on · answer_field 꺼짐) — 음성은 재개 제안을 쥐지 않고 보내는데 미션은 묻지 않는다. 지금처럼
+    받는 즉시 재출발하면 확인 없는 출발이다(원칙 3). 둘 다 꺼짐에서는 음성이 제안을 보내지 않아(should_forward_intent) 이 길이 없다."""
+    logic, t = paused()
+    assert _voice(logic, t, intent("resume", need_confirm=True)) == []
+    assert logic.state == State.PAUSED and logic.paused_destination.id == ROOM.id
+    assert _navs(_voice(logic, t + 1, intent("resume"))) == [ROOM.id]      # 확정은 지금처럼 곧바로 재출발
+    logic, t = _paused_help_requested()                                      # 도움 요청 뒤(관리자 확인 전)도 같다
+    assert _voice(logic, t, intent("resume", need_confirm=True)) == [] and logic.state == State.PAUSED

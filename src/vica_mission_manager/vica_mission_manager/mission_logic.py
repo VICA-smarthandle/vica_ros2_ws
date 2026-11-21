@@ -2584,6 +2584,12 @@ class MissionLogic:
             resumed = self._react_resume_question(intent, now, nav_ready)
             if resumed is not None:
                 return resumed
+        elif intent.intent == "resume" and intent.need_confirm:
+            # 원칙 3 — 확인 전 재개 제안으로는 출발하지 않는다. 둘 다 꺼져 있으면 음성이 이 제안을 쥐고 보내지 않아
+            # (should_forward_intent, 2026-08-26) 여기 오지 않는다 — 오는 것은 음성만 켬(VICA_ANSWER=on · answer_field 꺼짐)
+            # 조합뿐이다. 묻는 길이 꺼져 있어 받지 않는다(말 없음, 일시정지 그대로). 확정 재개는 지금처럼 곧바로 재출발한다.
+            self.voice_note = "확인 전 재개 제안 — 묻는 길(answer_field)이 꺼져 받지 않음"
+            return []
         if intent.intent == "finish":
             return self._voice_mission_command("cancel", now, nav_ready)
         if intent.intent in ("pause", "wait"):
