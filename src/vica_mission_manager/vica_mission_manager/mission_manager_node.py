@@ -2567,7 +2567,8 @@ class MissionManagerNode(Node):
                     self._question_safely(self._open_question, action)
                 if getattr(action, "expects_reply", False):
                     self.pub_listen_request.publish(Bool(data=True))
-                    self.logic.note_question_asked(action.text, self._now())
+                    # 같은 질문인지는 원래 질문 글자로 본다 — 세 단계 되묻기 ①·② 는 문장이 달라도 같은 질문이다(원칙 8).
+                    self.logic.note_question_asked(action.question_text or action.text, self._now())
                     self.get_logger().info("질문 발화 — 재청취 요청 발행")
             elif isinstance(action, StopSpeech):
                 out = String()

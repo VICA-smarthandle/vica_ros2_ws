@@ -305,13 +305,131 @@ def test_p9_handed_retry_is_dropped_even_when_the_ladder_is_done():
     assert _voice(logic, "unknown", t + 2, **handed) == []           # 사다리 끝 — 음성 문장도 말하지 않는다
 
 
+WAKE_ONLY = dict(ask_text=MSG_WAKE_GREETING, ask_kind="open")
+LADDERS = ("_confirm_ladder", "_cancel_ladder", "_help_ladder", "_wait_ladder", "_arrival_ladder", "_idle_ladder")
+
+
+def _steps(logic):
+    return {n: getattr(logic, n).step for n in LADDERS}
+
+
 def test_p9_handed_wake_greeting_keeps_todays_path():
-    """"네?"(호출어만 들림)는 지금처럼 넘겨받은 질문 길로 간다 — 미션이 이미 말했으면 버리고, 아니면 말한다(3.9 가 다룬다)."""
+    """"네?"(호출어만 들림, 원칙 9)는 켜져 있어도 사다리를 올리지 않고 "네?"만 말한다 — 세 번 모두."""
     logic, t = idle(reask_ladder=True)
-    for i in range(2):
-        _voice(logic, "unknown", t + i)
-    acts = _voice(logic, "unknown", t + 2, ask_text=MSG_WAKE_GREETING, ask_kind="open")
-    assert _says(acts) == [MSG_WAKE_GREETING]
+    says = [_says(_voice(logic, "unknown", t + i, **WAKE_ONLY)) for i in range(3)]
+    assert says == [[MSG_WAKE_GREETING]] * 3
+    assert logic._idle_ladder.step == 0
+    assert _says(_voice(logic, "unknown", t + 3)) == [MSG_REASK_RETRY]
+
+
+def test_p9_wake_only_is_recognised_by_reply_or_handed_question():
+    assert MissionLogic._is_wake_only(intent("unknown", ask_text=MSG_WAKE_GREETING))
+    assert MissionLogic._is_wake_only(intent("unknown", reply=MSG_WAKE_GREETING))
+    assert not MissionLogic._is_wake_only(intent("unknown", ask_text=MSG_REASK_RETRY))
+    assert not MissionLogic._is_wake_only(intent("question", reply=MSG_WAKE_GREETING))
+
+
+def test_p9_wake_only_leaves_every_question_and_count_alone():
+    """질문이 열려 있어도 "네?"는 그 질문·시한·횟수를 건드리지 않는다(알아들은 말로도 치지 않는다)."""
+    for make, state in ((idle, State.IDLE), (navigating, State.NAVIGATING), (confirming, State.CONFIRMING),
+                        (asking, State.ASKING_NEXT)):
+        logic, t = make(reask_ladder=True)
+        first = _voice(logic, "unknown", t)                          # 진짜 못 알아들은 말 하나 — 횟수 1
+        assert _says(first) == [MSG_REASK_RETRY], make.__name__
+        before = (_steps(logic), logic._confirm_reask_at, logic._response_deadline, logic._asking_entered_at)
+        for i in range(3):
+            assert _says(_voice(logic, "unknown", t + 1 + i, **WAKE_ONLY)) == [MSG_WAKE_GREETING], make.__name__
+        assert logic.state == state and logic.help_phase == "none", make.__name__
+        assert (_steps(logic), logic._confirm_reask_at, logic._response_deadline,
+                logic._asking_entered_at) == before, make.__name__
+        assert _says(_voice(logic, "unknown", t + 5)) == [MSG_REASK_LOUDER], make.__name__
+
+
+def test_p9_wake_only_leaves_the_other_question_ladders_alone_too():
+    def cancel_q():
+        logic, t = navigating(reask_ladder=True)
+        _voice(logic, "cancel", t)
+        return logic, t + 1
+
+    def help_q():
+        logic, t = navigating(reask_ladder=True)
+        _voice(logic, "help", t)
+        return logic, t + 1
+
+    def help_cancel_q():
+        logic, t = help_q()
+        _voice(logic, "affirm", t)
+        _voice(logic, "cancel", t + 1)
+        return logic, t + 2
+
+    def wait_need_q():
+        logic, t = waiting(reask_ladder=True)
+        _voice(logic, "cancel", t)
+        return logic, t + 1
+
+    def wait_finish_q():
+        return waiting_asked(reask_ladder=True)
+
+    for make in (cancel_q, help_q, help_cancel_q, wait_need_q, wait_finish_q):
+        logic, t = make()
+        assert _says(_voice(logic, "unknown", t)) == [MSG_REASK_RETRY], make.__name__
+        before = _steps(logic)
+        for i in range(3):
+            assert _says(_voice(logic, "unknown", t + 1 + i, **WAKE_ONLY)) == [MSG_WAKE_GREETING], make.__name__
+        assert _steps(logic) == before, make.__name__
+        assert _says(_voice(logic, "unknown", t + 5)) == [MSG_REASK_LOUDER], make.__name__
+
+
+# ---- 문장 없는 확인 질문(모르는 목적지 제안) -----------------------------------------------------
+def _confirming_unknown_place(**kw):
+    logic = MissionLogic(arrival_dialog=True, **kw)
+    acts = logic.on_intent(intent(matched_destination_id="nope", need_confirm=True), None, BOUNDS, True, 0.0)
+    assert acts == [] and logic.state == State.CONFIRMING and logic._confirm_prompt == ""
+    return logic, 1.0
+
+
+def test_p8_confirm_without_a_sentence_still_reasks_then_folds():
+    logic, t = _confirming_unknown_place(reask_ladder=True)
+    r1, r2, r3 = (_voice(logic, "unknown", t + i, ask_text=MSG_REASK_RETRY, ask_kind="open") for i in range(3))
+    assert [_says(r) for r in (r1, r2)] == [[MSG_REASK_RETRY], [MSG_REASK_LOUDER]]
+    assert (_question(r1).kind, _question(r1).question_text, _question(r1).step) == ("confirm", "", 1)
+    assert _says(r3) == [MSG_CONFIRM_TIMEOUT] and logic.state == State.IDLE
+
+
+def test_p8_confirm_without_a_sentence_silence_steps_too():
+    logic, _ = _confirming_unknown_place(reask_ladder=True)        # 0 초에 들어감
+    assert _says(logic.on_tick(15.0, NavStatus.NONE)) == [MSG_REASK_RETRY]
+    assert _says(logic.on_tick(30.0, NavStatus.NONE)) == [MSG_REASK_LOUDER] and logic.state == State.CONFIRMING
+    assert _says(logic.on_tick(45.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]
+
+
+def test_off_confirm_without_a_sentence_stays_as_today():
+    logic, t = _confirming_unknown_place()
+    acts = _voice(logic, "unknown", t, ask_text=MSG_REASK_RETRY, ask_kind="open")
+    assert _says(acts) == [MSG_REASK_RETRY] and _question(acts).kind == "open"   # 음성이 넘긴 말을 미션이 말한다
+    assert _says(logic.on_tick(15.0, NavStatus.NONE)) == []
+    assert _says(logic.on_tick(30.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]
+
+
+# ---- 질문 시각: 되묻기 문장은 원래 질문의 시각을 옮기지 않는다 -----------------------------------------
+def _node_says(logic, actions, now):
+    """노드 _run_actions 의 질문 표시 — 대답을 기다리는 말마다 note_question_asked(question_text or text)."""
+    for a in actions:
+        if isinstance(a, Say) and a.expects_reply:
+            logic.note_question_asked(a.question_text or a.text, now)
+    return actions
+
+
+def test_p8_reask_line_keeps_the_original_question_time():
+    """①이 나가도 _question_at 은 원래 질문 시각에 머문다 — 원래 질문 뒤·① 전에 시작한 "네"를 버리지 않는다."""
+    logic, t = confirming(reask_ladder=True)
+    logic.note_question_asked(TOILET_ASK, 0.0)                      # 확인 질문(0 초)
+    logic.on_listen_state("speech", 5.0)                             # 사용자가 말을 시작(질문 뒤)
+    _node_says(logic, _voice(logic, "unknown", 6.0), 6.0)            # 앞말은 못 알아들음 → ①
+    assert logic._question_at == 0.0
+    acts = _voice(logic, "affirm", 7.0)                              # 5 초에 시작한 말의 "네"
+    assert logic.voice_note != "질문 전에 시작한 말이라 대답으로 안 씀"
+    assert logic.state == State.NAVIGATING and any(getattr(a, "destination", None) for a in acts)
 
 
 def test_off_handed_retry_is_said_as_today():
@@ -338,3 +456,5 @@ def test_node_and_launch_expose_reask_ladder_off_by_default():
     assert 'reask_ladder=bool(self.get_parameter("reask_ladder").value)' in node
     assert 'DeclareLaunchArgument("reask_ladder", default_value="false")' in launch
     assert '"reask_ladder": ParameterValue(' in launch
+    # 질문 시각 표시는 원래 질문 글자로(수정 1차 3번) — 로직 쪽 계약은 test_p8_reask_line_keeps_the_original_question_time.
+    assert "self.logic.note_question_asked(action.question_text or action.text, self._now())" in node
