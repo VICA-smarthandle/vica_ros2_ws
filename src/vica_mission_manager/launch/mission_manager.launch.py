@@ -221,6 +221,9 @@ def generate_launch_description() -> LaunchDescription:
             # 필요하신가요?"를 조용히 접고, 40초 안의 "응"에는 실행하지 않고 그 질문을 다시 한다. 호출어만 들린 말은 되묻기
             # 횟수에 세지 않는다. 기본 꺼짐 = 지금 그대로.
             DeclareLaunchArgument("wake_revive", default_value="false"),
+            # answer_field: 대답 칸으로 처리(원칙 6 · 3, 2026-11-21) — 음성이 열린 질문의 대답 칸(yes·no·목적지·분·못 알아들음)을
+            # 실어 오면 의도보다 먼저 본다. 확인 질문 중 같은 목적지 이름은 승낙이 아니라 다시 묻는다. 기본 꺼짐 = 지금 그대로.
+            DeclareLaunchArgument("answer_field", default_value="false"),
             # obstacle_narration: 주행 중 장애물 안내(2026-10-09, 설계서 5절 2단계). false 면 구독도 안 한다.
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
             # 경비(순찰) 모드(2026-11-14, ~/vica_data/patrol_plan/SPEC.md 4.A). 값은 사용자 결정·11-10·11 실기 근거.
@@ -354,6 +357,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         "wake_revive": ParameterValue(
                             LaunchConfiguration("wake_revive"),
+                            value_type=bool,
+                        ),
+                        "answer_field": ParameterValue(
+                            LaunchConfiguration("answer_field"),
                             value_type=bool,
                         ),
                         "obstacle_narration": ParameterValue(

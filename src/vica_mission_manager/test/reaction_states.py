@@ -5,7 +5,7 @@
 남아야 칸의 동작이 실기와 같다. 정본 설계: docs/superpowers/specs/2026-10-08-mission-request-
 reactions-design.md
 일부 함수의 **kw 는 MissionLogic 인자다(예: reask_ladder=True — 세 단계 되묻기, Task 3.8 · wake_revive=True — "비카야" 뒤
-처리, Task 3.9). 안 주면 지금 그대로.
+처리, Task 3.9 · answer_field=True — 대답 칸으로 처리, Task 3.3). 안 주면 지금 그대로.
 """
 from vica_mission_manager.mission_logic import (
     WAIT_DEPART_AFTER_SPEECH_SEC,
@@ -167,6 +167,13 @@ def asking_wait_time(**kw):
     return logic, t + 2.0
 
 
+def asking_end_confirm(**kw):
+    """"몇 분쯤 걸리실까요?"에 "아니(기다리지 마)" → "여기까지 안내를 마칠까요?"(종료형)를 물은 직후(Task 3.3)."""
+    logic, t = asking_wait_time(**kw)
+    logic.on_voice_intent(intent("deny"), t, lookup, BOUNDS, True)
+    return logic, t + 1.0
+
+
 def waiting_release(minutes=10, **kw):
     logic = new_logic(**kw)
     logic.on_intent(go(SPOT_DEST), SPOT_DEST, BOUNDS, True, 0.0)
@@ -193,6 +200,13 @@ def waiting_asked(**kw):
     """대기 중 "다 됐어" → "네, 어디로 모실까요?"를 물은 직후(30초 안)."""
     logic, t = waiting(**kw)
     logic.on_intent(intent("finish"), None, BOUNDS, True, t)
+    return logic, t + 1.0
+
+
+def waiting_need_asked(**kw):
+    """대기 중 "취소" → "안내가 필요 없으신가요?"(뒤집힌 네/아니요)를 물은 직후(Task 3.3)."""
+    logic, t = waiting(**kw)
+    logic.on_voice_intent(intent("cancel"), t, lookup, BOUNDS, True)
     return logic, t + 1.0
 
 

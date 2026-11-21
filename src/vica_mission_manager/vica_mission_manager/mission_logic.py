@@ -1593,6 +1593,7 @@ class MissionLogic:
         patrol_max_leg_failures: int = PATROL_MAX_LEG_FAILURES,
         reask_ladder: bool = False,
         wake_revive: bool = False,
+        answer_field: bool = False,
     ) -> None:
         # 세 단계 되묻기(원칙 8 · 31, 노드·launch 파라미터 reask_ladder — 기본 꺼짐). 켜지면 미션 질문의 사다리 다섯이
         # ① 다시 말씀 → ② 더 크게 또박또박 → ③(안내 주행 중만) 직원 도움 → 끝 으로 오르고, 질문이 없는 상태의 못 알아들은
@@ -1603,6 +1604,11 @@ class MissionLogic:
         # 안의 승낙에는 실행하지 않고 그 질문을 다시 한다. 호출어만 들린 말("네?")은 되묻기 횟수에 세지 않는다.
         # 꺼져 있으면 지금 그대로 — 확인 질문만 접고, 취소·도움 확인은 살아 "네?" 뒤의 "응"이 그대로 답이 된다.
         self.wake_revive = wake_revive
+        # 대답 칸으로 처리(원칙 6 · 3, 노드·launch 파라미터 answer_field — 기본 꺼짐). 켜지면 음성이 실어 온 대답 칸(열린 질문의
+        # 대답일 때만 노드가 넘긴다, 3.2)을 의도보다 먼저 본다 — yes·no = 승낙·거절, 목적지·고르기 = 그 목적지 제안(확인 질문 중
+        # 같은 곳이어도 출발하지 않고 다시 묻는다), 분 = 그만큼 대기, 못 알아들음 = unknown(_intent_from_answer).
+        # 꺼져 있으면 지금 그대로 — 대답 칸을 보지 않는다.
+        self.answer_field = answer_field
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
         self.estop_release_grace_sec = estop_release_grace_sec
@@ -1884,6 +1890,9 @@ class MissionLogic:
         self._voice_dropped = False
         # 켜졌을 때 지금 처리하는 음성 요청이 호출어만 들린 것("네?")인가 — 그러면 어느 사다리도 올리지 않는다(원칙 9).
         self._reask_held = False
+        # 지금 처리하는 음성 요청을 대답 칸으로 바꿔 읽은 의도(원칙 6, answer_field 켜짐에서만) — 음성 요청을 처리하는 동안만
+        # 값이 있다. 확인 질문 중 같은 목적지의 승낙 규칙(09-01)을 가르고, 처리 뒤의 되묻기 정리·넘겨받은 질문도 이 의도로 본다.
+        self._answer_swapped: Optional[IntentData] = None
         # 호출이 접은 질문 하나(wake_revive 켜짐에서만 적는다, 원칙 13) — ("confirm"·"cancel"·"help", 확인 중이던 목적지 id, 접은 시각).
         # WAKE_REVIVE_SEC 안의 승낙이 그 질문을 다시 묻게 한다. 다른 말이 오거나 시간이 지나면 지운다. 꺼져 있으면 늘 None.
         self._wake_folded: Optional[tuple] = None
@@ -2009,14 +2018,18 @@ class MissionLogic:
         """음성 요청 하나에 대한 반응 + 음성이 넘긴 질문 문장(3-가 한 목소리)."""
         self._ladders_climbed = []
         self._voice_dropped = False
+        self._answer_swapped = None
         # 원칙 9 · 13 — 세 단계 되묻기가 꺼져 있어도 wake_revive 면 호출어만 들린 말은 "한 번 다시"도 쓰지 않는다.
         self._reask_held = (self.reask_ladder or self.wake_revive) and self._is_wake_only(intent)
         try:
             actions = self._react_voice_intent(intent, now, lookup, bounds, nav_ready)
+            # 원칙 6 — 대답 칸으로 바꿔 읽었으면 마무리(되묻기 정리·넘겨받은 질문)도 그 의도로 한다. 꺼져 있으면 늘 None.
+            intent = self._answer_swapped or intent
             self._restart_reasks_on_understood(intent)
         finally:
             self._ladders_climbed = None
             self._reask_held = False
+            self._answer_swapped = None
         return self._say_handed_question(intent, actions, lookup)
 
     @staticmethod
@@ -2077,6 +2090,14 @@ class MissionLogic:
             self.voice_note = "순찰 중이라 받지 않음"
             self._voice_dropped = True
             return []
+        if self.answer_field and intent.answer:
+            # 원칙 6 — 질문 뒤의 말은 먼저 그 질문의 대답인지 본다. 대답 칸이 있으면 의도 대신 그 대답으로 바꿔 읽고, 바꿔 읽은
+            # 의도가 이 상태에서 평소 하는 일이 곧 결과다(아래 길 그대로 — 화자 판정·질문 전 대답 버림도 그 의도로 받는다).
+            swapped = self._intent_from_answer(intent)
+            if swapped is not intent:
+                self.voice_note = f"대답 칸 {intent.answer} → {swapped.intent}"
+                intent = self._answer_swapped = swapped
+                self._reask_held = (self.reask_ladder or self.wake_revive) and self._is_wake_only(intent)
         if intent.intent == "dismiss":
             # 원칙 14 — 열린 질문이면 아니요, 안내 중이면 취소, 쉬는 중이면 끝맺는 말. 바꿔 읽은 뒤는 그 의도의 평소 길.
             swapped = self._dismiss_as(intent, now)
@@ -2103,6 +2124,36 @@ class MissionLogic:
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def _intent_from_answer(self, intent: IntentData) -> IntentData:
+        """대답 칸(answer·answer_value)을 바꿔 읽은 의도(원칙 6, answer_field 켜짐에서만 부른다). 바꿔 읽지 않으면 받은 의도 그대로.
+
+        yes·no = affirm·deny(확인 질문의 yes 는 on_confirm_answer(True) — 출발, no 는 접기. "안내가 필요 없으신가요?"의 yes 는
+        음성이 '필요 없다'로 내므로 지금 affirm 과 같은 방향이다), destination·choice = 그 목적지 제안(need_confirm — 확인 질문
+        중 같은 곳이어도 다시 묻는다, on_intent), minutes = 그 분만큼 wait, unclear = unknown. 값을 쓸 수 없으면(목적지가 비었거나
+        분이 0 보다 큰 정수가 아니면) unknown. other·모르는 값은 의도대로. 바꿔 읽은 의도의 대답 칸은 비운다(다시 바꿔 읽지 않게)
+        — reply·ask_text 등 다른 칸은 그대로 둔다."""
+        answer, value = intent.answer, intent.answer_value.strip()
+        read = replace(intent, answer="", answer_value="")
+        if answer == "yes":
+            return replace(read, intent="affirm")
+        if answer == "no":
+            return replace(read, intent="deny")
+        if answer in ("destination", "choice"):
+            if not value:
+                return replace(read, intent="unknown")
+            return replace(read, intent="navigate", matched_destination_id=value, need_confirm=True)
+        if answer == "minutes":
+            try:
+                minutes = int(value)
+            except ValueError:
+                minutes = 0
+            if minutes <= 0:
+                return replace(read, intent="unknown")
+            return replace(read, intent="wait", wait_minutes=minutes)
+        if answer == "unclear":
+            return replace(read, intent="unknown")
+        return intent
 
     def _wake_revive_as(self, intent: IntentData, now: float,
                         lookup: Callable[[str], Optional[Destination]]) -> Optional[IntentData]:
@@ -2863,6 +2914,11 @@ class MissionLogic:
                 # 확정한다 (2026-09-01, 야간 로그: 같은 확인 질문이 반복되다
                 # 3수째에야 출발). 확인 답의 정식 통로로 보낸다 — 게이트
                 # 포함 (need_confirm 그대로 흘리면 게이트가 거부한다).
+                if self._answer_swapped is not None:
+                    # 원칙 3 · 6 — 대답 칸이 '목적지 이름'이라고 실어 온 말은 승낙이 아니다(09-01 규칙을 쓰지 않는다).
+                    # 출발하지 않고 같은 확인 질문을 다시 한다(시계·되묻기는 처음부터, "다시 가자"와 같은 길).
+                    self._arm_confirm(now)
+                    return self._resay_confirm() if self._confirm_prompt else []
                 return self.on_confirm_answer(True, dest, bounds, nav_ready, now)
             else:
                 # 확인 대기 시작/갱신. 확인 질문은 미션이 목적지 confirm_prompt 로 한다(3-가 결정 A —
