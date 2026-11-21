@@ -565,6 +565,26 @@ def test_p3_other_requests_close_the_resume_question():
     assert _navs(_voice(logic, t + 1, intent("affirm"))) == [ROOM.id]
 
 
+@pytest.mark.parametrize("kind,ask", [("question", "화장실은 2층에 있어요. 안내해 드릴까요?"),
+                                      ("clarify", "어느 화장실로 안내해 드릴까요?")], ids=["question", "clarify"])
+def test_p6_handed_question_replaces_the_resume_question(kind, ask):
+    # 원칙 6 — 질문 뒤의 말은 가장 최근 질문의 대답이다. 미션이 음성이 넘긴 질문을 말하면 "다시 출발할까요?"는 닫힌다 —
+    # 남기면 그 질문에 한 "네"(질문 기록이 open 이라 바꿔 읽지 않은 affirm)가 재출발이 된다(Task 3.4 검토).
+    logic, t = paused_resume_asked()
+    assert _says(_voice(logic, t, intent(kind, ask_text=ask, ask_kind="open"))) == [ask]
+    off, t_off = paused()                              # 질문 없는 일시정지의 "네"와 같다
+    acts = _voice(logic, t + 1, intent("affirm", answer="yes", answer_kind="open"))
+    assert acts == _voice(off, t_off, intent("affirm")) == [] and logic.state == State.PAUSED
+    assert MSG_RESUME_CONFIRM not in _says(_tick(logic, t + 20))     # 닫힌 질문을 시계가 다시 묻지 않는다
+    assert _says(_voice(logic, t + 21, intent("resume", need_confirm=True))) == [MSG_RESUME_CONFIRM]   # 다시 가자 = 다시 묻는다
+
+
+def test_p6_answer_without_a_handed_question_keeps_the_resume_question():
+    logic, t = paused_resume_asked()                   # 넘긴 질문 없는 사용자 질문(대답은 음성이 말함)은 재개 질문을 둔다
+    assert _voice(logic, t, intent("question", reply="화장실은 2층에 있어요.")) == []
+    assert _navs(_voice(logic, t + 1, intent("affirm"))) == [ROOM.id]
+
+
 def test_p3_resume_question_replaces_an_open_cancel_question():
     logic, t = paused(answer_field=True)
     assert _says(_voice(logic, t, intent("cancel"))) == [MSG_CANCEL_CONFIRM]

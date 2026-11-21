@@ -2087,6 +2087,10 @@ class MissionLogic:
         kind = intent.ask_kind if intent.ask_kind in QUESTION_KINDS else "open"
         options = tuple((d.id, d.name) for d in map(lookup, intent.ask_option_ids) if d is not None)
         self.voice_note = " · ".join(filter(None, (self.voice_note, "넘겨받은 질문")))
+        if self._resume_question_open():
+            # 원칙 6 — 질문 뒤의 말은 가장 최근 질문의 대답이다. 넘겨받은 질문을 말하면 "다시 출발할까요?"(Task 3.4)는 닫는다 —
+            # 남기면 그 질문에 한 "네"가 재출발이 된다. 꺼져 있으면 열리지 않아 닿지 않는다.
+            self._close_resume_question()
         return [*actions, self._ask(intent.ask_text, kind, options)]
 
     def _react_voice_intent(
@@ -3378,6 +3382,7 @@ class MissionLogic:
             self._pause_hold = False
             self._confirming_dest_id = None
             self._confirm_deadline = None
+            self._close_resume_question()   # Task 3.4 — 일시정지로 돌아올 때 옛 "다시 출발할까요?"를 되살리지 않는다
             self.state = State.PAUSED
             return []
         held = self._wait_hold
