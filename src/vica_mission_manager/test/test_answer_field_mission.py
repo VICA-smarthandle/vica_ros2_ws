@@ -146,12 +146,12 @@ def test_p3_same_place_answer_reasks_the_same_confirm_question():
     assert logic._confirming_dest_id == TOILET.id
 
 
-def test_p3_without_answer_the_0901_rule_still_departs():
-    # 대답 칸 없이 온 같은 목적지(늦은 대답·음성이 칸을 안 채움)는 지금처럼 승낙 — 바로 앞 요청이 대답 칸이었어도.
+def test_p3_without_answer_after_an_answer_still_asks_again():
+    # 대답 칸 없이 온 같은 목적지(늦은 대답·음성이 칸을 안 채움)도 승낙이 아니다(Task 3.3b) — 바로 앞 요청이 대답 칸이었어도.
     logic, t = confirming(answer_field=True)
     _voice(logic, t, _ans(confirming, "navigate", "destination", TOILET.id))
     acts = _voice(logic, t + 1.0, intent(matched_destination_id=TOILET.id, need_confirm=True))
-    assert logic.state == State.NAVIGATING and any(isinstance(a, Navigate) for a in acts)
+    assert logic.state == State.CONFIRMING and not any(isinstance(a, Navigate) for a in acts)
 
 
 def test_p3_off_same_place_answer_departs_as_now():
@@ -159,6 +159,102 @@ def test_p3_off_same_place_answer_departs_as_now():
     _voice(logic, t, _ans(confirming, "navigate", "destination", TOILET.id,
                           matched_destination_id=TOILET.id, need_confirm=True))
     assert logic.state == State.NAVIGATING
+
+
+# ---- 확인 질문 — 대답 칸 없는 같은 곳 제안도 승낙이 아니다(원칙 3, Task 3.3b) ------------------------------------------
+# 2026-11-21 17:32 실기: "화장실로 안내해드릴까요?"에 "거기가 어디야" — 음성이 같은 곳 제안(navigate, need_confirm, 대답 칸 빈
+# 값)으로 읽었고 09-01 규칙이 그것을 승낙으로 받아 출발했다. 켜짐의 승낙은 affirm · 대답 칸 yes · 확정(need_confirm=False)뿐이다.
+def _same_place(**kw):
+    return intent(matched_destination_id=TOILET.id, need_confirm=True, **kw)
+
+
+def test_p3_same_place_proposal_without_answer_asks_again():   # _navs 는 아래(재개 질문 절)에 있다
+    logic, t = confirming(answer_field=True)
+    prompt = logic._confirm_prompt
+    acts = _voice(logic, t, _same_place())
+    assert _navs(acts) == [] and logic.state == State.CONFIRMING
+    asked = [a for a in acts if isinstance(a, Say) and a.expects_reply]
+    assert [a.text for a in asked] == [prompt] and asked[0].kind == "confirm"
+    assert asked[0].options == ((TOILET.id, TOILET.name),)
+    assert logic._confirming_dest_id == TOILET.id
+
+
+def test_p3_same_place_proposal_then_yes_departs():
+    logic, t = confirming(answer_field=True)
+    _voice(logic, t, _same_place())
+    acts = _voice(logic, t + 1.0, intent("affirm"))
+    assert _navs(acts) == [TOILET.id] and logic.state == State.NAVIGATING
+
+
+def test_p3_confirmed_same_place_still_departs():
+    # "그래" → 그 목적지의 확정(need_confirm=False) — 지금 그대로 출발(11-21 실기에서도 정상으로 여러 번).
+    logic, t = confirming(answer_field=True)
+    acts = _voice(logic, t, intent(matched_destination_id=TOILET.id, need_confirm=False))
+    assert _navs(acts) == [TOILET.id] and logic.state == State.NAVIGATING
+
+
+def test_p3_answer_yes_on_a_same_place_proposal_departs():
+    # 대답 칸 yes 가 의도(같은 곳 제안)보다 먼저다 — 승낙.
+    logic, t = confirming(answer_field=True)
+    acts = _voice(logic, t, _ans(confirming, "navigate", "yes", matched_destination_id=TOILET.id, need_confirm=True))
+    assert _navs(acts) == [TOILET.id] and logic.state == State.NAVIGATING
+
+
+def test_p3_off_same_place_proposal_departs_as_now():
+    logic, t = confirming()
+    acts = _voice(logic, t, _same_place())
+    assert _navs(acts) == [TOILET.id] and logic.state == State.NAVIGATING
+
+
+def test_p3_other_place_proposal_asks_about_that_place_as_now():
+    on = _outcome(confirming, intent(matched_destination_id=ELEV.id, need_confirm=True), answer_field=True)
+    assert on == _outcome(confirming, intent(matched_destination_id=ELEV.id, need_confirm=True))
+    assert on[0] == State.CONFIRMING and on[4] == ELEV.id and "Navigate(" not in on[1]
+
+
+def test_p3_same_place_proposal_three_times_never_departs():
+    logic, t = confirming(answer_field=True)
+    for i in range(3):
+        acts = _voice(logic, t + i, _same_place())
+        assert _navs(acts) == [] and logic.state == State.CONFIRMING
+        assert [a.text for a in acts if isinstance(a, Say)] == [logic._confirm_prompt]
+
+
+def test_p3_same_place_proposal_is_handled_like_a_destination_answer():
+    # 같은 함수·같은 결과 — 말·시한·되묻기 사다리 모두 대답 칸 destination 으로 온 같은 곳과 같다(사다리는 처음부터).
+    def run(it):
+        _FakeUuid.n = 0
+        logic, t = confirming(answer_field=True, reask_ladder=True)
+        out = [_voice(logic, t, intent("unknown"))]              # 사다리 한 단 오름
+        out.append(_voice(logic, t + 2.0, it))
+        out.append(_voice(logic, t + 3.0, intent("unknown")))    # 처음부터 다시 오르는가
+        return (repr(out), logic.state, logic._confirm_deadline, logic._confirm_reask_at, logic._confirm_ladder.step)
+    plain = run(_same_place())
+    assert plain == run(_ans(confirming, "navigate", "destination", TOILET.id,
+                             matched_destination_id=TOILET.id, need_confirm=True))
+    assert plain[1] == State.CONFIRMING and "Navigate(" not in plain[0]
+
+
+def test_p3_same_place_proposal_in_the_change_question_asks_again():
+    # 주행 중 바꾸기 질문("화장실로 안내해드릴까요?", 409호로 가다 멈춤)도 같다 — 대답 칸 destination 이 이미 다시 묻는 갈래다.
+    logic, t = confirming_change(answer_field=True)
+    prompt = logic._confirm_prompt
+    acts = _voice(logic, t, _same_place())
+    assert _navs(acts) == [] and logic.state == State.CONFIRMING
+    assert _says(acts) == [prompt] and logic._change_from is ROOM
+    acts = _voice(logic, t + 1.0, intent("affirm"))
+    assert _navs(acts) == [TOILET.id]
+
+
+def test_p13_revived_confirm_then_same_place_proposal_asks_again():
+    # 호출로 접은 확인 질문을 "응"으로 되살린 뒤(다시 묻기) 같은 곳 제안이 또 와도 다시 묻는다.
+    logic, t = confirming(answer_field=True, wake_revive=True)
+    logic.on_wake_call(t)
+    acts = _voice(logic, t + 2.0, intent("affirm"))
+    assert _navs(acts) == [] and logic.state == State.CONFIRMING and logic._confirming_dest_id == TOILET.id
+    acts = _voice(logic, t + 3.0, _same_place())
+    assert _navs(acts) == [] and logic.state == State.CONFIRMING
+    assert _says(acts) == [logic._confirm_prompt]
 
 
 def test_p6_choice_of_another_place_asks_about_that_place():

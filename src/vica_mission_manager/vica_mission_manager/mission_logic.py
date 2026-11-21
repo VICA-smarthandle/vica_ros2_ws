@@ -1619,7 +1619,7 @@ class MissionLogic:
         # 대답 칸으로 처리(원칙 6 · 3, 노드·launch 파라미터 answer_field — 기본 꺼짐). 켜지면 음성이 실어 온 대답 칸(열린 질문의
         # 대답일 때만 노드가 넘긴다, 3.2)을 뜻을 아는 종류의 질문(ANSWER_READ_KINDS — "네?" 같은 open 은 아님)이면 의도보다
         # 먼저 본다 — yes·no = 승낙·거절, 목적지·고르기 = 그 목적지 제안(확인 질문 중 같은 곳이어도 출발하지 않고 다시 묻는다),
-        # 분 = 그만큼 대기, 못 알아들음 = unknown(_intent_from_answer).
+        # 분 = 그만큼 대기, 못 알아들음 = unknown(_intent_from_answer). 대답 칸 없이 온 같은 곳 제안도 다시 묻는다(on_intent).
         # 꺼져 있으면 지금 그대로 — 대답 칸을 보지 않는다.
         self.answer_field = answer_field
         self.confirm_timeout_sec = confirm_timeout_sec
@@ -3173,9 +3173,11 @@ class MissionLogic:
                 # 확정한다 (2026-09-01, 야간 로그: 같은 확인 질문이 반복되다
                 # 3수째에야 출발). 확인 답의 정식 통로로 보낸다 — 게이트
                 # 포함 (need_confirm 그대로 흘리면 게이트가 거부한다).
-                if self._answer_swapped is not None:
-                    # 원칙 3 · 6 — 대답 칸이 '목적지 이름'이라고 실어 온 말은 승낙이 아니다(09-01 규칙을 쓰지 않는다).
-                    # 출발하지 않고 같은 확인 질문을 다시 한다(시계·되묻기는 처음부터, "다시 가자"와 같은 길).
+                if self.answer_field:
+                    # 원칙 3 · 6 — 켜져 있으면 같은 곳 제안은 대답 칸이 '목적지 이름'이든 비었든 승낙이 아니다(09-01 규칙을
+                    # 쓰지 않는다 — 11-21 실기: "거기가 어디야"가 대답 칸 없는 같은 곳 제안으로 와 출발). 승낙은 affirm·대답 칸
+                    # yes·확정(need_confirm=False)뿐이다. 출발하지 않고 같은 확인 질문을 다시 한다(시계·되묻기는 처음부터,
+                    # "다시 가자"와 같은 길). 주행 중 바꾸기 질문(_change_from)도 같다.
                     self._arm_confirm(now)
                     return self._resay_confirm() if self._confirm_prompt else []
                 return self.on_confirm_answer(True, dest, bounds, nav_ready, now)
