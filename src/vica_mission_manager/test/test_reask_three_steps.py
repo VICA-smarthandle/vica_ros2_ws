@@ -557,7 +557,8 @@ P28_ANSWERS = [
     (navigating_cancel_asked, "affirm", lambda lg, acts: MSG_CANCELED in _says(acts) and lg.state == State.IDLE),
     (navigating_help_asked, "affirm", lambda lg, acts: lg.help_phase == "requested"),
     (_help_cancel_asked, "affirm", lambda lg, acts: MSG_HELP_CANCELED in _says(acts) and lg.help_phase == "none"),
-    (paused_resume_asked, "affirm", lambda lg, acts: lg.state == State.NAVIGATING),
+    # 재개 질문의 "네"는 확정 resume·대답 칸 yes 뿐이다(원칙 3, 전체 검토 C1) — 맨 affirm 은 다시 묻기.
+    (paused_resume_asked, "resume", lambda lg, acts: lg.state == State.NAVIGATING),
     (asking, "affirm", lambda lg, acts: lg.state == State.WAITING),
     (asking_wait_time, "wait", lambda lg, acts: lg.state == State.WAITING and lg.wait_minutes_requested() == 5),
     (asking_end_confirm, "affirm", lambda lg, acts: lg.state == State.RETURNING),
@@ -581,7 +582,7 @@ def test_p28_repeat_keeps_the_resume_question_open():
     logic, t = paused_resume_asked()
     assert _says(_voice(logic, "repeat", t)) == [MSG_RESUME_CONFIRM]
     assert logic._resume_question_open() and logic.state == State.PAUSED
-    acts = _voice(logic, "affirm", t + 2)
+    acts = _voice(logic, "affirm", t + 2, answer="yes", answer_kind="yesno")   # 원칙 3 — 대답 칸 yes
     assert logic.state == State.NAVIGATING and any(isinstance(a, Navigate) for a in acts)
 
 

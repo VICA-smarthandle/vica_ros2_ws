@@ -523,7 +523,7 @@ def test_p3_resume_is_asked_by_the_mission_and_never_starts_unasked():
     logic, t = paused(answer_field=True)
     assert _says(logic.on_voice_intent(intent("resume", need_confirm=False), t, lookup, BOUNDS, True)) == [MSG_RESUME_CONFIRM]
     assert logic.state == State.PAUSED
-    logic.on_voice_intent(intent("affirm"), t + 2, lookup, BOUNDS, True)
+    logic.on_voice_intent(_ans(paused_resume_asked, "affirm", "yes"), t + 2, lookup, BOUNDS, True)   # 원칙 3 — 대답 칸 yes
     assert logic.state == State.NAVIGATING
 
 
@@ -627,15 +627,19 @@ def test_p13_wake_folds_the_resume_question_and_yes_asks_again():
     yes = intent("affirm", answer="yes", answer_kind="open")  # "네?" 뒤의 "응" — 열린 질문의 대답이라 바꿔 읽지 않는다
     acts = _voice(logic, t + 2, yes)
     assert _says(acts) == [MSG_RESUME_CONFIRM] and _navs(acts) == [] and logic.state == State.PAUSED
-    assert _navs(_voice(logic, t + 3, intent("affirm"))) == [ROOM.id]   # 다시 물은 질문의 "네"는 출발
+    yes = _ans(paused_resume_asked, "affirm", "yes")
+    assert _navs(_voice(logic, t + 3, yes)) == [ROOM.id]   # 다시 물은 질문의 "네"(대답 칸 yes)는 출발
 
 
 def test_p13_without_wake_revive_the_call_leaves_the_resume_question_open():
-    # 꺼짐 — 취소·도움 확인과 같이 호출은 재개 질문을 건드리지 않는다. "네?" 뒤의 "응"은 그 질문의 대답이다.
+    # 꺼짐 — 취소·도움 확인과 같이 호출은 재개 질문을 건드리지 않는다. "네?" 뒤의 "응"(open — 맨 affirm)은 그 질문의 승낙이 아니라
+    # 다시 묻기다(원칙 3, 전체 검토 C2). 다시 물은 질문의 대답 칸 yes 가 출발이다.
     logic, t = paused_resume_asked()
     logic.on_wake_call(t)
     assert logic._wake_folded is None and logic._resay_open_question(t) is not None
-    assert _navs(_voice(logic, t + 2, intent("affirm"))) == [ROOM.id]
+    acts = _voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))
+    assert _says(acts) == [MSG_RESUME_CONFIRM] and _navs(acts) == [] and logic.state == State.PAUSED
+    assert _navs(_voice(logic, t + 3, _ans(paused_resume_asked, "affirm", "yes"))) == [ROOM.id]
 
 
 def test_p14_dismiss_during_the_resume_question_is_a_no():
@@ -658,7 +662,7 @@ def test_p3_other_requests_close_the_resume_question():
     assert logic.state == State.IDLE and _navs(acts) == []
     logic, t = paused_resume_asked()   # 사용자 질문(대답은 음성 몫)은 질문을 닫지 않는다
     assert _voice(logic, t, intent("question")) == []
-    assert _navs(_voice(logic, t + 1, intent("affirm"))) == [ROOM.id]
+    assert _navs(_voice(logic, t + 1, _ans(paused_resume_asked, "affirm", "yes"))) == [ROOM.id]
 
 
 @pytest.mark.parametrize("kind,ask", [("question", "화장실은 2층에 있어요. 안내해 드릴까요?"),
@@ -680,11 +684,14 @@ def test_p6_handed_question_replaces_the_resume_question(kind, ask):
                          ids=["ladders_off", "reask_ladder", "wake_revive", "both"])
 def test_p13_wake_greeting_handed_over_keeps_the_resume_question(flags):
     # 원칙 9 · 13 — 창 안의 "비카야"에 넘긴 "네?"는 새 질문이 아니다(note_question_asked·_resume_reask 와 같은 뜻). 재개 질문은
-    # 남고 다음 "네"(대답 칸 open — 바꿔 읽지 않음)가 그 질문의 승낙이다 — 안내 취소 확인·도움 요청 취소 확인과 같다(Task 3.4 재검토).
+    # 남는다. 다음 "응"(대답 칸 open — 바꿔 읽지 않은 맨 affirm)은 그 질문의 승낙이 아니라 다시 묻기다(원칙 3, 전체 검토 C1) —
+    # 출발은 대답 칸 yes 뿐이다.
     logic, t = paused_resume_asked(**flags)
     _voice(logic, t, intent("unknown", ask_text=MSG_WAKE_GREETING, ask_kind="open"))
     assert logic._resay_open_question(t) is not None
-    assert _navs(_voice(logic, t + 1, intent("affirm", answer="yes", answer_kind="open"))) == [ROOM.id]
+    assert _navs(_voice(logic, t + 1, intent("affirm", answer="yes", answer_kind="open"))) == []
+    assert logic.state == State.PAUSED
+    assert _navs(_voice(logic, t + 2, _ans(paused_resume_asked, "affirm", "yes"))) == [ROOM.id]
 
 
 def test_p8_handed_retry_after_the_old_ladder_keeps_the_resume_question():
@@ -694,7 +701,10 @@ def test_p8_handed_retry_after_the_old_ladder_keeps_the_resume_question():
     assert _says(_voice(logic, t, retry)) == [MSG_RESUME_CONFIRM]
     assert _says(_voice(logic, t + 1, retry)) == [MSG_REASK_RETRY]
     assert logic._resay_open_question(t + 1) is not None
-    assert _navs(_voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))) == [ROOM.id]
+    # 넘긴 되묻는 말(open) 뒤의 "응"은 바꿔 읽지 않은 맨 affirm — 승낙이 아니다(원칙 3, 전체 검토 C1). 확정 resume 은 출발.
+    assert _navs(_voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))) == []
+    assert logic.state == State.PAUSED and logic._resay_open_question(t + 2) is not None
+    assert _navs(_voice(logic, t + 3, intent("resume", need_confirm=False))) == [ROOM.id]
 
 
 @pytest.mark.parametrize("flags", [{}, {"wake_revive": True}], ids=["ladders_off", "wake_revive"])
@@ -731,7 +741,7 @@ def test_p13_wake_call_folds_first_then_handed_wake_greeting_still_asks_again():
 def test_p6_answer_without_a_handed_question_keeps_the_resume_question():
     logic, t = paused_resume_asked()                   # 넘긴 질문 없는 사용자 질문(대답은 음성이 말함)은 재개 질문을 둔다
     assert _voice(logic, t, intent("question", reply="화장실은 2층에 있어요.")) == []
-    assert _navs(_voice(logic, t + 1, intent("affirm"))) == [ROOM.id]
+    assert _navs(_voice(logic, t + 1, _ans(paused_resume_asked, "affirm", "yes"))) == [ROOM.id]
 
 
 def test_p3_resume_question_replaces_an_open_cancel_question():
@@ -739,7 +749,7 @@ def test_p3_resume_question_replaces_an_open_cancel_question():
     assert _says(_voice(logic, t, intent("cancel"))) == [MSG_CANCEL_CONFIRM]
     assert _says(_voice(logic, t + 1, intent("resume", need_confirm=True))) == [MSG_RESUME_CONFIRM]
     assert logic.cancel_confirm_pending is False      # 질문은 하나만 — 다음 "네"가 안내 취소로 잡히지 않게
-    assert _navs(_voice(logic, t + 2, intent("affirm"))) == [ROOM.id]
+    assert _navs(_voice(logic, t + 2, _ans(paused_resume_asked, "affirm", "yes"))) == [ROOM.id]
 
 
 def test_p3_resume_question_during_a_help_request():
@@ -749,7 +759,7 @@ def test_p3_resume_question_during_a_help_request():
     assert logic.help_cancel_pending
     assert _says(_voice(logic, t + 1, intent("resume", need_confirm=True))) == [MSG_RESUME_CONFIRM]
     assert not logic.help_cancel_pending              # 질문은 하나만 — 다음 "네"가 도움 요청 취소로 잡히지 않게
-    acts = _voice(logic, t + 2, intent("affirm"))
+    acts = _voice(logic, t + 2, _ans(paused_resume_asked, "affirm", "yes"))
     assert _navs(acts) == [ROOM.id] and logic.help_phase == "none"
     assert [a.event for a in acts if isinstance(a, HelpEvent)] == ["help_canceled"]
 
@@ -772,7 +782,7 @@ def test_p3_resume_when_nav_is_not_ready_says_why_and_asks_nothing():
     assert _says(logic.on_voice_intent(intent("resume", need_confirm=True), t, lookup, BOUNDS, False)) == reject
     assert logic._resay_open_question(t) is None
     logic, t = paused_resume_asked()                   # 물은 뒤 준비가 풀렸다 — 이유를 말하고 닫는다
-    acts = logic.on_voice_intent(intent("affirm"), t, lookup, BOUNDS, False)
+    acts = logic.on_voice_intent(_ans(paused_resume_asked, "affirm", "yes"), t, lookup, BOUNDS, False)
     assert _says(acts) == reject and _navs(acts) == [] and logic.state == State.PAUSED
     assert logic._resay_open_question(t) is None
 

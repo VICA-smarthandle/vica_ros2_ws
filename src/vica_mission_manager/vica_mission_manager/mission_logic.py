@@ -1911,7 +1911,8 @@ class MissionLogic:
         # 켜졌을 때 지금 처리하는 음성 요청이 호출어만 들린 것("네?")인가 — 그러면 어느 사다리도 올리지 않는다(원칙 9).
         self._reask_held = False
         # 지금 처리하는 음성 요청을 대답 칸으로 바꿔 읽은 의도(원칙 6, answer_field 켜짐에서만) — 음성 요청을 처리하는 동안만
-        # 값이 있다. 확인 질문 중 같은 목적지의 승낙 규칙(09-01)을 가르고, 처리 뒤의 되묻기 정리·넘겨받은 질문도 이 의도로 본다.
+        # 값이 있다. 확인 질문 중 같은 목적지의 승낙 규칙(09-01)과 재개 질문의 승낙(대답 칸 yes 만, 원칙 3)을 가르고, 처리 뒤의
+        # 되묻기 정리·넘겨받은 질문도 이 의도로 본다.
         self._answer_swapped: Optional[IntentData] = None
         # 호출이 접은 질문 하나(wake_revive 켜짐에서만 적는다, 원칙 13) — ("confirm"·"cancel"·"help"·"resume", 확인 중이던 목적지 id, 접은 시각).
         # WAKE_REVIVE_SEC 안의 승낙이 그 질문을 다시 묻게 한다. 다른 말이 오거나 시간이 지나면 지운다. 꺼져 있으면 늘 None.
@@ -2709,9 +2710,11 @@ class MissionLogic:
         """일시정지 중 재개의 확인(answer_field 켜짐에서만 부른다). 맡지 않으면 None — 아래 길이 지금처럼 처리한다.
 
         다시 가자는 제안이든 확정이든 바로 출발하지 않고 "다시 출발할까요?"를 묻는다 — 미션이 묻지 않은 확정은 묻는 쪽으로
-        낮춘다(원칙 3: 확인받은 뒤에만 출발). 그 질문이 열려 있으면: 네(affirm — 대답 칸 yes 를 바꿔 읽은 것 포함)·확정 재개 =
+        낮춘다(원칙 3: 확인받은 뒤에만 출발). 그 질문이 열려 있으면: 네(대답 칸 yes 를 바꿔 읽은 affirm)·확정 재개 =
         지금 재개 길로 출발, 아니요(deny — 질문 중의 "됐어"도) = MSG_PAUSE_KEPT 하고 닫기(일시정지 그대로), 재개 제안 = 같은
-        질문을 다시(확인 질문 중의 "다시 가자"와 같다), 못 알아들은 말 = 되묻기 한 단(_resume_reask)."""
+        질문을 다시(확인 질문 중의 "다시 가자"와 같다), 못 알아들은 말 = 되묻기 한 단(_resume_reask).
+        대답 칸 없이 온 맨 affirm(글자 경로의 '음'·'어어', "네?" 뒤의 "응" — open 은 바꿔 읽지 않는다)은 승낙이 아니다 — 못
+        알아들은 말과 같은 한 단으로 다시 묻는다(원칙 3, 전체 검토 C1·C2). 횟수도 같이 세어 사다리가 끝없이 이어지지 않는다."""
         kind = intent.intent
         asked = self._resume_question_open()
         if kind == "resume":
@@ -2723,7 +2726,11 @@ class MissionLogic:
         if not asked:
             return None
         if kind == "affirm":
-            return self._resume_confirmed(now, nav_ready)
+            # 원칙 3 — _intent_from_answer 가 affirm 으로 바꾸는 대답 칸은 yes 뿐이라, 바꿔 읽은 affirm 이 곧 대답 칸 yes 다.
+            if self._answer_swapped is not None:
+                return self._resume_confirmed(now, nav_ready)
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "대답 칸 없는 승낙 — 재개 질문을 다시")))
+            return self._resume_reask(now)
         if kind == "deny":
             self._close_resume_question()
             return [Say(MSG_PAUSE_KEPT, priority="response")]
