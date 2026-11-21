@@ -32,6 +32,11 @@ class QuestionRecord:
     state: str                # 열 때의 미션 상태
 
 
+def answer_for(open_id: str, msg_question_id: str, answer: str) -> str:
+    """대답 칸이 지금 열린 질문의 것일 때만 answer 를 돌려준다. 늦게 온 대답·id 없음은 ""(지금처럼 의도로 처리)."""
+    return answer if open_id and msg_question_id and open_id == msg_question_id else ""
+
+
 class QuestionTracker:
     def __init__(self, prefix: str, no_signal_close_sec: float = NO_SIGNAL_CLOSE_SEC):
         self._prefix, self._no_signal_close_sec = prefix, no_signal_close_sec

@@ -145,7 +145,7 @@ from .mission_logic import (
     nav_behavior_tree,
     yaw_deg_to_quaternion,
 )
-from .question_record import QuestionRecord, QuestionTracker
+from .question_record import QuestionRecord, QuestionTracker, answer_for
 from .obstacle_inputs import (
     BASE_FRAME,
     LASER_DEFAULT,
@@ -962,6 +962,11 @@ class MissionManagerNode(Node):
 
     def _on_intent(self, msg: VicaIntent) -> None:
         """음성 요청. 판단은 로직(on_voice_intent)이 하고 여기선 실행·기록만 한다(2026-10-08)."""
+        # 대답 칸(3.2) — 열린 질문 id 는 기록을 닫기 전에 읽는다. 옛 메시지에는 칸이 없다.
+        open_q = self._questions.current
+        answer = answer_for(open_q.id if open_q else "", str(getattr(msg, "question_id", "")),
+                            str(getattr(msg, "answer", "")))
+        answer_value = str(getattr(msg, "answer_value", ""))
         intent = IntentData(
             intent=msg.intent,
             matched_destination_id=msg.matched_destination_id,
@@ -976,6 +981,7 @@ class MissionManagerNode(Node):
             ask_text=str(getattr(msg, "ask_text", "")),
             ask_kind=str(getattr(msg, "ask_kind", "")),
             ask_option_ids=tuple(getattr(msg, "ask_option_ids", ())),
+            answer=answer, answer_value=answer_value if answer else "",
         )
         before = self.logic.state
         self._question_safely(self._close_question, "answer")   # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
@@ -987,6 +993,7 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"음성 요청 intent={msg.intent} dest={msg.matched_destination_id or '-'} "
             f"confirm={msg.need_confirm}: {before.value} -> {self.logic.state.value}"
+            + (f" answer={answer}" if answer else "")
             + (f" 말={said}" if said else " (말 없음)")
             + (f" — {self.logic.voice_note}" if self.logic.voice_note else ""))
 

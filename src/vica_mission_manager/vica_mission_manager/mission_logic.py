@@ -222,6 +222,9 @@ class IntentData:
     ask_text: str = ""
     ask_kind: str = ""
     ask_option_ids: tuple = ()
+    # 대답 칸(3.2) — 열린 질문의 대답일 때만 채워 온다(answer_for). 로직은 아직 읽지 않는다.
+    answer: str = ""
+    answer_value: str = ""
 
 
 @dataclass(frozen=True)
