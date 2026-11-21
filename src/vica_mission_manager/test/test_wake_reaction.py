@@ -10,13 +10,14 @@ from pathlib import Path
 import pytest
 
 from reaction_states import (ROOM, TOILET, asking, awaiting_user, confirming, confirming_change, intent, lookup,
-                             navigating_cancel_asked, navigating_help_asked, waiting)
+                             navigating, navigating_cancel_asked, navigating_help_asked, new_logic, waiting)
 from vica_mission_manager.mission_logic import (
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
     MSG_CONFIRM_PROMPT_FALLBACK,
     MSG_ESTOP_REJECT,
     MSG_ESTOP_WAKE,
+    MSG_FINISH,
     MSG_HELP_CONFIRM,
     MSG_HELP_SENT,
     MSG_LEAVING_NOTICE,
@@ -432,3 +433,80 @@ def test_node_and_launch_expose_wake_revive_off_by_default():
     assert 'wake_revive=bool(self.get_parameter("wake_revive").value)' in node
     assert 'DeclareLaunchArgument("wake_revive", default_value="false")' in launch
     assert '"wake_revive": ParameterValue(' in launch
+
+
+# ---- 수정 1차(검토 전 코디네이터 지시): 열린 질문의 대답이 먼저 · 새 질문이 열리면 지움 · 문장 없는 확인 질문은 적지 않음 ----
+def _as_node(logic, acts, t):
+    """노드 _run_actions 처럼 — 대답을 기다리는 말(expects_reply)마다 질문 시각을 알린다(note_question_asked)."""
+    for a in acts:
+        if isinstance(a, Say) and a.expects_reply:
+            logic.note_question_asked(a.question_text or a.text, t)
+    return acts
+
+
+def _cancel_then_arrive(revive):
+    """주행 중 "안내를 취소할까요?" → "비카야"(접음) → 20 s 뒤 도착 질문("…기다릴까요?") → "응"."""
+    logic, t = navigating(TOILET, wake_revive=revive)
+    _voice(logic, "cancel", t)
+    logic.on_wake_call(t + 1)
+    logic.on_tick(t + 20, NavStatus.SUCCEEDED)
+    logic.on_arrival_question_spoken(t + 22)
+    return logic, _voice(logic, "affirm", t + 24)
+
+
+def test_p6_yes_to_the_arrival_question_is_its_answer_not_a_revived_cancel():
+    """원칙 6 — 접은 뒤 미션 질문이 열려 있으면 "응"은 그 질문의 대답이다(꺼짐의 같은 "응"과 같다). 접은 것은 지운다."""
+    off, off_acts = _cancel_then_arrive(False)
+    on, on_acts = _cancel_then_arrive(True)
+    assert _says(on_acts) == _says(off_acts) and on.state == off.state == State.WAITING
+    assert MSG_FINISH not in _says(on_acts) and on._wake_folded is None
+
+
+def test_p6_open_question_check_is_the_same_one_dismiss_uses():
+    """열린 질문 판정은 dismiss(원칙 14)와 같은 도우미 하나다."""
+    logic, t = asking(wake_revive=True)
+    assert logic._mission_question_open(t) is True
+    logic, t = navigating_cancel_asked()
+    assert logic._mission_question_open(t) is True
+    logic.on_wake_call(t)                                   # 꺼짐 — 취소 확인은 살아 있다
+    assert logic._mission_question_open(t) is True
+    logic, t = navigating_cancel_asked(wake_revive=True)
+    logic.on_wake_call(t)                                   # 켜짐 — 접혔다
+    assert logic._mission_question_open(t) is False
+
+
+def test_p13_a_new_mission_question_clears_the_fold():
+    """접은 뒤 미션이 다른 질문을 열었다가(도착 질문) 그 질문이 닫혀도(앱 취소) 옛 질문은 되살아나지 않는다."""
+    logic, t = confirming_change(wake_revive=True)
+    logic.on_wake_call(t)                                   # 409호로 다시 출발, ("confirm", "wc") 적음
+    acts = _as_node(logic, logic.on_tick(t + 5, NavStatus.SUCCEEDED), t + 5)
+    assert any(isinstance(a, Say) and a.expects_reply for a in acts)
+    assert logic._wake_folded is None
+    logic.on_app_cancel(t + 8)
+    assert logic.state == State.IDLE
+    assert _says(_voice(logic, "affirm", t + 10)) == [] and logic.state == State.IDLE
+
+
+def test_p13_the_wake_greeting_is_not_a_new_question():
+    """넘겨받은 "네?"(호출어만 들린 말·잠깐)는 노드가 질문으로 알려도 접은 것을 지우지 않는다."""
+    logic, t = confirming(wake_revive=True)
+    logic.on_wake_call(t)
+    acts = _as_node(logic, logic.on_voice_intent(WAKE_ONLY, t + 1, lookup, BOUNDS, True), t + 1)
+    assert _says(acts) == [MSG_WAKE_GREETING] and acts[-1].expects_reply
+    assert logic._wake_folded == ("confirm", TOILET.id, t)
+    assert _says(_as_node(logic, _voice(logic, "affirm", t + 2), t + 2)) == [TOILET_ASK]
+
+
+@pytest.mark.parametrize("dest_id", ["", "nope"])
+def test_p13_confirm_without_a_sentence_is_folded_but_not_remembered(dest_id):
+    """목적지 id 가 없거나 미션이 모르는 곳의 확인 질문 — 접기는 지금처럼, 적지는 않는다(되살려도 물을 문장이 없다)."""
+    def make(**kw):
+        logic = new_logic(**kw)
+        logic.on_intent(intent(matched_destination_id=dest_id, need_confirm=True), lookup(dest_id), BOUNDS, True, 0.0)
+        return logic, 1.0
+    off, t = make()
+    on, _ = make(wake_revive=True)
+    assert on.state == State.CONFIRMING and on._confirm_prompt == ""
+    assert on.on_wake_call(t) == off.on_wake_call(t) and on.state == off.state == State.IDLE
+    assert on._wake_folded is None
+    assert _voice(on, "affirm", t + 3) == _voice(off, "affirm", t + 3) and on.state == off.state == State.IDLE

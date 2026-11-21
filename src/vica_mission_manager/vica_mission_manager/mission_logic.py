@@ -2102,8 +2102,9 @@ class MissionLogic:
 
         접은 뒤 WAKE_REVIVE_SEC 안의 승낙(affirm)은 실행하지 않고 그 질문을 다시 하게 바꿔 읽는다 — 확인 질문은 그 목적지의
         제안(navigate, need_confirm), 취소 확인은 cancel, 도움 확인은 help. 그 의도가 지금 상태에서 하는 일이 곧 다시 묻기다
-        (확인 질문 · "안내를 취소할까요?" · "직원의 도움이 필요하신가요?"). 그사이 상태가 바뀌었으면 바꾼 의도가 그 상태에서
-        평소 하는 일을 한다. 호출어만 들린 말("네?")은 적어 둔 것을 그대로 두고, 그 밖의 말·시간이 지난 승낙은 지운다."""
+        (확인 질문 · "안내를 취소할까요?" · "직원의 도움이 필요하신가요?"). 다만 그때 미션 질문이 열려 있으면(도착 질문 등)
+        그 승낙은 그 질문의 대답이다 — 되살리지 않는다(원칙 6, 판정은 dismiss 와 같은 _mission_question_open). 미션이 새 질문을
+        열면 note_question_asked 가 지운다. 호출어만 들린 말("네?")은 적어 둔 것을 그대로 두고, 그 밖의 말·시간이 지난 승낙은 지운다."""
         folded = self._wake_folded
         if folded is None or self._is_wake_only(intent):
             return intent
@@ -2111,24 +2112,32 @@ class MissionLogic:
         kind, dest_id, at = folded
         if intent.intent != "affirm" or now - at > WAKE_REVIVE_SEC:
             return intent
+        if self._mission_question_open(now):
+            self.voice_note = "열린 질문의 대답으로 받음(호출로 접은 질문은 되살리지 않음)"
+            return intent
         self.voice_note = "호출로 접은 질문을 다시 묻기"
         if kind == "confirm":
             return replace(intent, intent="navigate", matched_destination_id=dest_id, need_confirm=True)
         return replace(intent, intent=kind)
 
-    def _dismiss_as(self, intent: IntentData, now: Optional[float] = None) -> Optional[IntentData]:
-        """dismiss("됐어", 원칙 14)를 바꿔 읽을 의도. None 이면 끝맺는 말(_dismiss_end)을 한다.
-        미션 질문이 열려 있으면 deny, 안내 중(NAVIGATING·PAUSED)이면 cancel("안내를 취소할까요?")."""
+    def _mission_question_open(self, now: Optional[float] = None) -> bool:
+        """미션이 쥔 질문이 열려 있나 — 확인·도착·대기 시간·접근 질문, 안내 취소 확인, 도움 확인·도움 요청 취소 확인, 대기 중
+        "안내가 필요 없으신가요?"·"어디로 모실까요?"(물은 뒤 WAIT_FINISH_REPEAT_SEC 안). dismiss 바꿔 읽기(원칙 14)와 호출이 접은
+        질문의 되살리기(원칙 6 · 13 — 질문 뒤의 말은 먼저 그 질문의 대답이다)가 같은 판정을 쓴다."""
         waiting = self.state in (State.WAITING, State.WAITING_RELEASE)
         finish_open = (self._wait_finish_asked_at is not None
                        and (now is None or now - self._wait_finish_asked_at <= WAIT_FINISH_REPEAT_SEC))
-        question_open = (
+        return (
             self.state in (State.CONFIRMING, State.ASKING_NEXT, State.ASKING_WAIT_TIME, State.AWAITING_USER)
             or self.cancel_confirm_pending
             or self.help_cancel_pending
             or self.help_phase == "asking"
             or (waiting and (self._wait_need_asked_at is not None or finish_open)))
-        if question_open:
+
+    def _dismiss_as(self, intent: IntentData, now: Optional[float] = None) -> Optional[IntentData]:
+        """dismiss("됐어", 원칙 14)를 바꿔 읽을 의도. None 이면 끝맺는 말(_dismiss_end)을 한다.
+        미션 질문이 열려 있으면 deny, 안내 중(NAVIGATING·PAUSED)이면 cancel("안내를 취소할까요?")."""
+        if self._mission_question_open(now):
             return replace(intent, intent="deny")
         if self.state in (State.NAVIGATING, State.PAUSED):
             return replace(intent, intent="cancel")
@@ -2186,10 +2195,14 @@ class MissionLogic:
 
     def note_question_asked(self, text: str, now: float) -> None:
         """노드가 대답을 기다리는 말(Say.expects_reply)을 내보낼 때 부른다. 같은 질문을 SAME_QUESTION_SEC 안에
-        다시 물은 것은 첫 질문 시각을 둔다."""
+        다시 물은 것은 첫 질문 시각을 둔다. 호출이 접어 둔 질문(_wake_folded)도 여기서 지운다("네?" 말고)."""
         if (self._question_at is None or text != self._question_text
                 or now - self._question_at > SAME_QUESTION_SEC):
             self._question_at, self._question_text = now, text
+        if text.strip() != MSG_WAKE_GREETING:
+            # 원칙 13 — 미션이 새 질문을 열었다: 호출이 접어 둔 옛 질문은 되살리지 않는다(꺼져 있으면 늘 None). 넘겨받은
+            # "네?"(호출어만 들린 말·잠깐)는 질문을 새로 연 것이 아니다. 되살린 질문은 이미 지운 뒤에 나간다.
+            self._wake_folded = None
 
     def _answer_predates_question(self, intent: IntentData) -> bool:
         """이 예/아니요의 말이 마지막 질문보다 먼저 시작됐나 — 그러면 그 질문의 대답이 아니다. 말 시작을 못
@@ -4934,7 +4947,9 @@ class MissionLogic:
             # 질문이었으면 원래 목적지로 다시 출발한다 — 질문 전 하던 일(안내 주행)로
             # 돌아가는 것이고, "네?"가 나가는 참이라 출발 멘트는 보태지 않는다.
             # 이어 목적지를 말하면 주행 중 바꾸기가 처음부터 다시 열린다.
-            confirm_id = self._confirming_dest_id or ""   # 원칙 13 — 접기 전에 읽는다(_fold_confirming 이 지운다)
+            # 원칙 13 — 접기 전에 읽는다(_fold_confirming 이 지운다). 목적지 id 가 없거나 미션이 모르는 곳이라 물을 문장이
+            # 없는 확인 질문은 적지 않는다 — 되살려도 다시 물을 문장이 없다(접기는 지금처럼 한다).
+            confirm_id = self._confirming_dest_id if self._confirming_dest_id and self._confirm_prompt else None
             actions = self._fold_confirming(now, announce=False)
             self._wake_consumed_at = now
             if self.wake_revive:
@@ -4970,7 +4985,8 @@ class MissionLogic:
     def _wake_fold_questions(self, now: float, confirm_id: Optional[str]) -> None:
         """호출이 되돌리기 어려운 질문을 조용히 접고 하나를 적어 둔다(원칙 13 · 3, wake_revive 켜짐에서만 부른다).
 
-        confirm_id 가 None 이 아니면 확인 질문을 방금 접은 것이다(on_wake 의 CONFIRMING 갈래). 함께 열린 질문은 모두 접고,
+        confirm_id 는 방금 접은 확인 질문의 목적지 id 다(on_wake 의 CONFIRMING 갈래 — 물을 문장이 없는 확인 질문이면 None 이라
+        적지 않는다). 함께 열린 질문은 모두 접고,
         적는 것은 확인 > 안내 취소 확인 > 도움 확인 순서로 가장 앞의 것 하나다. 닫는 방법은 시한이 됐을 때와 같다 — 취소 확인은
         _cancel_confirm_tick 의 시한 갈래처럼 취소하지 않고 닫고, 도움 확인은 _drop_help_question(말없이, 주행 계속).
         접은 것이 없으면 적어 둔 것을 그대로 둔다(창 안에서 또 들린 "비카야")."""
