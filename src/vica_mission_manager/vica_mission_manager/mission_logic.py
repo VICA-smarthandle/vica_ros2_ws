@@ -2087,12 +2087,20 @@ class MissionLogic:
         kind = intent.ask_kind if intent.ask_kind in QUESTION_KINDS else "open"
         options = tuple((d.id, d.name) for d in map(lookup, intent.ask_option_ids) if d is not None)
         self.voice_note = " · ".join(filter(None, (self.voice_note, "넘겨받은 질문")))
-        if self._resume_question_open() and intent.intent != "unknown":
-            # 원칙 6 — 질문 뒤의 말은 가장 최근 질문의 대답이다. 음성이 넘긴 다른 질문(question·clarify)을 말하면 "다시
-            # 출발할까요?"(Task 3.4)는 닫는다 — 남기면 그 질문에 한 "네"가 재출발이 된다. unknown 이 넘긴 말(호출어만 들린 "네?"·
-            # 옛 사다리 뒤의 "잘 듣지 못했습니다…")은 새 질문이 아니라 질문을 둔다(원칙 9 · 13 — 취소 확인과 같다). 꺼져 있으면 열리지 않는다.
+        if self._resume_question_open() and not self._handed_text_keeps_question(intent):
+            # 원칙 6 — 질문 뒤의 말은 가장 최근 질문의 대답이다. 미션이 넘겨받은 다른 말을 물으면 "다시 출발할까요?"(Task 3.4)는
+            # 닫는다 — 남기면 그 말에 한 "네"가 재출발이 된다. 꺼져 있으면 열리지 않는다.
             self._close_resume_question()
         return [*actions, self._ask(intent.ask_text, kind, options)]
+
+    @staticmethod
+    def _handed_text_keeps_question(intent: IntentData) -> bool:
+        """넘겨받아 말하는 글자가 로봇 자신의 고정 문장 — 호출 응답 "네?"(MSG_WAKE_GREETING)·되묻는 말(MSG_REASK_RETRY,
+        음성 replies.RETRY_PROMPT 와 같은 글자) — 인가. 그러면 열린 미션 질문을 둔다: "네?"는 새 질문이 아니고(원칙 13 —
+        note_question_asked 와 같은 뜻), 되묻는 말은 같은 질문을 다시 청하는 말이다(원칙 8). 그 밖의 글자는 의도가 무엇이든
+        (unknown 포함) 로봇이 다른 것을 묻는 말이다 — 앞 질문의 "네"로 읽지 않는다(원칙 6). 모르는 글자는 닫는 쪽이라 확인 없는
+        출발이 없다. _is_wake_only 는 reply 도 보므로 쓰지 않는다 — reply 가 "네?"여도 넘긴 글자가 다른 질문이면 닫아야 한다."""
+        return (intent.ask_text or "").strip() in (MSG_WAKE_GREETING, MSG_REASK_RETRY)
 
     def _react_voice_intent(
         self,

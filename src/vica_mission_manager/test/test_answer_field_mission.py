@@ -601,6 +601,29 @@ def test_p8_handed_retry_after_the_old_ladder_keeps_the_resume_question():
     assert _navs(_voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))) == [ROOM.id]
 
 
+@pytest.mark.parametrize("flags", [{}, {"wake_revive": True}], ids=["ladders_off", "wake_revive"])
+def test_p6_real_question_handed_with_unknown_closes_the_resume_question(flags):
+    # 수정 3차 — 의도가 unknown 이어도 넘긴 글자가 로봇의 "네?"·되묻는 말이 아니면 다른 질문이다(원칙 6). 옛 사다리: 첫째는
+    # 미션이 같은 질문을 다시 말해 넘긴 말을 버리고, 둘째(사다리 끝)는 넘긴 질문을 말한다 — 그 뒤 "네"로 출발하지 않는다.
+    ask = "화장실은 2층에 있어요. 안내해 드릴까요?"
+    logic, t = paused_resume_asked(**flags)
+    assert _says(_voice(logic, t, intent("unknown", ask_text=ask, ask_kind="open"))) == [MSG_RESUME_CONFIRM]
+    assert _says(_voice(logic, t + 1, intent("unknown", ask_text=ask, ask_kind="open"))) == [ask]
+    acts = _voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open"))
+    assert acts == [] and logic.state == State.PAUSED
+
+
+def test_p6_real_question_handed_with_an_unclear_answer_closes_the_resume_question():
+    # 대답 칸 unclear 가 unknown 으로 바뀐 요청(무작위 검사의 꼴)이 진짜 질문을 넘겼다 — 둘째에 말해지고 재개 질문은 닫힌다.
+    ask = "어느 화장실이요?"
+    logic, t = paused_resume_asked()
+    unclear = _ans(paused_resume_asked, "clarify", "unclear", ask_text=ask, ask_kind="open")
+    assert _says(_voice(logic, t, unclear)) == [MSG_RESUME_CONFIRM]
+    assert _says(_voice(logic, t + 1, unclear)) == [ask]
+    assert _voice(logic, t + 2, intent("affirm", answer="yes", answer_kind="open")) == []
+    assert logic.state == State.PAUSED
+
+
 def test_p13_wake_call_folds_first_then_handed_wake_greeting_still_asks_again():
     logic, t = paused_resume_asked(wake_revive=True)  # 호출이 먼저 접은 경우는 그대로 — "응"은 다시 묻는다
     logic.on_wake_call(t)
