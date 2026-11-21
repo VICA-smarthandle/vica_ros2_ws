@@ -86,6 +86,14 @@ def navigating_help_asked(**kw):
     return logic, t + 1.0
 
 
+def help_requested_confirm_asked(**kw):
+    """도움 요청을 보낸 뒤(일시정지, 관리자 확인 전) 엘리베이터 제안 → CONFIRMING 없이 확인 질문만 물은 직후(Task 3.3 수정 1차)."""
+    logic, t = navigating_help_asked(**kw)
+    logic.on_voice_intent(intent("affirm"), t, lookup, BOUNDS, True)
+    logic.on_voice_intent(intent(matched_destination_id=ELEV.id, need_confirm=True), t + 1.0, lookup, BOUNDS, True)
+    return logic, t + 2.0
+
+
 def asking(d=TOILET, **kw):
     """도착 질문. TOILET(restroom)은 대기형 "다녀오시는 동안 여기서 기다릴까요?"."""
     logic = new_logic(**kw)

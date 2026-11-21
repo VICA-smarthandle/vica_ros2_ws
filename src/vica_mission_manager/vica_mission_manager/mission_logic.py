@@ -222,9 +222,12 @@ class IntentData:
     ask_text: str = ""
     ask_kind: str = ""
     ask_option_ids: tuple = ()
-    # 대답 칸(3.2) — 열린 질문의 대답일 때만 채워 온다(answer_for). 로직은 아직 읽지 않는다.
+    # 대답 칸(3.2) — 열린 질문의 대답일 때만 채워 온다(answer_for). 켜졌을 때(answer_field) 로직이 읽는다(3.3).
     answer: str = ""
     answer_value: str = ""
+    # 그 대답이 맞춘 질문 기록의 종류·후보 목적지 id(3.3 수정 1차). 대답 칸이 비면 둘 다 빈 값이다.
+    answer_kind: str = ""
+    answer_options: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -257,6 +260,9 @@ class ApproachRequest:
 
 # 질문 종류(설계 2026-11-14 4.1). 대답을 기다리는 말(Say.expects_reply)은 이 중 하나를 단다.
 QUESTION_KINDS = ("open", "confirm", "choice", "yesno", "yesno_inverted", "minutes")
+# 대답 칸을 바꿔 읽는 질문 종류(원칙 6 · 13, Task 3.3 수정 1차) — 미션이 대답의 뜻을 아는 것만. open(호출 응답 "네?"·음성이
+# 넘긴 열린 질문)과 빈 값(옛 노드)은 받은 의도대로 — 부른 뒤의 말은 그대로 듣는다(하던 질문의 대답이면 대답, 새 말이면 새 요청).
+ANSWER_READ_KINDS = ("confirm", "choice", "yesno", "yesno_inverted", "minutes")
 
 
 @dataclass(frozen=True)
@@ -1605,8 +1611,9 @@ class MissionLogic:
         # 꺼져 있으면 지금 그대로 — 확인 질문만 접고, 취소·도움 확인은 살아 "네?" 뒤의 "응"이 그대로 답이 된다.
         self.wake_revive = wake_revive
         # 대답 칸으로 처리(원칙 6 · 3, 노드·launch 파라미터 answer_field — 기본 꺼짐). 켜지면 음성이 실어 온 대답 칸(열린 질문의
-        # 대답일 때만 노드가 넘긴다, 3.2)을 의도보다 먼저 본다 — yes·no = 승낙·거절, 목적지·고르기 = 그 목적지 제안(확인 질문 중
-        # 같은 곳이어도 출발하지 않고 다시 묻는다), 분 = 그만큼 대기, 못 알아들음 = unknown(_intent_from_answer).
+        # 대답일 때만 노드가 넘긴다, 3.2)을 뜻을 아는 종류의 질문(ANSWER_READ_KINDS — "네?" 같은 open 은 아님)이면 의도보다
+        # 먼저 본다 — yes·no = 승낙·거절, 목적지·고르기 = 그 목적지 제안(확인 질문 중 같은 곳이어도 출발하지 않고 다시 묻는다),
+        # 분 = 그만큼 대기, 못 알아들음 = unknown(_intent_from_answer).
         # 꺼져 있으면 지금 그대로 — 대답 칸을 보지 않는다.
         self.answer_field = answer_field
         self.confirm_timeout_sec = confirm_timeout_sec
@@ -2090,9 +2097,11 @@ class MissionLogic:
             self.voice_note = "순찰 중이라 받지 않음"
             self._voice_dropped = True
             return []
-        if self.answer_field and intent.answer:
+        if self.answer_field and intent.answer and intent.answer_kind in ANSWER_READ_KINDS:
             # 원칙 6 — 질문 뒤의 말은 먼저 그 질문의 대답인지 본다. 대답 칸이 있으면 의도 대신 그 대답으로 바꿔 읽고, 바꿔 읽은
             # 의도가 이 상태에서 평소 하는 일이 곧 결과다(아래 길 그대로 — 화자 판정·질문 전 대답 버림도 그 의도로 받는다).
+            # 원칙 13 — "네?"(open) 뒤의 말은 바꿔 읽지 않는다: 미션은 호출 때 도착·대기·취소·도움 질문을 접지 않아, "네?"에 맞춘
+            # yes 를 affirm 으로 읽으면 그 질문들의 승낙(종료·홈·안내 취소·도움 요청)이 된다.
             swapped = self._intent_from_answer(intent)
             if swapped is not intent:
                 self.voice_note = f"대답 칸 {intent.answer} → {swapped.intent}"
@@ -2126,16 +2135,21 @@ class MissionLogic:
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
 
     def _intent_from_answer(self, intent: IntentData) -> IntentData:
-        """대답 칸(answer·answer_value)을 바꿔 읽은 의도(원칙 6, answer_field 켜짐에서만 부른다). 바꿔 읽지 않으면 받은 의도 그대로.
+        """대답 칸(answer·answer_value)을 바꿔 읽은 의도(원칙 6, answer_field 켜짐·ANSWER_READ_KINDS 에서만 부른다). 바꿔 읽지
+        않으면 받은 의도 그대로.
 
         yes·no = affirm·deny(확인 질문의 yes 는 on_confirm_answer(True) — 출발, no 는 접기. "안내가 필요 없으신가요?"의 yes 는
-        음성이 '필요 없다'로 내므로 지금 affirm 과 같은 방향이다), destination·choice = 그 목적지 제안(need_confirm — 확인 질문
-        중 같은 곳이어도 다시 묻는다, on_intent), minutes = 그 분만큼 wait, unclear = unknown. 값을 쓸 수 없으면(목적지가 비었거나
-        분이 0 보다 큰 정수가 아니면) unknown. other·모르는 값은 의도대로. 바꿔 읽은 의도의 대답 칸은 비운다(다시 바꿔 읽지 않게)
-        — reply·ask_text 등 다른 칸은 그대로 둔다."""
+        음성이 '필요 없다'로 내므로 지금 affirm 과 같은 방향이다). 다만 미션이 CONFIRMING 없이 묻고 기다리는 확인 질문
+        (_help_confirm_waiting — 도움 요청 뒤)의 yes 는 그 질문 후보 첫 목적지의 확정 navigate 다 — affirm 을 받는 갈래가 없다.
+        destination·choice = 그 목적지 제안(need_confirm — 확인 질문 중 같은 곳이어도 다시 묻는다, on_intent), minutes = 그 분만큼
+        wait, unclear = unknown. 값을 쓸 수 없으면(목적지가 비었거나 분이 0 보다 큰 정수가 아니면) unknown. other·모르는 값은
+        의도대로. 바꿔 읽은 의도의 대답 칸은 모두 비운다(다시 바꿔 읽지 않게) — reply·ask_text 등 다른 칸은 그대로 둔다."""
         answer, value = intent.answer, intent.answer_value.strip()
-        read = replace(intent, answer="", answer_value="")
+        read = replace(intent, answer="", answer_value="", answer_kind="", answer_options=())
         if answer == "yes":
+            if intent.answer_kind == "confirm" and intent.answer_options and self._help_confirm_waiting():
+                return replace(read, intent="navigate", matched_destination_id=intent.answer_options[0],
+                               need_confirm=False)
             return replace(read, intent="affirm")
         if answer == "no":
             return replace(read, intent="deny")
@@ -2154,6 +2168,15 @@ class MissionLogic:
         if answer == "unclear":
             return replace(read, intent="unknown")
         return intent
+
+    def _help_confirm_waiting(self) -> bool:
+        """미션이 확인 대기 상태(CONFIRMING) 없이 목적지 확인 질문을 묻고 대답을 기다리는 중인가(원칙 6, Task 3.3 수정 1차).
+
+        그런 질문은 도움 요청을 보낸 뒤 관리자가 확인하기 전(help_phase "requested")의 제안에 _react_help 가 하는 것뿐이다 — 그
+        확정은 같은 함수의 D3 갈래(관문 → 출발·도움 요청 끝)가 받는다. 다른 확인 질문은 모두 CONFIRMING 에서 묻고, 노드 기록이
+        상태보다 늦게 닫히는 틈(시한·바꾸기 접힘 뒤 다음 시계까지)이나 음성이 넘긴 질문에서는 미션이 그 질문을 기다리지 않는다
+        — 거기서는 affirm 으로 둔다(확인 없이 출발하는 새 길을 만들지 않는다)."""
+        return self.state != State.CONFIRMING and self.help_phase == "requested"
 
     def _wake_revive_as(self, intent: IntentData, now: float,
                         lookup: Callable[[str], Optional[Destination]]) -> Optional[IntentData]:

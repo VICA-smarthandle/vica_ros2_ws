@@ -970,6 +970,9 @@ class MissionManagerNode(Node):
         answer = answer_for(open_q.id if open_q else "", str(getattr(msg, "question_id", "")),
                             str(getattr(msg, "answer", "")))
         answer_value = str(getattr(msg, "answer_value", ""))
+        # 그 대답이 맞춘 질문의 종류·후보 목적지 id(3.3) — 미션은 뜻을 아는 종류일 때만 대답 칸을 바꿔 읽는다. "네?"는 open 이다.
+        answer_kind = open_q.kind if answer and open_q else ""
+        answer_options = tuple(option[0] for option in open_q.options) if answer and open_q else ()
         intent = IntentData(
             intent=msg.intent,
             matched_destination_id=msg.matched_destination_id,
@@ -985,6 +988,7 @@ class MissionManagerNode(Node):
             ask_kind=str(getattr(msg, "ask_kind", "")),
             ask_option_ids=tuple(getattr(msg, "ask_option_ids", ())),
             answer=answer, answer_value=answer_value if answer else "",
+            answer_kind=answer_kind, answer_options=answer_options,
         )
         before = self.logic.state
         self._question_safely(self._close_question, "answer")   # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
