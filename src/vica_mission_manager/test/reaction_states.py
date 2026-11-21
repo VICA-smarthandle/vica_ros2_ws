@@ -338,7 +338,7 @@ ROWS = {
     "PATROL_PAUSED": patrol_paused,
 }
 
-# 반응표의 열 — 음성 요청 11종. 목적지 요청은 지금 가는 곳과 다른 엘리베이터로 한다.
+# 반응표의 열 — 음성 요청 12종. 목적지 요청은 지금 가는 곳과 다른 엘리베이터로 한다.
 REQUESTS = {
     "navp": intent(matched_destination_id=ELEV.id, need_confirm=True),
     "navc": intent(matched_destination_id=ELEV.id),
@@ -351,4 +351,5 @@ REQUESTS = {
     "no": intent("deny"),
     "talk": intent("question"),
     "bye": intent("dismiss"),          # 원칙 14
+    "again": intent("repeat"),         # 원칙 28 — "다시 말해줘"
 }

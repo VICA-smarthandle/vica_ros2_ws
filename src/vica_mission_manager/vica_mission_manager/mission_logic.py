@@ -2061,8 +2061,9 @@ class MissionLogic:
 
     def _restart_reasks_on_understood(self, intent: IntentData) -> None:
         """세 단계 되묻기(원칙 8): 알아들은 말을 처리했으면 되묻기 횟수를 처음으로 — 이번 말로 오른 사다리는 둔다(그 질문이
-        이 말을 못 알아들은 답으로 셌다). 꺼져 있으면 아무것도 안 한다(지금 그대로)."""
-        if not self.reask_ladder or intent.intent == "unknown" or self._voice_dropped:
+        이 말을 못 알아들은 답으로 셌다). 꺼져 있으면 아무것도 안 한다(지금 그대로). "다시 말해줘"(repeat)는 못 알아들은 말도
+        대답도 아니라 횟수를 그대로 둔다(원칙 28, _react_repeat)."""
+        if not self.reask_ladder or intent.intent in ("unknown", "repeat") or self._voice_dropped:
             return
         climbed = self._ladders_climbed or []
         for ladder in (self._confirm_ladder, self._cancel_ladder, self._resume_ladder, self._help_ladder,
@@ -2123,6 +2124,10 @@ class MissionLogic:
             self.voice_note = "순찰 중이라 받지 않음"
             self._voice_dropped = True
             return []
+        if intent.intent == "repeat":
+            # 원칙 28 — "다시 말해줘"는 대답도 명령도 아니다. 대답 칸 바꿔 읽기·화자 판정·반응표를 지나지 않고 미션이 쥔 질문을
+            # 한 번 더 말한다(질문을 닫지 않는다 — 재개 질문의 _RESUME_QUESTION_CLOSERS 에도 없다). 호출이 접어 둔 질문은 _react_repeat 이 본다.
+            return self._react_repeat(intent, now, lookup, bounds, nav_ready)
         if self.answer_field and intent.answer and intent.answer_kind in ANSWER_READ_KINDS:
             # 원칙 6 — 질문 뒤의 말은 먼저 그 질문의 대답인지 본다. 대답 칸이 있으면 의도 대신 그 대답으로 바꿔 읽고, 바꿔 읽은
             # 의도가 이 상태에서 평소 하는 일이 곧 결과다(아래 길 그대로 — 화자 판정·질문 전 대답 버림도 그 의도로 받는다).
@@ -2159,6 +2164,36 @@ class MissionLogic:
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def _react_repeat(self, intent: IntentData, now: float, lookup: Callable[[str], Optional[Destination]],
+                      bounds: Optional[MapBounds], nav_ready: bool) -> list:
+        """"다시 말해줘"(repeat, 원칙 28) — 미션이 쥔 열린 질문을 같은 문장으로 한 번 더 말한다(_resay_open_question).
+
+        그 질문의 시계는 지금부터 다시 잰다(_rearm_question_clock). 되묻기 횟수는 그대로다 — 못 알아들은 말이 아니라 올리지
+        않고, 대답도 아니라 처음으로 돌리지도 않는다(_restart_reasks_on_understood 가 이 의도를 건너뛴다). 질문을 닫지 않으니
+        다시 말한 뒤의 "네"는 그 질문의 대답이다. 화자 판정(대기 중 본인 확인)을 지나지 않는다 — 로봇을 움직이지 않는 말이고,
+        판정에 넣으면 되묻기·본인 질문 단계가 바뀌거나 저장돼 뒤의 명령이 그 단계의 대답으로 읽힌다.
+
+        미션이 쥔 질문이 없으면 말 없음·상태 그대로다(음성은 자기 마지막 말을 스스로 다시 말한다 — 여기 오지 않는다). 다만
+        호출("비카야")이 접어 둔 질문이 있으면(wake_revive) 그 질문을 다시 묻는다 — 접힌 질문의 승낙과 같은 길(_wake_revive_as:
+        실행이 아니라 다시 묻기)이고, 되살린 의도는 화자 판정 없이 반응표로 간다(_react_voice_intent 의 되살린 의도와 같다)."""
+        name = self._open_question_name(now)
+        if name is not None:
+            self._wake_folded = None   # 원칙 13 — 다른 말이 왔다(꺼져 있으면 늘 None)
+            self.voice_note = "다시 말해줘 — 열린 질문을 다시"
+            resaid = self._resay_question(name, now)
+            self._rearm_question_clock(name, now)
+            return resaid
+        # 되살리기는 승낙만 받는다 — "다시 말해줘"도 접은 질문을 다시 묻는 같은 길이라 승낙으로 넘긴다.
+        revived = (self._wake_revive_as(replace(intent, intent="affirm"), now, lookup, nav_ready)
+                   if self.wake_revive else None)
+        if revived is None:
+            self.voice_note = self.voice_note or "다시 말해줘 — 미션이 쥔 질문 없음"
+            return []
+        reacted = self._react_by_table(revived, now, lookup, bounds, nav_ready)
+        if reacted is not None:
+            return reacted
+        return self._route_voice_intent(revived, now, lookup, bounds, nav_ready)
 
     def _intent_from_answer(self, intent: IntentData) -> IntentData:
         """대답 칸(answer·answer_value)을 바꿔 읽은 의도(원칙 6, answer_field 켜짐·ANSWER_READ_KINDS 에서만 부른다). 바꿔 읽지
@@ -2440,28 +2475,72 @@ class MissionLogic:
         않고(몇 번째인지는 부르는 쪽이 정한다), 자리마다 다른 일(15초 시계의 마감 연장 등)은 그 자리에 남아 있다.
         고르는 순서는 음성 요청이 질문의 답으로 가는 순서(_react_by_table)와 같다: 도움 요청 → 안내 취소 확인 → 상태별.
         대기 중 질문은 다시 묻는 자리가 있는 WAITING 만 본다(손 놓기 기다림 WAITING_RELEASE 는 다시 묻지 않는다)."""
+        name = self._open_question_name(now)
+        return None if name is None else self._resay_question(name, now)
+
+    def _open_question_name(self, now: float) -> Optional[str]:
+        """_resay_open_question 이 다시 말할 질문의 이름(고르는 순서는 그 함수 설명). 없으면 None."""
         if self.help_cancel_pending:
-            return self._resay_help_cancel()
+            return "help_cancel"
         if self.help_phase == "asking" and self.state == State.NAVIGATING:
-            return self._resay_help_confirm()
+            return "help_confirm"
         if self.cancel_confirm_pending:
-            return self._resay_cancel()
+            return "cancel"
         if self._resume_question_open():
-            return self._resay_resume()
+            return "resume"
         if self.state == State.CONFIRMING:
-            return self._resay_confirm() if self._confirm_prompt else None
+            return "confirm" if self._confirm_prompt else None
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
-            return self._resay_arrival(now)
+            return "arrival"
         if self.state == State.WAITING:
             if self._wait_need_asked_at is not None:
-                return self._resay_wait_need(now)
+                return "wait_need"
             asked = self._wait_finish_asked_at
             if asked is not None and now - asked <= WAIT_FINISH_REPEAT_SEC:
-                return self._resay_wait_finish(now)
+                return "wait_finish"
             return None
         if self.state == State.AWAITING_USER:
-            return self._resay_approach(now)
+            return "approach"
         return None
+
+    def _resay_question(self, name: str, now: float) -> list:
+        """이름(_open_question_name)의 질문을 같은 문장으로 다시 말하는 동작."""
+        if name == "help_cancel":
+            return self._resay_help_cancel()
+        if name == "help_confirm":
+            return self._resay_help_confirm()
+        if name == "cancel":
+            return self._resay_cancel()
+        if name == "resume":
+            return self._resay_resume()
+        if name == "confirm":
+            return self._resay_confirm()
+        if name == "arrival":
+            return self._resay_arrival(now)
+        if name == "wait_need":
+            return self._resay_wait_need(now)
+        if name == "wait_finish":
+            return self._resay_wait_finish(now)
+        return self._resay_approach(now)
+
+    def _rearm_question_clock(self, name: str, now: float) -> None:
+        """다시 말한 질문의 시계를 지금부터 다시 잰다("다시 말해줘", 원칙 28) — 처음 물을 때처럼 15초 다시 묻기
+        (QUESTION_REASK_SEC)와 시한(confirm_timeout_sec)을 다시 걸고, 되묻기 사다리는 건드리지 않는다. 대기 질문·접근 질문은
+        _resay_* 가 물은 시각·대답 시계를 이미 다시 잰다. 도착 질문도 그렇고(대답 시계는 재생이 끝난 때부터), 떠나기 예고
+        뒤였으면 그 유예를 거둔다 — 다시 말한 질문에 대답할 틈 없이 떠나지 않게. 그 뒤의 침묵은 사다리가 그대로 정한다."""
+        deadline, reask_at = now + self.confirm_timeout_sec, now + QUESTION_REASK_SEC
+        if name == "help_cancel":
+            self._help_cancel_deadline, self._help_cancel_reask_at = deadline, reask_at
+        elif name == "help_confirm":
+            self._help_confirm_deadline, self._help_confirm_reask_at = deadline, reask_at
+        elif name == "cancel":
+            self._cancel_confirm_deadline, self._cancel_reask_at = deadline, reask_at
+        elif name == "resume":
+            self._resume_confirm_deadline, self._resume_reask_at = deadline, reask_at
+        elif name == "confirm":
+            self._confirm_deadline, self._confirm_reask_at = deadline, reask_at
+        elif name == "arrival":
+            self._leaving_deadline = None
 
     def _react_idle(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """안내 없음. 홈 가다 "비카야"로 세운 뒤(복귀 재개 사다리)면 기다려 = 직전 목적지 대기

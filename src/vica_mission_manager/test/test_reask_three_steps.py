@@ -8,24 +8,36 @@
 """
 from pathlib import Path
 
-from reaction_states import (BOUNDS, asking, asking_wait_time, confirming, estopped, idle, intent, lookup,
-                             navigating, waiting, waiting_asked)
+import pytest
+
+from reaction_states import (BOUNDS, TOILET, asking, asking_end_confirm, asking_wait_time, awaiting_user, confirming,
+                             confirming_change, estopped, idle, intent, lookup, navigating, navigating_cancel_asked,
+                             navigating_help_asked, paused_resume_asked, waiting, waiting_asked, waiting_need_asked)
 from vica_mission_manager.mission_logic import (
+    _RESUME_QUESTION_CLOSERS,
+    MSG_APPROACH_REASK,
+    MSG_ASK_ENTRANCE,
     MSG_ASK_RESTROOM,
     MSG_ASK_WAIT_TIME,
     MSG_CANCEL_CONFIRM,
     MSG_CANCEL_KEPT,
+    MSG_CANCELED,
     MSG_CONFIRM_PROMPT_FALLBACK,
     MSG_CONFIRM_TIMEOUT,
     MSG_HELP_CANCEL_CONFIRM,
+    MSG_HELP_CANCELED,
     MSG_HELP_CONFIRM,
     MSG_LEAVING_NOTICE,
     MSG_REASK_LOUDER,
     MSG_REASK_RETRY,
+    MSG_RESUME_CONFIRM,
+    MSG_SPK_REASK,
     MSG_WAIT_FINISH_ASK,
     MSG_WAIT_NEED_ASK,
     MSG_WAKE_GREETING,
+    CancelNav,
     MissionLogic,
+    Navigate,
     NavStatus,
     Say,
     State,
@@ -447,6 +459,238 @@ def test_p8_question_record_carries_the_original_question_and_step():
     assert (record.text, record.step, record.kind, record.options) == (TOILET_ASK, 2, "confirm", (("wc", "화장실"),))
     _, plain = tracker.open(Say(TOILET_ASK, expects_reply=True, kind="confirm"), "confirming", 2.0)
     assert (plain.text, plain.step) == (TOILET_ASK, 0)
+
+
+# ---- 원칙 28 — "다시 말해줘"(repeat, Task 4.3) --------------------------------------------------------
+# 음성은 미션이 쥔 질문이 열려 있을 때만 repeat 를 보낸다(Task 4.2). 미션은 그 질문을 같은 문장으로 한 번 더 말하고 그 질문의
+# 시계(15 s 다시 묻기·시한)는 지금부터 다시 잰다. 되묻기 횟수는 그대로다 — 못 알아들은 말이 아니라 올리지 않고, 대답도 아니라
+# 처음으로 돌리지도 않는다. 질문을 닫지 않아 다시 말한 뒤의 "네"는 그 질문의 대답이다. 쥔 질문이 없으면 말 없음·상태 그대로
+# (반응표 again 열, test_reaction_table.py).
+def _help_cancel_asked(**kw):
+    """도움 요청을 보낸 뒤(일시정지) "취소" → "도움 요청을 취소할까요?"를 물은 직후. 물은 시각은 돌려주는 시각보다 1초 앞이다."""
+    logic, t = navigating_help_asked(**kw)
+    _voice(logic, "affirm", t)
+    _voice(logic, "cancel", t + 1)
+    return logic, t + 2.0
+
+
+P28_QUESTIONS = [
+    (confirming, TOILET_ASK, State.CONFIRMING),
+    (confirming_change, TOILET_ASK, State.CONFIRMING),
+    (navigating_cancel_asked, MSG_CANCEL_CONFIRM, State.NAVIGATING),
+    (navigating_help_asked, MSG_HELP_CONFIRM, State.NAVIGATING),
+    (_help_cancel_asked, MSG_HELP_CANCEL_CONFIRM, State.PAUSED),
+    (paused_resume_asked, MSG_RESUME_CONFIRM, State.PAUSED),
+    (asking, MSG_ASK_RESTROOM, State.ASKING_NEXT),
+    (asking_wait_time, MSG_ASK_WAIT_TIME, State.ASKING_WAIT_TIME),
+    (asking_end_confirm, MSG_ASK_ENTRANCE, State.ASKING_NEXT),
+    (waiting_need_asked, MSG_WAIT_NEED_ASK, State.WAITING),
+    (waiting_asked, MSG_WAIT_FINISH_ASK, State.WAITING),
+    (awaiting_user, MSG_APPROACH_REASK, State.AWAITING_USER),
+]
+_P28_IDS = [make.__name__ for make, _, _ in P28_QUESTIONS]
+
+
+def test_p28_repeat_does_not_use_up_a_reask_step():
+    logic, t = confirming(reask_ladder=True)
+    logic.on_voice_intent(intent("repeat"), t, lookup, BOUNDS, True)
+    assert _says(logic.on_voice_intent(intent("unknown"), t + 3, lookup, BOUNDS, True)) == [MSG_REASK_RETRY]
+
+
+@pytest.mark.parametrize("ladder", [False, True], ids=["ladder_off", "ladder_on"])
+@pytest.mark.parametrize("make, question, state", P28_QUESTIONS, ids=_P28_IDS)
+def test_p28_repeat_says_the_open_question_again(make, question, state, ladder):
+    """질문마다 같은 문장 그대로(사다리 문장 ①·② 가 아니다) — 대답을 기다리는 말이고 상태는 그대로, 주행 동작은 없다."""
+    logic, t = make(reask_ladder=ladder)
+    acts = _voice(logic, "repeat", t)
+    assert _says(acts) == [question] and logic.state == state
+    say = _question(acts)
+    assert say.expects_reply and (say.step, say.question_text) == (0, "")
+    assert not any(isinstance(a, (Navigate, CancelNav)) for a in acts)
+
+
+P28_LADDER = [
+    (confirming, TOILET_ASK), (navigating_cancel_asked, MSG_CANCEL_CONFIRM), (navigating_help_asked, MSG_HELP_CONFIRM),
+    (_help_cancel_asked, MSG_HELP_CANCEL_CONFIRM), (paused_resume_asked, MSG_RESUME_CONFIRM),
+    (asking, MSG_ASK_RESTROOM), (waiting_need_asked, MSG_WAIT_NEED_ASK), (waiting_asked, MSG_WAIT_FINISH_ASK),
+]
+
+
+@pytest.mark.parametrize("make, question", P28_LADDER, ids=[m.__name__ for m, _ in P28_LADDER])
+def test_p28_repeat_keeps_the_reask_count_when_the_ladder_is_on(make, question):
+    """세 단계: ① 뒤의 "다시 말해줘"는 그 질문을 다시 말할 뿐 — 다음 못 알아들은 답은 ② 다(올리지도 되돌리지도 않는다)."""
+    logic, t = make(reask_ladder=True)
+    assert _says(_voice(logic, "unknown", t)) == [MSG_REASK_RETRY]
+    assert _says(_voice(logic, "repeat", t + 1)) == [question]
+    assert _says(_voice(logic, "unknown", t + 2)) == [MSG_REASK_LOUDER]
+
+
+@pytest.mark.parametrize("make, question", P28_LADDER, ids=[m.__name__ for m, _ in P28_LADDER])
+def test_p28_repeat_keeps_the_one_reask_when_the_ladder_is_off(make, question):
+    """꺼짐(옛 방식 — 같은 질문 한 번 다시): "다시 말해줘" 뒤에도 그 한 번이 남아 있고, 이미 썼으면 되살아나지 않는다."""
+    logic, t = make()
+    assert _says(_voice(logic, "repeat", t)) == [question]
+    assert _says(_voice(logic, "unknown", t + 1)) == [question]                # 한 번 다시 — 남아 있었다
+    assert _says(_voice(logic, "repeat", t + 2)) == [question]                 # 다시 말해줘는 횟수와 상관없다
+    assert question not in _says(_voice(logic, "unknown", t + 3))             # 한 번은 이미 썼다
+
+
+def test_p28_repeat_does_not_count_toward_the_approach_reasks():
+    """접근 질문의 세 번(APPROACH_REASK_MAX)은 못 알아들은 말·대답 없음만 센다 — "다시 말해줘"로는 물러나지 않는다."""
+    logic, t = awaiting_user()
+    for i in range(5):
+        assert _says(_voice(logic, "repeat", t + i)) == [MSG_APPROACH_REASK]
+    assert logic._approach_reasks == 0 and logic.state == State.AWAITING_USER
+
+
+def test_p28_repeat_with_no_mission_question_is_silent_and_keeps_the_count():
+    logic, t = idle(reask_ladder=True)
+    assert _says(_voice(logic, "unknown", t)) == [MSG_REASK_RETRY]
+    assert _voice(logic, "repeat", t + 1) == [] and logic.state == State.IDLE
+    assert _says(_voice(logic, "unknown", t + 2)) == [MSG_REASK_LOUDER]
+
+
+# 다시 말한 뒤의 "네"(또는 그 질문의 대답)가 그 질문의 대답으로 그대로 통한다 — repeat 는 질문을 닫지 않는다.
+P28_ANSWERS = [
+    (confirming, "affirm", lambda lg, acts: lg.state == State.NAVIGATING and lg.active_destination == TOILET),
+    (confirming_change, "affirm", lambda lg, acts: lg.state == State.NAVIGATING and lg.active_destination == TOILET),
+    (navigating_cancel_asked, "affirm", lambda lg, acts: MSG_CANCELED in _says(acts) and lg.state == State.IDLE),
+    (navigating_help_asked, "affirm", lambda lg, acts: lg.help_phase == "requested"),
+    (_help_cancel_asked, "affirm", lambda lg, acts: MSG_HELP_CANCELED in _says(acts) and lg.help_phase == "none"),
+    (paused_resume_asked, "affirm", lambda lg, acts: lg.state == State.NAVIGATING),
+    (asking, "affirm", lambda lg, acts: lg.state == State.WAITING),
+    (asking_wait_time, "wait", lambda lg, acts: lg.state == State.WAITING and lg.wait_minutes_requested() == 5),
+    (asking_end_confirm, "affirm", lambda lg, acts: lg.state == State.RETURNING),
+    (waiting_need_asked, "affirm", lambda lg, acts: lg.state == State.RETURNING),
+    (waiting_asked, "deny", lambda lg, acts: lg.state == State.RETURNING),
+    (awaiting_user, "affirm", lambda lg, acts: lg.state == State.TURNING),
+]
+
+
+@pytest.mark.parametrize("make, answer, done", P28_ANSWERS, ids=[m.__name__ for m, _, _ in P28_ANSWERS])
+def test_p28_the_answer_after_the_repeat_answers_that_question(make, answer, done):
+    logic, t = make()
+    _voice(logic, "repeat", t)
+    acts = _voice(logic, answer, t + 2, wait_minutes=5 if answer == "wait" else -1)
+    assert done(logic, acts)
+
+
+def test_p28_repeat_keeps_the_resume_question_open():
+    """"다시 출발할까요?"(Task 3.4)를 닫는 요청이 아니다 — 다시 말한 뒤의 "네"가 재출발이다."""
+    assert "repeat" not in _RESUME_QUESTION_CLOSERS
+    logic, t = paused_resume_asked()
+    assert _says(_voice(logic, "repeat", t)) == [MSG_RESUME_CONFIRM]
+    assert logic._resume_question_open() and logic.state == State.PAUSED
+    acts = _voice(logic, "affirm", t + 2)
+    assert logic.state == State.NAVIGATING and any(isinstance(a, Navigate) for a in acts)
+
+
+# ---- 원칙 28 — 시계는 다시 잰다 ----------------------------------------------------------------
+@pytest.mark.parametrize("make, question", [
+    (confirming, TOILET_ASK), (navigating_cancel_asked, MSG_CANCEL_CONFIRM), (navigating_help_asked, MSG_HELP_CONFIRM),
+    (_help_cancel_asked, MSG_HELP_CANCEL_CONFIRM), (paused_resume_asked, MSG_RESUME_CONFIRM),
+], ids=["confirm", "cancel", "help", "help_cancel", "resume"])
+def test_p28_repeat_restarts_the_15s_silence_clock(make, question):
+    """꺼짐: t-1 에 물은 질문은 t+14 에 한 번 다시 묻는다. t+9 에 다시 말했으면 그 15 s 는 t+24 부터다."""
+    logic, t = make()
+    assert _says(_voice(logic, "repeat", t + 9)) == [question]
+    assert question not in _says(logic.on_tick(t + 15, NavStatus.RUNNING))
+    assert _says(logic.on_tick(t + 24.5, NavStatus.RUNNING)) == [question]
+
+
+def test_p28_repeat_restarts_the_confirm_deadline_off():
+    """꺼짐: 0 s 에 물은 확인 질문을 10 s 에 다시 말하면 30 s 시한도 10 s 부터(25 s 에 한 번 다시 → 40.5 s 에 접힘)."""
+    logic, _ = confirming()
+    _voice(logic, "repeat", 10.0)
+    assert _says(logic.on_tick(15.5, NavStatus.NONE)) == []                    # 옛 시계면 여기서 다시 물었다
+    assert _says(logic.on_tick(25.5, NavStatus.NONE)) == [TOILET_ASK]
+    assert _says(logic.on_tick(39.0, NavStatus.NONE)) == [] and logic.state == State.CONFIRMING
+    assert _says(logic.on_tick(41.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]
+
+
+def test_p28_repeat_restarts_the_clock_but_not_the_ladder_on():
+    """세 단계: ①(2 s) 뒤 10 s 에 다시 말하면 다음 단은 25 s 이고, 그 단은 ② 다."""
+    logic, _ = confirming(reask_ladder=True)
+    assert _says(_voice(logic, "unknown", 2.0)) == [MSG_REASK_RETRY]
+    _voice(logic, "repeat", 10.0)
+    assert _says(logic.on_tick(17.5, NavStatus.NONE)) == []
+    assert _says(logic.on_tick(25.5, NavStatus.NONE)) == [MSG_REASK_LOUDER]
+
+
+def test_p28_repeat_after_the_leaving_notice_asks_again_and_holds_the_departure():
+    """도착 질문의 떠나기 예고(3 s 유예) 뒤의 "다시 말해줘" — 질문을 다시 말하고 유예를 거둔다(질문의 시계를 다시 잰다).
+    그 뒤 대답하면 그 질문의 대답이고, 또 침묵하면 사다리는 그대로라(이미 끝) 다시 떠나기 예고다."""
+    def leaving():
+        logic, _ = asking()                                   # 2 s 에 질문 재생 끝 → 10 s 침묵에 한 번 더(옛 방식)
+        logic.on_tick(10.5, NavStatus.NONE)
+        logic.on_arrival_question_spoken(11.0)
+        assert _says(logic.on_tick(19.5, NavStatus.NONE)) == [MSG_LEAVING_NOTICE]
+        assert _says(_voice(logic, "repeat", 20.0)) == [MSG_ASK_RESTROOM]
+        assert logic.on_tick(23.5, NavStatus.NONE) == [] and logic.state == State.ASKING_NEXT
+        logic.on_arrival_question_spoken(24.0)
+        return logic
+
+    logic = leaving()
+    _voice(logic, "affirm", 26.0)
+    assert logic.state == State.WAITING
+    logic = leaving()
+    assert _says(logic.on_tick(32.5, NavStatus.NONE)) == [MSG_LEAVING_NOTICE]
+
+
+# ---- 원칙 28 · 13 — "비카야" → "네?" → "다시 말해줘" ------------------------------------------------
+@pytest.mark.parametrize("make, question", [
+    (confirming, TOILET_ASK), (confirming_change, TOILET_ASK), (navigating_cancel_asked, MSG_CANCEL_CONFIRM),
+    (navigating_help_asked, MSG_HELP_CONFIRM), (paused_resume_asked, MSG_RESUME_CONFIRM),
+], ids=["confirm", "change", "cancel", "help", "resume"])
+def test_p28_repeat_after_the_call_asks_the_folded_question_again(make, question):
+    """wake_revive 켜짐: 호출이 접어 둔 질문을 다시 묻는다 — 접힌 질문의 승낙과 같은 길(실행이 아니라 다시 묻기)."""
+    logic, t = make(wake_revive=True)
+    logic.on_wake_call(t)
+    assert logic._wake_folded is not None
+    acts = _voice(logic, "repeat", t + 3)
+    assert _says(acts) == [question] and not any(isinstance(a, Navigate) for a in acts)
+    assert logic._wake_folded is None and logic._resay_open_question(t + 3) is not None
+
+
+def test_p28_the_yes_after_the_revived_question_answers_it():
+    logic, t = confirming(wake_revive=True)
+    logic.on_wake_call(t)
+    _voice(logic, "repeat", t + 3)
+    assert logic.state == State.CONFIRMING
+    acts = _voice(logic, "affirm", t + 5)
+    assert logic.state == State.NAVIGATING and any(isinstance(a, Navigate) for a in acts)
+
+
+def test_p28_repeat_after_the_call_is_silent_when_nothing_is_folded():
+    """wake_revive 꺼짐(접어 둔 것이 없음)·40 s 가 지남 — 말 없음, 상태 그대로."""
+    logic, t = confirming()
+    logic.on_wake_call(t)
+    assert _voice(logic, "repeat", t + 3) == [] and logic.state == State.IDLE
+    logic, t = navigating_cancel_asked(wake_revive=True)
+    logic.on_wake_call(t)
+    assert _voice(logic, "repeat", t + 41) == [] and logic.state == State.NAVIGATING
+    assert not logic.cancel_confirm_pending and logic._wake_folded is None
+
+
+# ---- 원칙 28 — 화자 판정(대기 중 본인 확인)을 지나지 않는다 ------------------------------------------------
+def test_p28_repeat_is_not_judged_by_the_speaker_gate():
+    """판정이 켜져 있고 목소리가 '다른 사람'이어도 다시 말한다 — 로봇을 움직이지 않는 말이다. 판정 단계도 열리지 않는다."""
+    logic, t = waiting_asked(speaker_gate=True)                   # "다 됐어" → "네, 어디로 모실까요?"(판정 없이 연 질문)
+    acts = _voice(logic, "repeat", t, speaker_verdict="fail")
+    assert _says(acts) == [MSG_WAIT_FINISH_ASK] and logic.state == State.WAITING
+    assert logic._spk_gate._stage is None
+
+
+def test_p28_repeat_leaves_an_open_gate_step_as_it_was():
+    """판정 단계(되묻기)가 열린 채 "다시 말해줘"가 와도 그 단계에 들어가지 않는다 — 단계·저장한 명령·두 번 표시·시각 그대로라
+    뒤의 명령을 '같은 명령 두 번'(D6)으로 확인 없이 통과시킬 일이 없다."""
+    logic, t = waiting(speaker_gate=True)
+    assert _says(_voice(logic, "cancel", t, speaker_verdict="fail")) == [MSG_SPK_REASK]
+    gate = logic._spk_gate
+    before = (gate._stage, gate.stored, gate._twice, gate._at)
+    acts = _voice(logic, "repeat", t + 1, speaker_verdict="fail")
+    assert (gate._stage, gate.stored, gate._twice, gate._at) == before
+    assert logic.state == State.WAITING and not any(isinstance(a, (Navigate, CancelNav)) for a in acts)
 
 
 def test_node_and_launch_expose_reask_ladder_off_by_default():
