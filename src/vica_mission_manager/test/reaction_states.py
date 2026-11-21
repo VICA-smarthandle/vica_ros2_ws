@@ -153,6 +153,15 @@ def paused(**kw):
     return logic, t + 1.0
 
 
+def paused_resume_asked(**kw):
+    """일시정지 중 "다시 가자"(재개 제안) → 미션이 "다시 출발할까요?"를 물은 직후(Task 3.4). 미션이 묻는 것은
+    answer_field 가 켜졌을 때뿐이라 따로 주지 않으면 켠다. 물은 시각은 돌려주는 시각보다 1초 앞이다."""
+    kw.setdefault("answer_field", True)
+    logic, t = paused(**kw)
+    logic.on_voice_intent(intent("resume", need_confirm=True), t, lookup, BOUNDS, True)
+    return logic, t + 1.0
+
+
 def failed():
     logic = new_logic(nav_retry_limit=0)
     logic.on_intent(go(ROOM), ROOM, BOUNDS, True, 0.0)

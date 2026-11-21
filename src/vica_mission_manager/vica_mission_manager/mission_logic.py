@@ -263,6 +263,9 @@ QUESTION_KINDS = ("open", "confirm", "choice", "yesno", "yesno_inverted", "minut
 # 대답 칸을 바꿔 읽는 질문 종류(원칙 6 · 13, Task 3.3 수정 1차) — 미션이 대답의 뜻을 아는 것만. open(호출 응답 "네?"·음성이
 # 넘긴 열린 질문)과 빈 값(옛 노드)은 받은 의도대로 — 부른 뒤의 말은 그대로 듣는다(하던 질문의 대답이면 대답, 새 말이면 새 요청).
 ANSWER_READ_KINDS = ("confirm", "choice", "yesno", "yesno_inverted", "minutes")
+# 미션이 물은 "다시 출발할까요?"(Task 3.4)를 닫는 다른 요청 — 그 요청이 하는 일(새 질문·멈춤·취소)이 질문을 대신한다. 승낙·거절·
+# 재개·못 알아들은 말은 그 질문의 대답이고, 사용자 질문·되묻기(question·clarify)는 질문을 그대로 둔다(확인 질문과 같다).
+_RESUME_QUESTION_CLOSERS = ("navigate", "cancel", "finish", "pause", "wait", "help")
 
 
 @dataclass(frozen=True)
@@ -707,6 +710,9 @@ ASKING_STUCK_FALLBACK_SEC = 30.0
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
 # 일시정지 중 받은 목적지 제안이 아니요·무응답으로 접혔을 때 — 일시정지로 돌아왔다고 알린다(2026-11-18 사용자 지정).
 MSG_PAUSE_KEPT = "알겠습니다. 다시 출발하려면 말씀해 주세요."
+# 일시정지 중 "다시 가자"에 미션이 묻는 말(원칙 3 · 6, 11-18 설계 4.4·4.5 — answer_field 켜짐에서만). 음성 replies.RESUME_CONFIRM
+# 과 같은 글자다(음성 tests/test_mission_phrases 가 대조) — 음성이 녹음(reply_resume_confirm)을 이미 구워 쓴다.
+MSG_RESUME_CONFIRM = "다시 출발할까요?"
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
 MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
@@ -1886,6 +1892,13 @@ class MissionLogic:
         self._confirm_ladder = ReaskLadder(three_step=reask_ladder)
         self._cancel_reask_at: Optional[float] = None
         self._cancel_ladder = ReaskLadder(three_step=reask_ladder)
+        # 일시정지 중 미션이 물은 "다시 출발할까요?"(원칙 3 · 6, answer_field 켜짐에서만 연다 — 꺼져 있으면 늘 False). 일시정지(PAUSED)
+        # 에서만 열려 있다고 본다(_resume_question_open). 시계·되묻기는 취소 확인과 같은 방식이다 — 15초 조용하면 한 번 다시(세
+        # 단계면 ①·②), 시한·사다리 끝이면 말없이 닫고 일시정지 그대로.
+        self._resume_confirm_pending = False
+        self._resume_confirm_deadline: Optional[float] = None
+        self._resume_reask_at: Optional[float] = None
+        self._resume_ladder = ReaskLadder(three_step=reask_ladder)
         # 질문이 없는 상태의 못 알아들은 말(원칙 8 · 31) — reask_ladder 가 켜졌을 때만 쓴다. 시계는 없다(말이 없으면 그대로).
         # 알아들은 말·미션이 여는 질문·호출에서 처음부터 센다.
         self._idle_ladder = ReaskLadder(three_step=True)
@@ -1900,7 +1913,7 @@ class MissionLogic:
         # 지금 처리하는 음성 요청을 대답 칸으로 바꿔 읽은 의도(원칙 6, answer_field 켜짐에서만) — 음성 요청을 처리하는 동안만
         # 값이 있다. 확인 질문 중 같은 목적지의 승낙 규칙(09-01)을 가르고, 처리 뒤의 되묻기 정리·넘겨받은 질문도 이 의도로 본다.
         self._answer_swapped: Optional[IntentData] = None
-        # 호출이 접은 질문 하나(wake_revive 켜짐에서만 적는다, 원칙 13) — ("confirm"·"cancel"·"help", 확인 중이던 목적지 id, 접은 시각).
+        # 호출이 접은 질문 하나(wake_revive 켜짐에서만 적는다, 원칙 13) — ("confirm"·"cancel"·"help"·"resume", 확인 중이던 목적지 id, 접은 시각).
         # WAKE_REVIVE_SEC 안의 승낙이 그 질문을 다시 묻게 한다. 다른 말이 오거나 시간이 지나면 지운다. 꺼져 있으면 늘 None.
         self._wake_folded: Optional[tuple] = None
         # 지금 안내 주행의 행동 트리 종류. 재시도·재개가 같은 트리를 쓰게 한다.
@@ -2052,8 +2065,8 @@ class MissionLogic:
         if not self.reask_ladder or intent.intent == "unknown" or self._voice_dropped:
             return
         climbed = self._ladders_climbed or []
-        for ladder in (self._confirm_ladder, self._cancel_ladder, self._help_ladder, self._wait_ladder,
-                       self._arrival_ladder, self._idle_ladder):
+        for ladder in (self._confirm_ladder, self._cancel_ladder, self._resume_ladder, self._help_ladder,
+                       self._wait_ladder, self._arrival_ladder, self._idle_ladder):
             if not any(ladder is c for c in climbed):
                 ladder.reset()
 
@@ -2114,7 +2127,7 @@ class MissionLogic:
                 self._wake_folded = None   # 원칙 13 — 다른 말이 왔다(꺼져 있으면 늘 None)
                 return self._dismiss_end()
             intent = swapped
-        revived = self._wake_revive_as(intent, now, lookup) if self.wake_revive else None
+        revived = self._wake_revive_as(intent, now, lookup, nav_ready) if self.wake_revive else None
         if revived is not None:
             intent = revived
         if self._answer_predates_question(intent):
@@ -2179,13 +2192,15 @@ class MissionLogic:
         return self.state != State.CONFIRMING and self.help_phase == "requested"
 
     def _wake_revive_as(self, intent: IntentData, now: float,
-                        lookup: Callable[[str], Optional[Destination]]) -> Optional[IntentData]:
+                        lookup: Callable[[str], Optional[Destination]],
+                        nav_ready: bool = True) -> Optional[IntentData]:
         """호출이 접은 질문의 되살리기(원칙 13 · 3, wake_revive 켜짐에서만 부른다). 되살렸으면 바꿔 읽은 의도, 아니면 None —
         None 이면 원래 의도를 지금처럼 처리한다.
 
         접은 뒤 WAKE_REVIVE_SEC 안의 승낙(affirm)은 실행하지 않고 그 질문을 다시 하게 바꿔 읽는다 — 확인 질문은 그 목적지의
-        제안(navigate, need_confirm), 취소 확인은 cancel, 도움 확인은 help. 그 의도가 지금 상태에서 하는 일이 곧 다시 묻기다
-        (확인 질문 · "안내를 취소할까요?" · "직원의 도움이 필요하신가요?"). 다만 그때 미션 질문이 열려 있으면(도착 질문 등)
+        제안(navigate, need_confirm), 취소 확인은 cancel, 도움 확인은 help, 재개 확인은 재개 제안(resume, need_confirm — Task 3.4).
+        그 의도가 지금 상태에서 하는 일이 곧 다시 묻기다(확인 질문 · "안내를 취소할까요?" · "직원의 도움이 필요하신가요?" ·
+        "다시 출발할까요?"). 다만 그때 미션 질문이 열려 있으면(도착 질문 등)
         그 승낙은 그 질문의 대답이다 — 되살리지 않는다(원칙 6, 판정은 dismiss 와 같은 _mission_question_open). 그 질문을 지금
         상태에서 다시 열 수 없으면(거절 멘트·말 없음으로 끝나는 상태, _revive_reopens) 말없이 지운다. 미션이 새 질문을 열면
         note_question_asked 가, 전체 정리·비상 정지는 _force_clear_all·_enter_estopped 가 지운다. 호출어만 들린 말("네?")은
@@ -2200,20 +2215,25 @@ class MissionLogic:
         if self._mission_question_open(now):
             self.voice_note = "열린 질문의 대답으로 받음(호출로 접은 질문은 되살리지 않음)"
             return None
-        if not self._revive_reopens(kind, dest_id, lookup):
+        if not self._revive_reopens(kind, dest_id, lookup, nav_ready):
             self.voice_note = "호출로 접은 질문을 지금은 다시 물을 수 없어 지움"
             return None
         self.voice_note = "호출로 접은 질문을 다시 묻기"
         if kind == "confirm":
             return replace(intent, intent="navigate", matched_destination_id=dest_id, need_confirm=True)
+        if kind == "resume":
+            return replace(intent, intent="resume", need_confirm=True)   # 원칙 3 — 다시 묻는다(재출발하지 않는다)
         return replace(intent, intent=kind)
 
-    def _revive_reopens(self, kind: str, dest_id: str, lookup: Callable[[str], Optional[Destination]]) -> bool:
+    def _revive_reopens(self, kind: str, dest_id: str, lookup: Callable[[str], Optional[Destination]],
+                        nav_ready: bool = True) -> bool:
         """바꿔 읽은 의도가 지금 상태에서 그 질문을 다시 여는가(원칙 13) — 상태만 읽는다(부수 효과 없음).
 
         - cancel: 음성 취소 관문(_voice_cancel_gate)이 OK 이고 취소 확인이 열려 있지 않을 때(on_cancel_confirm_request 가 묻는 조건).
           관문에 걸리면 "지금은 안내 중이 아닙니다" 같은 거절 멘트로 끝난다.
         - help: 안내 주행 중이고 도움 요청이 처음 상태일 때(_on_help_intent 가 "직원의 도움이 필요하신가요?"를 묻는 조건).
+        - resume: _react_paused 가 "다시 출발할까요?"를 묻는 조건 — answer_field 켜짐, 일시정지, 관리자가 오는 중이 아님
+          (그때는 _react_help 가 MSG_HELP_COMING 으로 끝낸다), 재개 관문(check_resume_gate)이 OK.
         - confirm: 그 목적지 제안이 확인 질문으로 이어질 때. 제안 갈래(on_intent·_navigating_destination_request·_react_help·
           _react_turning)에는 따로 부를 관문 함수가 없어(check_gate 는 확정에만 쓴다) 거절·말 없음으로 끝나는 조건을 옮겨 적었다 —
           비상 정지·도킹, 관리자가 오는 중(MSG_HELP_COMING), 물을 문장이 없는 목적지, 관리자 주행·같은 목적지로 가는 안내 주행
@@ -2223,6 +2243,8 @@ class MissionLogic:
             return self._voice_cancel_gate() == GateReason.OK and not self.cancel_confirm_pending
         if kind == "help":
             return self.state == State.NAVIGATING and self.help_phase == "none"
+        if kind == "resume":
+            return self._resume_ask_allowed(nav_ready) and self.help_phase != "acknowledged"
         if (self.estop_active or self.state == State.ESTOPPED or self.dock_mode or self.dock_pending
                 or self.help_phase == "acknowledged"):
             return False
@@ -2237,8 +2259,9 @@ class MissionLogic:
 
     def _mission_question_open(self, now: Optional[float] = None) -> bool:
         """미션이 쥔 질문이 열려 있나 — 확인·도착·대기 시간·접근 질문, 안내 취소 확인, 도움 확인·도움 요청 취소 확인, 대기 중
-        "안내가 필요 없으신가요?"·"어디로 모실까요?"(물은 뒤 WAIT_FINISH_REPEAT_SEC 안). dismiss 바꿔 읽기(원칙 14)와 호출이 접은
-        질문의 되살리기(원칙 6 · 13 — 질문 뒤의 말은 먼저 그 질문의 대답이다)가 같은 판정을 쓴다."""
+        "안내가 필요 없으신가요?"·"어디로 모실까요?"(물은 뒤 WAIT_FINISH_REPEAT_SEC 안), 일시정지 중 "다시 출발할까요?"(Task 3.4).
+        dismiss 바꿔 읽기(원칙 14)와 호출이 접은 질문의 되살리기(원칙 6 · 13 — 질문 뒤의 말은 먼저 그 질문의 대답이다)가 같은
+        판정을 쓴다."""
         waiting = self.state in (State.WAITING, State.WAITING_RELEASE)
         finish_open = (self._wait_finish_asked_at is not None
                        and (now is None or now - self._wait_finish_asked_at <= WAIT_FINISH_REPEAT_SEC))
@@ -2247,7 +2270,8 @@ class MissionLogic:
             or self.cancel_confirm_pending
             or self.help_cancel_pending
             or self.help_phase == "asking"
-            or (waiting and (self._wait_need_asked_at is not None or finish_open)))
+            or (waiting and (self._wait_need_asked_at is not None or finish_open))
+            or self._resume_question_open())
 
     def _dismiss_as(self, intent: IntentData, now: Optional[float] = None) -> Optional[IntentData]:
         """dismiss("됐어", 원칙 14)를 바꿔 읽을 의도. None 이면 끝맺는 말(_dismiss_end)을 한다.
@@ -2334,6 +2358,10 @@ class MissionLogic:
         nav_ready: bool,
     ) -> Optional[list]:
         """반응표로 새로 정한 칸(2026-10-08). 맡지 않는 칸은 None — 옛 갈래가 처리한다."""
+        if self._resume_question_open() and intent.intent in _RESUME_QUESTION_CLOSERS:
+            # 원칙 3 — "다시 출발할까요?" 중 다른 일을 시켰다(목적지·취소·잠깐·도움 등). 질문은 하나만 살린다 — 남기면 그 일이 연
+            # 질문(취소 확인 등)의 "네"나 뒤늦은 "네"가 재출발로 잡힌다. 아래 길은 지금 그대로다. 꺼져 있으면 늘 닫혀 있다.
+            self._close_resume_question()
         # 도움 요청이 걸린 말이 먼저다 — 도움 요청 중의 취소는 안내 취소가 아니다(설계 5.2절).
         helped = self._react_help(intent, now, lookup, bounds, nav_ready)
         if helped is not None:
@@ -2405,6 +2433,8 @@ class MissionLogic:
             return self._resay_help_confirm()
         if self.cancel_confirm_pending:
             return self._resay_cancel()
+        if self._resume_question_open():
+            return self._resay_resume()
         if self.state == State.CONFIRMING:
             return self._resay_confirm() if self._confirm_prompt else None
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
@@ -2549,7 +2579,11 @@ class MissionLogic:
     def _react_paused(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """일시정지. 잠깐·기다려 = 선 채로 "잠시 멈추겠습니다…"를 다시(규칙 1, 옛 말은 "안내
         중이 아닙니다"). 손 놓침 정지는 on_pause_request 가 보통 정지로 바꾼다. 다 됐어 =
-        취소처럼 되묻는다."""
+        취소처럼 되묻는다. answer_field 가 켜졌으면 다시 가자는 먼저 묻는다(_react_resume_question, Task 3.4)."""
+        if self.answer_field:
+            resumed = self._react_resume_question(intent, now, nav_ready)
+            if resumed is not None:
+                return resumed
         if intent.intent == "finish":
             return self._voice_mission_command("cancel", now, nav_ready)
         if intent.intent in ("pause", "wait"):
@@ -2558,6 +2592,110 @@ class MissionLogic:
                 return actions
             return [Say(MSG_PAUSED, priority="response")]
         return None
+
+    # -- 일시정지 중 "다시 출발할까요?"(원칙 3 · 6, 11-18 설계 4.4·4.5, Task 3.4 — answer_field 켜짐에서만) ----------------
+    # 예전엔 음성이 이 질문을 쥐었다 — 재개 제안을 미션에 보내지 않고 질문 문장만 넘기고, "네"를 확정 재개로 바꿔 보냈다(미션에
+    # 재개 확인 관문이 없어 받는 즉시 재출발하기 때문, 2026-08-26). 켜지면 미션이 묻고 대답을 받는다.
+
+    def _resume_question_open(self) -> bool:
+        """미션이 물은 "다시 출발할까요?"가 열려 있나 — 일시정지(PAUSED) 중에만 본다. 꺼져 있으면 늘 False(열지 않는다)."""
+        return self._resume_confirm_pending and self.state == State.PAUSED
+
+    def _resume_ask_allowed(self, nav_ready: bool) -> bool:
+        """"다시 출발할까요?"를 물어도 되나 — answer_field 켜짐이고 재개 관문(check_resume_gate: 일시정지·보관한 목적지·비상
+        정지 아님·Nav2 준비)이 OK. 관문에 걸리면 묻지 않는다 — 지금 길(_voice_mission_command)이 거절 이유를 말한다."""
+        return self.answer_field and check_resume_gate(
+            self.state, self.paused_destination, self.estop_active, nav_ready) == GateReason.OK
+
+    def _react_resume_question(self, intent, now, nav_ready) -> Optional[list]:
+        """일시정지 중 재개의 확인(answer_field 켜짐에서만 부른다). 맡지 않으면 None — 아래 길이 지금처럼 처리한다.
+
+        다시 가자는 제안이든 확정이든 바로 출발하지 않고 "다시 출발할까요?"를 묻는다 — 미션이 묻지 않은 확정은 묻는 쪽으로
+        낮춘다(원칙 3: 확인받은 뒤에만 출발). 그 질문이 열려 있으면: 네(affirm — 대답 칸 yes 를 바꿔 읽은 것 포함)·확정 재개 =
+        지금 재개 길로 출발, 아니요(deny — 질문 중의 "됐어"도) = MSG_PAUSE_KEPT 하고 닫기(일시정지 그대로), 재개 제안 = 같은
+        질문을 다시(확인 질문 중의 "다시 가자"와 같다), 못 알아들은 말 = 되묻기 한 단(_resume_reask)."""
+        kind = intent.intent
+        asked = self._resume_question_open()
+        if kind == "resume":
+            if asked and not intent.need_confirm:
+                return self._resume_confirmed(now, nav_ready)
+            if not self._resume_ask_allowed(nav_ready):
+                return None
+            return self._ask_resume(now)
+        if not asked:
+            return None
+        if kind == "affirm":
+            return self._resume_confirmed(now, nav_ready)
+        if kind == "deny":
+            self._close_resume_question()
+            return [Say(MSG_PAUSE_KEPT, priority="response")]
+        if kind == "unknown":
+            return self._resume_reask(now)
+        return None
+
+    def _resume_confirmed(self, now: float, nav_ready: bool) -> list:
+        """"다시 출발할까요?"에 네 — 질문을 닫고 지금 재개 길로(관문·도움 요청 끝내기·MSG_RESUMED 그대로)."""
+        self._close_resume_question()
+        return self._voice_mission_command("resume", now, nav_ready)
+
+    def _ask_resume(self, now: float) -> list:
+        """"다시 출발할까요?"를 묻는다(원칙 3). 질문은 하나만 살린다 — 걸려 있던 안내 취소 확인·도움 요청 취소 확인은 닫는다.
+        다시 가자는 취소하지 않겠다는 말이고(재개가 취소 확인을 닫는 것과 같은 뜻, 2026-10-09 검토 I-5), 남기면 다음 "네"가
+        그 질문의 대답(안내 취소·도움 요청 취소)으로 잡힌다."""
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
+        if self.help_cancel_pending:
+            self._close_help_cancel()
+        self._resume_confirm_pending = True
+        self._resume_confirm_deadline = now + self.confirm_timeout_sec
+        self._resume_reask_at = now + QUESTION_REASK_SEC
+        self._resume_ladder.reset()   # 원칙 8
+        return self._resay_resume()
+
+    def _resay_resume(self) -> list:
+        """"다시 출발할까요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_RESUME_CONFIRM, "yesno")]
+
+    def _close_resume_question(self) -> None:
+        """"다시 출발할까요?"를 닫는다(말 없음). 일시정지는 그대로다."""
+        self._resume_confirm_pending = False
+        self._resume_confirm_deadline = None
+        self._resume_reask_at = None
+        self._resume_ladder.reset()   # 원칙 8
+
+    def _resume_reask(self, now: float) -> list:
+        """"다시 출발할까요?"의 되묻기 한 단(원칙 8) — 못 알아들은 답과 대답 없음이 같이 올린다. 취소 확인(_cancel_reask)과 같은
+        방식이다. 옛 방식: 같은 질문 한 번 → 그 뒤는 흘려보냄(시한에 닫힘). 세 단계: ① → ② → 말없이 닫기 — 일시정지 중은 안내
+        주행이 아니라 ③(직원 도움)은 없다(can_help=False). 닫히면 일시정지 그대로다(재출발하지 않는다)."""
+        if self._reask_held:
+            return []   # 원칙 9 — 호출어만 들린 말은 사다리를 올리지 않는다(질문·시한 그대로)
+        rung = self._ladder_next(self._resume_ladder, can_help=False)
+        if rung == REASK_SAME:
+            return self._resay_resume()
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._resume_reask_at = now + QUESTION_REASK_SEC
+            return self._reask_line(rung, self._resume_ladder, self._resay_resume())
+        if self.reask_ladder:
+            self._close_resume_question()   # 끝 — 시한이 됐을 때와 같다
+        return []
+
+    def _resume_confirm_tick(self, now: float) -> list:
+        """"다시 출발할까요?" 시계 — 취소 확인(_cancel_confirm_tick)과 같다. 15초 조용하면 한 번 다시 묻고, 시한이 되면 말없이
+        닫는다(일시정지 그대로). 세 단계(reask_ladder)면 마지막으로 물은 때부터 15초마다 한 단, 시한 대신 사다리 끝이 닫는다."""
+        if self.reask_ladder:
+            if (self._resume_reask_at is not None and now >= self._resume_reask_at
+                    and not self._ear_holds(now)):
+                return self._resume_reask(now)
+            return []
+        if (self._resume_ladder.step == 0 and self._resume_reask_at is not None
+                and now >= self._resume_reask_at and not self._ear_holds(now)):
+            self._ladder_next(self._resume_ladder, can_help=False)   # 원칙 8 — 첫 단이라 REASK_SAME
+            self._resume_confirm_deadline = max(self._resume_confirm_deadline or now,
+                                                now + QUESTION_REASK_SEC)
+            return self._resay_resume()
+        if self._resume_confirm_deadline is not None and now >= self._resume_confirm_deadline:
+            self._close_resume_question()
+        return []
 
     def _react_asking(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """도착 질문·시간 질문. 잠깐 = "네?" 하고 질문 유지 — 다시 묻기 기회를 쓰지 않는다.
@@ -3161,6 +3299,7 @@ class MissionLogic:
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()   # Task 3.4 — 새 일시정지에 옛 "다시 출발할까요?"를 남기지 않는다
         self.state = State.PAUSED
 
     @property
@@ -3538,6 +3677,7 @@ class MissionLogic:
         self.active_destination = None
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()   # Task 3.4 — 새 일시정지에 옛 "다시 출발할까요?"를 남기지 않는다
         # 재개하면 새 goal 이므로 거리 안내도 처음부터 다시 한다.
         self._announced_milestones = set()
         self._distance_baseline = None
@@ -3576,6 +3716,7 @@ class MissionLogic:
         # 검토 I-5). 남기면 다시 달리는 중 15초 뒤 그 질문을 또 한다.
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()   # Task 3.4 — 물어 둔 "다시 출발할까요?"도(앱 재개·손잡이 다시 잡기 포함)
         if self._handle_pause:
             if not self._holding(now, self.grip_resume_window_sec,
                                  since=self._handle_lost_since):
@@ -3801,6 +3942,8 @@ class MissionLogic:
             return [], False
         self.help_phase = "acknowledged"
         self._help_last_sent_at = None
+        # 관리자가 오는 중 — 사용자 말로는 움직이지 않는다(R9). 물어 둔 "다시 출발할까요?"(Task 3.4)의 "네"가 재출발하지 않게 닫는다.
+        self._close_resume_question()
         return [Say(MSG_HELP_COMING, priority="response"),
                 HelpEvent("help_acknowledged", self.help_id)], True
 
@@ -5027,8 +5170,8 @@ class MissionLogic:
         질문의 답으로 오인 접수된다. 접는 멘트는 없다: 사용자는 이미 새 말을 하려는
         참이다. 도착 질문·대기 시간 질문과 대기(손 놓기 기다림 포함)는 2026-10-07 호출
         반응표대로 접지 않고 이어 간다.
-        wake_revive 가 켜졌으면 "안내를 취소할까요?"·"직원의 도움이 필요하신가요?"도 조용히 접고, 접은 질문 하나를 적어 둔다
-        (_wake_fold_questions, 원칙 13 · 3) — 그 뒤 40초 안의 승낙은 그 질문을 다시 묻는다(_wake_revive_as).
+        wake_revive 가 켜졌으면 "안내를 취소할까요?"·"직원의 도움이 필요하신가요?"·"다시 출발할까요?"(Task 3.4)도 조용히 접고,
+        접은 질문 하나를 적어 둔다(_wake_fold_questions, 원칙 13 · 3) — 그 뒤 40초 안의 승낙은 그 질문을 다시 묻는다(_wake_revive_as).
         RETURNING 의 복귀 브레이크는 노드가 on_return_brake 로 따로 보낸다.
 
         접근 온보딩 직후 억제(`_user_attached_until`)가 살아 있으면 되감는다
@@ -5094,7 +5237,7 @@ class MissionLogic:
             # 트랙을 억제한 채 IDLE.
             return []
         if self.wake_revive:
-            # 원칙 13 — 안내 주행·일시정지 중 열린 "안내를 취소할까요?"·"직원의 도움이 필요하신가요?"도 조용히 접는다.
+            # 원칙 13 — 안내 주행·일시정지 중 열린 "안내를 취소할까요?"·"직원의 도움이 필요하신가요?"·"다시 출발할까요?"도 조용히 접는다.
             self._wake_fold_questions(now, None)
         if self.user_attached_guard_active(now):
             # 되감기. 새로 억제를 걸지는 않는다(이미 살아 있을 때만) — 없던
@@ -5108,8 +5251,9 @@ class MissionLogic:
 
         confirm_id 는 방금 접은 확인 질문의 목적지 id 다(on_wake 의 CONFIRMING 갈래 — 물을 문장이 없는 확인 질문이면 None 이라
         적지 않는다). 함께 열린 질문은 모두 접고,
-        적는 것은 확인 > 안내 취소 확인 > 도움 확인 순서로 가장 앞의 것 하나다. 닫는 방법은 시한이 됐을 때와 같다 — 취소 확인은
-        _cancel_confirm_tick 의 시한 갈래처럼 취소하지 않고 닫고, 도움 확인은 _drop_help_question(말없이, 주행 계속).
+        적는 것은 확인 > 안내 취소 확인 > 도움 확인 > 재개 확인 순서로 가장 앞의 것 하나다. 닫는 방법은 시한이 됐을 때와 같다 —
+        취소 확인은 _cancel_confirm_tick 의 시한 갈래처럼 취소하지 않고 닫고, 도움 확인은 _drop_help_question(말없이, 주행 계속),
+        재개 확인("다시 출발할까요?", Task 3.4)은 _close_resume_question(말없이, 일시정지 그대로).
         접은 것이 없으면 적어 둔 것을 그대로 둔다(창 안에서 또 들린 "비카야")."""
         folded = ("confirm", confirm_id, now) if confirm_id is not None else None
         if self.cancel_confirm_pending:
@@ -5119,6 +5263,9 @@ class MissionLogic:
         if self.help_phase == "asking":
             self._drop_help_question()
             folded = folded or ("help", "", now)
+        if self._resume_question_open():
+            self._close_resume_question()
+            folded = folded or ("resume", "", now)
         if folded is not None:
             self._wake_folded = folded
 
@@ -5888,6 +6035,8 @@ class MissionLogic:
 
         if self.cancel_confirm_pending:
             actions.extend(self._cancel_confirm_tick(now))
+        if self._resume_question_open():
+            actions.extend(self._resume_confirm_tick(now))   # Task 3.4 — 꺼져 있으면 열리지 않는다
 
         if self.state == State.CONFIRMING:
             if self.reask_ladder:
@@ -6516,6 +6665,7 @@ class MissionLogic:
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()   # Task 3.4 — 해제 뒤 옛 "다시 출발할까요?"의 "네"로 출발하지 않는다
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._wake_folded = None   # 원칙 13 — 호출이 접어 둔 질문도 버린다(해제 뒤 되살리지 않는다, 꺼져 있으면 늘 None)
@@ -6565,6 +6715,7 @@ class MissionLogic:
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()   # Task 3.4
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._dwell_until = None
