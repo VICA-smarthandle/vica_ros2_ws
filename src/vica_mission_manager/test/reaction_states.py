@@ -303,4 +303,5 @@ REQUESTS = {
     "yes": intent("affirm"),
     "no": intent("deny"),
     "talk": intent("question"),
+    "bye": intent("dismiss"),          # 원칙 14
 }

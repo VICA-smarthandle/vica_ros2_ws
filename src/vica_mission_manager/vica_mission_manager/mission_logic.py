@@ -819,6 +819,8 @@ DEST_RETRY_RETURN_SEC = 0.0
 # 재생이 끝난 뒤 진동"(I-2) 장치는 문구가 바뀌며 필요가 없어져 걷어냈다.
 # 음성 저장소에 이 글자 그대로 구운 음성(mission_msg_handle_hint.wav, 10-05)이 있다 —
 # 글자를 바꾸면 합성으로 떨어져 늦게 나오니 다시 굽는다.
+# 원칙 14 — 안내 중이 아닐 때 "됐어"처럼 대화를 그만두려는 말(dismiss)에 끝맺는 말. 음성 mission_phrases.DISMISS_ACK 와 같은 글자.
+MSG_DISMISS_ACK = "네, 필요하시면 '비카야'라고 불러 주세요."
 MSG_HANDLE_HINT = "손잡이가 진동하고 있습니다. 잡아주세요."
 # 주행 중 손을 놓쳐 섰을 때(09-03 사용자 문구). 음성 저장소에 이 글자 그대로
 # 구운 음성(handle_grip_lost.wav)이 있다 — 구운 판은 문장 전체 대조라 **마침표를
@@ -1994,6 +1996,12 @@ class MissionLogic:
             # 순찰 중에는 음성 요청을 받지 않는다(2026-11-14) — 말도 상태도 그대로.
             self.voice_note = "순찰 중이라 받지 않음"
             return []
+        if intent.intent == "dismiss":
+            # 원칙 14 — 열린 질문이면 아니요, 안내 중이면 취소, 쉬는 중이면 끝맺는 말. 바꿔 읽은 뒤는 그 의도의 평소 길.
+            swapped = self._dismiss_as(intent, now)
+            if swapped is None:
+                return self._dismiss_end()
+            intent = swapped
         if self._answer_predates_question(intent):
             # 질문 전에 시작한 예/아니요 — 버린다. 질문은 그대로 기다리고(다시 묻기 시계도 그대로) 사용자가 다시 답한다.
             self.voice_note = "질문 전에 시작한 말이라 대답으로 안 씀"
@@ -2006,6 +2014,33 @@ class MissionLogic:
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def _dismiss_as(self, intent: IntentData, now: Optional[float] = None) -> Optional[IntentData]:
+        """dismiss("됐어", 원칙 14)를 바꿔 읽을 의도. None 이면 끝맺는 말(_dismiss_end)을 한다.
+        미션 질문이 열려 있으면 deny, 안내 중(NAVIGATING·PAUSED)이면 cancel("안내를 취소할까요?")."""
+        waiting = self.state in (State.WAITING, State.WAITING_RELEASE)
+        finish_open = (self._wait_finish_asked_at is not None
+                       and (now is None or now - self._wait_finish_asked_at <= WAIT_FINISH_REPEAT_SEC))
+        question_open = (
+            self.state in (State.CONFIRMING, State.ASKING_NEXT, State.ASKING_WAIT_TIME, State.AWAITING_USER)
+            or self.cancel_confirm_pending
+            or self.help_cancel_pending
+            or self.help_phase == "asking"
+            or (waiting and (self._wait_need_asked_at is not None or finish_open)))
+        if question_open:
+            return replace(intent, intent="deny")
+        if self.state in (State.NAVIGATING, State.PAUSED):
+            return replace(intent, intent="cancel")
+        return None
+
+    def _dismiss_end(self) -> list:
+        """끝맺는 말 — 쉬는 중(IDLE·질문 없는 대기)만. 듣기 창을 다시 열지 않는다(expects_reply 없음). 그 밖은 말 없음."""
+        if self.state == State.IDLE:
+            self._forget_dest_prompt()
+        elif self.state not in (State.WAITING, State.WAITING_RELEASE):
+            self.voice_note = "대화 끝내기 — 받을 상황이 아님"
+            return []
+        return [Say(MSG_DISMISS_ACK, priority="response")]
 
     @property
     def speaker_gate(self) -> bool:
