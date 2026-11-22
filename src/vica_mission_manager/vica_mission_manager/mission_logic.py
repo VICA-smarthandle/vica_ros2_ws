@@ -2303,7 +2303,10 @@ class MissionLogic:
         제안(navigate, need_confirm), 취소 확인은 cancel, 도움 확인은 help, 재개 확인은 재개 제안(resume, need_confirm — Task 3.4).
         그 의도가 지금 상태에서 하는 일이 곧 다시 묻기다(확인 질문 · "안내를 취소할까요?" · "직원의 도움이 필요하신가요?" ·
         "다시 출발할까요?"). 다만 그때 미션 질문이 열려 있으면(도착 질문 등)
-        그 승낙은 그 질문의 대답이다 — 되살리지 않는다(원칙 6, 판정은 dismiss 와 같은 _mission_question_open). 그 질문을 지금
+        그 승낙은 그 질문의 대답이다 — 되살리지 않는다(원칙 6, 판정은 dismiss 와 같은 _mission_question_open). 대기 중 질문
+        ("안내가 필요 없으신가요?"·"어디로 모실까요?")은 접은 시각보다 나중에 물었을 때만 이긴다 — 그보다 먼저 물은 대기 질문은
+        접은 질문(그 뒤의 목적지 제안 등)보다 오래된 질문이라 되살리기가 먼저다(원칙 6 — 가장 최근 질문의 대답, 검토 I-1: 대기
+        질문 → 목적지 제안 → 호출 → "응"이 대기 질문의 대답이 되어 "안내를 종료합니다." + 홈 복귀였다). 그 질문을 지금
         상태에서 다시 열 수 없으면(거절 멘트·말 없음으로 끝나는 상태, _revive_reopens) 말없이 지운다. 미션이 새 질문을 열면
         note_question_asked 가, 전체 정리·비상 정지는 _force_clear_all·_enter_estopped 가 지운다. 호출어만 들린 말("네?")은
         적어 둔 것을 그대로 두고, 그 밖의 말·시간이 지난 승낙은 지운다."""
@@ -2314,7 +2317,7 @@ class MissionLogic:
         kind, dest_id, at = folded
         if intent.intent != "affirm" or now - at > WAKE_REVIVE_SEC:
             return None
-        if self._mission_question_open(now):
+        if self._mission_question_open(now, wait_since=at):
             self.voice_note = "열린 질문의 대답으로 받음(호출로 접은 질문은 되살리지 않음)"
             return None
         if not self._revive_reopens(kind, dest_id, lookup, nav_ready):
@@ -2359,20 +2362,25 @@ class MissionLogic:
             return True
         return self.state not in _APPROACH_STATES and self.state not in _WAIT_MOVING_STATES
 
-    def _mission_question_open(self, now: Optional[float] = None) -> bool:
+    def _mission_question_open(self, now: Optional[float] = None, wait_since: Optional[float] = None) -> bool:
         """미션이 쥔 질문이 열려 있나 — 확인·도착·대기 시간·접근 질문, 안내 취소 확인, 도움 확인·도움 요청 취소 확인, 대기 중
         "안내가 필요 없으신가요?"·"어디로 모실까요?"(물은 뒤 WAIT_FINISH_REPEAT_SEC 안), 일시정지 중 "다시 출발할까요?"(Task 3.4).
         dismiss 바꿔 읽기(원칙 14)와 호출이 접은 질문의 되살리기(원칙 6 · 13 — 질문 뒤의 말은 먼저 그 질문의 대답이다)가 같은
-        판정을 쓴다."""
+        판정을 쓴다. wait_since 를 주면(되살리기 — 접은 시각) 대기 중 두 질문은 그보다 나중에 물은 것만 센다(검토 I-1)."""
         waiting = self.state in (State.WAITING, State.WAITING_RELEASE)
-        finish_open = (self._wait_finish_asked_at is not None
-                       and (now is None or now - self._wait_finish_asked_at <= WAIT_FINISH_REPEAT_SEC))
+        need_at, finish_at = self._wait_need_asked_at, self._wait_finish_asked_at
+        finish_open = finish_at is not None and (now is None or now - finish_at <= WAIT_FINISH_REPEAT_SEC)
+        if wait_since is None:
+            wait_open = need_at is not None or finish_open
+        else:
+            wait_open = ((need_at is not None and need_at > wait_since)
+                         or (finish_open and finish_at > wait_since))
         return (
             self.state in (State.CONFIRMING, State.ASKING_NEXT, State.ASKING_WAIT_TIME, State.AWAITING_USER)
             or self.cancel_confirm_pending
             or self.help_cancel_pending
             or self.help_phase == "asking"
-            or (waiting and (self._wait_need_asked_at is not None or finish_open))
+            or (waiting and wait_open)
             or self._resume_question_open())
 
     def _dismiss_as(self, intent: IntentData, now: Optional[float] = None) -> Optional[IntentData]:
@@ -2780,7 +2788,7 @@ class MissionLogic:
             return None
         if kind == "affirm":
             # 원칙 3 — _intent_from_answer 가 affirm 으로 바꾸는 대답 칸은 yes 뿐이라, 바꿔 읽은 affirm 이 곧 대답 칸 yes 다.
-            if self._answer_swapped is not None:
+            if self._answer_swapped is not None and self._answer_swapped.intent == "affirm":
                 return self._resume_confirmed(now, nav_ready)
             self.voice_note = " · ".join(filter(None, (self.voice_note, "대답 칸 없는 승낙 — 재개 질문을 다시")))
             return self._resume_reask(now)

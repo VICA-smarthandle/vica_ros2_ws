@@ -21,10 +21,13 @@ from vica_mission_manager.mission_logic import (
     MSG_CANCEL_CONFIRM,
     MSG_CANCELED,
     MSG_CONFIRM_PROMPT_FALLBACK,
+    MSG_FINISH,
     MSG_HELP_CONFIRM,
     MSG_REASK_LOUDER,
     MSG_REASK_RETRY,
     MSG_RESUME_CONFIRM,
+    MSG_WAIT_FINISH_ASK,
+    MSG_WAIT_NEED_ASK,
     MSG_WAKE_GREETING,
     QUESTION_REASK_SEC,
     CancelNav,
@@ -220,6 +223,72 @@ def test_off_inwindow_wake_still_uses_the_one_reask_and_folds_nothing():
     assert logic.cancel_confirm_pending and logic._wake_folded is None
 
 
+# ---- 대기 질문보다 나중에 접은 확인 질문이 먼저 되살아난다(원칙 6, 검토 I-1 — wake_revive 켜짐) -------------
+ELEV_ASK = say_destination(MSG_CONFIRM_PROMPT_FALLBACK, ELEV.name)
+PROPOSE_ELEV = intent(matched_destination_id=ELEV.id, need_confirm=True)
+CONFIRM_YES = intent("affirm", answer="yes", answer_kind="confirm")        # 다시 물은 확인 질문의 "네"(answer_field 켜짐이면 대답 칸)
+WAIT_ASKED = [(waiting_need_asked, MSG_WAIT_NEED_ASK), (waiting_asked, MSG_WAIT_FINISH_ASK)]
+WAIT_IDS = ["wait_need", "wait_finish"]
+
+
+def _navs(acts):
+    return [a.destination.id for a in acts if isinstance(a, Navigate)]
+
+
+def _call(logic, how, t):
+    """호출 세 길 — 창 밖 호출 · 창 안에서 소리로 건진 호출(노드가 on_wake 만 부름) · 창 안 음성 의도."""
+    if how == "call":
+        return logic.on_wake_call(t)
+    if how == "rescue":
+        return logic.on_wake(t)
+    return _voice(logic, t, WAKE_ONLY)
+
+
+@pytest.mark.parametrize("flags", REVIVE_FLAGS, ids=REVIVE_IDS)
+@pytest.mark.parametrize("how", ["call", "rescue", "inwindow"])
+@pytest.mark.parametrize("make, wait_q", WAIT_ASKED, ids=WAIT_IDS)
+def test_p6_confirm_folded_after_an_older_wait_question_is_revived_first(make, wait_q, how, flags):
+    """대기 질문 → 목적지 제안(확인 질문) → 호출이 확인 질문을 접음 → "응" = 확인 질문을 다시 묻기(그보다 오래된 대기 질문의 대답이
+    아니다 — "안내를 종료합니다." + 홈 없음) → 다시 "응" = 그 목적지로 출발."""
+    logic, t = make(**flags)
+    assert _says(_voice(logic, t, PROPOSE_ELEV)) == [ELEV_ASK]
+    _call(logic, how, t + 1)
+    assert logic.state == State.WAITING and logic._open_question_name(t + 1) in WAIT_IDS   # 옛 대기 질문은 열린 채
+    acts = _voice(logic, t + 2, OPEN_YES)
+    assert _says(acts) == [ELEV_ASK] and _navs(acts) == [] and MSG_FINISH not in _says(acts)
+    assert logic.state == State.CONFIRMING
+    acts = _voice(logic, t + 3, CONFIRM_YES)
+    assert _navs(acts) == [ELEV.id] and logic.state == State.NAVIGATING
+
+
+@pytest.mark.parametrize("make, wait_q", WAIT_ASKED, ids=WAIT_IDS)
+def test_p6_wait_question_asked_again_after_the_fold_is_answered_first(make, wait_q):
+    """접은 뒤에 대기 질문을 새로 물었으면(15 s 다시 묻기 — 접은 시각 < 물은 시각) 지금처럼 "응"은 그 대기 질문의 대답이다 —
+    접어 두지 않는 wake_revive 꺼짐과 같은 결과. (노드는 다시 물을 때 note_question_asked 로 적어 둔 것을 지운다 — 여기서는
+    부르지 않아 시각 비교만으로도 그렇게 됨을 본다.)"""
+    a, t = make(wake_revive=True)
+    b, _ = make()
+    for lg in (a, b):
+        _voice(lg, t, PROPOSE_ELEV)
+        lg.on_wake_call(t + 1)
+        resaid = [s for k in range(2, 16) for s in _says(lg.on_tick(t + k, NavStatus.NONE))]
+        assert wait_q in resaid
+    assert a._wake_folded is not None and a._wake_folded[2] == t + 1
+    acts_a, acts_b = _voice(a, t + 16, intent("affirm")), _voice(b, t + 16, intent("affirm"))
+    assert acts_a == acts_b and a.state == b.state
+
+
+@pytest.mark.parametrize("how", ["call", "rescue"])
+def test_off_older_wait_question_still_takes_the_yes(how):
+    """wake_revive 꺼짐은 지금 그대로 — 접은 확인 질문을 적어 두지 않아 "응"은 열린 대기 질문의 대답이다(원래 있던 동작, 바꿀지는
+    사용자 결정 사항)."""
+    logic, t = waiting_need_asked()
+    _voice(logic, t, PROPOSE_ELEV)
+    _call(logic, how, t + 1)
+    acts = _voice(logic, t + 2, intent("affirm"))
+    assert MSG_FINISH in _says(acts) and logic.state == State.RETURNING
+
+
 # ---- 무작위 장면 — 불변식 ------------------------------------------------------------------------------
 # 앞선 말·시계(장면을 여러 갈래로 데려간다). 실행하는 승낙(대답 칸 yes)도 넣어 상태가 바뀌게 둔다.
 PREFIX = [
@@ -248,13 +317,13 @@ def _run_prefix(logic, t, events):
 
 
 def test_p13_random_scenes_inwindow_wake_then_bare_yes_never_executes_with_wake_revive():
-    """wake_revive 켜짐 — 호출이 접는 질문이 열린 채 창 안 "비카야" → 대답 칸 없는 "응"만으로 출발·취소·재출발·도움 요청이 0건.
+    """wake_revive 켜짐 — 호출이 접는 질문이 열린 채 창 안 "비카야" → 대답 칸 없는 "응"만으로 출발·취소·재출발·도움 요청·종료가 0건.
 
-    같은 장면을 창 밖 호출(on_wake_call)로도 돌려 "응"의 결과가 같음을 함께 본다(창 안 호출 = 창 밖 호출). 접은 뒤에도 호출이
-    접지 않는 다른 질문이 남아 있으면(대기 중 "안내가 필요 없으신가요?" 뒤의 목적지 제안 등) "응"은 그 질문의 대답이다 — 창 밖
-    호출과 같은 결과인지만 보고 0건 세기에서는 뺀다(원래 있던 동작, 보고서 참고)."""
+    같은 장면을 창 밖 호출(on_wake_call)로도 돌려 "응"의 결과가 같음을 함께 본다(창 안 호출 = 창 밖 호출). 접은 뒤에도 그보다 먼저
+    물은 대기 질문("안내가 필요 없으신가요?"·"어디로 모실까요?")이 열려 있으면 접은 확인 질문이 먼저 되살아난다(원칙 6, 검토 I-1) —
+    그 장면도 종료·홈 0건으로 센다. 그 밖의 질문이 남는 장면은 없다."""
     rng = random.Random(20261122)
-    checked = other = 0
+    checked = older_wait = other = 0
     for _ in range(4000):
         flags = {"wake_revive": True, "reask_ladder": rng.random() < 0.5, "answer_field": rng.random() < 0.5}
         make = rng.choice(SCENES)
@@ -273,12 +342,15 @@ def test_p13_random_scenes_inwindow_wake_then_bare_yes_never_executes_with_wake_
         acts_a, acts_b = _voice(a, at, yes), _voice(b, at, yes)
         where = (make.__name__, flags, events, name, _says(acts_a))
         assert _outcome(acts_a) == _outcome(acts_b) and a.state == b.state, where
-        if left is not None:
+        if left is not None and left not in ("wait_need", "wait_finish"):
             other += 1
             continue
-        assert not _executed(acts_a), where
-        checked += 1
-    assert checked > 500 and other < checked
+        assert not _executed(acts_a) and MSG_FINISH not in _says(acts_a), where
+        if left is None:
+            checked += 1
+        else:
+            older_wait += 1
+    assert checked > 500 and older_wait > 30 and other == 0, (checked, older_wait, other)
 
 
 def test_p9_random_scenes_ladder_only_matches_the_old_way():
