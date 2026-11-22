@@ -143,6 +143,7 @@ from .mission_logic import (
     check_gate,
     doa_to_spin_yaw,
     nav_behavior_tree,
+    switch_bundle_warning,
     yaw_deg_to_quaternion,
 )
 from .question_record import QuestionRecord, QuestionTracker, answer_for
@@ -506,6 +507,11 @@ class MissionManagerNode(Node):
             self.get_logger().warn(
                 f"손잡이 시연 스위치 켜짐: 대기 {self.logic.grip_wait_timeout_sec:.0f}s 뒤 "
                 "잡은 것으로 넘어가고 손 놓침 정지를 쓰지 않는다(grip_assume_held)")
+        # 전체 검토 I4 — answer_field·reask_ladder·wake_revive 는 음성 VICA_RECUT·VICA_ANSWER 와 한 묶음. 어긋나면 알리기만 한다.
+        bundle_warning = switch_bundle_warning(
+            self.logic.answer_field, self.logic.reask_ladder, self.logic.wake_revive)
+        if bundle_warning:
+            self.get_logger().warn(bundle_warning)
         if arrival_dialog:
             self.get_logger().info(
                 f"도착 후 대화: 켜짐 · 홈={'있음' if home else '없음(제자리 대기)'}")

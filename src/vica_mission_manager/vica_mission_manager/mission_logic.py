@@ -1547,6 +1547,20 @@ class PatrolRun:
     last_alarm: Optional[PatrolAlarm] = None   # 재개 뒤 늦게 온 영상 id 를 붙일 직전 경보
 
 
+def switch_bundle_warning(answer_field: bool, reask_ladder: bool, wake_revive: bool) -> str:
+    """세 파라미터가 한 묶음에서 어긋났을 때의 경고 한 줄(전체 검토 I3 · I4). 전부 켜짐·전부 꺼짐이면 "".
+
+    셋은 음성 .env 의 VICA_RECUT·VICA_ANSWER 와 한 묶음으로 켜고 끈다 — 예: reask_ladder 만 켜고 VICA_RECUT 이 꺼져 있으면 옆
+    사람 말(옛 지시문의 unknown)에도 되묻고 안내 주행 중에는 직원 도움 확인까지 간다. 노드가 기동할 때 로그로만 알린다(막지 않는다)."""
+    values = {"answer_field": answer_field, "reask_ladder": reask_ladder, "wake_revive": wake_revive}
+    if len(set(values.values())) == 1:
+        return ""
+    on = ", ".join(n for n, v in values.items() if v)
+    off = ", ".join(n for n, v in values.items() if not v)
+    return (f"미션 파라미터 조합이 어긋남(켜짐 {on} / 꺼짐 {off}) — 셋은 음성 .env 의 VICA_RECUT·VICA_ANSWER 와 함께 "
+            "한 묶음으로 켠다")
+
+
 # ---- 상태 머신 ---------------------------------------------------------------
 
 
