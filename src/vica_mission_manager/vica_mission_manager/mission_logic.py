@@ -2533,10 +2533,18 @@ class MissionLogic:
             return self._ladder_next(ladder)
         return ladder.next_quiet()
 
+    def _quiet_reasked(self, ladder: ReaskLadder, misheard: bool) -> bool:
+        """세 단계에서 대답 없음으로 이미 원래 질문을 다시 말했고 이번 말이 못 알아들은 말(unknown)이 아닌가(Task N4 검토 2). 그러면
+        그 말은 꺼짐과 같이 처리한다 — 꺼짐은 그 다시 묻기를 사다리 첫 단으로 세어 '이미 한 번 다시 물었다'의 끝을 낸다(분 없는
+        "네" → 30 분 대기, 재개 질문의 맨 "응" → 흘려보냄 등). 꺼짐은 늘 False(지금 그대로)."""
+        return self.reask_ladder and not misheard and ladder.quiet > 0
+
     def _reask_line(self, rung: str, ladder: ReaskLadder, resaid: list) -> list:
         """세 단계 되묻기 ①·②(원칙 8). 질문을 같은 문장으로 다시 말하는 동작(_resay_*: 물은 시각·시한을 다시 잰다)에서
         문장만 사다리 문장으로 바꾼다 — 질문의 종류·후보·듣기 요청은 그대로, 원래 질문 문장은 질문 기록(question_text)에,
-        사다리 단계는 step 에 싣는다."""
+        사다리 단계는 step 에 싣는다. 대답 없음 횟수는 처음으로 돌린다 — ①·② 뒤는 꺼짐에서 그 질문을 새로 물었을 때와 같은
+        차례(조용 → 원래 질문 → 조용 → 끝)다(R3, Task N4 검토 1)."""
+        ladder.restart_quiet()
         line = MSG_REASK_RETRY if rung == REASK_RETRY else MSG_REASK_LOUDER
         return [replace(a, text=line, question_text=a.question_text or a.text, step=ladder.step)
                 if isinstance(a, Say) else a for a in resaid]
@@ -2805,7 +2813,7 @@ class MissionLogic:
             if self._answer_swapped is not None and self._answer_swapped.intent == "affirm":
                 return self._resume_confirmed(now, nav_ready)
             self.voice_note = " · ".join(filter(None, (self.voice_note, "대답 칸 없는 승낙 — 재개 질문을 다시")))
-            return self._resume_reask(now)
+            return self._resume_reask(now, misheard=False)
         if kind == "deny":
             self._close_resume_question()
             return [Say(MSG_PAUSE_KEPT, priority="response")]
@@ -2843,13 +2851,15 @@ class MissionLogic:
         self._resume_reask_at = None
         self._resume_ladder.reset()   # 원칙 8
 
-    def _resume_reask(self, now: float) -> list:
+    def _resume_reask(self, now: float, misheard: bool = True) -> list:
         """"다시 출발할까요?"의 못 알아들은 답 한 단(원칙 8). 취소 확인(_cancel_reask)과 같은 방식이다. 옛 방식(대답 없음과 한
         표시): 같은 질문 한 번 → 그 뒤는 흘려보냄(시한에 닫힘). 세 단계: ① → ② → 말없이 닫기 — 일시정지 중은 안내 주행이
         아니라 ③(직원 도움)은 없다(can_help=False). ①·② 부터 시계·시한을 다시 잰다(Task N4). 닫히면 일시정지 그대로다
-        (재출발하지 않는다)."""
+        (재출발하지 않는다). misheard=False(대답 칸 없는 맨 승낙)이고 대답 없음으로 이미 다시 물었으면 꺼짐과 같이 흘려보낸다."""
         if self._reask_held:
             return []   # 원칙 9 — 호출어만 들린 말은 사다리를 올리지 않는다(질문·시한 그대로)
+        if self._quiet_reasked(self._resume_ladder, misheard):
+            return []   # Task N4 검토 2 — 꺼짐과 같다: 이미 한 번 다시 물었으니 흘려보낸다(시한에 닫힘)
         rung = self._ladder_next(self._resume_ladder, can_help=False)
         if rung == REASK_SAME:
             return self._resay_resume()
@@ -2895,12 +2905,14 @@ class MissionLogic:
             if kind == "deny":
                 self._reset_arrival_dialog()
                 return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
-            return self._arrival_no_answer(now)
+            return self._arrival_no_answer(now, misheard=False)
         if self.state == State.ASKING_WAIT_TIME and kind == "affirm":
             # "몇 분쯤 걸리실까요?"에 "네"만 — 같은 질문을 한 번 다시 묻는다(결정 2). 다시 물은
             # 뒤에도 "네"면 기다려 달라는 뜻이 분명하니 기본 30분을 기다린다. 세 단계(reask_ladder)에서도 이 갈래는
-            # 그대로다 — 첫 단(①)이어도 같은 질문을 다시 말하고, 그다음은 30분 대기(사다리 횟수는 같이 쓴다).
-            if self._ladder_next(self._arrival_ladder) in (REASK_SAME, REASK_RETRY):   # 원칙 8
+            # 그대로다 — 첫 단(①)이어도 같은 질문을 다시 말하고, 그다음은 30분 대기. "이미 한 번 다시 물었다"는 꺼짐처럼
+            # 대답 없음의 다시 묻기도 센다(Task N4 검토 2 — 켜짐은 그 횟수를 따로 세므로 함께 본다).
+            if (not self._quiet_reasked(self._arrival_ladder, misheard=False)
+                    and self._ladder_next(self._arrival_ladder) in (REASK_SAME, REASK_RETRY)):   # 원칙 8
                 self._response_deadline = None
                 self._asking_entered_at = now
                 return [self._ask(MSG_ASK_WAIT_TIME, "minutes")]
@@ -2968,7 +2980,7 @@ class MissionLogic:
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         if within and kind in ("unknown", "affirm"):
             # "어디로 모실까요?"에 못 알아들은 답·"네" — 한 번 다시 묻는다(다시 묻기). 세 단계면 ①·②·끝(원칙 8).
-            return self._wait_finish_reask(now)
+            return self._wait_finish_reask(now, misheard=kind == "unknown")
         return None
 
     def _wait_question_tick(self, now: float) -> list:
@@ -3009,11 +3021,14 @@ class MissionLogic:
         self._wait_need_asked_at = None
         return [Say(MSG_CANCEL_KEPT, priority="response")]
 
-    def _wait_finish_reask(self, now: float) -> list:
+    def _wait_finish_reask(self, now: float, misheard: bool = True) -> list:
         """"네, 어디로 모실까요?"의 못 알아들은 답 한 단(원칙 8). 옛 방식(대답 없음과 한 표시): 같은 질문 한 번 → 그 뒤는
-        흘려보냄(30초 창이 닫힘). 세 단계: ① → ② → 끝(질문을 닫는다 — 대기는 그대로). 물은 시각을 지워야 시계가 끝에서 멈춘다."""
+        흘려보냄(30초 창이 닫힘). 세 단계: ① → ② → 끝(질문을 닫는다 — 대기는 그대로). 물은 시각을 지워야 시계가 끝에서 멈춘다.
+        misheard=False("네")이고 대답 없음으로 이미 다시 물었으면 꺼짐과 같이 흘려보낸다(Task N4 검토 2)."""
         if self._reask_held:
             return []   # 원칙 9 — 호출어만 들린 말은 사다리를 올리지 않는다(질문·시한 그대로)
+        if self._quiet_reasked(self._wait_ladder, misheard):
+            return []   # Task N4 검토 2 — 꺼짐과 같다: 이미 한 번 다시 물었으니 흘려보낸다(30초 창)
         rung = self._ladder_next(self._wait_ladder)
         if rung == REASK_SAME:
             return self._resay_wait_finish(now)
@@ -5614,7 +5629,7 @@ class MissionLogic:
         # 태그로 해석하면 "네"가 종료(홈행)로 둔갑했다(2026-08-31 구멍 ②).
         # 숫자가 올 때까지 재질문 사다리로 보낸다.
         if self.state == State.ASKING_WAIT_TIME and kind in ("affirm", "deny"):
-            return self._arrival_no_answer(now)
+            return self._arrival_no_answer(now, misheard=False)
 
         # 대기: wait, 또는 대기형 질문의 affirm.
         if kind == "wait" or (kind == "affirm" and not self._asking_is_finish):
@@ -5668,8 +5683,9 @@ class MissionLogic:
             self._asking_entered_at = now
             return []
 
-        # 못 알아들음(unknown 등): 무응답 사다리 ①.
-        return self._arrival_no_answer(now)
+        # 못 알아들음(unknown 등): 무응답 사다리 ①. unknown 이 아닌 것(갈 수 없는 목적지 확정 등)은 대답 없음으로 이미 다시
+        # 물었으면 꺼짐과 같이 처리한다(Task N4 검토 2).
+        return self._arrival_no_answer(now, misheard=kind == "unknown")
 
     def _enter_waiting(self, minutes: int, now: float,
                        default_msg: bool = False, away: bool = False) -> list:
@@ -5880,13 +5896,13 @@ class MissionLogic:
         actions.extend(self._go_home(now))
         return actions
 
-    def _arrival_no_answer(self, now: float) -> list:
+    def _arrival_no_answer(self, now: float, misheard: bool = True) -> list:
         """무응답 사다리: 못 알아들으면 같은 질문을 1회 다시 묻고, 그 뒤엔 떠나기 예고.
 
         2026-10-08 다시 묻기: 예전엔 "잘 듣지 못했습니다. 계속 안내가 필요하시면 말씀해
         주세요."였다 — 사용자는 질문을 다시 들어야 답할 수 있다. 물어 둔 질문이 없으면
-        (늦은 답 그물의 대화) 옛 문장을 쓴다."""
-        return self._arrival_reask(now)
+        (늦은 답 그물의 대화) 옛 문장을 쓴다. misheard 는 이번 말이 못 알아들은 말(unknown)인가다(_arrival_reask)."""
+        return self._arrival_reask(now, misheard)
 
     def _arrival_silence(self, now: float) -> list:
         """침묵 사다리 (2026-09-20 사용자 결정): 8초 침묵이면 같은 질문을 한 번 더
@@ -5899,12 +5915,15 @@ class MissionLogic:
             return self._resay_arrival(now)
         return self._leaving_notice(now)
 
-    def _arrival_reask(self, now: float) -> list:
+    def _arrival_reask(self, now: float, misheard: bool = True) -> list:
         """도착 질문의 못 알아들은 답 한 단(원칙 8). 시계는 지금 그대로(질문 재생이 끝난 때부터 8초). 옛 방식(8초 침묵과 한
         표시): 같은 질문 한 번 → 떠나기 예고. 세 단계: ① → ② → 떠나기 예고(도착 질문은 주행 중이 아니라 ③ 이 없다). ①·② 는
-        떠나기 예고의 유예도 거둔다 — 다시 말해 달라고 하고 곧바로 떠나지 않는다(Task N4)."""
+        떠나기 예고의 유예도 거둔다 — 다시 말해 달라고 하고 곧바로 떠나지 않는다(Task N4). misheard=False(답이 아닌 "네"·
+        갈 수 없는 목적지 확정 등)이고 대답 없음으로 이미 다시 물었으면 꺼짐과 같이 떠나기 예고다(Task N4 검토 2)."""
         if self._reask_held:
             return []   # 원칙 9 — 호출어만 들린 말은 사다리를 올리지 않는다(질문·시한 그대로)
+        if self._quiet_reasked(self._arrival_ladder, misheard):
+            return self._leaving_notice(now)   # Task N4 검토 2 — 꺼짐과 같다: 이미 한 번 다시 물었다
         rung = self._ladder_next(self._arrival_ladder)
         if rung == REASK_SAME:
             return self._resay_arrival(now)

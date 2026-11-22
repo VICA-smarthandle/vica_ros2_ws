@@ -217,8 +217,9 @@ def generate_launch_description() -> LaunchDescription:
             # 아래 셋(reask_ladder·wake_revive·answer_field) — 다섯 개(음성 .env 의 VICA_RECUT·VICA_ANSWER + 이 셋)는 한 묶음으로
             # 켜고 끈다(전체 검토 I3 · I4 · I5, 어긋나면 미션 노드가 기동 때 경고 한 줄). 설치본은 복사본이라 기본값을 바꾸면
             # colcon build --packages-select vica_mission_manager 뒤 미션을 다시 켜야 한다(소스만 되돌리면 켜진 채 남는다).
-            # reask_ladder: 세 단계 되묻기(원칙 8 · 31, 2026-11-21) — 못 알아들었거나 대답이 없으면 다시 말씀 → 더 크게
-            # 또박또박 → (안내 주행 중만) 직원 도움. 질문이 없을 때의 못 알아들은 말도 되묻는다. 음성 VICA_RECUT=on 과 함께
+            # reask_ladder: 세 단계 되묻기(원칙 8 · 31, 2026-11-21) — 못 알아들으면 다시 말씀 → 더 크게 또박또박 → (안내 주행
+            # 중만) 직원 도움. 대답이 없으면 꺼진 상태와 같이 원래 질문을 다시 말한다(2026-11-23). 질문이 없을 때의 못 알아들은
+            # 말도 되묻는다. 음성 VICA_RECUT=on 과 함께
             # (없으면 옆 사람 말에도 되묻는다). 기본 꺼짐 = 지금 그대로.
             DeclareLaunchArgument("reask_ladder", default_value="false"),
             # wake_revive: "비카야" 뒤 처리(원칙 13 · 3, 2026-11-21) — 호출(듣기 창 안의 "비카야" 포함)이 확인 질문·"안내를

@@ -19,6 +19,7 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_REASK,
     MSG_ASK_ENTRANCE,
     MSG_ASK_RESTROOM,
+    MSG_ASK_WAIT_TIME,
     MSG_CANCEL_CONFIRM,
     MSG_CANCEL_KEPT,
     MSG_CONFIRM_PROMPT_FALLBACK,
@@ -32,7 +33,9 @@ from vica_mission_manager.mission_logic import (
     MSG_WAIT_BEACON,
     MSG_WAIT_FINISH_ASK,
     MSG_WAIT_NEED_ASK,
+    CancelNav,
     MissionLogic,
+    Navigate,
     NavStatus,
     Say,
     State,
@@ -142,26 +145,52 @@ def _tts_done(logic, text, t):
     return acts + list(logic.on_wait_speech_spoken(text, t))
 
 
-def _run(logic, t0, events=None, until=130.0):
-    """노드처럼 0.5 s 마다 tick — 말(미션의 말·음성이 한 LLM 답)은 1 s 뒤 재생이 끝난다(_tts_done).
-    events 는 {t0 부터의 초: 의도} — 그 시각에 음성 의도를 넣는다. 동작은 repr 로(질문 기록의 step·question_text 까지) 견준다."""
-    events = dict(events or {})
-    log, done = [], []
+def _drive(logic, t0, voice=None, until=130.0):
+    """노드처럼 0.5 s 마다 tick — 말(미션의 말·음성이 한 LLM 답)은 1 s 뒤 재생이 끝난다(_tts_done). (시각, 동작 목록)을 낸다.
+    voice 는 {t0 부터의 초: 의도} 이거나 (시각) → 의도|None 인 함수 — 그 시각에 음성 의도를 넣는다."""
+    pick = voice if callable(voice) else (lambda t, ev=dict(voice or {}): ev.get(round(t - t0, 1)))
+    done = []
     for k in range(int(until / 0.5) + 1):
         t = t0 + k * 0.5
         acts = []
         for item in [d for d in done if d[0] <= t]:
             done.remove(item)
             acts += _tts_done(logic, item[1], t)
-        event = events.get(k * 0.5)
+        event = pick(t)
         if event is not None:
             acts += logic.on_voice_intent(event, t, lookup, BOUNDS, True)
             if event.reply:
                 done.append((t + 1.0, event.reply))
         acts += logic.on_tick(t, NONE)
         done += [(t + 1.0, a.text) for a in acts if isinstance(a, Say)]
-        log.append((t, [UUID.sub("<id>", repr(a)) for a in acts], _snapshot(logic, t)))
-    return log
+        yield t, acts
+
+
+def _run(logic, t0, events=None, until=130.0):
+    """_drive 의 기록 — 동작은 repr 로(질문 기록의 step·question_text 까지) 견준다."""
+    return [(t, [UUID.sub("<id>", repr(a)) for a in acts], _snapshot(logic, t))
+            for t, acts in _drive(logic, t0, events, until)]
+
+
+def _timeline(logic, t0, events=None, until=130.0):
+    """_drive 의 말(대기 알림 ambient 빼고)·주행 동작 — (시각, 글자 또는 동작 이름). 도움 요청 재전송(벽시계 10 s)은 뺀다."""
+    out = []
+    for t, acts in _drive(logic, t0, events, until):
+        for a in acts:
+            if isinstance(a, Say) and a.priority != "ambient":
+                out.append((t, a.text))
+            elif isinstance(a, (Navigate, CancelNav)):
+                out.append((t, type(a).__name__))
+    return out
+
+
+def _first_resay(make, flags):
+    """꺼짐 조용 장면에서 시계가 처음 질문을 다시 말한 시각(t0 부터의 초). 없으면 None."""
+    logic, t0 = make(**flags)
+    for t, acts in _drive(logic, t0):
+        if any(isinstance(a, Say) and a.expects_reply for a in acts):
+            return round(t - t0, 1)
+    return None
 
 
 # ---- R1: 대답 없음(시계) = 꺼짐과 같다 -----------------------------------------------------------------------------
@@ -258,13 +287,14 @@ def test_p8_misheard_then_silence_says_the_question_then_ends_like_off(make, que
 
 @pytest.mark.parametrize("make, question, end", FIFTEEN, ids=FIFTEEN_IDS)
 def test_p8_silence_then_misheard_starts_the_ladder_at_retry(make, question, end):
-    """(나) 15 초 조용 → 원래 질문 → 못 알아들은 말 → ①. 대답 없음으로 다시 말하기는 이미 썼다(꺼짐이 허용하는 한 번) — 그 뒤 조용하면
-    ① 부터 다시 잰 끝 시한(30 초)에 꺼짐과 같은 끝."""
+    """(나) 15 초 조용 → 원래 질문 → 못 알아들은 말 → ①. ① 뒤는 꺼짐에서 그 질문을 ① 의 시각에 새로 물었을 때와 같다(검토 1) —
+    ① 부터 15 초에 원래 질문, 30 초에 꺼짐과 같은 끝."""
     logic, t = make(reask_ladder=True)
     asked = t - 1.0
     assert _says(logic.on_tick(asked + 15.0, NONE)) == [question]
     assert _says(_voice(logic, "unknown", asked + 20.0)) == [MSG_REASK_RETRY]
-    assert _says(logic.on_tick(asked + 35.0, NONE)) == [] and _open(logic, asked + 35.0)
+    assert _says(logic.on_tick(asked + 34.5, NONE)) == [] and _open(logic, asked + 34.5)
+    assert _says(logic.on_tick(asked + 35.0, NONE)) == [question]
     assert _says(logic.on_tick(asked + 49.5, NONE)) == [] and _open(logic, asked + 49.5)
     assert _says(logic.on_tick(asked + 50.0, NONE)) == end and not _open(logic, asked + 50.0)
 
@@ -305,17 +335,22 @@ def test_p8_arrival_misheard_then_silence_says_the_question_then_leaves_like_off
 
 
 def test_p8_arrival_silence_then_misheard_starts_at_retry():
+    """① 뒤는 새로 물었을 때와 같다(검토 1) — 재생 끝 8 초에 원래 질문, 또 8 초에 떠나기 예고."""
     logic, _ = asking(reask_ladder=True)
     assert _says(logic.on_tick(10.5, NONE)) == [MSG_ASK_RESTROOM]
     logic.on_arrival_question_spoken(11.0)
     assert _says(_voice(logic, "unknown", 12.0)) == [MSG_REASK_RETRY]
     logic.on_arrival_question_spoken(13.0)
     assert _says(logic.on_tick(20.5, NONE)) == []
-    assert _says(logic.on_tick(21.0, NONE)) == [MSG_LEAVING_NOTICE]
+    assert _says(logic.on_tick(21.0, NONE)) == [MSG_ASK_RESTROOM]
+    logic.on_arrival_question_spoken(22.0)
+    assert _says(logic.on_tick(29.5, NONE)) == []
+    assert _says(logic.on_tick(30.0, NONE)) == [MSG_LEAVING_NOTICE]
 
 
 def test_p8_arrival_retry_during_the_leaving_notice_holds_the_departure():
-    """떠나기 예고(3 s 유예) 중의 못 알아들은 말 → ① — 유예를 거둔다(① 을 말하고 곧바로 떠나지 않는다). 그 뒤 조용하면 다시 예고."""
+    """떠나기 예고(3 s 유예) 중의 못 알아들은 말 → ① — 유예를 거둔다(① 을 말하고 곧바로 떠나지 않는다). 그 뒤는 새로 물었을 때와
+    같다 — 8 초에 원래 질문, 또 8 초에 떠나기 예고."""
     logic, _ = asking(reask_ladder=True)
     logic.on_tick(10.5, NONE)
     logic.on_arrival_question_spoken(11.0)
@@ -324,7 +359,9 @@ def test_p8_arrival_retry_during_the_leaving_notice_holds_the_departure():
     logic.on_arrival_question_spoken(21.0)
     assert logic.on_tick(23.0, NONE) == [] and logic.state == State.ASKING_NEXT
     assert _says(logic.on_tick(28.5, NONE)) == []
-    assert _says(logic.on_tick(29.0, NONE)) == [MSG_LEAVING_NOTICE]
+    assert _says(logic.on_tick(29.0, NONE)) == [MSG_ASK_RESTROOM]
+    logic.on_arrival_question_spoken(30.0)
+    assert _says(logic.on_tick(38.0, NONE)) == [MSG_LEAVING_NOTICE]
 
 
 # 대기 중 질문 — waiting_need_asked()·waiting_asked(): 11 s 에 물음, 12 s 를 돌려준다.
@@ -344,7 +381,9 @@ def test_p8_wait_need_silence_then_misheard_starts_at_retry():
     assert _q(logic.on_tick(asked + 15.0, NONE)) == [MSG_WAIT_NEED_ASK]
     assert _says(_voice(logic, "unknown", asked + 19.0)) == [MSG_REASK_RETRY]
     assert _q(logic.on_tick(asked + 33.5, NONE)) == []
-    assert _q(logic.on_tick(asked + 34.0, NONE)) == [MSG_CANCEL_KEPT]
+    assert _q(logic.on_tick(asked + 34.0, NONE)) == [MSG_WAIT_NEED_ASK]    # ① 뒤는 새로 물었을 때와 같다(검토 1)
+    assert _q(logic.on_tick(asked + 48.5, NONE)) == []
+    assert _q(logic.on_tick(asked + 49.0, NONE)) == [MSG_CANCEL_KEPT]
 
 
 def test_p8_wait_finish_misheard_then_silence_says_the_question_once():
@@ -360,8 +399,123 @@ def test_p8_wait_finish_silence_then_misheard_starts_at_retry():
     asked = t - 1.0
     assert _q(logic.on_tick(asked + 15.0, NONE)) == [MSG_WAIT_FINISH_ASK]
     assert _says(_voice(logic, "unknown", asked + 19.0)) == [MSG_REASK_RETRY]
-    later = [s for k in range(0, 100) for s in _q(logic.on_tick(asked + 19.5 + k * 0.5, NONE))]
+    assert _q(logic.on_tick(asked + 33.5, NONE)) == []
+    assert _q(logic.on_tick(asked + 34.0, NONE)) == [MSG_WAIT_FINISH_ASK]  # ① 뒤는 새로 물었을 때와 같다(검토 1)
+    later = [s for k in range(1, 100) for s in _q(logic.on_tick(asked + 34.0 + k * 0.5, NONE))]
     assert later == []
+
+
+# ---- 검토 1: ①·② 뒤는 꺼짐에서 그 질문을 그 시각에 새로 물었을 때와 같다(R3) ------------------------------------------
+# 시계 갈래 여덟 자리 — 끝을 시한으로 내는 여섯(확인·취소·재개·도움·도움 취소·대기 "어디로")과 대답 없음 횟수로 내는 둘(대기 "안내가
+# 필요 없으신가요?"·도착 질문). 장면은 물은 시각 + 1 을 돌려준다(도착 질문은 재생 끝 + 1).
+AFTER_RETRY = [confirming, confirming_change, _paused_proposal, _waiting_proposal, _confirming_unknown_place,
+               navigating_cancel_asked, _paused_cancel_asked, navigating_help_asked, _help_cancel_asked, paused_resume_asked,
+               waiting_asked, waiting_need_asked,
+               asking, _asking_entrance, _asking_generic, asking_wait_time, _end_confirm_spoken]
+ARRIVAL = (asking, _asking_entrance, _asking_generic, asking_wait_time, _end_confirm_spoken)
+
+
+@pytest.mark.parametrize("flags", FLAGS, ids=FLAG_IDS)
+@pytest.mark.parametrize("make", AFTER_RETRY, ids=[m.__name__.strip("_") for m in AFTER_RETRY])
+def test_p8_after_retry_runs_like_the_question_newly_asked_when_off(make, flags):
+    """(나) 조용 → 원래 질문 → 못 알아들은 말 → ① — ① 뒤의 말·시각·끝 동작이 꺼짐에서 그 질문을 ① 의 시각에 새로 물었을 때와 같다
+    (도착 질문은 재생 끝부터 — ① 은 1 초 뒤에 끝난다). 대답 없음 횟수가 ① 에서 처음으로 돌아가야 한다(검토 1)."""
+    first = _first_resay(make, flags)
+    at = (first if first is not None else 15.0) + 3.0
+    on, t0 = make(reask_ladder=True, **flags)
+    timeline = _timeline(on, t0, {at: intent("unknown")}, until=at + 100.0)
+    assert [t for t, s in timeline if s == MSG_REASK_RETRY] == [t0 + at]
+    anchor = t0 + at + (1.0 if make in ARRIVAL else 0.0)
+    after_on = [(round(t - anchor, 1), s) for t, s in timeline if t > t0 + at and t - anchor <= 95.0]
+    off, t_off = make(**flags)
+    after_off = [(round(t - (t_off - 1.0), 1), s) for t, s in _timeline(off, t_off, until=100.0)
+                 if t - (t_off - 1.0) <= 95.0]
+    assert after_on == after_off
+
+
+CLIMB = [
+    (confirming, TOILET_ASK, [MSG_CONFIRM_TIMEOUT]),
+    (navigating_cancel_asked, MSG_CANCEL_CONFIRM, [MSG_HELP_CONFIRM]),
+    (_paused_cancel_asked, MSG_CANCEL_CONFIRM, []),
+    (navigating_help_asked, MSG_HELP_CONFIRM, []),
+    (_help_cancel_asked, MSG_HELP_CANCEL_CONFIRM, []),
+    (paused_resume_asked, MSG_RESUME_CONFIRM, []),
+    (asking, MSG_ASK_RESTROOM, [MSG_LEAVING_NOTICE]),
+    (_end_confirm_spoken, MSG_ASK_ENTRANCE, [MSG_LEAVING_NOTICE]),
+    (waiting_need_asked, MSG_WAIT_NEED_ASK, [MSG_CANCEL_KEPT]),
+    (waiting_asked, MSG_WAIT_FINISH_ASK, []),
+]
+
+
+@pytest.mark.parametrize("make, question, end", CLIMB, ids=[m.__name__.strip("_") for m, _, _ in CLIMB])
+def test_p8_misheard_words_between_silences_still_end_at_the_third(make, question, end):
+    """못 알아들은 말 → ① → 조용 → 원래 질문 → 못 알아들은 말 → ② → 조용 → 원래 질문 → 못 알아들은 말 → 끝. 대답 없음 횟수가 ①·② 마다
+    처음으로 돌아가도 사다리가 세 번째 못 알아들은 말에서 끝나 끝없이 묻지 않는다(검토 1)."""
+    logic, t0 = make(reask_ladder=True)
+    plan = {"at": t0 + 2.0, "heard": 0}
+
+    def voice(t):
+        if plan["at"] is not None and t >= plan["at"]:
+            plan["at"] = None
+            plan["heard"] += 1
+            return intent("unknown")
+        return None
+
+    said = []
+    for t, acts in _drive(logic, t0, voice, until=200.0):
+        lines = [a.text for a in acts if isinstance(a, Say) and a.priority != "ambient"]
+        said += lines
+        if plan["heard"] == 3:
+            break
+        if question in lines:
+            plan["at"] = t + 2.0
+    assert said == [MSG_REASK_RETRY, question, MSG_REASK_LOUDER, question, *end]
+
+
+# ---- 검토 2: 대답 없음으로 다시 물은 뒤에 오는 말(못 알아들은 말이 아닌 것)은 꺼짐과 같이 처리한다 ------------------------------
+AFTER_RESAY = [intent("affirm"), intent("deny"), intent("cancel"), intent("finish"), intent("help"),
+               intent("wait", wait_minutes=-1), intent("wait", wait_minutes=5), intent("pause"),
+               intent("resume", need_confirm=True), intent("resume"),
+               intent(matched_destination_id=ELEV.id, need_confirm=True), intent(matched_destination_id=ELEV.id),
+               intent(matched_destination_id="nope"), SIDE, intent("clarify", reply="어느 화장실이요?"), intent("repeat"),
+               intent("dismiss"), intent("affirm", answer="yes", answer_kind="yesno"),
+               intent("affirm", answer="yes", answer_kind="open"), intent("deny", answer="no", answer_kind="yesno"),
+               intent("wait", answer="minutes", answer_value="10", answer_kind="minutes")]
+
+
+@pytest.mark.parametrize("flags", FLAGS, ids=FLAG_IDS)
+@pytest.mark.parametrize("make", SCENES, ids=SCENE_IDS)
+def test_p8_words_after_the_silence_resay_are_handled_like_off(make, flags):
+    """조용 → 원래 질문 다시 → 의도 하나(21종) → 조용 60 s — 꺼짐과 켜짐의 동작 목록이 같다. 꺼짐은 대답 없음의 다시 묻기를 사다리
+    첫 단으로 세어 "이미 한 번 다시 물었다"의 처리(분 없는 "네" → 30 분 대기, 재개 질문의 맨 "응" → 흘려보냄 등)를 한다(검토 2)."""
+    first = _first_resay(make, flags)
+    at = (first if first is not None else 15.0) + 2.0
+    for it in AFTER_RESAY:
+        on, t0 = make(reask_ladder=True, **flags)
+        off, _ = make(**flags)
+        assert _run(on, t0, {at: it}, until=at + 60.0) == _run(off, t0, {at: it}, until=at + 60.0), it
+
+
+@pytest.mark.parametrize("flags", FLAGS, ids=FLAG_IDS)
+def test_p8_where_question_yes_after_the_silence_resay_is_handled_like_off(flags):
+    """도착 질문 중 "다시 가자" → "네, 어디로 모실까요?" → 8 초 조용 → 같은 질문 → "네"(어디인지 없음) — 꺼짐과 같다(떠나기 예고).
+    두 의도가 있어야 닿는 자리라 위 시험(의도 하나)과 따로 본다(검토 2)."""
+    events = {2.0: intent("resume"), 14.0: intent("affirm")}
+    on, t0 = asking(reask_ladder=True, **flags)
+    off, _ = asking(**flags)
+    log_on, log_off = _run(on, t0, events, until=40.0), _run(off, t0, events, until=40.0)
+    assert any(f"'{MSG_WAIT_FINISH_ASK}'" in a for _, acts, _ in log_on[:25] for a in acts)   # 조용에 같은 질문을 다시 말했다
+    assert log_on == log_off
+
+
+def test_p8_minutes_question_yes_after_the_silence_resay_waits_30_minutes():
+    """검토 2 의 장면 — "몇 분쯤 걸리실까요?" → 8 초 조용 → 같은 질문 → "네"(분 없음) = 꺼짐과 같이 기본 30 분 대기(세 번째로 묻지 않는다)."""
+    for flags in ({}, {"reask_ladder": True}):
+        logic, t = asking_wait_time(**flags)                        # 재생 끝 t-1 → t+7 마감
+        assert _says(logic.on_tick(t + 7.0, NONE)) == [MSG_ASK_WAIT_TIME]
+        logic.on_arrival_question_spoken(t + 9.0)
+        acts = _voice(logic, "affirm", t + 11.0)
+        assert MSG_ASK_WAIT_TIME not in _says(acts) and logic.wait_minutes_requested() == 30, flags
 
 
 # ---- 2026-11-22 20:10 실기의 두 장면 --------------------------------------------------------------------------------
@@ -410,6 +564,8 @@ def test_p8_ladder_counts_silence_apart_from_misheard_words_when_on():
     assert ladder.next_quiet() == END
     ladder.restart_heard()                                          # 알아들은 말 — 못 알아들은 말의 단수만 처음으로
     assert (ladder.step, ladder.quiet_count) == (0, 2)
+    ladder.restart_quiet()                                          # ①·② 를 말했다 — 대답 없음 횟수만 처음으로(검토 1)
+    assert ladder.quiet_count == 0 and ladder.next_quiet() == SAME
     ladder.reset()                                                  # 질문을 새로 열면 둘 다 처음으로
     assert (ladder.step, ladder.quiet_count) == (0, 0)
 

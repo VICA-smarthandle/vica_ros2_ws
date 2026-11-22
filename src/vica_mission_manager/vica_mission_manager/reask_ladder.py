@@ -16,7 +16,8 @@ MAX_STEP = 3
 
 class ReaskLadder:
     """step 은 next() 가 불린 횟수(0~3 에서 멈춘다). quiet 은 세 단계에서 대답 없음(시계)으로 원래 질문을 다시 말한 횟수다 —
-    대답이 없는 것은 못 알아들은 것이 아니라 사다리 단수(step)와 따로 센다(원칙 8, Task N4). 옛 방식은 둘을 한 표시(step)로 센다."""
+    대답이 없는 것은 못 알아들은 것이 아니라 사다리 단수(step)와 따로 세고, ①·② 를 말하면 처음으로 돌린다(원칙 8, Task N4).
+    옛 방식은 둘을 한 표시(step)로 센다."""
 
     def __init__(self, three_step: bool = False) -> None:
         self.three_step = three_step
@@ -32,6 +33,12 @@ class ReaskLadder:
         """알아들은 말 — 못 알아들은 말의 단수만 처음으로(원칙 8). 대답 없음 횟수는 그 질문을 새로 물을 때까지 둔다 — 옛 방식은
         알아들은 말로 아무것도 돌리지 않아, 곁질문 뒤의 침묵에도 같은 질문은 한 번만 다시 묻는다(Task N4)."""
         self.step = 0
+
+    def restart_quiet(self) -> None:
+        """사다리 문장(①·②)을 말했다 — 대답 없음 횟수만 처음으로(Task N4 검토 1). 다시 말해 달라고 했으니 그 뒤는 질문을 새로
+        물었을 때와 같은 차례(조용 → 원래 질문 → 조용 → 끝)다. 사다리는 세 번째 못 알아들은 말에서 끝나므로 원래 질문을 대답
+        없음으로 다시 말하는 것은 질문 하나에 많아야 세 번이다."""
+        self.quiet = 0
 
     @property
     def quiet_count(self) -> int:
