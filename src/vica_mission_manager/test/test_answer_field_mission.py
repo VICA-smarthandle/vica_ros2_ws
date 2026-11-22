@@ -600,14 +600,14 @@ def test_p8_resume_question_three_steps_then_closes_without_staff_help():
     assert logic._resay_open_question(t + 2) is None
 
 
-def test_p8_resume_question_silence_climbs_the_three_steps():
+def test_p8_resume_question_silence_asks_once_then_closes_like_off():
+    """세 단계(reask_ladder)여도 대답 없음은 꺼짐과 같다 — 15 s 에 같은 질문, 30 s 에 말없이 닫기(원칙 8, Task N4)."""
     logic, t = paused_resume_asked(reask_ladder=True)
     asked = t - 1.0
-    assert _says(_tick(logic, asked + 15.0)) == [MSG_REASK_RETRY]
-    assert _says(_tick(logic, asked + 29.9)) == []
-    assert _says(_tick(logic, asked + 30.0)) == [MSG_REASK_LOUDER]
-    assert _says(_tick(logic, asked + 45.0)) == []
-    assert logic._resay_open_question(asked + 45.0) is None
+    assert _says(_tick(logic, asked + 15.0)) == [MSG_RESUME_CONFIRM]
+    assert _says(_tick(logic, asked + 29.9)) == [] and logic._resay_open_question(asked + 29.9) is not None
+    assert _says(_tick(logic, asked + 30.0)) == []
+    assert logic._resay_open_question(asked + 30.0) is None
     assert logic.help_phase == "none" and logic.state == State.PAUSED
 
 

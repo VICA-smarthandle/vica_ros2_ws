@@ -188,12 +188,13 @@ def test_p9_inwindow_wake_resays_the_question_without_climbing_when_only_the_lad
 
 
 def test_p9_inwindow_wake_resay_restarts_the_silence_clock():
-    """다시 말한 질문의 15 s 시계는 그때부터 — 다시 말하자마자 사다리 문장이 이어지지 않는다("다시 말해줘"와 같다)."""
-    logic, t = confirming(reask_ladder=True)                 # t-1 에 물음 → t+14 에 ①
+    """다시 말한 질문의 15 s 시계는 그때부터 — 다시 말하자마자 또 묻지 않는다("다시 말해줘"와 같다). 대답이 없으면 그때 원래 질문을
+    다시 말한다(원칙 8, Task N4 — 대답 없음은 사다리 문장이 아니다)."""
+    logic, t = confirming(reask_ladder=True)                 # t-1 에 물음 → t+14 에 다시 묻기
     _voice(logic, t + 12, WAKE_ONLY)
     assert logic._confirm_reask_at == t + 12 + QUESTION_REASK_SEC
     assert _says(logic.on_tick(t + 14.5, NavStatus.NONE)) == []
-    assert _says(logic.on_tick(t + 27.5, NavStatus.NONE)) == [MSG_REASK_RETRY]
+    assert _says(logic.on_tick(t + 27.5, NavStatus.NONE)) == [TOILET_ASK]
 
 
 # ---- 호출이 접지 않는 질문은 그대로 ---------------------------------------------------------------

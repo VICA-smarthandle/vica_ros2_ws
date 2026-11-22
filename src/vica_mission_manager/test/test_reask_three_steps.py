@@ -1,9 +1,10 @@
 """세 단계 되묻기 — 파라미터 reask_ladder 가 켜졌을 때만(원칙 8 · 9 · 21 · 31, Task 3.8).
 
-켜지면 미션 질문이 열린 채 못 알아들었거나(unknown) 대답이 없을 때 ① "잘 듣지 못했습니다. 다시 말씀해 주세요."
+켜지면 미션 질문이 열린 채 못 알아들었을 때(unknown) ① "잘 듣지 못했습니다. 다시 말씀해 주세요."
 ② "죄송합니다. 더 크게, 또박또박 말씀해 주세요." ③ 안내 주행 중에만 "직원의 도움이 필요하신가요?" 그다음은 그 질문이
 끝까지 대답을 못 받았을 때 하던 일. ①② 는 질문을 다시 말하지 않고 그 문장만 말한다 — 질문의 종류·후보는 그대로,
 질문 기록에는 원래 질문(question_text)과 단계(step). 질문이 없는 상태의 못 알아들은 말도 같은 순서로 되묻는다.
+대답이 없을 때(시계)는 켜져도 꺼짐과 같다 — 원래 질문을 다시 말한다(Task N4, test_reask_silence_resays).
 꺼져 있으면(기본값) 지금 그대로 — 같은 질문을 한 번 다시.
 """
 from pathlib import Path
@@ -91,10 +92,11 @@ def test_p9_the_voice_handed_retry_sentence_is_not_said_twice():
     assert _says(acts) == [MSG_REASK_RETRY]
 
 
-def test_p8_silence_and_not_understood_share_one_count():
+def test_p8_silence_and_not_understood_count_apart():
+    """대답 없음은 원래 질문을 다시 말하고 사다리를 올리지 않는다 — 그 뒤의 못 알아들은 말은 ① 부터(Task N4)."""
     logic, t = confirming(reask_ladder=True)
-    assert _says(logic.on_tick(t + 16, NavStatus.NONE)) == [MSG_REASK_RETRY]            # 대답 없음
-    assert _says(logic.on_voice_intent(intent("unknown"), t + 20, lookup, BOUNDS, True)) == [MSG_REASK_LOUDER]
+    assert _says(logic.on_tick(t + 16, NavStatus.NONE)) == [TOILET_ASK]                 # 대답 없음 — 원래 질문
+    assert _says(logic.on_voice_intent(intent("unknown"), t + 20, lookup, BOUNDS, True)) == [MSG_REASK_RETRY]
 
 
 def test_off_still_reasks_the_same_question_once():
@@ -134,19 +136,16 @@ def test_p8_reask_sentences_word_for_word():
     assert MSG_REASK_LOUDER == "죄송합니다. 더 크게, 또박또박 말씀해 주세요."
 
 
-# ---- 확인 질문: 대답 없음만으로 ① → ② → 끝 ------------------------------------------------
-def test_p8_confirm_silence_steps_every_15s_then_folds():
+# ---- 확인 질문: 대답 없음은 꺼짐과 같다 — 15 s 에 원래 질문, 30 s 에 접기(Task N4) ----------------------------
+def test_p8_confirm_silence_says_the_question_at_15s_then_folds_at_30s():
     logic, t = confirming(reask_ladder=True)          # 0 초에 물음
     assert _says(logic.on_tick(14.9, NavStatus.NONE)) == []
     first = logic.on_tick(15.0, NavStatus.NONE)
-    assert _says(first) == [MSG_REASK_RETRY] and _question(first).question_text == TOILET_ASK
+    assert _says(first) == [TOILET_ASK] and (_question(first).question_text, _question(first).step) == ("", 0)
     assert _question(first).options == (("wc", "화장실"),) and _question(first).expects_reply
-    assert _says(logic.on_tick(29.9, NavStatus.NONE)) == []             # 옛 30 s 시한은 접지 않는다
+    assert _says(logic.on_tick(29.9, NavStatus.NONE)) == []
     assert logic.state == State.CONFIRMING
-    second = logic.on_tick(30.0, NavStatus.NONE)
-    assert _says(second) == [MSG_REASK_LOUDER] and _question(second).step == 2
-    assert _says(logic.on_tick(44.9, NavStatus.NONE)) == []
-    assert _says(logic.on_tick(45.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]
+    assert _says(logic.on_tick(30.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]   # 꺼짐과 같은 30 s 시한
     assert logic.state == State.IDLE
 
 
@@ -155,7 +154,7 @@ def test_p8_confirm_silence_waits_while_the_user_is_speaking():
     logic.on_listen_state("speech", 14.0)
     assert _says(logic.on_tick(15.0, NavStatus.NONE)) == []
     logic.on_listen_state("empty:short-reject", 16.0)
-    assert _says(logic.on_tick(16.1, NavStatus.NONE)) == [MSG_REASK_RETRY]
+    assert _says(logic.on_tick(16.1, NavStatus.NONE)) == [TOILET_ASK]
 
 
 # ---- 안내 취소 확인(주행 중): ① ② ③ 직원 도움 --------------------------------------------
@@ -169,12 +168,13 @@ def test_p21_cancel_question_while_driving_goes_retry_louder_help():
     assert logic.state == State.NAVIGATING
 
 
-def test_p21_cancel_question_silence_also_reaches_help_while_driving():
+def test_p21_cancel_question_silence_never_reaches_help_while_driving():
+    """대답 없음은 직원 도움(③)으로 가지 않는다 — 15 s 에 같은 질문, 30 s 에 조용히 닫기(꺼짐과 같다, Task N4)."""
     logic, t = navigating(reask_ladder=True)
     _voice(logic, "cancel", t)                                       # t 에 물음
-    assert _says(logic.on_tick(t + 15, NavStatus.NONE)) == [MSG_REASK_RETRY]
-    assert _says(logic.on_tick(t + 30, NavStatus.NONE)) == [MSG_REASK_LOUDER]
-    assert _says(logic.on_tick(t + 45, NavStatus.NONE)) == [MSG_HELP_CONFIRM]
+    assert _says(logic.on_tick(t + 15, NavStatus.NONE)) == [MSG_CANCEL_CONFIRM]
+    assert _says(logic.on_tick(t + 30, NavStatus.NONE)) == [] and not logic.cancel_confirm_pending
+    assert _says(logic.on_tick(t + 45, NavStatus.NONE)) == [] and logic.help_phase == "none"
 
 
 def test_p8_cancel_question_not_driving_closes_quietly():
@@ -197,12 +197,11 @@ def test_p21_help_question_goes_retry_louder_then_drops_without_a_third():
     assert logic.help_phase == "none" and logic.state == State.NAVIGATING
 
 
-def test_p8_help_question_silence_steps_then_drops():
+def test_p8_help_question_silence_asks_once_then_drops():
     logic, t = navigating(reask_ladder=True)
     _voice(logic, "help", t)
-    assert _says(logic.on_tick(t + 15, NavStatus.NONE)) == [MSG_REASK_RETRY]
-    assert _says(logic.on_tick(t + 30, NavStatus.NONE)) == [MSG_REASK_LOUDER]
-    assert _says(logic.on_tick(t + 45, NavStatus.NONE)) == []
+    assert _says(logic.on_tick(t + 15, NavStatus.NONE)) == [MSG_HELP_CONFIRM]   # 대답 없음 — 원래 질문(Task N4)
+    assert _says(logic.on_tick(t + 30, NavStatus.NONE)) == []                   # 꺼짐과 같은 30 s 시한
     assert logic.help_phase == "none"
 
 
@@ -213,7 +212,7 @@ def test_p8_help_cancel_question_steps_then_keeps_the_request():
     assert _says(_voice(logic, "cancel", t + 2)) == [MSG_HELP_CANCEL_CONFIRM]
     first = _voice(logic, "unknown", t + 3)
     assert _says(first) == [MSG_REASK_RETRY] and _question(first).question_text == MSG_HELP_CANCEL_CONFIRM
-    assert _says(logic.on_tick(t + 3 + 15, NavStatus.NONE)) == [MSG_REASK_LOUDER]
+    assert _says(logic.on_tick(t + 3 + 15, NavStatus.NONE)) == [MSG_HELP_CANCEL_CONFIRM]   # 대답 없음 — 원래 질문
     assert _says(logic.on_tick(t + 3 + 30, NavStatus.NONE)) == []
     assert not logic.help_cancel_pending and logic.help_phase == "requested"
 
@@ -228,12 +227,11 @@ def test_p8_arrival_question_goes_retry_louder_then_leaving_notice():
 
 
 def test_p8_arrival_silence_keeps_its_8s_clock():
+    """8 초 침묵 → 같은 질문 → 또 8 초 → 떠나기 예고(꺼짐과 같다, Task N4)."""
     logic, _ = asking(reask_ladder=True)                             # 2 초에 질문 재생 끝 → 10 초 마감
-    assert _says(logic.on_tick(10.5, NavStatus.NONE)) == [MSG_REASK_RETRY]
+    assert _says(logic.on_tick(10.5, NavStatus.NONE)) == [MSG_ASK_RESTROOM]
     logic.on_arrival_question_spoken(11.0)
-    assert _says(logic.on_tick(19.5, NavStatus.NONE)) == [MSG_REASK_LOUDER]
-    logic.on_arrival_question_spoken(20.0)
-    assert _says(logic.on_tick(28.5, NavStatus.NONE)) == [MSG_LEAVING_NOTICE]
+    assert _says(logic.on_tick(19.5, NavStatus.NONE)) == [MSG_LEAVING_NOTICE]
 
 
 def test_p8_wait_time_yes_still_asks_the_same_question_then_waits_30_minutes():
@@ -249,18 +247,19 @@ def test_p8_wait_need_question_steps_then_keeps_waiting():
     assert _says(_voice(logic, "cancel", t)) == [MSG_WAIT_NEED_ASK]
     r1 = _voice(logic, "unknown", t + 1)
     assert _says(r1) == [MSG_REASK_RETRY] and _question(r1).kind == "yesno_inverted"
-    assert _says(logic.on_tick(t + 1 + 15, NavStatus.NONE)) == [MSG_REASK_LOUDER]
+    assert _says(logic.on_tick(t + 1 + 15, NavStatus.NONE)) == [MSG_WAIT_NEED_ASK]   # 대답 없음 — 원래 질문(Task N4)
     assert _says(logic.on_tick(t + 1 + 30, NavStatus.NONE)) == [MSG_CANCEL_KEPT]
     assert logic.state == State.WAITING
 
 
-def test_p8_wait_finish_question_silence_steps_then_closes():
+def test_p8_wait_finish_question_silence_asks_once():
+    """대답 없음은 꺼짐과 같다 — 15 s 에 같은 질문 한 번, 그 뒤는 다시 묻지 않는다(30 s 창이 닫힘, Task N4)."""
     logic, t = waiting_asked(reask_ladder=True)                      # t-1 에 물음
     first = logic.on_tick(t + 14.5, NavStatus.NONE)
-    assert _says(first) == [MSG_REASK_RETRY] and _question(first).question_text == MSG_WAIT_FINISH_ASK
-    assert _says(logic.on_tick(t + 29.5, NavStatus.NONE)) == [MSG_REASK_LOUDER]
-    assert MSG_REASK_LOUDER not in _says(logic.on_tick(t + 44.5, NavStatus.NONE))
-    assert logic._wait_finish_asked_at is None and logic.state == State.WAITING
+    assert _says(first) == [MSG_WAIT_FINISH_ASK] and _question(first).question_text == ""
+    assert MSG_WAIT_FINISH_ASK not in _says(logic.on_tick(t + 29.5, NavStatus.NONE))
+    assert MSG_WAIT_FINISH_ASK not in _says(logic.on_tick(t + 44.5, NavStatus.NONE))
+    assert logic._wait_finish_asked_at == t + 14.5 and logic.state == State.WAITING
 
 
 # ---- 알아들은 말 · 호출 = 처음부터 -----------------------------------------------------------
@@ -410,11 +409,11 @@ def test_p8_confirm_without_a_sentence_still_reasks_then_folds():
     assert _says(r3) == [MSG_CONFIRM_TIMEOUT] and logic.state == State.IDLE
 
 
-def test_p8_confirm_without_a_sentence_silence_steps_too():
+def test_p8_confirm_without_a_sentence_silence_folds_like_off():
+    """물을 문장이 없는 확인 질문 — 꺼짐처럼 대답 없음에 다시 묻지 않고 30 s 에 접는다(Task N4)."""
     logic, _ = _confirming_unknown_place(reask_ladder=True)        # 0 초에 들어감
-    assert _says(logic.on_tick(15.0, NavStatus.NONE)) == [MSG_REASK_RETRY]
-    assert _says(logic.on_tick(30.0, NavStatus.NONE)) == [MSG_REASK_LOUDER] and logic.state == State.CONFIRMING
-    assert _says(logic.on_tick(45.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]
+    assert _says(logic.on_tick(15.0, NavStatus.NONE)) == [] and logic.state == State.CONFIRMING
+    assert _says(logic.on_tick(30.0, NavStatus.NONE)) == [MSG_CONFIRM_TIMEOUT]
 
 
 def test_off_confirm_without_a_sentence_stays_as_today():
@@ -612,12 +611,13 @@ def test_p28_repeat_restarts_the_confirm_deadline_off():
 
 
 def test_p28_repeat_restarts_the_clock_but_not_the_ladder_on():
-    """세 단계: ①(2 s) 뒤 10 s 에 다시 말하면 다음 단은 25 s 이고, 그 단은 ② 다."""
+    """세 단계: ①(2 s) 뒤 10 s 에 다시 말하면 대답 없음의 다시 묻기는 25 s(원래 질문 — Task N4)이고, 다음 못 알아들은 말은 ② 다."""
     logic, _ = confirming(reask_ladder=True)
     assert _says(_voice(logic, "unknown", 2.0)) == [MSG_REASK_RETRY]
     _voice(logic, "repeat", 10.0)
     assert _says(logic.on_tick(17.5, NavStatus.NONE)) == []
-    assert _says(logic.on_tick(25.5, NavStatus.NONE)) == [MSG_REASK_LOUDER]
+    assert _says(logic.on_tick(25.5, NavStatus.NONE)) == [TOILET_ASK]
+    assert _says(_voice(logic, "unknown", 27.0)) == [MSG_REASK_LOUDER]
 
 
 def test_p28_repeat_after_the_leaving_notice_asks_again_and_holds_the_departure():
