@@ -342,9 +342,9 @@ def test_p9_wake_only_is_recognised_by_reply_or_handed_question():
 
 
 def test_p9_wake_only_leaves_every_question_and_count_alone():
-    """질문이 열려 있어도 "네?"는 그 질문·시한·횟수를 건드리지 않는다(알아들은 말로도 치지 않는다)."""
-    for make, state in ((idle, State.IDLE), (navigating, State.NAVIGATING), (confirming, State.CONFIRMING),
-                        (asking, State.ASKING_NEXT)):
+    """질문이 열려 있어도 "네?"는 그 질문·시한·횟수를 건드리지 않는다(알아들은 말로도 치지 않는다). 확인 질문은 빠졌다 —
+    호출이 접는 질문은 "네?" 대신 그 질문을 다시 말한다(횟수 그대로, 전체 검토 C3 — test_inwindow_wake)."""
+    for make, state in ((idle, State.IDLE), (navigating, State.NAVIGATING), (asking, State.ASKING_NEXT)):
         logic, t = make(reask_ladder=True)
         first = _voice(logic, "unknown", t)                          # 진짜 못 알아들은 말 하나 — 횟수 1
         assert _says(first) == [MSG_REASK_RETRY], make.__name__
@@ -382,12 +382,14 @@ def test_p9_wake_only_leaves_the_other_question_ladders_alone_too():
     def wait_finish_q():
         return waiting_asked(reask_ladder=True)
 
-    for make in (cancel_q, help_q, help_cancel_q, wait_need_q, wait_finish_q):
+    # 안내 취소 확인·도움 확인은 "네?" 대신 그 질문을 다시 말한다(횟수 그대로 — 전체 검토 C3, test_inwindow_wake).
+    for make, said in ((cancel_q, MSG_CANCEL_CONFIRM), (help_q, MSG_HELP_CONFIRM), (help_cancel_q, MSG_WAKE_GREETING),
+                       (wait_need_q, MSG_WAKE_GREETING), (wait_finish_q, MSG_WAKE_GREETING)):
         logic, t = make()
         assert _says(_voice(logic, "unknown", t)) == [MSG_REASK_RETRY], make.__name__
         before = _steps(logic)
         for i in range(3):
-            assert _says(_voice(logic, "unknown", t + 1 + i, **WAKE_ONLY)) == [MSG_WAKE_GREETING], make.__name__
+            assert _says(_voice(logic, "unknown", t + 1 + i, **WAKE_ONLY)) == [said], make.__name__
         assert _steps(logic) == before, make.__name__
         assert _says(_voice(logic, "unknown", t + 5)) == [MSG_REASK_LOUDER], make.__name__
 

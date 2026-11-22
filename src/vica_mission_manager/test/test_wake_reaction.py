@@ -386,11 +386,14 @@ def test_p13_wake_only_keeps_the_folded_question():
 
 
 def test_p13_wake_only_does_not_use_up_the_one_reask_when_the_ladder_is_off():
-    """세 단계 되묻기가 꺼져도(한 번 다시 묻기) 호출어만 들린 말은 그 한 번을 쓰지 않고 질문을 다시 말하지도 않는다."""
+    """세 단계 되묻기가 꺼져도(한 번 다시 묻기) 호출어만 들린 말은 그 한 번을 쓰지 않고 질문을 다시 말하지도 않는다.
+    창 안의 "비카야"도 호출처럼 확인 질문을 접고 적어 둔다(전체 검토 C3) — "응"은 다시 묻기, 그 질문의 한 번 다시는 남아 있다."""
     logic, t = confirming(wake_revive=True)
     for i in range(3):
         assert _says(logic.on_voice_intent(WAKE_ONLY, t + i, lookup, BOUNDS, True)) == [MSG_WAKE_GREETING]
-    assert logic.state == State.CONFIRMING and logic._confirm_ladder.step == 0
+    assert logic.state == State.IDLE and logic._wake_folded == ("confirm", TOILET.id, t)
+    assert _says(_voice(logic, "affirm", t + 3)) == [TOILET_ASK] and logic.state == State.CONFIRMING
+    assert logic._confirm_ladder.step == 0
     assert _says(_voice(logic, "unknown", t + 4)) == [TOILET_ASK]      # 한 번 다시 묻기는 그대로 남아 있다
 
 

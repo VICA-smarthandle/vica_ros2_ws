@@ -679,13 +679,11 @@ def test_p6_handed_question_replaces_the_resume_question(kind, ask):
     assert _says(_voice(logic, t + 21, intent("resume", need_confirm=True))) == [MSG_RESUME_CONFIRM]   # 다시 가자 = 다시 묻는다
 
 
-@pytest.mark.parametrize("flags", [{}, {"reask_ladder": True}, {"wake_revive": True},
-                                   {"reask_ladder": True, "wake_revive": True}],
-                         ids=["ladders_off", "reask_ladder", "wake_revive", "both"])
+@pytest.mark.parametrize("flags", [{}, {"reask_ladder": True}], ids=["ladders_off", "reask_ladder"])
 def test_p13_wake_greeting_handed_over_keeps_the_resume_question(flags):
     # 원칙 9 · 13 — 창 안의 "비카야"에 넘긴 "네?"는 새 질문이 아니다(note_question_asked·_resume_reask 와 같은 뜻). 재개 질문은
     # 남는다. 다음 "응"(대답 칸 open — 바꿔 읽지 않은 맨 affirm)은 그 질문의 승낙이 아니라 다시 묻기다(원칙 3, 전체 검토 C1) —
-    # 출발은 대답 칸 yes 뿐이다.
+    # 출발은 대답 칸 yes 뿐이다. wake_revive 켜짐이면 창 안 "비카야"도 호출처럼 접는다(전체 검토 C3 — test_inwindow_wake).
     logic, t = paused_resume_asked(**flags)
     _voice(logic, t, intent("unknown", ask_text=MSG_WAKE_GREETING, ask_kind="open"))
     assert logic._resay_open_question(t) is not None

@@ -994,6 +994,10 @@ WAKE_CONSUMED_GUARD_SEC = 3.0
 # "직원의 도움이 필요하신가요?")을 이 시간 안의 승낙이 다시 묻게 한다(2026-11-20 사용자 결정 — 접는 것은 그대로, 분명한
 # 승낙이면 실행하지 않고 질문으로 되살린다).
 WAKE_REVIVE_SEC = 40.0
+# 호출이 접는 질문의 이름(_open_question_name) — on_wake 가 늘 접는 확인 질문과 wake_revive 에서 _wake_fold_questions 가 접는
+# 안내 취소 확인·도움 확인·재개 확인. 듣기 창 안의 "비카야"(음성 의도, _react_inwindow_wake)는 wake_revive 켜짐에서 이것을 접고,
+# reask_ladder 만 켜짐에서는 이것을 다시 말한다(원칙 13 · 9 · 3, 전체 검토 C3). 도착·대기·접근 질문·도움 요청 취소 확인은 접지 않는다.
+_WAKE_FOLD_QUESTIONS = ("confirm", "cancel", "help_confirm", "resume")
 # 접근을 마친 뒤 같은 track_id 에 다시 다가가지 않는 시간. 거절한 사람을 로봇이
 # 계속 쫓아다니는 것이 이 기능의 가장 나쁜 실패 방식이라 값을 넉넉히 둔다.
 REAPPROACH_SUPPRESS_SEC = 60.0
@@ -2139,6 +2143,12 @@ class MissionLogic:
                 self.voice_note = f"대답 칸 {intent.answer} → {swapped.intent}"
                 intent = self._answer_swapped = swapped
                 self._reask_held = (self.reask_ladder or self.wake_revive) and self._is_wake_only(intent)
+        if self._reask_held:
+            # 원칙 13 · 9 · 3 — 듣기 창 안의 "비카야"(unknown + 넘긴 "네?", on_wake 를 거치지 않는다)도 호출로 다룬다(전체 검토 C3).
+            # 둘 다 꺼져 있으면 _reask_held 가 늘 False 라 지나간다(지금 그대로).
+            inwindow = self._react_inwindow_wake(now)
+            if inwindow is not None:
+                return inwindow
         if intent.intent == "dismiss":
             # 원칙 14 — 열린 질문이면 아니요, 안내 중이면 취소, 쉬는 중이면 끝맺는 말. 바꿔 읽은 뒤는 그 의도의 평소 길.
             swapped = self._dismiss_as(intent, now)
@@ -2195,6 +2205,35 @@ class MissionLogic:
         if reacted is not None:
             return reacted
         return self._route_voice_intent(revived, now, lookup, bounds, nav_ready)
+
+    def _react_inwindow_wake(self, now: float) -> Optional[list]:
+        """듣기 창 안에서 음성 의도로 온 "비카야"(_is_wake_only — reask_ladder 나 wake_revive 가 켜졌을 때만 부른다, 원칙 13 · 9 · 3,
+        전체 검토 C3). 맡지 않으면 None — 지금처럼 넘겨받은 "네?"만 말하고 질문·횟수는 그대로다.
+
+        음성은 창 안의 "비카야"를 on_wake_call·on_wake 없이 의도로만 보낸다. 호출이 접는 질문(_WAKE_FOLD_QUESTIONS)이 열린 채
+        "네?"만 나가면 그 뒤의 "응"이 그 질문의 승낙이 된다(출발·안내 취소·도움 요청).
+        - wake_revive 켜짐: on_wake 와 같이 접는다(_wake_fold) — 그 뒤의 "응"은 되살리기(다시 묻기, _wake_revive_as)다. 접기가
+          돌려주는 동작(바꾸기 질문이면 원래 목적지로 다시)에는 말이 없어 "네?"는 넘겨받은 말로 한 번만 나간다. 접은 것이 없으면
+          (창 밖 호출이 이미 접었거나 열린 질문이 없다) 맡지 않는다.
+        - wake_revive 꺼짐(reask_ladder 켜짐): 옛 방식이 그 자리에서 하던 대로 그 질문을 같은 문장으로 다시 말한다("네?" 대신) —
+          되묻기 횟수는 올리지 않고 시계는 지금부터 다시 잰다("다시 말해줘"와 같다, _react_repeat).
+        on_wake 가 접지 않는 상태(_wake_folds_here)와 호출이 접지 않는 질문(도착·대기·접근 질문·도움 요청 취소 확인)은 맡지 않는다."""
+        if not self._wake_folds_here():
+            return None
+        if self.wake_revive:
+            folded, confirming = self._wake_folded, self.state == State.CONFIRMING
+            actions = self._wake_fold(now)
+            if not confirming and self._wake_folded is folded:
+                return None   # 접은 질문이 없다
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "창 안 호출 — 질문을 접음")))
+            return actions
+        name = self._open_question_name(now)
+        if name not in _WAKE_FOLD_QUESTIONS:
+            return None
+        self.voice_note = " · ".join(filter(None, (self.voice_note, "창 안 호출 — 열린 질문을 다시")))
+        resaid = self._resay_question(name, now)
+        self._rearm_question_clock(name, now)
+        return resaid
 
     def _intent_from_answer(self, intent: IntentData) -> IntentData:
         """대답 칸(answer·answer_value)을 바꿔 읽은 의도(원칙 6, answer_field 켜짐·ANSWER_READ_KINDS 에서만 부른다). 바꿔 읽지
@@ -5315,18 +5354,7 @@ class MissionLogic:
             # 혼자 대기 장소로 가는 중 — 대기 상태가 될 때까지 대답하지 않는다.
             return []
         if self.state == State.CONFIRMING:
-            # 대기 중에 들어온 확인 질문이었으면 그 대기로 돌아간다. 주행 중 바꾸기
-            # 질문이었으면 원래 목적지로 다시 출발한다 — 질문 전 하던 일(안내 주행)로
-            # 돌아가는 것이고, "네?"가 나가는 참이라 출발 멘트는 보태지 않는다.
-            # 이어 목적지를 말하면 주행 중 바꾸기가 처음부터 다시 열린다.
-            # 원칙 13 — 접기 전에 읽는다(_fold_confirming 이 지운다). 목적지 id 가 없거나 미션이 모르는 곳이라 물을 문장이
-            # 없는 확인 질문은 적지 않는다 — 되살려도 다시 물을 문장이 없다(접기는 지금처럼 한다).
-            confirm_id = self._confirming_dest_id if self._confirming_dest_id and self._confirm_prompt else None
-            actions = self._fold_confirming(now, announce=False)
-            self._wake_consumed_at = now
-            if self.wake_revive:
-                self._wake_fold_questions(now, confirm_id)
-            return actions
+            return self._wake_fold(now)
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             # 질문을 접지 않는다(2026-10-07 사용자 결정, 호출 반응표). 옛 동작은 질문을
             # 접고 IDLE 이라, 부른 뒤의 "기다려 줘"·"5분"이 갈 곳 없이 무시됐다. 부른
@@ -5344,15 +5372,44 @@ class MissionLogic:
             # 이어진 "그래"·"안내를 받을게요"가 갈 곳 없이 버려졌다). 옛 동작(2026-09-01): 질문을 접고
             # 트랙을 억제한 채 IDLE.
             return []
-        if self.wake_revive:
-            # 원칙 13 — 안내 주행·일시정지 중 열린 "안내를 취소할까요?"·"직원의 도움이 필요하신가요?"·"다시 출발할까요?"도 조용히 접는다.
-            self._wake_fold_questions(now, None)
+        self._wake_fold(now)
         if self.user_attached_guard_active(now):
             # 되감기. 새로 억제를 걸지는 않는다(이미 살아 있을 때만) — 없던
             # 억제를 여기서 새로 만들면 접근·온보딩과 무관한 "비카야"에도
             # USER_ATTACHED_SUPPRESS_SEC 짜리 억제가 생긴다.
             self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
         return []
+
+    def _wake_fold(self, now: float) -> list:
+        """호출의 질문 접기 — on_wake 와 창 안의 "비카야"(_react_inwindow_wake, wake_revive 켜짐)가 같이 부른다(원칙 13 · 3).
+        부르는 쪽이 접는 상태(_wake_folds_here)에서만 부른다. 돌려주는 동작은 다시 출발할 때(바꾸기 질문)만 있다."""
+        if self.state == State.CONFIRMING:
+            # 대기 중에 들어온 확인 질문이었으면 그 대기로 돌아간다. 주행 중 바꾸기
+            # 질문이었으면 원래 목적지로 다시 출발한다 — 질문 전 하던 일(안내 주행)로
+            # 돌아가는 것이고, "네?"가 나가는 참이라 출발 멘트는 보태지 않는다.
+            # 이어 목적지를 말하면 주행 중 바꾸기가 처음부터 다시 열린다.
+            # 원칙 13 — 접기 전에 읽는다(_fold_confirming 이 지운다). 목적지 id 가 없거나 미션이 모르는 곳이라 물을 문장이
+            # 없는 확인 질문은 적지 않는다 — 되살려도 다시 물을 문장이 없다(접기는 지금처럼 한다).
+            confirm_id = self._confirming_dest_id if self._confirming_dest_id and self._confirm_prompt else None
+            actions = self._fold_confirming(now, announce=False)
+            self._wake_consumed_at = now
+            if self.wake_revive:
+                self._wake_fold_questions(now, confirm_id)
+            return actions
+        if self.wake_revive:
+            # 원칙 13 — 안내 주행·일시정지 중 열린 "안내를 취소할까요?"·"직원의 도움이 필요하신가요?"·"다시 출발할까요?"도 조용히 접는다.
+            self._wake_fold_questions(now, None)
+        return []
+
+    def _wake_folds_here(self) -> bool:
+        """on_wake 가 지금 상태에서 질문 접기(_wake_fold)까지 가는가 — 창 안의 "비카야"가 on_wake 와 같은 곳에서만 접거나 다시
+        말하게 한다(전체 검토 C3). on_wake 가 먼저 돌려보내는 상태: 순찰·도킹(나오다 멈춤 포함)·대기와 손 놓기 기다림·대기 장소로
+        가는 길·도착 질문과 대기 시간 질문·접근 질문(호출 반응표 2026-10-07 · 10-09). on_wake 의 갈래를 바꾸면 이것도 같이
+        바꾼다(test_inwindow_wake 가 반응표의 모든 상태에서 견준다)."""
+        if self.dock_mode or self.dock_pending:
+            return False
+        return self.state not in (*_PATROL_STATES, State.WAITING, State.WAITING_RELEASE, *_WAIT_MOVING_STATES,
+                                  State.ASKING_NEXT, State.ASKING_WAIT_TIME, State.AWAITING_USER)
 
     def _wake_fold_questions(self, now: float, confirm_id: Optional[str]) -> None:
         """호출이 되돌리기 어려운 질문을 조용히 접고 하나를 적어 둔다(원칙 13 · 3, wake_revive 켜짐에서만 부른다).
