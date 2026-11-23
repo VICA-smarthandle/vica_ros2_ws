@@ -306,11 +306,10 @@ def test_help_again_after_ack_repeats_coming():
 
 @pytest.mark.parametrize("make", [requested, acknowledged])
 def test_d8_destination_proposal_keeps_pause(make):
-    """음성이 "화장실로 안내해드릴까요?"를 물어도 미션은 확인 상태로 넘어가지 않는다 — "아니요"·무응답이면"""
+    """미션이 "화장실로 안내해드릴까요?"를 물어도(3-가) 확인 상태로 넘어가지 않는다 — "아니요"·무응답이면"""
     logic, t = make()
     phase = logic.help_phase
-    acts = _voice(logic, "navigate", t, matched_destination_id=TOILET.id, need_confirm=True)
-    assert acts == []
+    _voice(logic, "navigate", t, matched_destination_id=TOILET.id, need_confirm=True)
     assert logic.state == State.PAUSED and logic.paused_destination == ROOM
     _voice(logic, "deny", t + 1.0)
     logic.on_tick(t + 40.0, NavStatus.NONE)
@@ -318,6 +317,24 @@ def test_d8_destination_proposal_keeps_pause(make):
     assert logic.help_phase == phase
     _, reason = logic.on_resume_request(True, t + 41.0)
     assert reason == GateReason.OK
+
+
+def test_help_proposal_asks_and_stays_paused():
+    """3-가 한 목소리 — 확인 질문은 미션이 한다. 일시정지와 도움 요청은 그대로(10-16 결정 1)."""
+    logic, t = requested()
+    acts = _voice(logic, "navigate", t, matched_destination_id=TOILET.id, need_confirm=True)
+    asks = [a for a in acts if isinstance(a, Say)]
+    assert [(a.text, a.expects_reply, a.kind) for a in asks] == [("화장실로 안내해드릴까요?", True, "confirm")]
+    assert logic.state == State.PAUSED and logic.help_phase == "requested"
+    assert not any(isinstance(a, Navigate) for a in acts)
+
+
+def test_help_acknowledged_proposal_says_coming():
+    """관리자가 오는 중의 제안 — 확정 요청과 같은 말(결정 D)."""
+    logic, t = acknowledged()
+    acts = _voice(logic, "navigate", t, matched_destination_id=TOILET.id, need_confirm=True)
+    assert acts == [Say(MSG_HELP_COMING, priority="response")]
+    assert logic.state == State.PAUSED
 
 
 def test_d3_confirmed_destination_before_ack_departs_and_cancels():

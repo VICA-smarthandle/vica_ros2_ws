@@ -8,8 +8,10 @@
 #include "sensor_msgs/msg/range.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "vica_interfaces/msg/robot_state.hpp"
 #include "vica_interfaces/msg/smart_handle_state.hpp"
 #include "vica_interfaces/msg/turn_guide.hpp"
 
@@ -91,6 +93,11 @@ public:
       "/estop_state", 10, [this](const std_msgs::msg::Bool & m) {core_->on_estop(m.data);});
     sub_goal_ = create_subscription<std_msgs::msg::String>(
       "/vica_goal_event", 10, [this](const std_msgs::msg::String & m) {core_->on_goal(m.data);});
+    sub_robot_state_ = create_subscription<vica_interfaces::msg::RobotState>(
+      "/vica/robot_state", 10,
+      [this](const vica_interfaces::msg::RobotState & m) {
+        core_->on_robot_state(m.dialog_state);
+      });
     sub_haptic_ = create_subscription<std_msgs::msg::String>(
       "/vica/haptic_request", 10,
       [this](const std_msgs::msg::String & m) {core_->on_haptic(m.data);});
@@ -108,6 +115,18 @@ public:
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this, true);
       }
+      pub_front_on_ = create_publisher<std_msgs::msg::Bool>(
+        "/vica/ultrasonic/front_enabled", rclcpp::QoS(1).transient_local());
+      srv_front_ = create_service<std_srvs::srv::SetBool>(
+        "/vica/ultrasonic/front_enable",
+        [this](
+          const std::shared_ptr<std_srvs::srv::SetBool::Request> req,
+          std::shared_ptr<std_srvs::srv::SetBool::Response> res) {
+          res->success = core_->set_front_ultrasonic(req->data, res->message);
+          publish_front_state();
+        });
+      publish_front_state();
+      timer_front_ = create_wall_timer(std::chrono::seconds(1), [this] {publish_front_state();});
     }
 
     timer_send_ = create_wall_timer(
@@ -121,6 +140,13 @@ public:
   }
 
   void shutdown_to_neutral() {core_->shutdown_to_neutral();}
+
+  void publish_front_state()
+  {
+    std_msgs::msg::Bool m;
+    m.data = core_->front_ultrasonic_on();
+    pub_front_on_->publish(m);
+  }
 
   int64_t steady_now_ns() override {return steady_clock_.now().nanoseconds();}
   int64_t ros_now_ns() override {return get_clock()->now().nanoseconds();}
@@ -186,12 +212,15 @@ private:
   rclcpp::Subscription<vica_interfaces::msg::TurnGuide>::SharedPtr sub_turn_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_estop_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_goal_;
+  rclcpp::Subscription<vica_interfaces::msg::RobotState>::SharedPtr sub_robot_state_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_haptic_;
   rclcpp::Publisher<vica_interfaces::msg::SmartHandleState>::SharedPtr pub_state_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Range>::SharedPtr> us_pubs_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_front_on_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_front_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  rclcpp::TimerBase::SharedPtr timer_send_, timer_diag_, timer_uplink_;
+  rclcpp::TimerBase::SharedPtr timer_send_, timer_diag_, timer_uplink_, timer_front_;
 };
 
 }

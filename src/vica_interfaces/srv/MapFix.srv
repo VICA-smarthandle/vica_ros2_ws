@@ -1,0 +1,12 @@
+string map_id
+
+string action
+
+string args_json
+---
+bool accepted
+
+string reason
+string message
+
+string result_json

@@ -44,6 +44,8 @@ _TOPIC_FIELDS = (
     ('max_hz', 0.0),
     ('fault_code', ''),
     ('optional', False),
+    ('require_true', ['']),
+    ('require_true_messages', ['']),
 )
 _LINK_FIELDS = (
     ('component', ''),
@@ -82,6 +84,7 @@ class ExternalDiagnosticsNode(Node):
 
         self.topic_diagnostics: dict = {}
         self.topic_counts: dict = {}
+        self.topic_fields: dict = {}
         self.skipped_probes: list = []
 
         self._build_topic_probes()
@@ -168,9 +171,14 @@ class ExternalDiagnosticsNode(Node):
             self.create_subscription(
                 msg_class,
                 spec.topic,
-                self._make_topic_callback(spec.name, diagnostic),
+                self._make_topic_callback(spec.name, diagnostic, spec.require_true),
                 qos,
             )
+            if spec.require_true:
+                self.updater.add(
+                    f'{spec.component}: {spec.topic} state',
+                    self._make_field_task(spec),
+                )
 
     def _build_link_probes(self) -> None:
         """Register publisher-presence probes. 구독하지 않고 그래프만 본다."""
@@ -254,14 +262,43 @@ class ExternalDiagnosticsNode(Node):
         except (ValueError, OSError, AttributeError):
             return 0
 
-    def _make_topic_callback(self, name: str, diagnostic):
+    def _make_topic_callback(self, name: str, diagnostic, fields=()):
         """Build a subscription callback that ticks the frequency diagnostic."""
 
-        def callback(_msg) -> None:
+        def callback(msg) -> None:
             self.topic_counts[name] = self.topic_counts.get(name, 0) + 1
             diagnostic.tick()
+            if fields:
+                values = {field: bool(getattr(msg, field, False)) for field in fields}
+                self.topic_fields[name] = (values, self.steady_clock.now().nanoseconds)
 
         return callback
+
+    def _make_field_task(self, spec):
+        """require_true 칸 검사. 칸이 거짓이면 ERROR, 그 칸의 문구를 보인다."""
+        stale_ns = int(3.0 / spec.min_hz * 1e9)
+        messages = dict(zip(spec.require_true, spec.require_true_messages))
+
+        def task(stat):
+            stat.add('topic', spec.topic)
+            last = self.topic_fields.get(spec.name)
+            if last is None:
+                stat.summary(DiagnosticStatus.OK, '아직 받은 상태가 없습니다(주기 검사가 판정)')
+                return stat
+            values, at_ns = last
+            if self.steady_clock.now().nanoseconds - at_ns > stale_ns:
+                stat.summary(DiagnosticStatus.OK, '최근 상태가 없습니다(주기 검사가 판정)')
+                return stat
+            for field, value in values.items():
+                stat.add(field, str(value).lower())
+            bad = [messages[f] for f, v in values.items() if not v]
+            if bad:
+                stat.summary(DiagnosticStatus.ERROR, ' '.join(bad))
+            else:
+                stat.summary(DiagnosticStatus.OK, '정상')
+            return stat
+
+        return task
 
     def sample_processes(self) -> None:
         """Refresh CPU percentages for every configured process probe."""

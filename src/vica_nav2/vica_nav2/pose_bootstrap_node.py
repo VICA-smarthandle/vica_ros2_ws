@@ -22,6 +22,7 @@ from .pose_score import (
     build_likelihood_field,
     beam_hits,
     filter_beams,
+    map_fingerprint,
     MapGrid,
     MIN_BEAMS,
     MIN_MARGIN,
@@ -177,12 +178,13 @@ class PoseBootstrapNode(Node):
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         info = msg.info
-        key = (info.width, info.height, info.resolution,
-               info.origin.position.x, info.origin.position.y, len(msg.data))
+        cells = np.asarray(msg.data, dtype=np.int8)
+        key = map_fingerprint(info.width, info.height, info.resolution,
+                              info.origin.position.x, info.origin.position.y, cells)
         with self._lock:
             if key == self._map_key and self._field is not None:
                 return
-        data = np.asarray(msg.data, dtype=np.int8).reshape(info.height, info.width)
+        data = cells.reshape(info.height, info.width)
         grid = MapGrid(data, info.resolution, info.origin.position.x, info.origin.position.y)
         field = build_likelihood_field(grid)
         with self._lock:

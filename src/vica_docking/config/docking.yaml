@@ -1,0 +1,25 @@
+vica_docking:
+  ros__parameters:
+    destinations_path: ""
+    map_id: ""
+    auto_initial_pose: true
+    boot_check_s: 20.0
+    trace_dir: ""
+
+    approach:
+      target_cm: 14.0
+      stage_cm: 100.0
+      lead: 0.0136
+      vmax: 0.10
+      vfinal: 0.05
+      max_time: 60.0
+      lost_timeout_s: 3.0
+
+    undock:
+      until_cm: 85.0
+      clear_pre: 0.80
+      lead_back: 0.024
+      lead_turn_deg: 5.4
+      turn_dir: 1
+      wait_timeout: 30.0
+      turn_done_deg: 10.0

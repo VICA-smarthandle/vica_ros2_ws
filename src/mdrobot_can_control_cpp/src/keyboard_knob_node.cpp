@@ -51,6 +51,7 @@ public:
     p.invert_mot2 = declare_parameter<bool>("invert_mot2", false);
     p.min_rpm_when_moving = declare_parameter<int64_t>("min_rpm_when_moving", 0);
     p.can_reconnect_interval_sec = declare_parameter<double>("can_reconnect_interval_sec", 1.0);
+    p.ignore_knob = declare_parameter<bool>("ignore_knob", false);
 
     core_ = std::make_unique<Core>(p);
     core_->now_fn = [this]() {return steady_clock_->now().nanoseconds();};
@@ -121,7 +122,13 @@ public:
       [this]() {core_->control_loop();});
 
     RCLCPP_INFO(get_logger(), "Subscribed: /cmd_vel_safe");
-    RCLCPP_INFO(get_logger(), "knob1 = 최고속도 제한기");
+    if (p.ignore_knob) {
+      RCLCPP_WARN(
+        get_logger(),
+        "ignore_knob=true — 가변저항(knob)을 무시한다(시험용). 속도 상한 = max_linear_mps, 줄로 세우는 정지 없음");
+    } else {
+      RCLCPP_INFO(get_logger(), "knob1 = 최고속도 제한기");
+    }
     RCLCPP_INFO(get_logger(), "Ready.");
   }
 

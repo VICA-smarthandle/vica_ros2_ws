@@ -1,0 +1,8 @@
+string map_id
+---
+bool found
+string map_id
+string[] destination_ids
+string[] names
+string[] watch_off
+string message

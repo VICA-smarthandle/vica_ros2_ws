@@ -1,0 +1,1 @@
+{"at": "2026-11-19T21:44:14+09:00", "kind": "scan", "radius_m": 2.0, "added": 21, "removed": 0, "black": null, "gray": null, "rects": null, "pose": [-5.7034, 2.4152, -3.0623], "seq": 1, "map": {"width": 572, "height": 443, "resolution": 0.05, "origin_x": -15.1, "origin_y": -8.59}}

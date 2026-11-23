@@ -14,7 +14,11 @@ from std_msgs.msg import Bool
 from .can_link import CanLink
 from .can_preflight import require_can_interface_up
 from .freshness import is_fresh_ns, sec_to_ns
-from .motor_watchdog import motor_speed_ratio, normalize_knob_pct
+from .motor_watchdog import (
+    motor_speed_ratio,
+    motor_speed_ratio_ignoring_knob,
+    normalize_knob_pct,
+)
 
 
 CAN_FAILURES = (can.CanError, OSError, ValueError)
@@ -76,6 +80,8 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         self.declare_parameter('min_rpm_when_moving', 0)
 
+        self.declare_parameter('ignore_knob', False)
+
         self.declare_parameter('can_reconnect_interval_sec', 1.0)
 
         self.can_iface = self.get_parameter('can_iface').value
@@ -107,6 +113,7 @@ class MdrobotCanKeyboardKnobNode(Node):
         self.min_rpm_when_moving = int(
             self.get_parameter('min_rpm_when_moving').value
         )
+        self.ignore_knob = bool(self.get_parameter('ignore_knob').value)
 
         self.can_reconnect_interval_sec = float(
             self.get_parameter('can_reconnect_interval_sec').value
@@ -175,7 +182,12 @@ class MdrobotCanKeyboardKnobNode(Node):
         )
 
         self.get_logger().info('Subscribed: /cmd_vel_safe')
-        self.get_logger().info('knob1 = 최고속도 제한기')
+        if self.ignore_knob:
+            self.get_logger().warn(
+                'ignore_knob=true — 가변저항(knob)을 무시한다(시험용). '
+                '속도 상한 = max_linear_mps, 줄로 세우는 정지 없음')
+        else:
+            self.get_logger().info('knob1 = 최고속도 제한기')
         self.get_logger().info('Ready.')
 
     def now_ns(self) -> int:
@@ -345,15 +357,22 @@ class MdrobotCanKeyboardKnobNode(Node):
 
         knob_norm = normalize_knob_pct(
             int(self.knob1), self.knob_min_pct, self.knob_max_pct)
-        speed_ratio = motor_speed_ratio(
-            cmd_last_ns=self.last_cmd_ns,
-            knob_last_ns=self.last_knob_ns,
-            knob_pct=knob_norm,
-            now_ns=now,
-            cmd_timeout_ns=self.cmd_timeout_ns,
-            knob_timeout_ns=self.knob_timeout_ns,
-            deadzone_pct=self.deadzone_pct,
-        )
+        if self.ignore_knob:
+            speed_ratio = motor_speed_ratio_ignoring_knob(
+                cmd_last_ns=self.last_cmd_ns,
+                now_ns=now,
+                cmd_timeout_ns=self.cmd_timeout_ns,
+            )
+        else:
+            speed_ratio = motor_speed_ratio(
+                cmd_last_ns=self.last_cmd_ns,
+                knob_last_ns=self.last_knob_ns,
+                knob_pct=knob_norm,
+                now_ns=now,
+                cmd_timeout_ns=self.cmd_timeout_ns,
+                knob_timeout_ns=self.knob_timeout_ns,
+                deadzone_pct=self.deadzone_pct,
+            )
 
         if not can_ok:
             speed_ratio = 0.0

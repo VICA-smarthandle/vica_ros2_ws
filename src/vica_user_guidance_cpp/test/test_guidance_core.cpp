@@ -10,6 +10,7 @@
 
 #include "gtest/gtest.h"
 
+#include "vica_user_guidance_cpp/driver_core.hpp"
 #include "vica_user_guidance_cpp/frames.hpp"
 #include "vica_user_guidance_cpp/guidance.hpp"
 #include "vica_user_guidance_cpp/pyfmt.hpp"
@@ -164,6 +165,82 @@ TEST(Priority, EstopArrivalTurnOrder)
   EXPECT_FALSE(is_fresh_ns(2000, 1999, 1000));
 }
 
+TEST(Patrol, DialogStateToCode)
+{
+  EXPECT_EQ(patrol_state_code("patrolling"), protocol::STATE_PATROL);
+  EXPECT_EQ(patrol_state_code("patrol_dwell"), protocol::STATE_PATROL);
+  EXPECT_EQ(patrol_state_code("patrol_paused"), protocol::STATE_PATROL);
+  EXPECT_EQ(patrol_state_code("patrol_light"), protocol::STATE_PATROL_LIGHT);
+  EXPECT_EQ(patrol_state_code("patrol_alarm"), protocol::STATE_PATROL_ALARM);
+  EXPECT_EQ(protocol::STATE_PATROL, 8);
+  EXPECT_EQ(protocol::STATE_PATROL_LIGHT, 9);
+  EXPECT_EQ(protocol::STATE_PATROL_ALARM, 10);
+  for (const char * s : {"", "idle", "navigating", "paused", "estopped", "waiting", "Patrolling",
+      " patrol_alarm", "patro"})
+  {
+    EXPECT_EQ(patrol_state_code(s), PATROL_NONE) << s;
+  }
+  EXPECT_EQ(patrol_state_code("patrol_alarm2"), protocol::STATE_PATROL);
+}
+
+TEST(Patrol, SitsBetweenEstopAndArrival)
+{
+  const int64_t sec = 1000000000;
+  const int64_t now = 100 * sec;
+  GuidanceInputs in;
+  in.estop_last_ns = now;
+  in.turn_direction = DIRECTION_LEFT;
+  in.turn_last_ns = now;
+  in.arrival_started_ns = now;
+  auto run = [&](bool estop_required = true) {
+      return resolve_state_code(in, now, sec, sec, 4 * sec, estop_required);
+    };
+  EXPECT_EQ(run().state_code, protocol::STATE_ARRIVED);
+  in.patrol_last_ns = now;
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT, protocol::STATE_DOCKED,
+      protocol::STATE_PATROL_ALARM})
+  {
+    in.patrol_code = code;
+    in.estop_active = false;
+    EXPECT_EQ(run().state_code, code);
+    EXPECT_TRUE(protocol::is_sendable(run().state_code));
+    in.estop_active = true;
+    EXPECT_EQ(run().state_code, protocol::STATE_ESTOP);
+  }
+  in.estop_active = false;
+  in.estop_last_ns = std::nullopt;
+  EXPECT_STREQ(run().reason, "estop_stale");
+  EXPECT_STREQ(run(false).reason, "patrol_alarm");
+  in.estop_last_ns = now;
+  for (int code : {0, 1, 3, 4, 5, 7, 11, -1}) {
+    in.patrol_code = code;
+    EXPECT_EQ(run().state_code, protocol::STATE_ARRIVED) << code;
+  }
+}
+
+TEST(Patrol, DroppedWhenRobotStateIsSilentForThreeSeconds)
+{
+  const int64_t sec = 1000000000;
+  const int64_t now = 100 * sec;
+  GuidanceInputs in;
+  in.estop_last_ns = now;
+  in.turn_direction = DIRECTION_RIGHT;
+  in.turn_last_ns = now;
+  in.patrol_code = protocol::STATE_PATROL;
+  auto code = [&]() {return resolve_state_code(in, now, sec, sec, 4 * sec, true).state_code;};
+  EXPECT_EQ(PATROL_STATE_TIMEOUT_NS, 3 * sec);
+  in.patrol_last_ns = now - 3 * sec;
+  EXPECT_EQ(code(), protocol::STATE_PATROL);
+  in.patrol_last_ns = now - 3 * sec - 1;
+  EXPECT_EQ(code(), protocol::STATE_RIGHT);
+  in.patrol_last_ns = std::nullopt;
+  EXPECT_EQ(code(), protocol::STATE_RIGHT);
+  in.patrol_last_ns = now + 1;
+  EXPECT_EQ(code(), protocol::STATE_RIGHT);
+  EXPECT_EQ(active_patrol_code(protocol::STATE_PATROL_ALARM, now, now), protocol::STATE_PATROL_ALARM);
+  EXPECT_EQ(active_patrol_code(protocol::STATE_PATROL_ALARM, now - 4 * sec, now), PATROL_NONE);
+}
+
 TEST(Gate, ReportsTransitionOnce)
 {
   RangeTfGate gate(2);
@@ -243,6 +320,29 @@ TEST(SerialLinkRules, RefusesWatchdogAndStateCodesOnRawPath)
   EXPECT_THROW(link.send(protocol::STATE_LINK_LOST, 0), PyError);
   EXPECT_THROW(link.send_raw(protocol::STATE_ESTOP, 0), PyError);
   EXPECT_FALSE(link.send(protocol::STATE_NORMAL, 0));
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT,
+      protocol::STATE_PATROL_ALARM})
+  {
+    EXPECT_NO_THROW(link.send(code, 0));
+    EXPECT_THROW(link.send_raw(code, 0), PyError);
+  }
+  EXPECT_THROW(link.send(protocol::STATE_CHARGED, 0), PyError);
+  EXPECT_THROW(link.send(11, 0), PyError);
+}
+
+TEST_F(PtyTest, PatrolCodesGoOutAsOneByte)
+{
+  SerialLink link(path_, 115200, true, 0.05, 2000000000, open_posix_serial);
+  ASSERT_TRUE(link.connected());
+  for (int code : {protocol::STATE_PATROL, protocol::STATE_PATROL_LIGHT,
+      protocol::STATE_PATROL_ALARM})
+  {
+    EXPECT_TRUE(link.send(code, 0));
+    uint8_t got = 0xFF;
+    ASSERT_EQ(::read(master_, &got, 1), 1);
+    EXPECT_EQ(got, code);
+    EXPECT_EQ(link.last_state_code(), code);
+  }
 }
 
 TEST(SerialLinkRules, MissingPortIsPortOpenFault)
@@ -250,4 +350,44 @@ TEST(SerialLinkRules, MissingPortIsPortOpenFault)
   SerialLink link("/dev/vica_no_such_handle", 115200, true, 0.05, 2000000000, open_posix_serial);
   EXPECT_FALSE(link.connected());
   EXPECT_EQ(link.fault_code(), FAULT_PORT_OPEN);
+}
+
+TEST(Docking, DockedDialogStateMapsToCode6)
+{
+  EXPECT_EQ(patrol_state_code("docked"), protocol::STATE_DOCKED);
+  EXPECT_EQ(protocol::STATE_DOCKED, 6);
+  EXPECT_TRUE(protocol::is_sendable(protocol::STATE_DOCKED));
+  EXPECT_EQ(patrol_state_code("docking"), PATROL_NONE);
+  EXPECT_EQ(patrol_state_code("undocking"), PATROL_NONE);
+  EXPECT_STREQ(patrol_reason(protocol::STATE_DOCKED), "docked");
+}
+
+TEST(RuntimeSwitch, OffSendsClearThreeTimesThenStops)
+{
+  using A = RuntimeChannelSwitch::Action;
+  RuntimeChannelSwitch s(8);
+  EXPECT_EQ(s.action(1), A::Normal);
+  EXPECT_TRUE(s.set({1, 2}, false));
+  for (int i = 0; i < RuntimeChannelSwitch::kClearFrames; ++i) {
+    EXPECT_EQ(s.action(1), A::Clear) << i;
+    s.cleared(1);
+  }
+  EXPECT_EQ(s.action(1), A::Skip);
+  EXPECT_EQ(s.action(2), A::Clear);
+  EXPECT_EQ(s.action(5), A::Normal);
+  EXPECT_FALSE(s.on(1));
+}
+
+TEST(RuntimeSwitch, OnResumesAtOnceAndSameStateIsNoChange)
+{
+  using A = RuntimeChannelSwitch::Action;
+  RuntimeChannelSwitch s(8);
+  EXPECT_FALSE(s.set({1, 2}, true));
+  s.set({1, 2}, false);
+  EXPECT_FALSE(s.set({1, 2}, false));
+  s.cleared(1);
+  EXPECT_TRUE(s.set({1, 2}, true));
+  EXPECT_EQ(s.action(1), A::Normal);
+  EXPECT_TRUE(s.on(2));
+  EXPECT_FALSE(s.set({9, -1}, false));
 }

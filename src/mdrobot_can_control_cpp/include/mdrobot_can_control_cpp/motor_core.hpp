@@ -113,6 +113,12 @@ inline int64_t normalize_knob_pct(int64_t raw_pct, int64_t min_pct, int64_t max_
   return std::max<int64_t>(0, std::min<int64_t>(100, scaled));
 }
 
+inline double motor_speed_ratio_ignoring_knob(
+  std::optional<int64_t> cmd_last_ns, int64_t now_ns, int64_t cmd_timeout_ns)
+{
+  return is_fresh_ns(cmd_last_ns, now_ns, cmd_timeout_ns) ? 1.0 : 0.0;
+}
+
 inline double motor_speed_ratio(
   std::optional<int64_t> cmd_last_ns, std::optional<int64_t> knob_last_ns,
   int64_t knob_pct, int64_t now_ns, int64_t cmd_timeout_ns, int64_t knob_timeout_ns,
@@ -194,6 +200,7 @@ struct Params
   bool invert_mot1 = false;
   bool invert_mot2 = false;
   int64_t min_rpm_when_moving = 0;
+  bool ignore_knob = false;
   double can_reconnect_interval_sec = 1.0;
 };
 
@@ -404,7 +411,9 @@ public:
     }
 
     const int64_t knob_norm = normalize_knob_pct(knob1, p.knob_min_pct, p.knob_max_pct);
-    double speed_ratio = motor_speed_ratio(
+    double speed_ratio = p.ignore_knob ?
+      motor_speed_ratio_ignoring_knob(last_cmd_ns, now, cmd_timeout_ns) :
+      motor_speed_ratio(
       last_cmd_ns, last_knob_ns, knob_norm, now, cmd_timeout_ns, knob_timeout_ns,
       p.deadzone_pct);
 

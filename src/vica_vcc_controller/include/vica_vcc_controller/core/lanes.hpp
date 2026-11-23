@@ -49,6 +49,12 @@ public:
     target_ = std::clamp(std::round(d / p_.step) * p_.step, -p_.max_offset, p_.max_offset);
     pending_count_ = 0;
   }
+  void shiftTarget(double delta)
+  {
+    if (std::abs(target_) < 1e-9) {return;}
+    target_ = snapLane(target_ + delta);
+    if (pending_count_ > 0 && std::abs(pending_) > 1e-9) {pending_ = snapLane(pending_ + delta);}
+  }
   double target() const {return target_;}
   bool blocked() const {return blocked_;}
   double currentClearance() const {return current_clearance_;}
@@ -60,6 +66,11 @@ public:
   Path lanePath(const Path & path, double v) const;
 
 private:
+  double snapLane(double d) const
+  {
+    const double k = std::floor(std::abs(d) / p_.step + 0.5 - 1e-9);
+    return std::clamp(std::copysign(k * p_.step, d), -p_.max_offset, p_.max_offset);
+  }
   Path candidatePath(const Path & path, double cand, double shift_speed) const;
   double minClearance(const Path & lane, const ClearanceFn & f) const;
   LaneScore evaluate(const Path & path, double v_des, double cand, const ClearanceFn & f) const;

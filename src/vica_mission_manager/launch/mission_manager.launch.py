@@ -1,8 +1,11 @@
 """vica_mission_manager launch."""
+import os
 from typing import List
 
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import (
     EnvironmentVariable,
     LaunchConfiguration,
@@ -10,6 +13,33 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def _docking_nodes(map_id) -> List[Node]:
+    """도킹 노드(2026-11-18) — 미션이 유일한 지휘자라 미션과 같이 뜨고 같이 내린다."""
+    try:
+        share = get_package_share_directory("vica_docking")
+    except PackageNotFoundError:
+        return []
+    return [
+        Node(
+            package="vica_docking",
+            executable="vica_docking_node",
+            name="vica_docking",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_docking")),
+            parameters=[
+                os.path.join(share, "config", "docking.yaml"),
+                {
+                    "destinations_path": ParameterValue(
+                        LaunchConfiguration("destinations_yaml"), value_type=str),
+                    "map_id": ParameterValue(map_id, value_type=str),
+                    "trace_dir": ParameterValue(
+                        LaunchConfiguration("docking_trace_dir"), value_type=str),
+                },
+            ],
+        )
+    ]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -33,6 +63,8 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=default_destinations,
             ),
             DeclareLaunchArgument("map_yaml", default_value=""),
+            DeclareLaunchArgument("use_docking", default_value="true"),
+            DeclareLaunchArgument("docking_trace_dir", default_value=""),
             DeclareLaunchArgument("confirm_timeout_sec", default_value="30.0"),
             DeclareLaunchArgument("estop_release_grace_sec", default_value="1.0"),
             DeclareLaunchArgument(
@@ -60,10 +92,31 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("handle_side_min_yaw_deg", default_value="135.0"),
             DeclareLaunchArgument("return_resume_sec", default_value="15.0"),
             DeclareLaunchArgument("dest_retry_return_sec", default_value="0.0"),
-            DeclareLaunchArgument("grip_release_grace_sec", default_value="0.5"),
-            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="5.0"),
-            DeclareLaunchArgument("grip_assume_held", default_value="true"),
+            DeclareLaunchArgument("grip_release_grace_sec", default_value="0.1"),
+            DeclareLaunchArgument("grip_enter_window_sec", default_value="1.0"),
+            DeclareLaunchArgument("grip_wait_timeout_sec", default_value="10.0"),
+            DeclareLaunchArgument("grip_assume_held", default_value="false"),
+            DeclareLaunchArgument("grip_release_stop", default_value="false"),
+            DeclareLaunchArgument("speaker_gate", default_value="false"),
+            DeclareLaunchArgument("spk_joined_threshold", default_value="0.50"),
+            DeclareLaunchArgument("speaker_gate_grip", default_value="false"),
+            DeclareLaunchArgument("reask_ladder", default_value="false"),
+            DeclareLaunchArgument("wake_revive", default_value="false"),
+            DeclareLaunchArgument("answer_field", default_value="false"),
             DeclareLaunchArgument("obstacle_narration", default_value="true"),
+            DeclareLaunchArgument("patrol_dwell_sec", default_value="3.0"),
+            DeclareLaunchArgument("patrol_intruder_repeat_sec", default_value="3.0"),
+            DeclareLaunchArgument("patrol_light_repeat_sec", default_value="10.0"),
+            DeclareLaunchArgument("patrol_alarm_resend_sec", default_value="10.0"),
+            DeclareLaunchArgument("patrol_detector_timeout_sec", default_value="3.0"),
+            DeclareLaunchArgument("patrol_arming_timeout_sec", default_value="15.0"),
+            DeclareLaunchArgument("patrol_speed_mps", default_value="0.6"),
+            DeclareLaunchArgument("patrol_max_leg_failures", default_value="3"),
+            DeclareLaunchArgument(
+                "patrol_media_dir",
+                default_value=PathJoinSubstitution(
+                    [EnvironmentVariable("HOME"), "workspaces", "isaac_ros-dev", "vica_patrol"]),
+            ),
             Node(
                 package="vica_mission_manager",
                 executable="mission_manager",
@@ -139,14 +192,61 @@ def generate_launch_description() -> LaunchDescription:
                             LaunchConfiguration("grip_wait_timeout_sec"),
                             value_type=float,
                         ),
+                        "grip_enter_window_sec": ParameterValue(
+                            LaunchConfiguration("grip_enter_window_sec"),
+                            value_type=float,
+                        ),
                         "grip_assume_held": ParameterValue(
                             LaunchConfiguration("grip_assume_held"),
+                            value_type=bool,
+                        ),
+                        "grip_release_stop": ParameterValue(
+                            LaunchConfiguration("grip_release_stop"),
+                            value_type=bool,
+                        ),
+                        "speaker_gate": ParameterValue(
+                            LaunchConfiguration("speaker_gate"),
+                            value_type=bool,
+                        ),
+                        "spk_joined_threshold": ParameterValue(
+                            LaunchConfiguration("spk_joined_threshold"),
+                            value_type=float,
+                        ),
+                        "speaker_gate_grip": ParameterValue(
+                            LaunchConfiguration("speaker_gate_grip"),
+                            value_type=bool,
+                        ),
+                        "reask_ladder": ParameterValue(
+                            LaunchConfiguration("reask_ladder"),
+                            value_type=bool,
+                        ),
+                        "wake_revive": ParameterValue(
+                            LaunchConfiguration("wake_revive"),
+                            value_type=bool,
+                        ),
+                        "answer_field": ParameterValue(
+                            LaunchConfiguration("answer_field"),
                             value_type=bool,
                         ),
                         "obstacle_narration": ParameterValue(
                             LaunchConfiguration("obstacle_narration"),
                             value_type=bool,
                         ),
+                        **{
+                            name: ParameterValue(
+                                LaunchConfiguration(name), value_type=float)
+                            for name in (
+                                "patrol_dwell_sec", "patrol_intruder_repeat_sec",
+                                "patrol_light_repeat_sec", "patrol_alarm_resend_sec",
+                                "patrol_detector_timeout_sec", "patrol_arming_timeout_sec",
+                                "patrol_speed_mps")
+                        },
+                        "patrol_max_leg_failures": ParameterValue(
+                            LaunchConfiguration("patrol_max_leg_failures"),
+                            value_type=int,
+                        ),
+                        "patrol_media_dir": ParameterValue(
+                            LaunchConfiguration("patrol_media_dir"), value_type=str),
                     }
                 ],
             ),
@@ -156,5 +256,6 @@ def generate_launch_description() -> LaunchDescription:
                 output="screen",
                 parameters=[{"pulse_sec": LaunchConfiguration("estop_pulse_sec")}],
             ),
+            *_docking_nodes(map_id),
         ]
     )

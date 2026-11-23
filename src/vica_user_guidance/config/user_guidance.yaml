@@ -70,10 +70,10 @@ user_guidance_driver_node:
       - /ultrasonic/front_left
       - /ultrasonic/front_right
       - /ultrasonic/right_wheel
-      - /ultrasonic/right_rear_wheel
-      - /ultrasonic/rear_right
-      - /ultrasonic/rear_left
-      - /ultrasonic/left_rear_wheel
+      - /ultrasonic/dock_right_rear_wheel
+      - /ultrasonic/dock_rear_right
+      - /ultrasonic/dock_rear_left
+      - /ultrasonic/dock_left_rear_wheel
     ultrasonic_frame_ids:
       - usonic_left_wheel
       - usonic_front_left
@@ -84,10 +84,10 @@ user_guidance_driver_node:
       - usonic_rear_left
       - usonic_left_rear_wheel
     ultrasonic_fov_rad: 0.524
-    ultrasonic_fov_rad_per_channel: [-1.0, 0.349, 0.349, -1.0, -1.0, -1.0, -1.0, -1.0]
+    ultrasonic_fov_rad_per_channel: [-1.0, 0.349, 0.349, -1.0, 1.047, 1.047, 1.047, 1.047]
     ultrasonic_min_range_m: 0.02
     ultrasonic_max_range_m: 1.50
-    ultrasonic_max_range_m_per_channel: [0.40, -1.0, -1.0, 0.40, -1.0, -1.0, -1.0, -1.0]
-    ultrasonic_measurement_delay_ms: [210, 210, 105, 210, 105, 420, 315, 105]
-    ultrasonic_channel_enabled: [false, true, true, false, false, false, false, false]
+    ultrasonic_max_range_m_per_channel: [0.40, -1.0, -1.0, 0.40, 0.70, 0.80, 0.80, 0.70]
+    ultrasonic_measurement_delay_ms: [210, 315, 210, 210, 105, 315, 210, 105]
+    ultrasonic_channel_enabled: [false, true, true, false, true, true, true, true]
     ultrasonic_stale_warn_sec: 2.0

@@ -57,6 +57,14 @@ class GripMeter:
                 held += hi - lo
         return held / window
 
+    def touched_within(self, now: float, sec: float) -> bool:
+        """[now-sec, now] 안에 '잡음' 구간이 하나라도 있었나."""
+        start = now - sec
+        for seg_start, seg_end, value in self._segments(now):
+            if value and seg_end > start and seg_start <= now:
+                return True
+        return False
+
     def released_for(self, now: float) -> float:
         """지금까지 계속 '놓음'이었던 시간(초). 잡고 있으면 0, 기록이 없으면 무한대."""
         if self._value_at(now):

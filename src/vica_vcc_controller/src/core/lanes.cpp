@@ -9,6 +9,11 @@ namespace vica_vcc_controller::core
 namespace
 {
 bool same(double a, double b) {return std::abs(a - b) < 1e-6;}
+
+bool towardRail(double cand, double target)
+{
+  return std::abs(cand) < std::abs(target) - 1e-9 && cand * target >= -1e-9;
+}
 }
 
 void LaneSelector::reset()
@@ -96,6 +101,11 @@ void LaneSelector::update(
       pending_count_ = 0;
     } else if (!same(best->offset, target_) && best->score < cur->score - p_.switch_margin) {
       if (same(pending_, best->offset) && pending_count_ > 0) {
+        ++pending_count_;
+      } else if (pending_count_ > 0 && towardRail(pending_, target_) &&
+        towardRail(best->offset, target_))
+      {
+        pending_ = best->offset;
         ++pending_count_;
       } else {
         pending_ = best->offset;

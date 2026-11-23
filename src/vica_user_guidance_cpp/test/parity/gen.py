@@ -79,6 +79,14 @@ HAPTICS = [
 
 DIRECTIONS = [0, 1, 2, 1, 2, 0, 3, 255]
 
+# /vica/robot_state 의 dialog_state(2026-11-14 순찰 표시). 순찰 값·아닌 값·닮은 값.
+DIALOGS = [
+    'idle', 'navigating', 'waiting', 'estopped', 'paused', '',
+    'patrolling', 'patrolling', 'patrol_dwell', 'patrol_paused', 'patrol_light', 'patrol_alarm',
+    'patrol_light', 'patrol_alarm', 'patrol', 'patrol_alarm2', 'patrol_lights', 'patrolX',
+    'Patrolling', ' patrol_alarm', 'patro', 'PATROL_ALARM', '순찰', 'patrol 순찰',
+]
+
 
 def xor(body):
     x = 0
@@ -129,6 +137,10 @@ class Gen:
         self.pending = b''          # 다음 수신으로 넘길 쪼개진 꼬리
         self.estop_on = True        # /estop_state 를 보내는 중인가(끊기면 stale)
         self.estop_val = False
+        # 순찰 사건은 따로 뽑는다 — 기존 사건의 난수 순서를 건드리지 않게.
+        self.rng_patrol = random.Random(seed * 1000003 + 20261114)
+        self.rstate_on = True       # /vica/robot_state 를 보내는 중인가(끊기면 3 s 뒤 순찰 표시 해제)
+        self.rstate_val = 'idle'
         frame_ids = params.get('ultrasonic_frame_ids', ['usonic_front_left', 'usonic_front_right'])
         self.frame_ids = sorted(set(frame_ids))
 
@@ -233,6 +245,16 @@ class Gen:
                 self.emit('goal ' + rng.choice(GOALS).encode().hex())
             if rng.random() < 0.01:
                 self.emit('haptic ' + rng.choice(HAPTICS).encode().hex())
+            # 순찰 상태: 2 Hz 쯤으로 오고, 가끔 값이 바뀌거나 통째로 끊긴다. 순찰 중 진동 요청도 넣는다.
+            rp = self.rng_patrol
+            if rp.random() < 0.004:
+                self.rstate_on = not self.rstate_on
+            if self.rstate_on and rp.random() < 0.1:
+                if rp.random() < 0.1:
+                    self.rstate_val = rp.choice(DIALOGS)
+                self.emit('rstate ' + self.rstate_val.encode().hex())
+            if self.rstate_val.startswith('patrol') and rp.random() < 0.01:
+                self.emit('haptic ' + rp.choice(HAPTICS[:4]).encode().hex())
 
             # 상향 수신 → 타이머들(파이썬 판 주기: 읽기 20 Hz, 전송 10 Hz, 진단 2 Hz)
             data = self.uplink_bytes()

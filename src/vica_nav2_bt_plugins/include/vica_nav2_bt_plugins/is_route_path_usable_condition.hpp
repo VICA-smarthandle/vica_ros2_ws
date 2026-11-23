@@ -36,6 +36,10 @@ public:
       BT::InputPort<std::string>("global_frame", std::string("map"), "경로 frame"),
       BT::InputPort<std::string>("robot_base_frame", std::string("base_footprint"), "로봇 frame"),
       BT::InputPort<double>("transform_tolerance", 0.2, "TF 허용 지연 (s)"),
+      BT::InputPort<double>("keep_rail_goal_dist", 0.0,
+        "인계 거리 안이어도 목적지가 레일 선에서 이 거리(m) 안이고 남은 레일이 코너면 레일 유지. 0 이면 끔(2026-10-28)"),
+      BT::InputPort<double>("keep_rail_min_turn_deg", 15.0,
+        "남은 레일의 시작·끝 방향 차이가 이 각(도) 이상이어야 코너로 본다"),
     };
   }
 

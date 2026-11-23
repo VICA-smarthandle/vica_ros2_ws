@@ -76,7 +76,10 @@ def test_default_config_matches_python_line_by_line():
                     'L W [초음파]', 'L I [초음파]', 'L I [HAPTIC]', 'L W [HAPTIC] 모르는',
                     'L W [HAPTIC] ', 'L I [HANDLE] ARRIVED', 'L I [HANDLE] LEFT',
                     'L I [HANDLE] RIGHT', 'L W [HANDLE] ESTOP(3) reason=estop_stale',
-                    'L W 초음파 프레임 수신 끊김', 'X '):
+                    'L W 초음파 프레임 수신 끊김', 'X ',
+                    'W 08', 'W 09', 'W 0a', 'L I [HANDLE] PATROL(8)',
+                    'L I [HANDLE] PATROL_LIGHT(9)', 'L I [HANDLE] PATROL_ALARM(10)',
+                    'L I [HAPTIC] 순찰 중'):
             total[key] = total.get(key, 0) + count(py, key)
     for key, n in total.items():
         if key == 'X ':
@@ -163,6 +166,47 @@ def test_other_configs_match_python(overrides):
     for seed in (7, 8):
         py, cpp = both(scenario(seed, 600, overrides))
         assert py == cpp, f'[{overrides}] seed {seed}: {first_difference(py, cpp)}'
+
+
+def test_patrol_priority_and_timeout_scenario():
+    """순찰 표시(2026-11-14) — 두 판이 같고, 나간 바이트가 명세(4.D)대로인지 손으로 짠 순서로 본다."""
+    t0 = 1_000_000_000_000
+    sec = 1_000_000_000
+
+    def hx(s):
+        return s.encode().hex()
+
+    lines = ['P ' + json.dumps(base_params(), ensure_ascii=False),
+             f'T {t0}', 'R 1791000000000000000', 'start',
+             'estop 0', 'send',
+             'rstate ' + hx('navigating'), 'turn 1', 'send',
+             'rstate ' + hx('patrolling'), 'send',
+             'goal ' + hx('{"event": "goal_succeeded"}'), 'send',
+             'haptic ' + hx('long'),
+             'rstate ' + hx('patrol_dwell'), 'send',
+             'rstate ' + hx('patrol_paused'), 'send',
+             f'T {t0 + 5 * sec}', 'estop 0',
+             'rstate ' + hx('patrol_light'), 'send',
+             'rstate ' + hx('patrol_alarm'), 'send',
+             'estop 1', 'send',
+             'estop 0', 'send',
+             f'T {t0 + 8 * sec}', 'estop 0', 'send',
+             f'T {t0 + 8 * sec + 1}', 'send',
+             'turn 2', 'send',
+             'haptic ' + hx('long'),
+             'rstate ' + hx('patrolling'), 'send',
+             'rstate ' + hx('idle'), 'turn 0', 'send',
+             'shutdown']
+    py, cpp = both('\n'.join(lines) + '\n')
+    assert py == cpp, first_difference(py, cpp)
+    out = py.splitlines()
+    written = [line[2:] for line in out if line.startswith('W ')]
+    assert written == ['00', '01', '08', '08', '08', '08', '09', '0a', '03', '0a', '0a', '00',
+                       '02', '11', '08', '00', '00'], written
+    assert 'L I [HAPTIC] 순찰 중 — long 무시' in out
+    assert 'L I [HANDLE] PATROL(8) reason=patrol' in out
+    assert 'L I [HANDLE] PATROL_LIGHT(9) reason=patrol_light' in out
+    assert 'L I [HANDLE] PATROL_ALARM(10) reason=patrol_alarm' in out
 
 
 def test_startup_errors_are_the_python_errors():

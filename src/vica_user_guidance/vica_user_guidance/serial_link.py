@@ -85,7 +85,7 @@ class SerialLink:
 
     def send_raw(self, byte: int, now_ns: int) -> bool:
         """상태코드가 아닌 바이트(햅틱 명령 등)를 1개 전송한다. 성공하면 True."""
-        if 0 <= byte <= protocol.STATE_CHARGED:
+        if 0 <= byte <= protocol.STATE_CODE_MAX:
             raise ValueError(
                 f"상태코드 범위({byte})는 send_raw 로 보내지 않는다. send() 를 쓸 것."
             )

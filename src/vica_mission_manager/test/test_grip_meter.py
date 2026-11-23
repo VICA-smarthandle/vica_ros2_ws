@@ -106,3 +106,20 @@ def test_history_is_bounded():
         m.update(t, i % 2 == 0, True)
         t += 0.1
     assert len(m._points) < 100
+
+
+def test_touched_within_after_auto_release():
+    """대기 중 본인 확인(2026-11-11 설계 B2) — TTP223 은 쥔 채 약 8.2 s 뒤 '놓음'으로 읽힌다."""
+    m = GripMeter(stale_sec=1.0)
+    feed(m, [(t / 2, True) for t in range(0, 17)])
+    feed(m, [(8.2, False), (8.7, False)])
+    assert not m.contact(9.0)
+    assert m.touched_within(9.0, 10.0)
+    feed(m, [(9.2 + t / 2, False) for t in range(0, 20)])
+    assert not m.touched_within(19.0, 10.0)
+
+
+def test_touched_within_never_touched():
+    m = GripMeter(stale_sec=1.0)
+    feed(m, [(0.0, False), (0.5, False)])
+    assert not m.touched_within(1.0, 10.0)

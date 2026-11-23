@@ -8,8 +8,9 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import String
 from tf2_geometry_msgs import do_transform_point
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -29,6 +30,8 @@ from vica_perception.inference_gate import (
     InferenceGate,
     InferenceReason,
 )
+from vica_perception.patrol_profile import is_patrol_state, parse_watch_off
+from vica_perception.patrol_wiring import PatrolWiring
 from vica_perception.person_geometry import (
     bbox_center,
     body_depth_median_m,
@@ -37,11 +40,36 @@ from vica_perception.person_geometry import (
 
 DEFAULT_ENGINE = "/workspaces/isaac_ros-dev/models/v6-blur-640/weights/best.engine"
 
+DEFAULT_APPROACH_MIN_CONFIDENCE = 0.8
+
+APPROACH_PARAM_DEFAULTS = {
+    "approach_min_confidence": DEFAULT_APPROACH_MIN_CONFIDENCE,
+    "approach_min_distance_m": DEFAULT_MIN_DISTANCE_M,
+    "approach_max_distance_m": DEFAULT_MAX_DISTANCE_M,
+}
+
+
+def approach_gate_thresholds(get_param) -> GateThresholds:
+    """노드 파라미터 → 접근 관문 문턱. get_param(이름) 이 값을 돌려준다."""
+    return GateThresholds(
+        min_confidence=float(get_param("approach_min_confidence")),
+        min_distance_m=float(get_param("approach_min_distance_m")),
+        max_distance_m=float(get_param("approach_max_distance_m")),
+    )
+
+
+def load_engine(path: str):
+    """엔진을 올리고 한 번 돌려 본다. 기동(지팡이 엔진)과 첫 순찰(순찰 엔진)이 같이 쓴다."""
+    from ultralytics import YOLO
+    model = YOLO(path)
+    model.predict(np.zeros((480, 640, 3), dtype=np.uint8), device=0, verbose=False)
+    return model
+
 
 class PersonDetectorNode(Node):
     """배선만 갖는다 — 판정은 detection_gate, 기하는 person_geometry."""
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, load_model=None) -> None:
         super().__init__("person_detector_node")
         self.declare_parameter("engine_path", DEFAULT_ENGINE)
         self.declare_parameter("conf_threshold", 0.25)
@@ -49,22 +77,20 @@ class PersonDetectorNode(Node):
         self.declare_parameter("target_frame", "map")
         self.declare_parameter("gate_while_moving", True)
         self.declare_parameter("robot_state_timeout_s", DEFAULT_STATE_TIMEOUT_S)
-        self.declare_parameter("approach_min_distance_m", DEFAULT_MIN_DISTANCE_M)
-        self.declare_parameter("approach_max_distance_m", DEFAULT_MAX_DISTANCE_M)
+        for name, default in APPROACH_PARAM_DEFAULTS.items():
+            self.declare_parameter(name, default)
 
         self._model = model
         self._conf = float(self.get_parameter("conf_threshold").value)
         self._period_s = 1.0 / float(self.get_parameter("publish_rate_hz").value)
         self._target_frame = str(self.get_parameter("target_frame").value)
 
-        self._approach_min_m = float(
-            self.get_parameter("approach_min_distance_m").value)
-        self._approach_max_m = float(
-            self.get_parameter("approach_max_distance_m").value)
-        self._gate = DetectionGate(GateThresholds(
-            min_distance_m=self._approach_min_m,
-            max_distance_m=self._approach_max_m,
-        ))
+        thresholds = approach_gate_thresholds(
+            lambda name: self.get_parameter(name).value)
+        self._approach_min_m = thresholds.min_distance_m
+        self._approach_max_m = thresholds.max_distance_m
+        self._approach_min_conf = thresholds.min_confidence
+        self._gate = DetectionGate(thresholds)
         self._infer_gate = InferenceGate(
             state_timeout_s=float(
                 self.get_parameter("robot_state_timeout_s").value),
@@ -83,6 +109,21 @@ class PersonDetectorNode(Node):
             RequestApproach, "/vica/mission/request_approach")
         self._throttle = ApproachRequestThrottle()
         self._pending_since_ns: int | None = None
+        self._load_model = load_model
+        self._patrol: PatrolWiring | None = None
+        self._patrol_busy = False
+        self._patrol_ok = (
+            load_model is not None
+            and "dialog_state" in RobotState.get_fields_and_field_types())
+        if load_model is not None and not self._patrol_ok:
+            self.get_logger().warning(
+                "RobotState 에 dialog_state 가 없다(옛 vica_interfaces) — 순찰 프로필 꺼짐")
+        self._patrol_watch_off: frozenset = frozenset()
+        if self._patrol_ok:
+            self.create_subscription(
+                String, "/vica/patrol/watch", self._on_patrol_watch,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Image, "/camera/camera/color/image_raw",
                                  self._on_color, qos_profile_sensor_data)
         self.create_subscription(Image, "/camera/camera/depth/image_rect_raw",
@@ -93,10 +134,11 @@ class PersonDetectorNode(Node):
                                  self._on_robot_state, 10)
         self.get_logger().info(
             "person_detector_node 시작 (conf %.2f, %.1f Hz, frame %s, "
-            "주행 중 추론 %s, 접근 거리 %.1f~%.1f m)"
+            "주행 중 추론 %s, 접근 거리 %.1f~%.1f m, 접근 conf ≥ %.2f)"
             % (self._conf, 1.0 / self._period_s, self._target_frame,
                "차단" if self._infer_gate.enabled else "허용",
-               self._approach_min_m, self._approach_max_m))
+               self._approach_min_m, self._approach_max_m,
+               self._approach_min_conf))
 
     def _on_depth(self, msg: Image) -> None:
         self._depth = msg
@@ -107,8 +149,37 @@ class PersonDetectorNode(Node):
     def _on_robot_state(self, msg: RobotState) -> None:
         self._infer_gate.observe_state(
             time.monotonic_ns(), msg.is_moving, msg.is_paused)
+        if self._patrol_busy or (
+                self._patrol_ok and is_patrol_state(msg.dialog_state)):
+            if self._patrol is None:
+                self._patrol = PatrolWiring(
+                    self, self._load_model,
+                    rate_hz=1.0 / self._period_s,
+                    state_timeout_s=float(
+                        self.get_parameter("robot_state_timeout_s").value))
+                self._patrol.set_watch_off(self._patrol_watch_off)
+            self._patrol.on_dialog_state(msg.dialog_state)
+
+    def _on_patrol_watch(self, msg: String) -> None:
+        off = parse_watch_off(msg.data)
+        if off is None:
+            return
+        if self._patrol is not None:
+            self._patrol.set_watch_off(off)
+        elif off != self._patrol_watch_off:
+            self.get_logger().info(
+                "순찰 감시 항목 알림 — 끔: %s" % (", ".join(sorted(off)) or "없음"))
+        self._patrol_watch_off = off
+
+    def patrol_shutdown(self) -> None:
+        """종료 직전에 부른다. 순찰을 쓴 적이 없으면 아무것도 안 한다."""
+        if self._patrol is not None:
+            self._patrol.shutdown()
 
     def _on_color(self, msg: Image) -> None:
+        if self._patrol_busy:
+            self._patrol.on_color(msg)
+            return
         now_ns = time.monotonic_ns()
         reason = self._infer_gate.reason(now_ns)
         if reason is not self._last_infer_reason:
@@ -256,20 +327,21 @@ class PersonDetectorNode(Node):
 
 
 def main(args=None) -> None:
-    from ultralytics import YOLO
+    from ultralytics import YOLO  # noqa: F401
     rclpy.init(args=args)
     import os
     engine = os.environ.get("VICA_YOLO_ENGINE", DEFAULT_ENGINE)
-    model = YOLO(engine)
-    model.predict(np.zeros((480, 640, 3), dtype=np.uint8), device=0, verbose=False)
-    node = PersonDetectorNode(model)
+    node = PersonDetectorNode(load_engine(engine), load_engine)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.patrol_shutdown()
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

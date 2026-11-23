@@ -24,6 +24,9 @@ STATE_NAMES = {
     3: "ESTOP",
     4: "LINK_LOST",
     5: "ARRIVED",
+    8: "PATROL",
+    9: "PATROL_LIGHT",
+    10: "PATROL_ALARM",
 }
 
 SEND_HZ = 10.0
@@ -163,6 +166,23 @@ def case_8(b: Bench) -> None:
     b.hold(0, 6.0)
 
 
+def case_9(b: Bench) -> None:
+    b.hold(0, 1.0)
+    b.hold(8, 6.0)
+
+
+def case_10(b: Bench) -> None:
+    b.hold(0, 1.0)
+    b.hold(9, 6.0)
+
+
+def case_11(b: Bench) -> None:
+    b.hold(8, 2.0)
+    b.hold(10, 6.0)
+    print("  코드 3(비상정지)으로 바꿉니다 — 주황 점멸 + 긴 진동 1회여야 한다.")
+    b.hold(3, 3.0)
+
+
 CASES = [
     (1, "부팅 직후 워치독 보류",
      case_1,
@@ -197,6 +217,19 @@ CASES = [
      "전송 중단 1.5초 뒤 양쪽 빨간색 상시 점등(점멸 아님), 서보 중앙. "
      "전송 재개 시 하늘색 복귀",
      "워치독 + LINK_LOST (핵심)"),
+    (9, "순찰 중",
+     case_9,
+     "양쪽 연두색 상시 점등(하늘색·충전 초록과 구분), 서보 중앙, 진동 없음",
+     "PATROL (코드 8)"),
+    (10, "순찰 — 불 켜짐",
+     case_10,
+     "양쪽 진노랑 상시 점등(연두와 구분), 서보 중앙, 진동 없음",
+     "PATROL_LIGHT (코드 9)"),
+    (11, "순찰 — 감지 경보",
+     case_11,
+     "연두 → 양쪽 빨간색 점멸(0.3초, 빨강부터 켜짐), 서보 중앙, 진동 없음. "
+     "이어서 비상정지는 주황 점멸",
+     "PATROL_ALARM (코드 10) → ESTOP 전환"),
 ]
 
 
@@ -234,7 +267,7 @@ def main() -> int:
     parser.add_argument("--port", default=DEFAULT_PORT, help=f"기본: {DEFAULT_PORT}")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     parser.add_argument("--list", action="store_true", help="시험 항목만 출력")
-    parser.add_argument("--case", type=int, help="특정 항목 실행 (1~8)")
+    parser.add_argument("--case", type=int, help="특정 항목 실행 (1~11)")
     parser.add_argument("--all", action="store_true", help="전체 순차 실행")
     parser.add_argument("--send", type=int, help="상태코드 1회 전송")
     parser.add_argument("--hold", type=int, help="상태코드를 10Hz로 계속 전송")

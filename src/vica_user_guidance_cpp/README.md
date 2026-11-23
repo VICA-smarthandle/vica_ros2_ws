@@ -37,7 +37,7 @@ C++ 판은 TF 수신을 `tf2_ros::TransformListener`의 자기 스레드에서 �
 | 파일 | 역할 | 파이썬 판 |
 | --- | --- | --- |
 | `driver_core.*` | 드라이버 콜백·주기 처리의 판정과 순서 | `user_guidance_driver_node.py` 메서드 |
-| `guidance.*` | 우선순위 병합·도착 이벤트·TF 게이트·신선도 | `guidance_priority.py`·`range_tf_gate.py`·`timebase.py` |
+| `guidance.*` | 우선순위 병합·순찰 표시(2026-11-14)·도착 이벤트·TF 게이트·신선도 | `guidance_priority.py`·`range_tf_gate.py`·`timebase.py` |
 | `frames.*` | 상향 프레임 누적기(초음파·터치·통계·설정) | `ultrasonic_frame.py`·`touch_frame.py`·`ultrasonic_stats.py` |
 | `serial_link.*`, `posix_serial.cpp` | 시리얼 래퍼, pyserial 3.5 동작을 옮긴 tty | `serial_link.py` + pyserial |
 | `turn_core.*` | 방향지시 콜백·주기 처리의 판정과 순서 | `turn_guide_node.py` 메서드 |
@@ -98,7 +98,7 @@ Ctrl+C 때 방향지시는 두 판 다 마지막 IDLE 을 **못 보낸다**(rclp
 
 ## 빌드·배포 주의
 
-- `vica_interfaces`(TurnGuide·SmartHandleState)를 바꾸면 **이 패키지도 다시 빌드한다.** C++ 판은 메시지 모양을
+- `vica_interfaces`(TurnGuide·SmartHandleState·RobotState)를 바꾸면 **이 패키지도 다시 빌드한다.** C++ 판은 메시지 모양을
   컴파일할 때 박아 넣는다 — 옛 바이너리가 새 메시지와 짝이 어긋나면 조용히 값이 깨질 수 있다(파이썬 판은 그때그때 읽어
   이 문제가 없다). 메인 작업공간에서는 `colcon build --packages-up-to vica_user_guidance` 가 둘 다 짓는다.
 - C++ 판이 설치돼 있지 않으면 launch 가 경고를 남기고 파이썬 판으로 띄운다(손잡이 안내가 통째로 꺼지지 않게).

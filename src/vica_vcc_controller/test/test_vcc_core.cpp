@@ -425,6 +425,80 @@ TEST(VccCore, TurnExitKeepsNearestLaneAsTarget)
   EXPECT_NEAR(out.offset, 0.4, 0.011);
 }
 
+namespace
+{
+CoreOutput exitTurnAtLeft04(VccCore & c, const World & w, double & t)
+{
+  Path back;
+  for (double s = 0.0; s <= 0.1; s += 0.05) {back.push_back({s, 0.0, 0.0});}
+  for (double s = 0.05; s <= 2.0; s += 0.05) {back.push_back({0.1 - s, 0.0, M_PI});}
+  CoreOutput out = c.step(inputs(back, w, t, 0.3));
+  for (int i = 1; i <= 10 && out.state != State::Track; ++i) {
+    t += 0.1;
+    out = c.step(inputs(line(-0.4, 0.0), w, t, 0.4));
+  }
+  return out;
+}
+}
+
+TEST(VccCore, NewPathFromRobotDoesNotPushTheLaneAgain)
+{
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out = exitTurnAtLeft04(c, w, t);
+  ASSERT_EQ(out.state, State::Track);
+  ASSERT_NEAR(out.target, 0.4, 1e-9);
+  c.onNewPath();
+  out = c.step(inputs(line(0.0, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(0.0, 0.0), w, t += 0.1, 0.4));
+  EXPECT_NEAR(out.offset, 0.0, 0.011);
+  EXPECT_NEAR(out.target, 0.0, 1e-9) << "예전 코드는 0.4 — 새 경로에서 또 0.4 옆으로 감";
+}
+
+TEST(VccCore, LagResyncWithoutNewPathKeepsTheTarget)
+{
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out = exitTurnAtLeft04(c, w, t);
+  ASSERT_NEAR(out.target, 0.4, 1e-9);
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  ASSERT_NEAR(out.offset, 0.1, 0.011);
+  EXPECT_NEAR(out.target, 0.4, 1e-9);
+}
+
+TEST(VccCore, NewPathShiftsThePartlyDoneLane)
+{
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out = exitTurnAtLeft04(c, w, t);
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(-0.1, 0.0), w, t += 0.1, 0.4));
+  ASSERT_NEAR(out.offset, 0.1, 0.011);
+  c.onNewPath();
+  out = c.step(inputs(line(0.3, 0.0), w, t += 0.1, 0.4));
+  out = c.step(inputs(line(0.3, 0.0), w, t += 0.1, 0.4));
+  EXPECT_NEAR(out.offset, -0.3, 0.011);
+  EXPECT_NEAR(out.target, 0.0, 1e-9);
+}
+
+TEST(VccCore, NewPathWithRailTargetStaysOnTheNewPath)
+{
+  VccCore c; c.configure(params());
+  World w;
+  double t = 1.0;
+  CoreOutput out;
+  for (int i = 0; i < 3; ++i, t += 0.1) {out = c.step(inputs(line(0.0, 0.0), w, t, 0.3));}
+  c.onNewPath();
+  out = c.step(inputs(line(-0.4, 0.0), w, t, 0.3));
+  out = c.step(inputs(line(-0.4, 0.0), w, t + 0.1, 0.3));
+  EXPECT_NEAR(out.offset, 0.4, 0.011);
+  EXPECT_NEAR(out.target, 0.0, 1e-9);
+}
+
 TEST(VccCore, StopsInsideTheGoalCheckerCircle)
 {
   VccCore c; c.configure(params());
@@ -761,7 +835,7 @@ TEST(VccCoreEndStraight, EndBehindIsNotStraight)
   EXPECT_EQ(n.state, State::Align);
 }
 
-TEST(VccCoreEndStraight, PositionOnlyArrivalIsUntouched)
+TEST(VccCoreEndStraight, PositionOnlyArrivalAlsoGoesStraight)
 {
   World w;
   VccCore off; off.configure(paramsStraight(0.0));
@@ -774,9 +848,9 @@ TEST(VccCoreEndStraight, PositionOnlyArrivalIsUntouched)
   in.yaw_tol = 3.141;
   const CoreOutput o = off.step(in);
   const CoreOutput n = on.step(in);
-  EXPECT_FALSE(n.end_straight);
-  EXPECT_LT(n.cmd.w, -0.01);
-  EXPECT_DOUBLE_EQ(n.cmd.w, o.cmd.w);
+  EXPECT_LT(o.cmd.w, -0.01);
+  EXPECT_TRUE(n.end_straight);
+  EXPECT_NEAR(n.cmd.w, 0.0, 1e-9);
   EXPECT_DOUBLE_EQ(n.cmd.v, o.cmd.v);
 }
 

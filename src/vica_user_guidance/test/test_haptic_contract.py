@@ -97,6 +97,22 @@ def test_driver_pattern_table():
     }
 
 
+def test_driver_drops_haptic_requests_while_patrolling():
+    """순찰 중에는 진동 요청을 보내지 않는다(2026-11-14). 그 판정이 send_raw 보다 앞에 있다."""
+    text = DRIVER.read_text(encoding="utf-8")
+    body = text.split("def cb_haptic_request(self, msg: String)")[1].split("\n    def ")[0]
+    gate = body.index(
+        "active_patrol_code(self.patrol_code, self.patrol_last_ns, now) != PATROL_NONE")
+    assert gate < body.index("self.link.send_raw(code")
+
+
+def test_firmware_patrol_states_do_not_vibrate():
+    """순찰 표시 8·9·10 은 진입 진동이 없다(D6 과 같은 원칙)."""
+    src = _ino()
+    for case in ("STATE_PATROL", "STATE_PATROL_LIGHT", "STATE_PATROL_ALARM"):
+        assert "hapticStart" not in _case_body(src, case), case
+
+
 def test_bench_tool_knows_tick():
     text = BENCH.read_text(encoding="utf-8")
     assert re.search(r'"tick":\s*\(0x12,', text)

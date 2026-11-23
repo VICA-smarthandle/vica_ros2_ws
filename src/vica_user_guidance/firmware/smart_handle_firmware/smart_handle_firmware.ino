@@ -1,11 +1,11 @@
-#include <Servo.h>
+#include <Adafruit_TiCoServo.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 
 #define NUM_LEDS_A  21
 #define NUM_LEDS_B  21
 
-#define SERVO_PIN         8
+#define SERVO_PIN        10
 #define LED_A_PIN         9
 #define LED_B_PIN        11
 #define SERVO_US_MIN    544
@@ -33,9 +33,23 @@
 #define STATE_MIN  STATE_NORMAL
 #define STATE_MAX  STATE_ARRIVED
 
+#define STATE_PATROL        8
+#define STATE_PATROL_LIGHT  9
+#define STATE_PATROL_ALARM 10
+#define STATE_PATROL_MIN  STATE_PATROL
+#define STATE_DOCKED      6
+#define DOCK_BREATH_MS    2400
+#define DOCK_STEP_MS      40
+#define DOCK_MIN_PCT      8
+#define DOCK_MAX_PCT      60
+#define DOCK_R            0
+#define DOCK_G            255
+#define DOCK_B            0
+#define STATE_PATROL_MAX  STATE_PATROL_ALARM
+
 #define WATCHDOG_TIMEOUT_MS  1500
 
-Servo myServo;
+Adafruit_TiCoServo myServo;
 Adafruit_NeoPixel ledA(NUM_LEDS_A, LED_A_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel ledB(NUM_LEDS_B, LED_B_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -44,8 +58,10 @@ const uint32_t ORANGE = Adafruit_NeoPixel::Color(255, 80,  0  );
 const uint32_t RED    = Adafruit_NeoPixel::Color(255, 0,   0  );
 const uint32_t GREEN  = Adafruit_NeoPixel::Color(0,   255, 0  );
 const uint32_t OFF    = Adafruit_NeoPixel::Color(0,   0,   0  );
+const uint32_t LIME         = Adafruit_NeoPixel::Color(110, 255, 0  );
+const uint32_t DEEP_YELLOW  = Adafruit_NeoPixel::Color(255, 170, 0  );
 
-enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE };
+enum Mode { NORMAL, WAVE_A, WAVE_B, BLINK_BOTH, BLINK_ARRIVE, BLINK_ALARM, BREATHE_DOCK };
 Mode    currentMode  = NORMAL;
 uint8_t currentState = STATE_NORMAL;
 
@@ -75,7 +91,7 @@ bool arriveTailPending = false;
 #define US_WAIT_MS    100
 #define US_CLEAR_MM   3001
 #define US_ANGLE_LEVEL 0x03
-const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 3, 1, 1, 3, 3, 3, 3, 3 };
+const uint8_t US_ANGLE_LEVEL_CH[US_N] = { 3, 1, 1, 3, 4, 4, 4, 4 };
 #define US_GAP_MS     5
 #define US_REG_DIST   0x02
 #define US_REG_CMD    0x10
@@ -102,11 +118,15 @@ enum UsStatKind { US_ST_OK, US_ST_CLEAR, US_ST_FFFF, US_ST_FFFE, US_ST_OTHER, US
 #define TOUCH_FLAG_ON    0x01
 #define TOUCH_PERIOD_MS  50
 #define TOUCH_HOLD_MS    200
+#define TOUCH_MIN_LOW_MS 200
+#define TOUCH_REFRESH_LOW_MS 20
 
-uint8_t       touchSeq     = 0;
-unsigned long touchLastLow = 0;
-bool          touchSeenLow = false;
-unsigned long touchSentAt  = 0;
+uint8_t       touchSeq      = 0;
+unsigned long touchLastLow  = 0;
+bool          touchSeenLow  = false;
+unsigned long touchSentAt   = 0;
+unsigned long touchLowSince = 0;
+bool          touchLowRun   = false;
 
 #define HAPTIC_PIN             6
 #define HAPTIC_CMD_SHORT      0x10
@@ -168,7 +188,7 @@ const uint8_t US_ROUND_CH[US_ROUNDS][US_PER_ROUND] = {
   { 0, 3 },
   { 7, 4 },
 };
-const uint8_t US_CH_ON[US_N] = { 0, 1, 1, 0, 0, 0, 0, 0 };
+const uint8_t US_CH_ON[US_N] = { 0, 1, 1, 0, 1, 1, 1, 1 };
 #define US_LEGACY_CH0 1
 #define US_LEGACY_CH1 2
 
@@ -329,9 +349,19 @@ void usSendLegacyFrame() {
 void touchPoll() {
   unsigned long now = millis();
 
+  const bool heldNow = touchSeenLow && (now - touchLastLow < TOUCH_HOLD_MS);
   if (digitalRead(TOUCH_PIN) == LOW) {
-    touchLastLow = now;
-    touchSeenLow = true;
+    if (!touchLowRun) {
+      touchLowRun = true;
+      touchLowSince = now;
+    }
+    const unsigned long needMs = heldNow ? TOUCH_REFRESH_LOW_MS : TOUCH_MIN_LOW_MS;
+    if (now - touchLowSince >= needMs) {
+      touchLastLow = now;
+      touchSeenLow = true;
+    }
+  } else {
+    touchLowRun = false;
   }
   bool touched = touchSeenLow && (now - touchLastLow < TOUCH_HOLD_MS);
 
@@ -493,6 +523,30 @@ void applyState(uint8_t state) {
       servoMoveTo(SERVO_CENTER);
       hapticStart(HAPTIC_SHORT_COUNT, HAPTIC_SHORT_ON_MS, HAPTIC_SHORT_OFF_MS);
       break;
+
+    case STATE_PATROL:
+      currentMode = NORMAL;
+      setBoth(LIME);
+      servoMoveTo(SERVO_CENTER);
+      break;
+
+    case STATE_PATROL_LIGHT:
+      currentMode = NORMAL;
+      setBoth(DEEP_YELLOW);
+      servoMoveTo(SERVO_CENTER);
+      break;
+
+    case STATE_DOCKED:
+      currentMode = BREATHE_DOCK;
+      servoMoveTo(SERVO_CENTER);
+      break;
+
+    case STATE_PATROL_ALARM:
+      currentMode = BLINK_ALARM;
+      blinkState  = true;
+      setBoth(RED);
+      servoMoveTo(SERVO_CENTER);
+      break;
   }
 }
 
@@ -557,7 +611,9 @@ void loop() {
       usAngleLv[US_SIDE_CH_L] = b - US_CMD_SIDE_ANGLE_BASE;
       usAngleLv[US_SIDE_CH_R] = b - US_CMD_SIDE_ANGLE_BASE;
       usCfgPending = true;
-    } else if (b >= STATE_MIN && b <= STATE_MAX) {
+    } else if ((b >= STATE_MIN && b <= STATE_MAX) ||
+               (b >= STATE_PATROL_MIN && b <= STATE_PATROL_MAX) ||
+               b == STATE_DOCKED) {
       lastRxMillis    = now;
       watchdogTripped = false;
       everConnected   = true;
@@ -598,6 +654,19 @@ void loop() {
     lastBlink  = now;
     blinkState = !blinkState;
     setBoth(blinkState ? ORANGE : OFF);
+  }
+
+  if (currentMode == BREATHE_DOCK && now - lastBlink >= DOCK_STEP_MS) {
+    lastBlink = now;
+    float ph  = (float)(now % DOCK_BREATH_MS) / DOCK_BREATH_MS;
+    float lvl = (DOCK_MIN_PCT + (DOCK_MAX_PCT - DOCK_MIN_PCT) * (0.5f - 0.5f * cos(6.2831853f * ph))) / 100.0f;
+    setBoth(Adafruit_NeoPixel::Color((uint8_t)(DOCK_R * lvl), (uint8_t)(DOCK_G * lvl), (uint8_t)(DOCK_B * lvl)));
+  }
+
+  if (currentMode == BLINK_ALARM && now - lastBlink >= BLINK_MS) {
+    lastBlink  = now;
+    blinkState = !blinkState;
+    setBoth(blinkState ? RED : OFF);
   }
 
   if (currentMode == BLINK_ARRIVE && now - lastBlink >= ARRIVE_BLINK_MS) {
