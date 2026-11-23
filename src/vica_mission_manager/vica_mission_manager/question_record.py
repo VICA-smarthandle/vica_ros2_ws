@@ -26,10 +26,15 @@ class QuestionRecord:
     kind: str
     text: str
     options: tuple            # ((목적지 id, 이름), …)
-    step: int                 # 되묻기 단계 — 되묻기 구현 전에는 0
+    step: int                 # 되묻기 단계 — 세 단계 되묻기(reask_ladder)의 ①·② 만 1·2, 그 밖은 0
     on_silence: str           # 무응답 기본 동작 — 되묻기 구현 전에는 ""
     opened_at: float
     state: str                # 열 때의 미션 상태
+
+
+def answer_for(open_id: str, msg_question_id: str, answer: str) -> str:
+    """대답 칸이 지금 열린 질문의 것일 때만 answer 를 돌려준다. 늦게 온 대답·id 없음은 ""(지금처럼 의도로 처리)."""
+    return answer if open_id and msg_question_id and open_id == msg_question_id else ""
 
 
 class QuestionTracker:
@@ -44,8 +49,11 @@ class QuestionTracker:
         old = self.close("replaced")
         self._count += 1
         kind = say.kind if say.kind in QUESTION_KINDS else "open"
-        self.current = QuestionRecord(id=f"{self._prefix}-{self._count}", kind=kind, text=say.text,
-                                      options=tuple(say.options), step=0, on_silence="", opened_at=now, state=state)
+        # 세 단계 되묻기(원칙 8)의 ①·② 는 질문 대신 되묻는 문장을 말한다 — 기록에는 원래 질문 문장과 단계를 적는다.
+        text = getattr(say, "question_text", "") or say.text
+        self.current = QuestionRecord(id=f"{self._prefix}-{self._count}", kind=kind, text=text,
+                                      options=tuple(say.options), step=int(getattr(say, "step", 0)), on_silence="",
+                                      opened_at=now, state=state)
         self._last_signal_at = now
         return old, self.current
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -186,4 +187,79 @@ TEST(RailDistanceGate, NewGoalStartsFresh)
   ASSERT_TRUE(g.far());
   g.update(std::numeric_limits<double>::infinity(), 0.5, 20.0, 5.0);   // 다른 목적지, 거리 모름
   EXPECT_FALSE(g.far());
+}
+
+// ── 코너 목적지는 레일 끝까지 (2026-10-28, keep_goal_dist) ─────────────────────────────
+// 대강당 R 2.0 코너: 직선 뒤 반지름 2 m 로 왼쪽 90° 도는 레일, 점 간격 0.05 m(path_density).
+static nav_msgs::msg::Path straightThenArc(double straight, double r, double turn_deg)
+{
+  nav_msgs::msg::Path p;
+  auto push = [&p](double x, double y) {
+      geometry_msgs::msg::PoseStamped ps;
+      ps.pose.position.x = x;
+      ps.pose.position.y = y;
+      p.poses.push_back(ps);
+    };
+  for (double s = 0.0; s < straight; s += 0.05) {push(s, 0.0);}   // +x 로 직진
+  const double th_end = turn_deg * M_PI / 180.0;
+  const int n = std::max(2, static_cast<int>(r * th_end / 0.05));
+  for (int i = 0; i <= n; ++i) {                                 // 중심 (straight, r) 으로 왼쪽으로 돈다
+    const double th = th_end * i / n;
+    push(straight + r * std::sin(th), r - r * std::cos(th));
+  }
+  return p;
+}
+
+TEST(RoutePathCheck, CornerGoalOnTheRailKeepsTheRail)
+{
+  // 로봇 = 레일 시작, 목적지 = 레일 끝(호 45° 지점, 직선거리 약 2 m 안). 남은 꺾임 45°.
+  const auto p = straightThenArc(0.3, 2.0, 45.0);
+  const auto & end = p.poses.back().pose.position;
+  const auto v = checkRoutePath(p, 0.0, 0.0, 2, 1.5, end.x, end.y, 2.0, 0.10, 15.0);
+  ASSERT_LT(v.dist_to_goal, 2.0);
+  EXPECT_TRUE(v.usable) << v.reason;
+  EXPECT_TRUE(v.kept_for_corner);
+  EXPECT_NEAR(v.remaining_turn_deg, 45.0, 3.0);
+  EXPECT_LT(v.goal_to_path, 0.01);
+}
+
+TEST(RoutePathCheck, StraightGoalStillHandsOff)
+{
+  // 직선 구간 목적지는 종전대로 곧은 경로로 넘긴다(꺾임 0 < 15°).
+  const auto p = line(0.0, 1.5, 0.0, 31);
+  const auto v = checkRoutePath(p, 0.0, 0.0, 2, 1.5, 1.5, 0.0, 2.0, 0.10, 15.0);
+  EXPECT_FALSE(v.usable);
+  EXPECT_FALSE(v.kept_for_corner);
+  EXPECT_EQ(v.reason, "near goal: freespace approach");
+}
+
+TEST(RoutePathCheck, CornerGoalOffTheRailHandsOff)
+{
+  // 코너지만 목적지가 레일에서 0.30 m(10-29 (-0.12, 17.27) 처럼) — 레일 끝에 서면 0.25 를 넘어 옆으로 다시 가야 한다.
+  const auto p = straightThenArc(0.3, 2.0, 45.0);
+  const auto & end = p.poses.back().pose.position;
+  const double nx = -std::sin(M_PI / 4.0), ny = std::cos(M_PI / 4.0);   // 끝점에서 호 바깥이 아닌 왼쪽 법선
+  const auto v = checkRoutePath(p, 0.0, 0.0, 2, 1.5, end.x + 0.30 * nx, end.y + 0.30 * ny, 2.0, 0.10, 15.0);
+  EXPECT_FALSE(v.usable);
+  EXPECT_FALSE(v.kept_for_corner);
+  EXPECT_NEAR(v.goal_to_path, 0.30, 0.02);
+}
+
+TEST(RoutePathCheck, CornerKeepIsOffByDefault)
+{
+  // 포트를 안 주면(기본 keep 0) 코너도 종전대로 넘긴다 — 레일 트리·홈·앱은 그대로.
+  const auto p = straightThenArc(0.3, 2.0, 45.0);
+  const auto & end = p.poses.back().pose.position;
+  const auto v = checkRoutePath(p, 0.0, 0.0, 2, 1.5, end.x, end.y, 2.0);
+  EXPECT_FALSE(v.usable);
+  EXPECT_EQ(v.reason, "near goal: freespace approach");
+}
+
+TEST(RoutePathCheck, ShortRemainderCountsAsStraight)
+{
+  // 남은 레일이 0.4 m 도 안 되면 방향을 못 재 직선으로 본다(종전대로 넘김).
+  const auto p = line(0.0, 0.3, 0.0, 7);
+  const auto v = checkRoutePath(p, 0.0, 0.0, 2, 1.5, 0.3, 0.0, 2.0, 0.10, 15.0);
+  EXPECT_FALSE(v.usable);
+  EXPECT_DOUBLE_EQ(v.remaining_turn_deg, 0.0);
 }

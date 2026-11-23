@@ -89,11 +89,12 @@ f.invert_mot1 = False
 f.invert_mot2 = False
 f.min_rpm_when_moving = 0
 f.can_reconnect_interval_sec = 1.0
+f.ignore_knob = False
 INT_PARAMS = ('min_rpm_when_moving', 'max_rpm', 'deadzone_pct', 'knob_min_pct', 'knob_max_pct',
               'driver_id')
 for kv in os.environ.get('PARAMS', '').split():
     key, value = kv.split('=')
-    if key in ('invert_mot1', 'invert_mot2'):
+    if key in ('invert_mot1', 'invert_mot2', 'ignore_knob'):
         setattr(f, key, value == '1')
     elif key in INT_PARAMS:
         setattr(f, key, int(value, 0))

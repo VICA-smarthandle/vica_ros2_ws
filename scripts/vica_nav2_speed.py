@@ -19,13 +19,14 @@
     끝내지 못한 노드는 직접 deactivate·cleanup / configure·activate 를 보낸다.
 
 바꾸는 값 — 기준 속도 대비 비율 k(0.5 -> 0.9 면 1.8). 10-06 0.5 -> 0.7(1.4배) 때와 같은 묶음이다.
-  - FollowPath.desired_linear_vel = 목표, linear_accel·planned_linear_decel·curve_decel × k
+  - FollowPath.desired_linear_vel = 목표, linear_accel·planned_linear_decel·curve_decel × k,
+    approach_velocity_scaling_dist × max(k, 1)(10-28 추가 — 빠를수록 도착 감속을 멀리서 시작)
     (planned 는 비상 제동 이하, curve 는 planned 이하 — test_vcc_limits_match_the_smoother 조건)
   - velocity_smoother.max_velocity[0] = 목표
   - 충돌 감시 PolygonStop·PolygonSlow 앞면을 VCC 정지거리 식(vcc_core.cpp 146행)이 늘어난 만큼 앞으로.
     0.5 -> 0.9 에서 정지거리 0.30 -> 0.644 m, 두 상자 앞면 +0.344 m.
 그대로 두는 값: 비상 제동 1.25(물리 제동력이라 비율로 못 올림), 출발 1단계 0.25/0.5 s, 회전 0.5,
-  curve_min_radius 0.8, slow_clearance 0.35, approach 0.6 — 10-06 0.7 때와 같다.
+  curve_min_radius 0.8, slow_clearance 0.35 — 10-06 0.7 때와 같다.
 """
 import argparse
 import sys
@@ -60,6 +61,11 @@ def plan(base, v):
         'FollowPath.linear_accel': round(float(fp['linear_accel']) * k, 3),
         'FollowPath.planned_linear_decel': planned,
         'FollowPath.curve_decel': curve,
+        # 도착 감속 시작 거리도 k 배(기준보다 짧게는 안 함). 0.6 그대로 0.9 를 내면 0.6 m 직선 곡선에
+        # 0.81/0.6 = 1.35 m/s² 가 필요한데 planned 0.9 로 못 따라가 멈춤 반경 0.12 를 지나쳤다(10-28 대구,
+        # 도착 11번 중 4번이 latch 뒤 5~9 s 제자리 회전).
+        'FollowPath.approach_velocity_scaling_dist': round(
+            float(fp['approach_velocity_scaling_dist']) * max(k, 1.0), 3),
     }
     max_velocity = [float(x) for x in sm['max_velocity']]
     max_velocity[0] = round(v, 3)

@@ -17,6 +17,7 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_REASK,
     MSG_ARRIVAL_RETRY,
     MSG_ASK_ENTRANCE,
+    MSG_ASK_RESTROOM,
     MSG_ASK_WAIT_TIME,
     MSG_CANCEL_CONFIRM,
     MSG_CONFIRM_PROMPT_FALLBACK,
@@ -50,8 +51,11 @@ M2_RIGHT_10 = MSG_WAIT_SPOT_CONFIRM.format(minutes=10, place="입구 오른쪽")
 SWITCH_ELEV = "네, 엘리베이터로 안내해드릴까요?"
 GOING_ROOM = "지금 409호로 가는 중이에요."
 NEED_ASK = "안내가 필요 없으신가요?"
+# 원칙 14 — 대화 끝내기(dismiss). 안내 중이 아닐 때 끝맺는 말(글자는 설계 6.3).
+DISMISS_ACK = "네, 필요하시면 '비카야'라고 불러 주세요."
 
-COLS = ("navp", "navc", "wait", "finish", "cancel", "pause", "resume", "yes", "no", "talk")
+# again = "다시 말해줘"(원칙 28) — 미션이 쥔 질문이 열린 행은 그 질문을 같은 문장으로 한 번 더, 나머지는 말 없음·상태 그대로.
+COLS = ("navp", "navc", "wait", "finish", "cancel", "pause", "resume", "yes", "no", "talk", "bye", "again")
 
 EXPECT = {
     "IDLE": {
@@ -65,6 +69,8 @@ EXPECT = {
         "yes": ((), State.IDLE),
         "no": ((), State.IDLE),
         "talk": ((), State.IDLE),
+        "bye": ((DISMISS_ACK,), State.IDLE),
+        "again": ((), State.IDLE),
     },
     "IDLE_BRAKED": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -77,6 +83,8 @@ EXPECT = {
         "yes": ((), State.IDLE),
         "no": ((), State.IDLE),
         "talk": ((), State.IDLE),
+        "bye": ((DISMISS_ACK,), State.IDLE),
+        "again": ((), State.IDLE),
     },
     "IDLE_BRAKED_SPOT": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -89,6 +97,8 @@ EXPECT = {
         "yes": ((), State.IDLE),
         "no": ((), State.IDLE),
         "talk": ((), State.IDLE),
+        "bye": ((DISMISS_ACK,), State.IDLE),
+        "again": ((), State.IDLE),
     },
     "CONFIRMING": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -101,6 +111,8 @@ EXPECT = {
         "yes": ((START_TOILET,), State.NAVIGATING),
         "no": ((MSG_CONFIRM_TIMEOUT,), State.IDLE),
         "talk": ((), State.CONFIRMING),
+        "bye": ((MSG_CONFIRM_TIMEOUT,), State.IDLE),
+        "again": ((ASK_TOILET,), State.CONFIRMING),
     },
     "CONFIRMING_CHANGE": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -114,6 +126,8 @@ EXPECT = {
         "yes": ((START_TOILET,), State.NAVIGATING),
         "no": ((RESUMED_ROOM,), State.NAVIGATING),
         "talk": ((), State.CONFIRMING),
+        "bye": ((RESUMED_ROOM,), State.NAVIGATING),
+        "again": ((ASK_TOILET,), State.CONFIRMING),
     },
     "NAVIGATING": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -126,6 +140,8 @@ EXPECT = {
         "yes": ((), State.NAVIGATING),
         "no": ((), State.NAVIGATING),
         "talk": ((), State.NAVIGATING),
+        "bye": ((MSG_CANCEL_CONFIRM,), State.NAVIGATING),
+        "again": ((), State.NAVIGATING),
     },
     "PAUSED": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -138,6 +154,8 @@ EXPECT = {
         "yes": ((), State.PAUSED),
         "no": ((), State.PAUSED),
         "talk": ((), State.PAUSED),
+        "bye": ((MSG_CANCEL_CONFIRM,), State.PAUSED),
+        "again": ((), State.PAUSED),
     },
     "FAILED": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -150,6 +168,8 @@ EXPECT = {
         "yes": ((), State.FAILED),
         "no": ((), State.FAILED),
         "talk": ((), State.FAILED),
+        "bye": ((), State.FAILED),
+        "again": ((), State.FAILED),
     },
     "ARRIVED": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -162,6 +182,8 @@ EXPECT = {
         "yes": ((), State.ARRIVED),
         "no": ((), State.ARRIVED),
         "talk": ((), State.ARRIVED),
+        "bye": ((), State.ARRIVED),
+        "again": ((), State.ARRIVED),
     },
     "ASKING_NEXT": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -174,6 +196,8 @@ EXPECT = {
         "yes": ((MSG_WAIT_DEFAULT,), State.WAITING),
         "no": ((MSG_ASK_ENTRANCE,), State.ASKING_NEXT),
         "talk": ((), State.ASKING_NEXT),
+        "bye": ((MSG_ASK_ENTRANCE,), State.ASKING_NEXT),
+        "again": ((MSG_ASK_RESTROOM,), State.ASKING_NEXT),
     },
     "ASKING_WAIT_TIME": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -186,6 +210,8 @@ EXPECT = {
         "yes": ((MSG_ASK_WAIT_TIME,), State.ASKING_WAIT_TIME),
         "no": ((MSG_ASK_ENTRANCE,), State.ASKING_NEXT),
         "talk": ((), State.ASKING_WAIT_TIME),
+        "bye": ((MSG_ASK_ENTRANCE,), State.ASKING_NEXT),
+        "again": ((MSG_ASK_WAIT_TIME,), State.ASKING_WAIT_TIME),
     },
     "WAITING_RELEASE": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -198,6 +224,8 @@ EXPECT = {
         "yes": ((), State.WAITING_RELEASE),
         "no": ((MSG_ASK_ENTRANCE,), State.ASKING_NEXT),
         "talk": ((), State.WAITING_RELEASE),
+        "bye": ((DISMISS_ACK,), State.WAITING_RELEASE),
+        "again": ((), State.WAITING_RELEASE),
     },
     "MOVING_TO_WAIT_SPOT": {
         "navp": ((), State.MOVING_TO_WAIT_SPOT),
@@ -210,6 +238,8 @@ EXPECT = {
         "yes": ((), State.MOVING_TO_WAIT_SPOT),
         "no": ((), State.MOVING_TO_WAIT_SPOT),
         "talk": ((), State.MOVING_TO_WAIT_SPOT),
+        "bye": ((), State.MOVING_TO_WAIT_SPOT),
+        "again": ((), State.MOVING_TO_WAIT_SPOT),
     },
     "WAITING": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -222,6 +252,8 @@ EXPECT = {
         "yes": ((), State.WAITING),
         "no": ((), State.WAITING),
         "talk": ((), State.WAITING),
+        "bye": ((DISMISS_ACK,), State.WAITING),
+        "again": ((), State.WAITING),
     },
     "WAITING_ASKED": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -234,6 +266,8 @@ EXPECT = {
         "yes": ((MSG_WAIT_FINISH_ASK,), State.WAITING),
         "no": ((MSG_FINISH,), State.RETURNING),
         "talk": ((), State.WAITING),
+        "bye": ((MSG_FINISH,), State.RETURNING),
+        "again": ((MSG_WAIT_FINISH_ASK,), State.WAITING),
     },
     "MOVING_BACK_TO_DEST": {
         "navp": ((), State.MOVING_BACK_TO_DEST),
@@ -246,6 +280,8 @@ EXPECT = {
         "yes": ((), State.MOVING_BACK_TO_DEST),
         "no": ((), State.MOVING_BACK_TO_DEST),
         "talk": ((), State.MOVING_BACK_TO_DEST),
+        "bye": ((), State.MOVING_BACK_TO_DEST),
+        "again": ((), State.MOVING_BACK_TO_DEST),
     },
     "APPROACHING": {
         "navp": ((MSG_APPROACH_BUSY,), State.APPROACHING),
@@ -258,6 +294,8 @@ EXPECT = {
         "yes": ((), State.APPROACHING),
         "no": ((), State.APPROACHING),
         "talk": ((), State.APPROACHING),
+        "bye": ((), State.APPROACHING),
+        "again": ((), State.APPROACHING),
     },
     "AWAITING_USER": {
         "navp": ((MSG_APPROACH_ACCEPTED,), State.TURNING),
@@ -272,6 +310,8 @@ EXPECT = {
         "yes": ((MSG_APPROACH_ACCEPTED,), State.TURNING),
         "no": ((MSG_APPROACH_DECLINED,), State.RETURNING),
         "talk": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
+        "bye": ((MSG_APPROACH_DECLINED,), State.RETURNING),
+        "again": ((MSG_APPROACH_REASK,), State.AWAITING_USER),
     },
     "TURNING": {
         "navp": ((), State.TURNING),
@@ -284,6 +324,8 @@ EXPECT = {
         "yes": ((), State.TURNING),
         "no": ((), State.TURNING),
         "talk": ((), State.TURNING),
+        "bye": ((), State.TURNING),
+        "again": ((), State.TURNING),
     },
     "SEEKING": {
         "navp": ((MSG_APPROACH_BUSY,), State.SEEKING),
@@ -296,6 +338,8 @@ EXPECT = {
         "yes": ((), State.SEEKING),
         "no": ((), State.SEEKING),
         "talk": ((), State.SEEKING),
+        "bye": ((), State.SEEKING),
+        "again": ((), State.SEEKING),
     },
     "RETURNING": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -308,6 +352,8 @@ EXPECT = {
         "yes": ((), State.RETURNING),
         "no": ((), State.RETURNING),
         "talk": ((), State.RETURNING),
+        "bye": ((), State.RETURNING),
+        "again": ((), State.RETURNING),
     },
     "RETURNING_LATE": {
         "navp": ((ASK_ELEV,), State.CONFIRMING),
@@ -320,6 +366,8 @@ EXPECT = {
         "yes": ((M2P_FRONT,), State.MOVING_BACK_TO_DEST),
         "no": ((MSG_FINISH,), State.RETURNING),
         "talk": ((), State.RETURNING),
+        "bye": ((), State.RETURNING),
+        "again": ((), State.RETURNING),
     },
     "ESTOPPED": {
         "navp": ((MSG_ESTOP_REJECT,), State.ESTOPPED),
@@ -332,6 +380,8 @@ EXPECT = {
         "yes": ((), State.ESTOPPED),
         "no": ((), State.ESTOPPED),
         "talk": ((), State.ESTOPPED),
+        "bye": ((), State.ESTOPPED),
+        "again": ((), State.ESTOPPED),
     },
     # 경비(순찰, 2026-11-14) — 어떤 음성 요청에도 말하지 않고 상태도 그대로다.
     **{row: {col: ((), state) for col in COLS} for row, state in (
@@ -377,3 +427,33 @@ def test_reaction(row, col):
     says = tuple(a.text for a in actions if isinstance(a, Say))
     expected_says, expected_state = EXPECT[row][col]
     assert (says, logic.state) == (expected_says, expected_state)
+
+
+# ---- 원칙 14 — 대화 끝내기(dismiss): 상태 위에 겹친 열린 질문 ----------------------------
+def test_p14_dismiss_answers_cancel_confirm_as_no():
+    """주행 중 "안내를 취소할까요?"가 열려 있으면 dismiss = 아니요(취소 유지)."""
+    logic, now = ROWS["NAVIGATING"]()
+    logic.on_voice_intent(REQUESTS["cancel"], now, lookup, BOUNDS, True)
+    assert logic.cancel_confirm_pending
+    logic.on_voice_intent(REQUESTS["bye"], now + 1.0, lookup, BOUNDS, True)
+    assert not logic.cancel_confirm_pending and logic.state == State.NAVIGATING
+
+
+def test_p14_dismiss_answers_wait_need_question_as_no():
+    """대기 중 "안내가 필요 없으신가요?" 뒤 dismiss = 아니요(계속 기다림)."""
+    logic, now = ROWS["WAITING"]()
+    logic.on_voice_intent(REQUESTS["cancel"], now, lookup, BOUNDS, True)
+    actions = logic.on_voice_intent(REQUESTS["bye"], now + 1.0, lookup, BOUNDS, True)
+    assert logic._wait_need_asked_at is None and logic.state == State.WAITING
+    assert [a.text for a in actions if isinstance(a, Say)] == [logic_cancel_kept()]
+
+
+def logic_cancel_kept():
+    from vica_mission_manager.mission_logic import MSG_CANCEL_KEPT
+    return MSG_CANCEL_KEPT
+
+
+def test_p14_dismiss_ack_does_not_reopen_the_listening_window():
+    logic, now = ROWS["IDLE"]()
+    (say,) = logic.on_voice_intent(REQUESTS["bye"], now, lookup, BOUNDS, True)
+    assert say.text == DISMISS_ACK and not say.expects_reply

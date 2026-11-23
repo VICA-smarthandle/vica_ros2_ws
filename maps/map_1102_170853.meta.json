@@ -1,0 +1,16 @@
+{
+  "map_id": "map_1102_170853",
+  "display_name": "라이다 보정 후",
+  "saved_at": "2026-11-02T17:08:55",
+  "scale_history": [
+    {
+      "scale": 0.9645,
+      "center": [
+        0,
+        0
+      ],
+      "at": "2026-11-02T19:56:14",
+      "note": "지도 길이 보정(drive_diag/map_scale.py) — 레일·금지구역 좌표도 같은 배율"
+    }
+  ]
+}

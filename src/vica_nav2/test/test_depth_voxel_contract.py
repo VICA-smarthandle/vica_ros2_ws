@@ -39,8 +39,9 @@ import yaml
 BASE_LINK_Z = 0.190
 # 2026-08-30 카메라 재장착으로 0.835 -> 0.855 (지면 1.045 m, 줄자 실측).
 # 탈부착하면 이 값과 CAMERA_PITCH_DEG 를 함께 다시 잰다.
-CAMERA_Z_IN_BASE = 0.855
-CAMERA_HEIGHT = BASE_LINK_Z + CAMERA_Z_IN_BASE      # 지면 1.045 m
+# 2026-10-24 재측정 0.855 -> 0.788 (지면 0.978 m, 바닥평면 RANSAC 4회 + 줄자 0.98 m).
+CAMERA_Z_IN_BASE = 0.788
+CAMERA_HEIGHT = BASE_LINK_Z + CAMERA_Z_IN_BASE      # 지면 0.978 m
 # 마스트가 실제로 기운 각도(음수 = 위로 들림). 2026-08-29 바닥평면 RANSAC
 # 4회 실측(3.05 / 2.88 / 3.16 / 3.06 -> 3.04 +- 0.14).
 # 부호 주의: 측정기의 양수는 "URDF 보다 위로 들렸다"는 뜻이라 URDF pitch 에는

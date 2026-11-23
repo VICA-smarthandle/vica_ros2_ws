@@ -26,6 +26,8 @@ void apply_param(mdrobot::Params & p, const std::string & key, const std::string
     p.invert_mot1 = value == "1";
   } else if (key == "invert_mot2") {
     p.invert_mot2 = value == "1";
+  } else if (key == "ignore_knob") {
+    p.ignore_knob = value == "1";
   } else if (key == "min_rpm_when_moving") {
     p.min_rpm_when_moving = i64();
   } else if (key == "max_rpm") {

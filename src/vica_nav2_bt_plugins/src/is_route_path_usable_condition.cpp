@@ -59,11 +59,20 @@ BT::NodeStatus IsRoutePathUsableCondition::tick()
   double rejoin = -1.0;
   getInput("rejoin_dist_from_path", rejoin);
   const double gx = has_goal ? goal.pose.position.x : nan, gy = has_goal ? goal.pose.position.y : nan;
+  double keep_goal = 0.0, keep_turn = 15.0;
+  getInput("keep_rail_goal_dist", keep_goal);
+  getInput("keep_rail_min_turn_deg", keep_turn);
   const double thr = gate_.threshold(max_dist, rejoin);
   const auto v = checkRoutePath(
     path, robot.pose.position.x, robot.pose.position.y,
-    static_cast<std::size_t>(std::max(min_poses, 1)), thr, gx, gy, handoff);
+    static_cast<std::size_t>(std::max(min_poses, 1)), thr, gx, gy, handoff, keep_goal, keep_turn);
   gate_.update(v.dist_to_path, thr, gx, gy);
+  if (v.kept_for_corner) {
+    RCLCPP_INFO_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 2000,
+      "[IsRoutePathUsable] 코너 목적지 — 레일 끝까지 유지 (목적지까지 %.2f m, 목적지↔레일 %.2f m, 남은 꺾임 %.0f°)",
+      v.dist_to_goal, v.goal_to_path, v.remaining_turn_deg);
+  }
 
   if (!v.usable) {
     // 1 Hz 로 다시 물으므로 매 틱 찍히면 로그가 넘친다. 2초에 한 번만.

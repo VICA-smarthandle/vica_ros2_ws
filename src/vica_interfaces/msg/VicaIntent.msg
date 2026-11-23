@@ -38,3 +38,7 @@ float32 speaker_score_joined   # 직전 발화와 이어 붙인 점수(되묻기
 string ask_text                # 미션이 말할 질문 문장. 없으면 ""
 string ask_kind                # open / confirm / choice / yesno / yesno_inverted / minutes
 string[] ask_option_ids        # 고르기 후보 목적지 id
+# 대답 칸(설계 2026-11-18 answer-interpretation, 3-나-2) — 음성이 열린 질문의 대답으로 읽었을 때만 채운다. 옛 의도에는 없다.
+string question_id             # 이 말을 읽을 때 열려 있던 질문 id. 없으면 ""
+string answer                  # yes / no / destination / choice / minutes / other / unclear, 없으면 ""
+string answer_value            # 목적지 id · 분, 없으면 ""

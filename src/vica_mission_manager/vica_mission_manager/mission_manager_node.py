@@ -143,9 +143,10 @@ from .mission_logic import (
     check_gate,
     doa_to_spin_yaw,
     nav_behavior_tree,
+    switch_bundle_warning,
     yaw_deg_to_quaternion,
 )
-from .question_record import QuestionRecord, QuestionTracker
+from .question_record import QuestionRecord, QuestionTracker, answer_for
 from .obstacle_inputs import (
     BASE_FRAME,
     LASER_DEFAULT,
@@ -354,6 +355,12 @@ class MissionManagerNode(Node):
         self.declare_parameter("speaker_gate", False)
         self.declare_parameter("spk_joined_threshold", 0.50)
         self.declare_parameter("speaker_gate_grip", False)   # 대기 중 명령에 손잡이 접촉도 요구(11-14 기본 꺼짐)
+        # 세 단계 되묻기(원칙 8 · 31, 2026-11-21). 켜면 다시 말씀 → 더 크게 또박또박 → (주행 중) 직원 도움. 기본 꺼짐 = 지금 그대로.
+        self.declare_parameter("reask_ladder", False)
+        # "비카야" 뒤 처리(원칙 13 · 3, 2026-11-21). 켜면 호출이 취소·도움 확인도 접고, 40초 안의 "응"엔 그 질문을 다시 한다. 기본 꺼짐 = 지금 그대로.
+        self.declare_parameter("wake_revive", False)
+        # 대답 칸으로 처리(원칙 6 · 3, 2026-11-21). 켜면 열린 질문의 대답 칸(yes·no·목적지·분·못 알아들음)을 의도보다 먼저 본다. 기본 꺼짐 = 지금 그대로.
+        self.declare_parameter("answer_field", False)
         # 홈 알림(2026-10-08): 홈에서 쉬는 동안 이 간격(초)마다 M3 를 말한다. 0 이면 끈다.
         self.declare_parameter("home_beacon_interval_sec", HOME_BEACON_INTERVAL_SEC)
         # 주행 중 장애물 안내(2026-10-09, 설계서 2026-10-08-obstacle-narration-design.md 5절 2단계).
@@ -476,6 +483,9 @@ class MissionManagerNode(Node):
             speaker_gate=bool(self.get_parameter("speaker_gate").value),
             spk_joined_threshold=float(self.get_parameter("spk_joined_threshold").value),
             speaker_gate_grip=bool(self.get_parameter("speaker_gate_grip").value),
+            reask_ladder=bool(self.get_parameter("reask_ladder").value),
+            wake_revive=bool(self.get_parameter("wake_revive").value),
+            answer_field=bool(self.get_parameter("answer_field").value),
             home_beacon_interval_sec=float(
                 self.get_parameter("home_beacon_interval_sec").value),
             **{name: float(self.get_parameter(name).value) for name in (
@@ -497,6 +507,11 @@ class MissionManagerNode(Node):
             self.get_logger().warn(
                 f"손잡이 시연 스위치 켜짐: 대기 {self.logic.grip_wait_timeout_sec:.0f}s 뒤 "
                 "잡은 것으로 넘어가고 손 놓침 정지를 쓰지 않는다(grip_assume_held)")
+        # 전체 검토 I4 — answer_field·reask_ladder·wake_revive 는 음성 VICA_RECUT·VICA_ANSWER 와 한 묶음. 어긋나면 알리기만 한다.
+        bundle_warning = switch_bundle_warning(
+            self.logic.answer_field, self.logic.reask_ladder, self.logic.wake_revive)
+        if bundle_warning:
+            self.get_logger().warn(bundle_warning)
         if arrival_dialog:
             self.get_logger().info(
                 f"도착 후 대화: 켜짐 · 홈={'있음' if home else '없음(제자리 대기)'}")
@@ -956,6 +971,14 @@ class MissionManagerNode(Node):
 
     def _on_intent(self, msg: VicaIntent) -> None:
         """음성 요청. 판단은 로직(on_voice_intent)이 하고 여기선 실행·기록만 한다(2026-10-08)."""
+        # 대답 칸(3.2) — 열린 질문 id 는 기록을 닫기 전에 읽는다. 옛 메시지에는 칸이 없다.
+        open_q = self._questions.current
+        answer = answer_for(open_q.id if open_q else "", str(getattr(msg, "question_id", "")),
+                            str(getattr(msg, "answer", "")))
+        answer_value = str(getattr(msg, "answer_value", ""))
+        # 그 대답이 맞춘 질문의 종류·후보 목적지 id(3.3) — 미션은 뜻을 아는 종류일 때만 대답 칸을 바꿔 읽는다. "네?"는 open 이다.
+        answer_kind = open_q.kind if answer and open_q else ""
+        answer_options = tuple(option[0] for option in open_q.options) if answer and open_q else ()
         intent = IntentData(
             intent=msg.intent,
             matched_destination_id=msg.matched_destination_id,
@@ -970,6 +993,8 @@ class MissionManagerNode(Node):
             ask_text=str(getattr(msg, "ask_text", "")),
             ask_kind=str(getattr(msg, "ask_kind", "")),
             ask_option_ids=tuple(getattr(msg, "ask_option_ids", ())),
+            answer=answer, answer_value=answer_value if answer else "",
+            answer_kind=answer_kind, answer_options=answer_options,
         )
         before = self.logic.state
         self._question_safely(self._close_question, "answer")   # 뒤이은 동작이 새 질문을 열 수 있다 — 먼저 닫는다
@@ -981,6 +1006,7 @@ class MissionManagerNode(Node):
         self.get_logger().info(
             f"음성 요청 intent={msg.intent} dest={msg.matched_destination_id or '-'} "
             f"confirm={msg.need_confirm}: {before.value} -> {self.logic.state.value}"
+            + (f" answer={answer}" if answer else "")
             + (f" 말={said}" if said else " (말 없음)")
             + (f" — {self.logic.voice_note}" if self.logic.voice_note else ""))
 
@@ -2528,7 +2554,8 @@ class MissionManagerNode(Node):
         self._publish_question(record)
         self.get_logger().info(
             f"[질문] 열림 id={record.id} kind={record.kind} 후보={len(record.options)} "
-            f"요청={'y' if say.expects_reply else 'n'} 글자={record.text}")
+            f"요청={'y' if say.expects_reply else 'n'} 글자={record.text}"
+            + (f" 되묻기={record.step}" if record.step else ""))
 
     def _close_question(self, reason: str, record: Optional[QuestionRecord] = None) -> None:
         """열린 질문을 닫고 빈 기록을 낸다. record 를 주면 이미 닫힌 것을 알리기만 한다."""
@@ -2563,7 +2590,8 @@ class MissionManagerNode(Node):
                     self._question_safely(self._open_question, action)
                 if getattr(action, "expects_reply", False):
                     self.pub_listen_request.publish(Bool(data=True))
-                    self.logic.note_question_asked(action.text, self._now())
+                    # 같은 질문인지는 원래 질문 글자로 본다 — 세 단계 되묻기 ①·② 는 문장이 달라도 같은 질문이다(원칙 8).
+                    self.logic.note_question_asked(action.question_text or action.text, self._now())
                     self.get_logger().info("질문 발화 — 재청취 요청 발행")
             elif isinstance(action, StopSpeech):
                 out = String()

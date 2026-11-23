@@ -88,7 +88,8 @@ def test_node_reports_every_question_it_sends():
         encoding="utf-8")
     body = src[src.index("    def _run_actions"):]
     body = body[:body.index("\n    def ", 10)]
-    assert "self.logic.note_question_asked(action.text, self._now())" in body
+    # 세 단계 되묻기 ①·② 는 원래 질문 글자로 알린다(원칙 8, 2026-11-21) — 꺼져 있으면 question_text 가 비어 action.text 그대로.
+    assert "self.logic.note_question_asked(action.question_text or action.text, self._now())" in body
 
 
 # ── 닫힘(closed)은 받아쓰기 뒤에 나간다 — 말 시작(speech)으로 견준다(2026-10-11 20:1x 실측) ──────────

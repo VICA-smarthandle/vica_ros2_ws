@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from vica_mission_manager.mission_logic import Say
-from vica_mission_manager.question_record import NO_SIGNAL_CLOSE_SEC, QuestionRecord, QuestionTracker
+from vica_mission_manager.question_record import NO_SIGNAL_CLOSE_SEC, QuestionRecord, QuestionTracker, answer_for
 
 
 def ask(text="여기서 대기할까요?", kind="yesno", options=()):
@@ -186,3 +186,28 @@ def test_node_clears_a_stale_question_at_startup():
 
 def test_open_log_says_whether_a_listen_request_went_out():
     assert "요청={'y' if say.expects_reply else 'n'}" in NODE
+
+
+# ---- 대답 칸 통로(3.2) — 열린 질문의 대답일 때만 로직에 넘긴다 ---------------------------------
+def test_stale_question_id_is_not_an_answer():
+    assert answer_for("q1-3", "q1-3", "yes") == "yes"
+    assert answer_for("q1-4", "q1-3", "yes") == ""      # 늦게 온 대답 — 지금처럼 의도로 처리한다
+    assert answer_for("", "q1-3", "yes") == "" and answer_for("q1-3", "", "yes") == ""
+
+
+def test_node_reads_the_open_question_id_before_closing_it():
+    body = _body("_on_intent")
+    assert body.index("self._questions.current") < body.index('self._close_question, "answer")')
+    assert "answer_for(" in body and "answer_value" in body
+    assert body.index("answer_for(") < body.index("self.logic.on_voice_intent(")
+
+
+def test_node_answer_fields_tolerate_an_old_message():
+    body = _body("_on_intent")
+    assert 'getattr(msg, "question_id", "")' in body and 'getattr(msg, "answer", "")' in body
+
+
+def test_intent_data_answer_fields_default_empty():
+    from vica_mission_manager.mission_logic import IntentData
+    d = IntentData(intent="affirm", matched_destination_id="", need_confirm=False, safety_flag="normal")
+    assert (d.answer, d.answer_value) == ("", "")
