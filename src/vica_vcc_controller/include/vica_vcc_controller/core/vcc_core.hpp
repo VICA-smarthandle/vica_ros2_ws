@@ -100,6 +100,7 @@ private:
   double stopped_since_{-1.0};
   int resync_count_{0};
   bool resync_primed_{false};
+  bool resync_new_path_{false};
   double align_failed_since_{-1.0};
   double need_since_{-1.0};
   double turn_target_{0.0};

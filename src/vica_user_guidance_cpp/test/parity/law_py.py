@@ -232,6 +232,8 @@ def run(lines):
                 node.cb_estop(SimpleNamespace(data=arg == '1'))
             elif cmd == 'goal':
                 node.cb_goal(SimpleNamespace(data=text(arg)))
+            elif cmd == 'rstate':
+                node.cb_robot_state(SimpleNamespace(dialog_state=text(arg)))
             elif cmd == 'haptic':
                 node.cb_haptic_request(SimpleNamespace(data=text(arg)))
             elif cmd == 'send':

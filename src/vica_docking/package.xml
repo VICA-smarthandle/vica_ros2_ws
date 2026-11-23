@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vica_docking</name>
+  <version>0.1.0</version>
+  <description>
+    라이다 V자 인식으로 하는 전진 도킹·해제(2026-11-18). 충전 도크 앞 V자 구조물(내각 120°, 팔 0.20 m)을
+    라이다로 찾아, 준비 위치(범퍼→꼭짓점 1 m)에서 정렬 → 직진 → 14 cm 에 멈추고, 나올 때는 뒤·옆뒤
+    초음파를 보며 85 cm 까지 후진한 뒤 제자리 180° 돈다. 판정은 11-17·18 실기 도구를 그대로 옮겼다.
+
+    Nav2 도킹 서버(opennav_docking)를 쓰지 않은 이유: Humble 판은 막히면 기다렸다 이어 가지 못하고
+    (FailedToControl 로 실패), 후진·회전 중 초음파 감시를 넣을 자리가 없으며, 라이다 인식기가 없다.
+    평소에는 아무 토픽도 받지 않는다 — 일을 시킬 때만 구독한다.
+  </description>
+  <maintainer email="mjw41177@gmail.com">ji_w</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>vica_interfaces</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-numpy</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

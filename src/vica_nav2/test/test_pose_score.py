@@ -478,3 +478,17 @@ def test_hits_with_no_beams_is_empty_not_crashed():
 
     assert hit_x.size == 0
     assert hit_y.size == 0
+
+
+def test_map_fingerprint_changes_with_cell_content():
+    """크기·원점이 같아도 칸 내용이 바뀌면 다른 지도다(2026-11-19, 앱 지도 수정)."""
+    from vica_nav2.pose_score import map_fingerprint
+
+    info = dict(width=4, height=3, resolution=0.05, origin_x=1.0, origin_y=-2.0)
+    data = np.zeros(12, dtype=np.int8)
+    changed = data.copy()
+    changed[5] = 100
+
+    assert map_fingerprint(**info, data=data) == map_fingerprint(**info, data=list(data))
+    assert map_fingerprint(**info, data=data) != map_fingerprint(**info, data=changed)
+    assert map_fingerprint(**{**info, 'origin_x': 1.05}, data=data) != map_fingerprint(**info, data=data)

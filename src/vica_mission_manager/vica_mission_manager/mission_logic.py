@@ -4,7 +4,8 @@ from __future__ import annotations
 import math
 import uuid
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from enum import Enum
 from typing import Callable, Optional, Sequence, Union
 
@@ -17,6 +18,9 @@ from .approach_recheck import (
 )
 from .approach_speed import ApproachSpeedLadder, NO_SPEED_LIMIT
 from .grip_meter import GripMeter
+from .reask_ladder import (HELP as REASK_HELP, LOUDER as REASK_LOUDER, RETRY as REASK_RETRY, SAME as REASK_SAME,
+                           ReaskLadder)
+from .speaker_gate import GRIP_RECENT_SEC, WaitSpeakerGate
 
 HARD_EMERGENCY_KEYWORDS = frozenset({"멈춰", "정지", "스탑", "스톱", "안돼", "위험해"})
 
@@ -40,6 +44,11 @@ class State(str, Enum):
     WAITING_RELEASE = "waiting_release"
     MOVING_TO_WAIT_SPOT = "moving_to_wait_spot"
     MOVING_BACK_TO_DEST = "moving_back_to_dest"
+    PATROLLING = "patrolling"
+    PATROL_DWELL = "patrol_dwell"
+    PATROL_ALARM = "patrol_alarm"
+    PATROL_LIGHT = "patrol_light"
+    PATROL_PAUSED = "patrol_paused"
 
 
 class NavStatus(str, Enum):
@@ -69,11 +78,19 @@ class GateReason(str, Enum):
     NOT_PAUSED = "not_paused"
     NO_TRACK_ID = "no_track_id"
     TRACK_SUPPRESSED = "track_suppressed"
+    USER_ENGAGED = "user_engaged"
     BUSY_APPROACHING = "busy_approaching"
     NOT_APPROACHING = "not_approaching"
     NO_HOME = "no_home"
     ALREADY_HOME_BOUND = "already_home_bound"
     NO_WAIT_SPOT = "no_wait_spot"
+    NO_PATROL_ROUTE = "no_patrol_route"
+    ALREADY_PATROLLING = "already_patrolling"
+    POSE_UNKNOWN = "pose_unknown"
+    NOT_PATROLLING = "not_patrolling"
+    DETECTOR_NOT_READY = "detector_not_ready"
+    NO_PATROL_ALARM = "no_patrol_alarm"
+    PATROL_ALARM_MISMATCH = "alarm_id_mismatch"
 
 
 @dataclass(frozen=True)
@@ -131,6 +148,16 @@ class IntentData:
     safety_flag: str
     wait_minutes: int = -1
     reply: str = ""
+    speaker_verdict: str = ""
+    speaker_score: float = -1.0
+    speaker_joined: float = -1.0
+    ask_text: str = ""
+    ask_kind: str = ""
+    ask_option_ids: tuple = ()
+    answer: str = ""
+    answer_value: str = ""
+    answer_kind: str = ""
+    answer_options: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -143,11 +170,20 @@ class ApproachRequest:
     person: Optional[Pose2D] = None
 
 
+QUESTION_KINDS = ("open", "confirm", "choice", "yesno", "yesno_inverted", "minutes")
+ANSWER_READ_KINDS = ("confirm", "choice", "yesno", "yesno_inverted", "minutes")
+_RESUME_QUESTION_CLOSERS = ("navigate", "cancel", "finish", "pause", "wait", "help")
+
+
 @dataclass(frozen=True)
 class Say:
     text: str
     priority: str = "narration"
     expects_reply: bool = False
+    kind: str = field(default="", compare=False)
+    options: tuple = field(default=(), compare=False)
+    question_text: str = field(default="", compare=False)
+    step: int = field(default=0, compare=False)
 
 
 @dataclass(frozen=True)
@@ -215,9 +251,45 @@ class Haptic:
     pattern: str
 
 
+@dataclass(frozen=True)
+class SetNavSpeedCap:
+    """Nav2 controller 최대속도 상한(m/s). 순찰 구간 전용(2026-11-14) — 같은 /speed_limit 을"""
+
+    mps: float
+
+
+@dataclass(frozen=True)
+class PatrolEvent:
+    """경비(순찰) 사건 하나 — 노드가 /vica_goal_event JSON 으로 낸다(SPEC 3.3)."""
+
+    event: str
+    reason: str = ""
+    route: tuple = ()
+    destination: Optional[Destination] = None
+    index: int = -1
+    lap: int = 0
+    count: int = 0
+    alarm_id: str = ""
+    kind: str = ""
+    time: str = ""
+    clip_id: str = ""
+    photo: str = ""
+    level_db: Optional[float] = None
+    resend: bool = False
+    return_home: bool = False
+
+
+@dataclass(frozen=True)
+class PatrolRecordClip:
+    """경보 뒤에 알게 된 영상 id — 노드가 기록 파일에 {"type":"clip"} 한 줄을 덧붙인다(SPEC 3.5)."""
+
+    alarm_id: str
+    clip_id: str
+
+
 Action = Union[
     Say, Navigate, CancelNav, SetNavSpeedLimit, Haptic, SpinInPlace, StopSpeech,
-    GoalEvent, WakeReply,
+    GoalEvent, WakeReply, SetNavSpeedCap, PatrolEvent, PatrolRecordClip,
 ]
 
 
@@ -277,6 +349,9 @@ TIP_SELF_WAKE_GUARD_SEC = 7.0
 
 MSG_WAKE_GREETING = "네?"
 MSG_ESTOP_WAKE = "지금은 비상 멈춤 상태입니다."
+MSG_DOCK_WAKE = "비카가 밥 먹고 있어요. 밥 먹을때는 개도 안 건드린다는 속담이 있죠"
+MSG_DOCK_GO = "도킹 위치로 복귀합니다"
+MSG_DOCK_WAIT = "비카가 아직 밥을 덜 먹었어요. 조금만 기다려주세요"
 MSG_CONFIRM_PROMPT_FALLBACK = "{name}{josa} 안내해드릴까요?"
 MSG_CONFIRM_SWITCH = "네, {prompt}"
 
@@ -295,6 +370,11 @@ MSG_WAIT_SPOT_CONFIRM = (
 MSG_WAIT_SPOT_DEFAULT = (
     "최대 30분 동안 {place}에서 기다리겠습니다. 돌아오시면 '비카야'라고 불러 주세요.")
 MSG_WAIT_BEACON = "비카가 대기 중입니다."
+MSG_WAIT_LOCATE = "비카가 여기 있어요"
+MSG_WAIT_IN_USE = "지금은 대기중입니다. 사용자님을 기다리고 있어요"
+MSG_SPK_REASK = "확인을 위해 한 번 더 말씀해 주세요"
+MSG_SPK_IDENTITY = "아까 {dest}에 가자고 하신 사용자님이신가요?"
+MSG_SPK_REJECT = "죄송합니다. 다른 분을 안내 중이라 지금은 이용하실 수 없어요."
 MSG_WAIT_SPOT_BLOCKED = "대기 자리가 막혀 입구 앞에서 기다리겠습니다."
 MSG_WAIT_EXPIRED = "대기 시간이 종료되어 제자리로 돌아갑니다."
 MSG_OBSTACLE_AVOID = "앞에 장애물이 있어 비켜갈게요."
@@ -303,8 +383,12 @@ MSG_OBSTACLE_STOP = "앞에 장애물이 있어 정지합니다."
 MIC_OFF_MESSAGES = frozenset({MSG_OBSTACLE_STOP})
 OBSTACLE_STALE_SEC = 2.5
 MSG_WAIT_FINISH_ASK = "네, 어디로 모실까요?"
+_ASKING_KINDS = {MSG_WAIT_FINISH_ASK: "open", MSG_ASK_ENTRANCE: "yesno", MSG_ASK_RESTROOM: "yesno",
+                 MSG_ASK_GENERIC: "yesno", MSG_ASK_WAIT_TIME: "minutes"}
 MSG_WAIT_NEED_ASK = "안내가 필요 없으신가요?"
 QUESTION_REASK_SEC = 15.0
+MSG_REASK_RETRY = "잘 듣지 못했습니다. 다시 말씀해 주세요."
+MSG_REASK_LOUDER = "죄송합니다. 더 크게, 또박또박 말씀해 주세요."
 WAIT_PLACE_PHRASES = {"right": "입구 오른쪽", "left": "입구 왼쪽", "across": "입구 맞은편"}
 WAIT_PLACE_AT_DESTINATION = "입구 앞"
 MSG_FINISH = "안내를 종료합니다."
@@ -315,7 +399,7 @@ WAIT_MINUTES_CAP = 30
 WAIT_BEACON_INTERVAL_SEC = 10.0
 HOME_BEACON_INTERVAL_SEC = 60.0
 HOME_BEACON_RADIUS_M = 0.5
-WAIT_RELEASE_SEC = 5.0
+WAIT_DEPART_AFTER_SPEECH_SEC = 1.0
 WAIT_RELEASE_SPEECH_FALLBACK_SEC = 30.0
 WAIT_FINISH_REPEAT_SEC = 30.0
 DOOR_FRONT_BACK_DEG = 30.0
@@ -330,6 +414,8 @@ SAME_QUESTION_SEC = 60.0
 LLM_THINKING_TAIL_SEC = 1.0
 ASKING_STUCK_FALLBACK_SEC = 30.0
 MSG_PAUSED = "잠시 멈추겠습니다. 다시 출발하려면 말씀해 주세요."
+MSG_PAUSE_KEPT = "알겠습니다. 다시 출발하려면 말씀해 주세요."
+MSG_RESUME_CONFIRM = "다시 출발할까요?"
 MSG_RESUMED = "{name}{josa} 다시 출발합니다."
 MSG_CANCEL_CONFIRM = "안내를 취소할까요?"
 MSG_CANCEL_KEPT = "안내를 계속하겠습니다."
@@ -343,6 +429,40 @@ MSG_HELP_CANCEL_CONFIRM = "도움 요청을 취소할까요?"
 MSG_HELP_CANCELED = "도움 요청을 취소했습니다."
 MSG_HELP_UNAVAILABLE = "지금은 도움 요청을 보낼 수 없습니다"
 HELP_RESEND_SEC = 10.0
+MSG_PATROL_INTRUDER = "침입자 발생"
+MSG_PATROL_LIGHT = "불 켜짐 감지"
+MSG_PATROL_STARTED = "경비 모드를 시작합니다."
+MSG_PATROL_ENDED = "경비 모드를 종료합니다."
+PATROL_DWELL_SEC = 3.0
+PATROL_INTRUDER_REPEAT_SEC = 3.0
+PATROL_LIGHT_REPEAT_SEC = 10.0
+PATROL_ALARM_RESEND_SEC = 10.0
+PATROL_DETECTOR_TIMEOUT_SEC = 3.0
+PATROL_ARMING_TIMEOUT_SEC = 15.0
+PATROL_SPEED_MPS = 0.6
+PATROL_MAX_LEG_FAILURES = 3
+PATROL_ALARM_KINDS = ("intruder", "sound", "light", "camera_lost")
+PATROL_WATCH_KINDS = ("intruder", "light", "sound")
+PATROL_DESTINATION_PREFIX = "patrol:"
+PATROL_REJECT_TEXT = {
+    GateReason.ESTOP_ACTIVE: "비상정지 중입니다. 해제한 뒤 다시 시도하세요.",
+    GateReason.ALREADY_PATROLLING: "이미 순찰 중입니다.",
+    GateReason.BUSY_NAVIGATING: "안내·접근 중에는 경비를 시작할 수 없습니다.",
+    GateReason.NO_PATROL_ROUTE: "순찰 지점이 2곳 이상이어야 경비를 시작할 수 있습니다.",
+    GateReason.POSE_INVALID: "순찰 경로에 갈 수 없는 장소가 있습니다.",
+    GateReason.NAV_NOT_READY: "주행 준비(Nav2)가 아직 안 됐습니다.",
+    GateReason.POSE_UNKNOWN: "로봇 위치가 아직 정해지지 않았습니다.",
+    GateReason.NOT_PATROLLING: "순찰 중이 아닙니다.",
+    GateReason.NOT_NAVIGATING: "지금은 일시정지할 수 없습니다.",
+    GateReason.NOT_PAUSED: "재개할 순찰이 없습니다.",
+    GateReason.DETECTOR_NOT_READY: "카메라가 준비되지 않아 재개할 수 없습니다.",
+    GateReason.NO_PATROL_ALARM: "확인할 경보가 없습니다.",
+    GateReason.PATROL_ALARM_MISMATCH: "지금 경보와 다른 경보입니다.",
+}
+PATROL_START_REJECT_TEXT = {
+    GateReason.ESTOP_ACTIVE: "비상정지 중에는 경비를 시작할 수 없습니다.",
+    GateReason.NO_PATROL_ROUTE: "순찰 지점이 2곳 이상이어야 경비를 시작할 수 있습니다.",
+}
 MSG_APPROACH_COMING = "동행로봇 비카가 다가가고 있어요."
 MSG_APPROACH_QUESTION = "안녕하세요? 시각장애인 안내로봇 비카입니다. 안내를 받으시겠어요?"
 MSG_APPROACH_ACCEPTED = "네, 잠시만 기다려주세요. 로봇이 회전하니 주의하세요."
@@ -358,9 +478,11 @@ DEST_ANSWER_WAIT_SEC = 15.0
 DEST_PROMPT_FALLBACK_SEC = 40.0
 DEST_RETRY_RETURN_SEC = 0.0
 
+MSG_DISMISS_ACK = "네, 필요하시면 '비카야'라고 불러 주세요."
 MSG_HANDLE_HINT = "손잡이가 진동하고 있습니다. 잡아주세요."
 MSG_HANDLE_LOST = "안전을 위해 손잡이를 다시 잡아주세요"
 MSG_HANDLE_UNAVAILABLE = "손잡이 연결에 문제가 있어 일반 안내로 진행합니다."
+MSG_HANDLE_HEIGHT = "검지손가락으로 스위치를 위아래로 움직이시면 스마트핸들 높이를 조절하실 수 있습니다."
 HAPTIC_PATTERN_HANDLE_HINT = "long"
 HAPTIC_PATTERN_GRIP_ACK = "tick"
 HAPTIC_PATTERN_WAKE_LOCATE = "locate"
@@ -392,8 +514,11 @@ SEEK_TURN_TIMEOUT_SEC = APPROACH_TURN_TIMEOUT_SEC
 SEEK_MIN_YAW_RAD = math.radians(10.0)
 HANDLE_SIDE_MIN_YAW_RAD = math.radians(135.0)
 WAKE_CONSUMED_GUARD_SEC = 3.0
+WAKE_REVIVE_SEC = 40.0
+_WAKE_FOLD_QUESTIONS = ("confirm", "cancel", "help_confirm", "resume")
 REAPPROACH_SUPPRESS_SEC = 60.0
 USER_ATTACHED_SUPPRESS_SEC = 60.0
+APPROACH_LOCK_QUIET_SEC = 40.0
 NEAR_CALL_MAX_M = 1.5
 NEAR_CALL_NO_SPIN_M = 1.0
 PERSON_APPROACH_SPEED_PERCENT = 100.0
@@ -471,6 +596,11 @@ _APPROACH_STATES = (
 _GOAL_ACTIVE_STATES = (
     State.NAVIGATING, State.APPROACHING, State.TURNING, State.RETURNING,
     State.SEEKING, State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST,
+    State.PATROLLING,
+)
+_PATROL_STATES = (
+    State.PATROLLING, State.PATROL_DWELL, State.PATROL_ALARM, State.PATROL_LIGHT,
+    State.PATROL_PAUSED,
 )
 _WAIT_STATES = (
     State.WAITING_RELEASE, State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST,
@@ -479,6 +609,7 @@ _WAIT_STATES = (
 _WAIT_MOVING_STATES = (State.MOVING_TO_WAIT_SPOT, State.MOVING_BACK_TO_DEST)
 _WAKE_IGNORE_STATES = (
     State.APPROACHING, State.TURNING, State.FAILED, *_WAIT_MOVING_STATES,
+    *_PATROL_STATES,
 )
 
 _REJECT_MESSAGES = {
@@ -600,6 +731,7 @@ def check_approach_gate(
     nav_ready: bool,
     suppressed: bool,
     same_person: bool = False,
+    user_engaged: bool = False,
 ) -> GateReason:
     """사람 접근 요청 게이트. 첫 번째 실패 사유를 돌려준다."""
     if not request.approachable:
@@ -617,6 +749,8 @@ def check_approach_gate(
         return GateReason.BUSY_NAVIGATING
     if suppressed:
         return GateReason.TRACK_SUPPRESSED
+    if user_engaged:
+        return GateReason.USER_ENGAGED
     if request.goal is None:
         return GateReason.POSE_INVALID
     if not pose_valid(approach_destination(request), bounds):
@@ -675,6 +809,76 @@ def yaw_deg_to_quaternion(yaw_deg: float) -> tuple:
     return (0.0, 0.0, math.sin(half), math.cos(half))
 
 
+def patrol_leg_destination(target: Destination, following: Destination) -> Destination:
+    """순찰 구간 goal. 도착 방향은 저장 방향이 아니라 **다음 지점을 바라보는 방향**이다."""
+    dx = following.pose.x - target.pose.x
+    dy = following.pose.y - target.pose.y
+    yaw = (math.degrees(math.atan2(dy, dx)) if math.hypot(dx, dy) >= 0.05
+           else target.pose.yaw_deg)
+    return Destination(
+        id=PATROL_DESTINATION_PREFIX + target.id,
+        name=target.name,
+        pose=Pose2D(target.pose.x, target.pose.y, yaw, target.pose.frame_id),
+        calibrated=True,
+    )
+
+
+def _patrol_text(value) -> str:
+    """순찰 이벤트 JSON 의 글자 칸. 글자가 아니면 ""."""
+    return value if isinstance(value, str) else ""
+
+
+def _patrol_number(value) -> Optional[float]:
+    """순찰 이벤트 JSON 의 숫자 칸. 유한한 숫자가 아니면 None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+@dataclass
+class PatrolAlarm:
+    """지금 걸린 경보 하나. 확인(acked) 전까지 음성 반복·이벤트 재전송을 한다."""
+
+    alarm_id: str
+    kind: str
+    time: str
+    said_at: float
+    sent_at: float
+    clip_id: str = ""
+    photo: str = ""
+    level_db: Optional[float] = None
+    acked: bool = False
+
+
+@dataclass
+class PatrolRun:
+    """순찰 한 번의 문맥. 시작에 만들고 종료·비상정지에 버린다."""
+
+    route: tuple
+    watch_off: frozenset = frozenset()
+    index: int = 0
+    lap: int = 1
+    arrived: bool = False
+    armed: bool = False
+    arming_deadline: Optional[float] = None
+    dwell_until: Optional[float] = None
+    leg_failures: int = 0
+    detector_ok_at: Optional[float] = None
+    alarm: Optional[PatrolAlarm] = None
+    last_alarm: Optional[PatrolAlarm] = None
+
+
+def switch_bundle_warning(answer_field: bool, reask_ladder: bool, wake_revive: bool) -> str:
+    """세 파라미터가 한 묶음에서 어긋났을 때의 경고 한 줄(전체 검토 I3 · I4). 전부 켜짐·전부 꺼짐이면 ""."""
+    values = {"answer_field": answer_field, "reask_ladder": reask_ladder, "wake_revive": wake_revive}
+    if len(set(values.values())) == 1:
+        return ""
+    on = ", ".join(n for n, v in values.items() if v)
+    off = ", ".join(n for n, v in values.items() if not v)
+    return (f"미션 파라미터 조합이 어긋남(켜짐 {on} / 꺼짐 {off}) — 셋은 음성 .env 의 VICA_RECUT·VICA_ANSWER 와 함께 "
+            "한 묶음으로 켠다")
+
+
 class MissionLogic:
     """상태 머신. 안내 7종 + 사람 접근 3종."""
 
@@ -688,6 +892,7 @@ class MissionLogic:
         nav_retry_delay_sec: float = 3.0,
         approach_response_timeout_sec: float = APPROACH_RESPONSE_TIMEOUT_SEC,
         reapproach_suppress_sec: float = REAPPROACH_SUPPRESS_SEC,
+        approach_lock_quiet_sec: float = APPROACH_LOCK_QUIET_SEC,
         person_approach_speed_percent: float = PERSON_APPROACH_SPEED_PERCENT,
         approach_goal_update_m: float = APPROACH_GOAL_UPDATE_M,
         return_destination: Optional[Destination] = None,
@@ -711,8 +916,26 @@ class MissionLogic:
         handle_lost_give_up_sec: float = HANDLE_LOST_GIVE_UP_SEC,
         handle_state_stale_sec: float = HANDLE_STATE_STALE_SEC,
         grip_assume_held: bool = False,
+        grip_release_stop: bool = True,
         home_beacon_interval_sec: float = HOME_BEACON_INTERVAL_SEC,
+        speaker_gate: bool = False,
+        spk_joined_threshold: float = 0.50,
+        speaker_gate_grip: bool = False,
+        patrol_dwell_sec: float = PATROL_DWELL_SEC,
+        patrol_intruder_repeat_sec: float = PATROL_INTRUDER_REPEAT_SEC,
+        patrol_light_repeat_sec: float = PATROL_LIGHT_REPEAT_SEC,
+        patrol_alarm_resend_sec: float = PATROL_ALARM_RESEND_SEC,
+        patrol_detector_timeout_sec: float = PATROL_DETECTOR_TIMEOUT_SEC,
+        patrol_arming_timeout_sec: float = PATROL_ARMING_TIMEOUT_SEC,
+        patrol_speed_mps: float = PATROL_SPEED_MPS,
+        patrol_max_leg_failures: int = PATROL_MAX_LEG_FAILURES,
+        reask_ladder: bool = False,
+        wake_revive: bool = False,
+        answer_field: bool = False,
     ) -> None:
+        self.reask_ladder = reask_ladder
+        self.wake_revive = wake_revive
+        self.answer_field = answer_field
         self.confirm_timeout_sec = confirm_timeout_sec
         self.dwell_sec = dwell_sec
         self.estop_release_grace_sec = estop_release_grace_sec
@@ -722,6 +945,7 @@ class MissionLogic:
 
         self.approach_response_timeout_sec = approach_response_timeout_sec
         self.reapproach_suppress_sec = reapproach_suppress_sec
+        self.approach_lock_quiet_sec = approach_lock_quiet_sec
         self.person_approach_speed_percent = person_approach_speed_percent
         self.approach_goal_update_m = approach_goal_update_m
         self.return_destination = return_destination
@@ -738,6 +962,8 @@ class MissionLogic:
         self.dest_retry_return_sec = dest_retry_return_sec
         self._wake_consumed_at: Optional[float] = None
         self._user_attached_until: Optional[float] = None
+        self._approach_lock = False
+        self._approach_lock_quiet_since: Optional[float] = None
         self._seek_return_yaw: Optional[float] = None
         self._seek_deadline: Optional[float] = None
         self._turn_deadline: Optional[float] = None
@@ -758,6 +984,11 @@ class MissionLogic:
         self.handle_lost_repeat_sec = handle_lost_repeat_sec
         self.handle_lost_give_up_sec = handle_lost_give_up_sec
         self.grip_assume_held = grip_assume_held
+        self.grip_release_stop = grip_release_stop
+        self._speaker_gate_param = speaker_gate
+        self._speaker_mode = "off"
+        self._spk_gate = WaitSpeakerGate(spk_joined_threshold)
+        self._speaker_gate_grip = speaker_gate_grip
         self._grip = GripMeter(stale_sec=handle_state_stale_sec)
         self.handle_active: bool = False
         self._handle_engaged: bool = False
@@ -775,24 +1006,24 @@ class MissionLogic:
         self._help_last_sent_at: Optional[float] = None
         self._help_confirm_reask_at: Optional[float] = None
         self._help_confirm_deadline: Optional[float] = None
-        self._help_confirm_reasked = False
+        self._help_ladder = ReaskLadder(three_step=reask_ladder)
         self.help_cancel_pending = False
         self._help_cancel_reask_at: Optional[float] = None
         self._help_cancel_deadline: Optional[float] = None
-        self._help_cancel_reasked = False
 
         self.arrival_dialog = arrival_dialog
         self._asking_is_finish = False
         self._asking_time_after_yes = False
         self._nav_from_app = False
         self._asking_entered_at: Optional[float] = None
-        self._arrival_retried = False
+        self._arrival_ladder = ReaskLadder(three_step=reask_ladder)
         self._asking_question = ""
         self._deny_reconfirmed = False
         self._asking_where = False
         self._leaving_deadline: Optional[float] = None
         self._wait_until: Optional[float] = None
         self._wait_minutes_requested = -1
+        self._wait_located = False
         self.robot_yaw_deg: Optional[float] = None
         self.door_side: str = ""
         self._arrived_destination: Optional[Destination] = None
@@ -807,17 +1038,28 @@ class MissionLogic:
         self._release_entered_at: Optional[float] = None
         self._wait_finish_asked_at: Optional[float] = None
         self._wait_need_asked_at: Optional[float] = None
-        self._wait_finish_reasked = False
-        self._wait_need_reasked = False
+        self._wait_ladder = ReaskLadder(three_step=reask_ladder)
         self._wait_hold: Optional[State] = None
         self._change_from: Optional[Destination] = None
+        self._pause_hold = False
         self._approach_dest: Optional[Destination] = None
         self._confirm_from_approach = False
         self._confirm_prompt = ""
+        self._confirm_options: tuple = ()
         self._confirm_reask_at: Optional[float] = None
-        self._confirm_reasked = False
+        self._confirm_ladder = ReaskLadder(three_step=reask_ladder)
         self._cancel_reask_at: Optional[float] = None
-        self._cancel_reasked = False
+        self._cancel_ladder = ReaskLadder(three_step=reask_ladder)
+        self._resume_confirm_pending = False
+        self._resume_confirm_deadline: Optional[float] = None
+        self._resume_reask_at: Optional[float] = None
+        self._resume_ladder = ReaskLadder(three_step=reask_ladder)
+        self._idle_ladder = ReaskLadder(three_step=True)
+        self._ladders_climbed: Optional[list] = None
+        self._voice_dropped = False
+        self._reask_held = False
+        self._answer_swapped: Optional[IntentData] = None
+        self._wake_folded: Optional[tuple] = None
         self._nav_tree: str = NAV_TREE_DEFAULT
         self._ear_busy = False
         self._ear_busy_since: Optional[float] = None
@@ -834,6 +1076,9 @@ class MissionLogic:
 
         self.state: State = State.IDLE
         self.estop_active: bool = False
+        self.dock_mode: str = ""
+        self.dock_pending: bool = False
+        self.dock_near: bool = False
         self.active_destination: Optional[Destination] = None
         self.paused_destination: Optional[Destination] = None
         self._paused_returning_home: bool = False
@@ -860,6 +1105,18 @@ class MissionLogic:
         self._suppressed_tracks: dict = {}
         self._suppressed_places: list = []
 
+        self.patrol_dwell_sec = patrol_dwell_sec
+        self.patrol_intruder_repeat_sec = patrol_intruder_repeat_sec
+        self.patrol_light_repeat_sec = patrol_light_repeat_sec
+        self.patrol_alarm_resend_sec = patrol_alarm_resend_sec
+        self.patrol_detector_timeout_sec = patrol_detector_timeout_sec
+        self.patrol_arming_timeout_sec = patrol_arming_timeout_sec
+        self.patrol_speed_mps = patrol_speed_mps
+        self.patrol_max_leg_failures = patrol_max_leg_failures
+        self.patrol_wall_clock: Callable[[], datetime] = datetime.now
+        self._patrol: Optional[PatrolRun] = None
+        self.patrol_stop_home_reason: Optional[GateReason] = None
+
     @property
     def approach_stages(self) -> tuple:
         """검증·정렬을 마친 접근 감속 단계 목록 (먼 거리부터)."""
@@ -878,21 +1135,304 @@ class MissionLogic:
         bounds: Optional[MapBounds] = None,
         nav_ready: bool = True,
     ) -> list:
+        """음성 요청 하나에 대한 반응 + 음성이 넘긴 질문 문장(3-가 한 목소리)."""
+        self._ladders_climbed = []
+        self._voice_dropped = False
+        self._answer_swapped = None
+        self._reask_held = (self.reask_ladder or self.wake_revive) and self._is_wake_only(intent)
+        try:
+            actions = self._react_voice_intent(intent, now, lookup, bounds, nav_ready)
+            intent = self._answer_swapped or intent
+            self._restart_reasks_on_understood(intent)
+        finally:
+            self._ladders_climbed = None
+            self._reask_held = False
+            self._answer_swapped = None
+        return self._say_handed_question(intent, actions, lookup)
+
+    @staticmethod
+    def _is_wake_only(intent: IntentData) -> bool:
+        """호출어만 들린 말인가 — 음성이 "네?"(MSG_WAKE_GREETING)로 답하거나 넘긴 unknown(창 안의 "비카야")."""
+        return intent.intent == "unknown" and MSG_WAKE_GREETING in (
+            (intent.reply or "").strip(), (intent.ask_text or "").strip())
+
+    def _restart_reasks_on_understood(self, intent: IntentData) -> None:
+        """세 단계 되묻기(원칙 8): 알아들은 말을 처리했으면 못 알아들은 말의 단수를 처음으로 — 이번 말로 오른 사다리는 둔다(그"""
+        if not self.reask_ladder or intent.intent in ("unknown", "repeat") or self._voice_dropped:
+            return
+        climbed = self._ladders_climbed or []
+        for ladder in (self._confirm_ladder, self._cancel_ladder, self._resume_ladder, self._help_ladder,
+                       self._wait_ladder, self._arrival_ladder, self._idle_ladder):
+            if not any(ladder is c for c in climbed):
+                ladder.restart_heard()
+
+    def _say_handed_question(self, intent: IntentData, actions: list,
+                             lookup: Callable[[str], Optional[Destination]]) -> list:
+        """음성이 넘긴 질문(ask_text)을 미션이 말한다 — 질문 기록·듣기 요청이 함께 나간다(설계 4.4)."""
+        if not intent.ask_text or self.state in _PATROL_STATES:
+            return actions
+        if self.reask_ladder and intent.intent == "unknown" and not self._is_wake_only(intent):
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "넘겨받은 되묻는 말 버림(사다리가 말함)")))
+            return actions
+        if any(isinstance(a, Say) for a in actions):
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "미션이 이미 말해 넘겨받은 질문 버림")))
+            return actions
+        kind = intent.ask_kind if intent.ask_kind in QUESTION_KINDS else "open"
+        options = tuple((d.id, d.name) for d in map(lookup, intent.ask_option_ids) if d is not None)
+        self.voice_note = " · ".join(filter(None, (self.voice_note, "넘겨받은 질문")))
+        if self._resume_question_open() and not self._handed_text_keeps_question(intent):
+            self._close_resume_question()
+        return [*actions, self._ask(intent.ask_text, kind, options)]
+
+    @staticmethod
+    def _handed_text_keeps_question(intent: IntentData) -> bool:
+        """넘겨받아 말하는 글자가 로봇 자신의 고정 문장 — 호출 응답 "네?"(MSG_WAKE_GREETING)·되묻는 말(MSG_REASK_RETRY,"""
+        return (intent.ask_text or "").strip() in (MSG_WAKE_GREETING, MSG_REASK_RETRY)
+
+    def _react_voice_intent(
+        self,
+        intent: IntentData,
+        now: float,
+        lookup: Callable[[str], Optional[Destination]],
+        bounds: Optional[MapBounds] = None,
+        nav_ready: bool = True,
+    ) -> list:
         """음성 요청 하나에 대한 반응. 노드는 나온 동작을 실행하고 기록만 한다."""
         self.voice_note = ""
+        if self.state in _PATROL_STATES:
+            self.voice_note = "순찰 중이라 받지 않음"
+            self._voice_dropped = True
+            return []
+        if intent.intent == "repeat":
+            return self._react_repeat(intent, now, lookup, bounds, nav_ready)
+        if self.answer_field and intent.answer and intent.answer_kind in ANSWER_READ_KINDS:
+            swapped = self._intent_from_answer(intent)
+            if swapped is not intent:
+                self.voice_note = f"대답 칸 {intent.answer} → {swapped.intent}"
+                intent = self._answer_swapped = swapped
+                self._reask_held = (self.reask_ladder or self.wake_revive) and self._is_wake_only(intent)
+        if self._reask_held:
+            inwindow = self._react_inwindow_wake(now)
+            if inwindow is not None:
+                return inwindow
+        if intent.intent == "dismiss":
+            swapped = self._dismiss_as(intent, now)
+            if swapped is None:
+                self._wake_folded = None
+                return self._dismiss_end()
+            intent = swapped
+        revived = self._wake_revive_as(intent, now, lookup, nav_ready) if self.wake_revive else None
+        if revived is not None:
+            intent = revived
         if self._answer_predates_question(intent):
             self.voice_note = "질문 전에 시작한 말이라 대답으로 안 씀"
+            self._voice_dropped = True
             return []
+        if self.speaker_gate and revived is None and self.state in (State.WAITING, State.WAITING_RELEASE):
+            gated, intent = self._speaker_gate_step(intent, now)
+            if gated is not None:
+                return gated
         reacted = self._react_by_table(intent, now, lookup, bounds, nav_ready)
         if reacted is not None:
             return reacted
         return self._route_voice_intent(intent, now, lookup, bounds, nav_ready)
+
+    def _react_repeat(self, intent: IntentData, now: float, lookup: Callable[[str], Optional[Destination]],
+                      bounds: Optional[MapBounds], nav_ready: bool) -> list:
+        """"다시 말해줘"(repeat, 원칙 28) — 미션이 쥔 열린 질문을 같은 문장으로 한 번 더 말한다(_resay_open_question)."""
+        name = self._open_question_name(now)
+        if name is not None:
+            self._wake_folded = None
+            self.voice_note = "다시 말해줘 — 열린 질문을 다시"
+            resaid = self._resay_question(name, now)
+            self._rearm_question_clock(name, now)
+            return resaid
+        revived = (self._wake_revive_as(replace(intent, intent="affirm"), now, lookup, nav_ready)
+                   if self.wake_revive else None)
+        if revived is None:
+            self.voice_note = self.voice_note or "다시 말해줘 — 미션이 쥔 질문 없음"
+            return []
+        reacted = self._react_by_table(revived, now, lookup, bounds, nav_ready)
+        if reacted is not None:
+            return reacted
+        return self._route_voice_intent(revived, now, lookup, bounds, nav_ready)
+
+    def _react_inwindow_wake(self, now: float) -> Optional[list]:
+        """듣기 창 안에서 음성 의도로 온 "비카야"(_is_wake_only — reask_ladder 나 wake_revive 가 켜졌을 때만 부른다, 원칙 13 · 9 · 3,"""
+        if not self._wake_folds_here():
+            return None
+        if self.wake_revive:
+            folded, confirming = self._wake_folded, self.state == State.CONFIRMING
+            actions = self._wake_fold(now)
+            if not confirming and self._wake_folded is folded:
+                return None
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "창 안 호출 — 질문을 접음")))
+            return actions
+        name = self._open_question_name(now)
+        if name not in _WAKE_FOLD_QUESTIONS:
+            return None
+        self.voice_note = " · ".join(filter(None, (self.voice_note, "창 안 호출 — 열린 질문을 다시")))
+        resaid = self._resay_question(name, now)
+        self._rearm_question_clock(name, now)
+        return resaid
+
+    def _intent_from_answer(self, intent: IntentData) -> IntentData:
+        """대답 칸(answer·answer_value)을 바꿔 읽은 의도(원칙 6, answer_field 켜짐·ANSWER_READ_KINDS 에서만 부른다). 바꿔 읽지"""
+        answer, value = intent.answer, intent.answer_value.strip()
+        read = replace(intent, answer="", answer_value="", answer_kind="", answer_options=())
+        if answer == "yes":
+            if intent.answer_kind == "confirm" and intent.answer_options and self._help_confirm_waiting():
+                return replace(read, intent="navigate", matched_destination_id=intent.answer_options[0],
+                               need_confirm=False)
+            return replace(read, intent="affirm")
+        if answer == "no":
+            return replace(read, intent="deny")
+        if answer in ("destination", "choice"):
+            if not value:
+                return replace(read, intent="unknown")
+            return replace(read, intent="navigate", matched_destination_id=value, need_confirm=True)
+        if answer == "minutes":
+            try:
+                minutes = int(value)
+            except ValueError:
+                minutes = 0
+            if minutes <= 0:
+                return replace(read, intent="unknown")
+            return replace(read, intent="wait", wait_minutes=minutes)
+        if answer == "unclear":
+            return replace(read, intent="unknown")
+        return intent
+
+    def _help_confirm_waiting(self) -> bool:
+        """미션이 확인 대기 상태(CONFIRMING) 없이 목적지 확인 질문을 묻고 대답을 기다리는 중인가(원칙 6, Task 3.3 수정 1차)."""
+        return self.state != State.CONFIRMING and self.help_phase == "requested"
+
+    def _wake_revive_as(self, intent: IntentData, now: float,
+                        lookup: Callable[[str], Optional[Destination]],
+                        nav_ready: bool = True) -> Optional[IntentData]:
+        """호출이 접은 질문의 되살리기(원칙 13 · 3, wake_revive 켜짐에서만 부른다). 되살렸으면 바꿔 읽은 의도, 아니면 None —"""
+        folded = self._wake_folded
+        if folded is None or self._is_wake_only(intent):
+            return None
+        self._wake_folded = None
+        kind, dest_id, at = folded
+        if intent.intent != "affirm" or now - at > WAKE_REVIVE_SEC:
+            return None
+        if self._mission_question_open(now, wait_since=at):
+            self.voice_note = "열린 질문의 대답으로 받음(호출로 접은 질문은 되살리지 않음)"
+            return None
+        if not self._revive_reopens(kind, dest_id, lookup, nav_ready):
+            self.voice_note = "호출로 접은 질문을 지금은 다시 물을 수 없어 지움"
+            return None
+        self.voice_note = "호출로 접은 질문을 다시 묻기"
+        if kind == "confirm":
+            return replace(intent, intent="navigate", matched_destination_id=dest_id, need_confirm=True)
+        if kind == "resume":
+            return replace(intent, intent="resume", need_confirm=True)
+        return replace(intent, intent=kind)
+
+    def _revive_reopens(self, kind: str, dest_id: str, lookup: Callable[[str], Optional[Destination]],
+                        nav_ready: bool = True) -> bool:
+        """바꿔 읽은 의도가 지금 상태에서 그 질문을 다시 여는가(원칙 13) — 상태만 읽는다(부수 효과 없음)."""
+        if kind == "cancel":
+            return self._voice_cancel_gate() == GateReason.OK and not self.cancel_confirm_pending
+        if kind == "help":
+            return self.state == State.NAVIGATING and self.help_phase == "none"
+        if kind == "resume":
+            return self._resume_ask_allowed(nav_ready) and self.help_phase != "acknowledged"
+        if (self.estop_active or self.state == State.ESTOPPED or self.dock_mode or self.dock_pending
+                or self.help_phase == "acknowledged"):
+            return False
+        if not self._confirm_prompt_for(lookup(dest_id)):
+            return False
+        if self.state == State.NAVIGATING:
+            current = self.active_destination
+            return not self._nav_from_app and current is not None and current.id != dest_id
+        if self.state == State.RETURNING:
+            return True
+        return self.state not in _APPROACH_STATES and self.state not in _WAIT_MOVING_STATES
+
+    def _mission_question_open(self, now: Optional[float] = None, wait_since: Optional[float] = None) -> bool:
+        """미션이 쥔 질문이 열려 있나 — 확인·도착·대기 시간·접근 질문, 안내 취소 확인, 도움 확인·도움 요청 취소 확인, 대기 중"""
+        waiting = self.state in (State.WAITING, State.WAITING_RELEASE)
+        need_at, finish_at = self._wait_need_asked_at, self._wait_finish_asked_at
+        finish_open = finish_at is not None and (now is None or now - finish_at <= WAIT_FINISH_REPEAT_SEC)
+        if wait_since is None:
+            wait_open = need_at is not None or finish_open
+        else:
+            wait_open = ((need_at is not None and need_at > wait_since)
+                         or (finish_open and finish_at > wait_since))
+        return (
+            self.state in (State.CONFIRMING, State.ASKING_NEXT, State.ASKING_WAIT_TIME, State.AWAITING_USER)
+            or self.cancel_confirm_pending
+            or self.help_cancel_pending
+            or self.help_phase == "asking"
+            or (waiting and wait_open)
+            or self._resume_question_open())
+
+    def _dismiss_as(self, intent: IntentData, now: Optional[float] = None) -> Optional[IntentData]:
+        """dismiss("됐어", 원칙 14)를 바꿔 읽을 의도. None 이면 끝맺는 말(_dismiss_end)을 한다."""
+        if self._mission_question_open(now):
+            return replace(intent, intent="deny")
+        if self.state in (State.NAVIGATING, State.PAUSED):
+            return replace(intent, intent="cancel")
+        return None
+
+    def _dismiss_end(self) -> list:
+        """끝맺는 말 — 쉬는 중(IDLE·질문 없는 대기)만. 듣기 창을 다시 열지 않는다(expects_reply 없음). 그 밖은 말 없음."""
+        if self.state == State.IDLE:
+            self._forget_dest_prompt()
+        elif self.state not in (State.WAITING, State.WAITING_RELEASE):
+            self.voice_note = "대화 끝내기 — 받을 상황이 아님"
+            return []
+        return [Say(MSG_DISMISS_ACK, priority="response")]
+
+    @property
+    def speaker_gate(self) -> bool:
+        """대기 중 본인 확인이 켜졌나 — 음성 VICA_SPK_FOLLOW=on 이거나 launch speaker_gate:=true."""
+        return self._speaker_gate_param or self._speaker_mode == "on"
+
+    def set_speaker_mode(self, mode: str) -> None:
+        """음성 노드의 화자 판정 모드(off·log·on). on 이 아니게 되면 열린 단계를 닫는다."""
+        self._speaker_mode = (mode or "off").strip().lower()
+        if not self.speaker_gate:
+            self._spk_gate.reset()
+
+    def _speaker_gate_step(self, intent: IntentData, now: float):
+        """대기 중 본인 확인(설계 4.5·B1~B5). (동작 목록, None) 이면 그대로 내보내고,"""
+        followup_open = any(t is not None and now - t <= WAIT_FINISH_REPEAT_SEC
+                            for t in (self._wait_need_asked_at, self._wait_finish_asked_at))
+        out = self._spk_gate.decide(intent, grip_recent=self._grip.touched_within(now, GRIP_RECENT_SEC),
+                                    sensor_ok=self._speaker_gate_grip and self._grip.fresh(now),
+                                    followup_open=followup_open, now=now)
+        if out.note:
+            self.voice_note = out.note
+        if out.action == "hint":
+            return [Haptic(HAPTIC_PATTERN_HANDLE_HINT), Say(MSG_HANDLE_HINT, priority="response")], None
+        if out.action == "reask":
+            return [self._ask(MSG_SPK_REASK, "open")], None
+        if out.action == "identity":
+            dest = self._arrived_destination
+            return [self._ask(MSG_SPK_IDENTITY.format(dest=dest.name if dest is not None else "목적지"), "yesno")], None
+        if out.action == "reject":
+            return [Say(MSG_SPK_REJECT, priority="response")], None
+        if out.action == "drop":
+            return [], None
+        chosen = out.intent
+        if out.skip_confirm and chosen.intent in ("cancel", "finish"):
+            self._reset_arrival_dialog()
+            return [Say(MSG_FINISH, priority="response"), *self._go_home(now)], None
+        if out.skip_confirm and chosen.intent == "navigate":
+            chosen = replace(chosen, need_confirm=False)
+        return None, chosen
 
     def note_question_asked(self, text: str, now: float) -> None:
         """노드가 대답을 기다리는 말(Say.expects_reply)을 내보낼 때 부른다. 같은 질문을 SAME_QUESTION_SEC 안에"""
         if (self._question_at is None or text != self._question_text
                 or now - self._question_at > SAME_QUESTION_SEC):
             self._question_at, self._question_text = now, text
+        if text.strip() != MSG_WAKE_GREETING:
+            self._wake_folded = None
 
     def _answer_predates_question(self, intent: IntentData) -> bool:
         """이 예/아니요의 말이 마지막 질문보다 먼저 시작됐나 — 그러면 그 질문의 대답이 아니다. 말 시작을 못"""
@@ -908,16 +1448,15 @@ class MissionLogic:
         nav_ready: bool,
     ) -> Optional[list]:
         """반응표로 새로 정한 칸(2026-10-08). 맡지 않는 칸은 None — 옛 갈래가 처리한다."""
+        if self._resume_question_open() and intent.intent in _RESUME_QUESTION_CLOSERS:
+            self._close_resume_question()
         helped = self._react_help(intent, now, lookup, bounds, nav_ready)
         if helped is not None:
             return helped
         if self.cancel_confirm_pending and intent.intent in ("affirm", "deny"):
             return self.on_cancel_confirm_answer(intent.intent == "affirm", now)
         if self.cancel_confirm_pending and intent.intent == "unknown":
-            if not self._cancel_reasked:
-                self._cancel_reasked = True
-                return [self._ask(MSG_CANCEL_CONFIRM)]
-            return []
+            return self._cancel_reask(now)
         handler = {
             State.IDLE: self._react_idle,
             State.CONFIRMING: self._react_confirming,
@@ -946,9 +1485,98 @@ class MissionLogic:
         return self._enter_waiting(WAIT_MINUTES_CAP, now, default_msg=True, away=True)
 
     @staticmethod
-    def _ask(text: str) -> Say:
-        """대답을 기다리는 말 — 노드가 듣기 창을 연다(expects_reply)."""
-        return Say(text, priority="response", expects_reply=True)
+    def _ask(text: str, kind: str, options: tuple = ()) -> Say:
+        """대답을 기다리는 말 — 노드가 듣기 창을 연다(expects_reply). kind·options 는 질문 기록에 실린다."""
+        return Say(text, priority="response", expects_reply=True, kind=kind, options=tuple(options))
+
+    def _ladder_next(self, ladder: ReaskLadder, can_help: bool = True) -> str:
+        """그 질문의 되묻기 사다리를 한 단 올리고 할 일을 받는다(원칙 8). 옛 방식은 첫 번째만 REASK_SAME(같은 질문"""
+        if self._ladders_climbed is not None:
+            self._ladders_climbed.append(ladder)
+        return ladder.next(driving=self.state == State.NAVIGATING, can_help=can_help)
+
+    def _quiet_next(self, ladder: ReaskLadder) -> str:
+        """대답 없음(시계)으로 그 질문을 한 단 — 원칙 8: 대답이 없는 것은 못 알아들은 것이 아니다(Task N4, 2026-11-23 사용자 결정)."""
+        if not self.reask_ladder:
+            return self._ladder_next(ladder)
+        return ladder.next_quiet()
+
+    def _quiet_reasked(self, ladder: ReaskLadder, misheard: bool) -> bool:
+        """세 단계에서 대답 없음으로 이미 원래 질문을 다시 말했고 이번 말이 못 알아들은 말(unknown)이 아닌가(Task N4 검토 2). 그러면"""
+        return self.reask_ladder and not misheard and ladder.quiet > 0
+
+    def _reask_line(self, rung: str, ladder: ReaskLadder, resaid: list) -> list:
+        """세 단계 되묻기 ①·②(원칙 8). 질문을 같은 문장으로 다시 말하는 동작(_resay_*: 물은 시각·시한을 다시 잰다)에서"""
+        ladder.restart_quiet()
+        line = MSG_REASK_RETRY if rung == REASK_RETRY else MSG_REASK_LOUDER
+        return [replace(a, text=line, question_text=a.question_text or a.text, step=ladder.step)
+                if isinstance(a, Say) else a for a in resaid]
+
+    def _resay_open_question(self, now: float) -> Optional[list]:
+        """지금 미션이 쥔 열린 질문을 다시 말하는 동작(원칙 8). 열린 질문이 없으면 None."""
+        name = self._open_question_name(now)
+        return None if name is None else self._resay_question(name, now)
+
+    def _open_question_name(self, now: float) -> Optional[str]:
+        """_resay_open_question 이 다시 말할 질문의 이름(고르는 순서는 그 함수 설명). 없으면 None."""
+        if self.help_cancel_pending:
+            return "help_cancel"
+        if self.help_phase == "asking" and self.state == State.NAVIGATING:
+            return "help_confirm"
+        if self.cancel_confirm_pending:
+            return "cancel"
+        if self._resume_question_open():
+            return "resume"
+        if self.state == State.CONFIRMING:
+            return "confirm" if self._confirm_prompt else None
+        if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
+            return "arrival"
+        if self.state == State.WAITING:
+            if self._wait_need_asked_at is not None:
+                return "wait_need"
+            asked = self._wait_finish_asked_at
+            if asked is not None and now - asked <= WAIT_FINISH_REPEAT_SEC:
+                return "wait_finish"
+            return None
+        if self.state == State.AWAITING_USER:
+            return "approach"
+        return None
+
+    def _resay_question(self, name: str, now: float) -> list:
+        """이름(_open_question_name)의 질문을 같은 문장으로 다시 말하는 동작."""
+        if name == "help_cancel":
+            return self._resay_help_cancel()
+        if name == "help_confirm":
+            return self._resay_help_confirm()
+        if name == "cancel":
+            return self._resay_cancel()
+        if name == "resume":
+            return self._resay_resume()
+        if name == "confirm":
+            return self._resay_confirm()
+        if name == "arrival":
+            return self._resay_arrival(now)
+        if name == "wait_need":
+            return self._resay_wait_need(now)
+        if name == "wait_finish":
+            return self._resay_wait_finish(now)
+        return self._resay_approach(now)
+
+    def _rearm_question_clock(self, name: str, now: float) -> None:
+        """다시 말한 질문의 시계를 지금부터 다시 잰다("다시 말해줘", 원칙 28 · 세 단계 되묻기의 ①·②, 원칙 8 · Task N4) — 처음"""
+        deadline, reask_at = now + self.confirm_timeout_sec, now + QUESTION_REASK_SEC
+        if name == "help_cancel":
+            self._help_cancel_deadline, self._help_cancel_reask_at = deadline, reask_at
+        elif name == "help_confirm":
+            self._help_confirm_deadline, self._help_confirm_reask_at = deadline, reask_at
+        elif name == "cancel":
+            self._cancel_confirm_deadline, self._cancel_reask_at = deadline, reask_at
+        elif name == "resume":
+            self._resume_confirm_deadline, self._resume_reask_at = deadline, reask_at
+        elif name == "confirm":
+            self._confirm_deadline, self._confirm_reask_at = deadline, reask_at
+        elif name == "arrival":
+            self._leaving_deadline = None
 
     def _react_idle(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """안내 없음. 홈 가다 "비카야"로 세운 뒤(복귀 재개 사다리)면 기다려 = 직전 목적지 대기"""
@@ -982,22 +1610,51 @@ class MissionLogic:
             return self.on_confirm_answer(False, dest, bounds, nav_ready, now)
         if kind == "pause" and not change:
             self._arm_confirm(now)
-            return [self._ask(MSG_WAKE_GREETING)]
+            return [self._ask(MSG_WAKE_GREETING, "open")]
         if kind == "resume" and not change and self._confirm_prompt:
             self._arm_confirm(now)
-            return [self._ask(self._confirm_prompt)]
+            return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
         if kind == "unknown":
-            if not self._confirm_reasked and self._confirm_prompt:
-                self._confirm_reasked = True
-                return [self._ask(self._confirm_prompt)]
+            if self._confirm_prompt or self.reask_ladder:
+                return self._confirm_reask(now)
             return []
         return None
+
+    def _confirm_reask(self, now: float) -> list:
+        """확인 질문의 못 알아들은 답 한 단(원칙 8). 옛 방식은 문장(_confirm_prompt)이 있을 때만 부르고, 대답 없음(on_tick)과"""
+        if self._reask_held:
+            return []
+        rung = self._ladder_next(self._confirm_ladder)
+        if rung == REASK_SAME:
+            return self._resay_confirm()
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._rearm_question_clock("confirm", now)
+            return self._reask_line(rung, self._confirm_ladder, self._resay_confirm())
+        if self.reask_ladder:
+            return self._confirm_unanswered(now)
+        return []
+
+    def _confirm_unanswered(self, now: float) -> list:
+        """확인 질문이 끝내 대답을 못 받았다 — 질문 전에 하던 일로 접는다(옛 30초 시한·세 단계의 끝이 같은 일을 한다)."""
+        if self._change_from is not None:
+            return self._fold_confirming(now)
+        if self._confirm_from_approach:
+            return self._fold_approach_confirm(now)
+        if self._pause_hold:
+            self._fold_confirming(now)
+            return [Say(MSG_PAUSE_KEPT)]
+        self._fold_confirming(now)
+        return [Say(MSG_CONFIRM_TIMEOUT)]
 
     def _arm_confirm(self, now: float) -> None:
         """확인 질문 시계 — 15초 조용하면 같은 질문을 한 번 더, 30초면 접는다(2026-10-08)."""
         self._confirm_deadline = now + self.confirm_timeout_sec
         self._confirm_reask_at = now + QUESTION_REASK_SEC
-        self._confirm_reasked = False
+        self._confirm_ladder.reset()
+
+    def _resay_confirm(self) -> list:
+        """확인 질문을 같은 문장으로 다시(원칙 8). 문장(_confirm_prompt)이 있을 때만 부른다."""
+        return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
 
     @staticmethod
     def _confirm_prompt_for(dest: Optional[Destination]) -> str:
@@ -1005,6 +1662,15 @@ class MissionLogic:
         if dest is None:
             return ""
         return dest.confirm_prompt or say_destination(MSG_CONFIRM_PROMPT_FALLBACK, dest.name)
+
+    @staticmethod
+    def _options_for(dest: Optional[Destination]) -> tuple:
+        """확인 질문이 묻는 목적지 — 질문 기록의 후보 ((id, 이름),)."""
+        return ((dest.id, dest.name),) if dest is not None else ()
+
+    def _asking_kind(self) -> str:
+        """다시 묻는 도착 질문의 종류 — 처음 물은 문장으로 정한다. 문장이 없으면 MSG_ARRIVAL_RETRY(열린 질문)."""
+        return _ASKING_KINDS.get(self._asking_question, "open")
 
     def _react_navigating(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """안내 주행. 기다려 = 잠깐과 같이 멈춘다, 다 됐어 = 취소처럼 되묻는다, 다시 가자 ="""
@@ -1020,6 +1686,13 @@ class MissionLogic:
 
     def _react_paused(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """일시정지. 잠깐·기다려 = 선 채로 "잠시 멈추겠습니다…"를 다시(규칙 1, 옛 말은 "안내"""
+        if self.answer_field:
+            resumed = self._react_resume_question(intent, now, nav_ready)
+            if resumed is not None:
+                return resumed
+        elif intent.intent == "resume" and intent.need_confirm:
+            self.voice_note = "확인 전 재개 제안 — 묻는 길(answer_field)이 꺼져 받지 않음"
+            return []
         if intent.intent == "finish":
             return self._voice_mission_command("cancel", now, nav_ready)
         if intent.intent in ("pause", "wait"):
@@ -1029,13 +1702,102 @@ class MissionLogic:
             return [Say(MSG_PAUSED, priority="response")]
         return None
 
+    def _resume_question_open(self) -> bool:
+        """미션이 물은 "다시 출발할까요?"가 열려 있나 — 일시정지(PAUSED) 중에만 본다. 꺼져 있으면 늘 False(열지 않는다)."""
+        return self._resume_confirm_pending and self.state == State.PAUSED
+
+    def _resume_ask_allowed(self, nav_ready: bool) -> bool:
+        """"다시 출발할까요?"를 물어도 되나 — answer_field 켜짐이고 재개 관문(check_resume_gate: 일시정지·보관한 목적지·비상"""
+        return self.answer_field and check_resume_gate(
+            self.state, self.paused_destination, self.estop_active, nav_ready) == GateReason.OK
+
+    def _react_resume_question(self, intent, now, nav_ready) -> Optional[list]:
+        """일시정지 중 재개의 확인(answer_field 켜짐에서만 부른다). 맡지 않으면 None — 아래 길이 지금처럼 처리한다."""
+        kind = intent.intent
+        asked = self._resume_question_open()
+        if kind == "resume":
+            if asked and not intent.need_confirm:
+                return self._resume_confirmed(now, nav_ready)
+            if not self._resume_ask_allowed(nav_ready):
+                return None
+            return self._ask_resume(now)
+        if not asked:
+            return None
+        if kind == "affirm":
+            if self._answer_swapped is not None and self._answer_swapped.intent == "affirm":
+                return self._resume_confirmed(now, nav_ready)
+            self.voice_note = " · ".join(filter(None, (self.voice_note, "대답 칸 없는 승낙 — 재개 질문을 다시")))
+            return self._resume_reask(now, misheard=False)
+        if kind == "deny":
+            self._close_resume_question()
+            return [Say(MSG_PAUSE_KEPT, priority="response")]
+        if kind == "unknown":
+            return self._resume_reask(now)
+        return None
+
+    def _resume_confirmed(self, now: float, nav_ready: bool) -> list:
+        """"다시 출발할까요?"에 네 — 질문을 닫고 지금 재개 길로(관문·도움 요청 끝내기·MSG_RESUMED 그대로)."""
+        self._close_resume_question()
+        return self._voice_mission_command("resume", now, nav_ready)
+
+    def _ask_resume(self, now: float) -> list:
+        """"다시 출발할까요?"를 묻는다(원칙 3). 질문은 하나만 살린다 — 걸려 있던 안내 취소 확인·도움 요청 취소 확인은 닫는다."""
+        self.cancel_confirm_pending = False
+        self._cancel_confirm_deadline = None
+        if self.help_cancel_pending:
+            self._close_help_cancel()
+        self._resume_confirm_pending = True
+        self._resume_confirm_deadline = now + self.confirm_timeout_sec
+        self._resume_reask_at = now + QUESTION_REASK_SEC
+        self._resume_ladder.reset()
+        return self._resay_resume()
+
+    def _resay_resume(self) -> list:
+        """"다시 출발할까요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_RESUME_CONFIRM, "yesno")]
+
+    def _close_resume_question(self) -> None:
+        """"다시 출발할까요?"를 닫는다(말 없음). 일시정지는 그대로다."""
+        self._resume_confirm_pending = False
+        self._resume_confirm_deadline = None
+        self._resume_reask_at = None
+        self._resume_ladder.reset()
+
+    def _resume_reask(self, now: float, misheard: bool = True) -> list:
+        """"다시 출발할까요?"의 못 알아들은 답 한 단(원칙 8). 취소 확인(_cancel_reask)과 같은 방식이다. 옛 방식(대답 없음과 한"""
+        if self._reask_held:
+            return []
+        if self._quiet_reasked(self._resume_ladder, misheard):
+            return []
+        rung = self._ladder_next(self._resume_ladder, can_help=False)
+        if rung == REASK_SAME:
+            return self._resay_resume()
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._rearm_question_clock("resume", now)
+            return self._reask_line(rung, self._resume_ladder, self._resay_resume())
+        if self.reask_ladder:
+            self._close_resume_question()
+        return []
+
+    def _resume_confirm_tick(self, now: float) -> list:
+        """"다시 출발할까요?" 시계 — 취소 확인(_cancel_confirm_tick)과 같다. 15초 조용하면 한 번 다시 묻고, 시한이 되면 말없이"""
+        if (self._resume_ladder.quiet_count == 0 and self._resume_reask_at is not None
+                and now >= self._resume_reask_at and not self._ear_holds(now)):
+            self._quiet_next(self._resume_ladder)
+            self._resume_confirm_deadline = max(self._resume_confirm_deadline or now,
+                                                now + QUESTION_REASK_SEC)
+            return self._resay_resume()
+        if self._resume_confirm_deadline is not None and now >= self._resume_confirm_deadline:
+            self._close_resume_question()
+        return []
+
     def _react_asking(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """도착 질문·시간 질문. 잠깐 = "네?" 하고 질문 유지 — 다시 묻기 기회를 쓰지 않는다."""
         kind = intent.intent
         if kind == "pause":
             self._response_deadline = None
             self._asking_entered_at = now
-            return [self._ask(MSG_WAKE_GREETING)]
+            return [self._ask(MSG_WAKE_GREETING, "open")]
         if kind == "resume":
             self.state = State.ASKING_NEXT
             self._asking_where = True
@@ -1044,18 +1806,18 @@ class MissionLogic:
             self._asking_question = MSG_WAIT_FINISH_ASK
             self._response_deadline = None
             self._asking_entered_at = now
-            return [self._ask(MSG_WAIT_FINISH_ASK)]
+            return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
         if self._asking_where and kind in ("affirm", "deny"):
             if kind == "deny":
                 self._reset_arrival_dialog()
                 return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
-            return self._arrival_no_answer(now)
+            return self._arrival_no_answer(now, misheard=False)
         if self.state == State.ASKING_WAIT_TIME and kind == "affirm":
-            if not self._arrival_retried:
-                self._arrival_retried = True
+            if (not self._quiet_reasked(self._arrival_ladder, misheard=False)
+                    and self._ladder_next(self._arrival_ladder) in (REASK_SAME, REASK_RETRY)):
                 self._response_deadline = None
                 self._asking_entered_at = now
-                return [self._ask(MSG_ASK_WAIT_TIME)]
+                return [self._ask(MSG_ASK_WAIT_TIME, "minutes")]
             return self._enter_waiting(WAIT_MINUTES_CAP, now, default_msg=True)
         if self.state == State.ASKING_WAIT_TIME and kind == "deny":
             return self._ask_end_confirm(now)
@@ -1069,11 +1831,11 @@ class MissionLogic:
         self._asking_time_after_yes = False
         self._asking_where = False
         self._asking_question = MSG_ASK_ENTRANCE
-        self._arrival_retried = False
+        self._arrival_ladder.reset()
         self._leaving_deadline = None
         self._response_deadline = None
         self._asking_entered_at = now
-        return [self._ask(MSG_ASK_ENTRANCE)]
+        return [self._ask(MSG_ASK_ENTRANCE, "yesno")]
 
     def _react_waiting(self, intent, now, lookup, bounds, nav_ready) -> Optional[list]:
         """손 놓기 기다림·대기 중. 기다려 = 시간을 지금부터 다시 세고 대기 안내를 다시 말한다."""
@@ -1085,7 +1847,7 @@ class MissionLogic:
             return self._ask_where(now)
         if release:
             if kind == "pause":
-                return [self._ask(MSG_WAKE_GREETING)]
+                return [self._ask(MSG_WAKE_GREETING, "open")]
             if kind in ("cancel", "deny"):
                 return self._ask_end_confirm(now)
             return None
@@ -1096,28 +1858,19 @@ class MissionLogic:
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         if self._wait_need_asked_at is not None and kind == "unknown":
-            if not self._wait_need_reasked:
-                self._wait_need_reasked = True
-                self._wait_need_asked_at = now
-                return [self._ask(MSG_WAIT_NEED_ASK)]
-            self._wait_need_asked_at = None
-            return [Say(MSG_CANCEL_KEPT, priority="response")]
+            return self._wait_need_reask(now)
         if kind == "cancel":
             self._wait_need_asked_at = now
-            self._wait_need_reasked = False
+            self._wait_ladder.reset()
             self._wait_finish_asked_at = None
-            return [self._ask(MSG_WAIT_NEED_ASK)]
+            return [self._ask(MSG_WAIT_NEED_ASK, "yesno_inverted")]
         asked = self._wait_finish_asked_at
         within = asked is not None and now - asked <= WAIT_FINISH_REPEAT_SEC
         if kind == "deny" and within:
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         if within and kind in ("unknown", "affirm"):
-            if not self._wait_finish_reasked:
-                self._wait_finish_reasked = True
-                self._wait_finish_asked_at = now
-                return [self._ask(MSG_WAIT_FINISH_ASK)]
-            return []
+            return self._wait_finish_reask(now, misheard=kind == "unknown")
         return None
 
     def _wait_question_tick(self, now: float) -> list:
@@ -1125,27 +1878,65 @@ class MissionLogic:
         if self._ear_holds(now):
             return []
         asked = self._wait_finish_asked_at
-        if (asked is not None and not self._wait_finish_reasked
+        if (asked is not None and self._wait_ladder.quiet_count == 0
                 and now - asked >= QUESTION_REASK_SEC):
-            self._wait_finish_reasked = True
-            self._wait_finish_asked_at = now
-            return [self._ask(MSG_WAIT_FINISH_ASK)]
+            self._quiet_next(self._wait_ladder)
+            return self._resay_wait_finish(now)
         need = self._wait_need_asked_at
         if need is not None and now - need >= QUESTION_REASK_SEC:
-            if not self._wait_need_reasked:
-                self._wait_need_reasked = True
-                self._wait_need_asked_at = now
-                return [self._ask(MSG_WAIT_NEED_ASK)]
-            self._wait_need_asked_at = None
-            return [Say(MSG_CANCEL_KEPT, priority="response")]
+            return self._wait_need_silence(now)
         return []
+
+    def _wait_need_silence(self, now: float) -> list:
+        """"안내가 필요 없으신가요?"에 15초 대답이 없다 — 같은 질문 한 번 → "안내를 계속하겠습니다."(계속 기다림). 세 단계여도"""
+        if self._quiet_next(self._wait_ladder) == REASK_SAME:
+            return self._resay_wait_need(now)
+        self._wait_need_asked_at = None
+        return [Say(MSG_CANCEL_KEPT, priority="response")]
+
+    def _wait_need_reask(self, now: float) -> list:
+        """"안내가 필요 없으신가요?"의 못 알아들은 답 한 단(원칙 8). 옛 방식(대답 없음과 한 표시): 같은 질문 한 번 →"""
+        if self._reask_held:
+            return []
+        rung = self._ladder_next(self._wait_ladder)
+        if rung == REASK_SAME:
+            return self._resay_wait_need(now)
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            return self._reask_line(rung, self._wait_ladder, self._resay_wait_need(now))
+        self._wait_need_asked_at = None
+        return [Say(MSG_CANCEL_KEPT, priority="response")]
+
+    def _wait_finish_reask(self, now: float, misheard: bool = True) -> list:
+        """"네, 어디로 모실까요?"의 못 알아들은 답 한 단(원칙 8). 옛 방식(대답 없음과 한 표시): 같은 질문 한 번 → 그 뒤는"""
+        if self._reask_held:
+            return []
+        if self._quiet_reasked(self._wait_ladder, misheard):
+            return []
+        rung = self._ladder_next(self._wait_ladder)
+        if rung == REASK_SAME:
+            return self._resay_wait_finish(now)
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            return self._reask_line(rung, self._wait_ladder, self._resay_wait_finish(now))
+        if self.reask_ladder:
+            self._wait_finish_asked_at = None
+        return []
+
+    def _resay_wait_need(self, now: float) -> list:
+        """대기 중 "안내가 필요 없으신가요?"를 다시 — 물은 시각도 지금으로(원칙 8)."""
+        self._wait_need_asked_at = now
+        return [self._ask(MSG_WAIT_NEED_ASK, "yesno_inverted")]
+
+    def _resay_wait_finish(self, now: float) -> list:
+        """대기 중 "네, 어디로 모실까요?"를 다시 — 물은 시각도 지금으로(원칙 8). 두 번째 "다 됐어"의 30초 창도 다시 연다."""
+        self._wait_finish_asked_at = now
+        return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
 
     def _ask_where(self, now: float) -> list:
         """대기 중 "다시 가자" — 어디로 갈지 묻는다. "다 됐어"의 첫 질문과 같은 문장이지만"""
         self._wait_finish_asked_at = now
-        self._wait_finish_reasked = False
+        self._wait_ladder.reset()
         self._wait_need_asked_at = None
-        return [self._ask(MSG_WAIT_FINISH_ASK)]
+        return [self._ask(MSG_WAIT_FINISH_ASK, "open")]
 
     def _rewait(self, minutes: int, now: float) -> list:
         """대기 중 "기다려"·"20분 기다려" — 시간을 지금부터 다시 세고 대기 안내를 다시 말한다."""
@@ -1211,7 +2002,7 @@ class MissionLogic:
             self._late_answer_finish = None
             return [Say(MSG_FINISH, priority="response")]
         if kind == "pause" and not self._returning_home:
-            return self.on_return_brake(now) + [self._ask(MSG_WAKE_GREETING)]
+            return self.on_return_brake(now) + [self._ask(MSG_WAKE_GREETING, "open")]
         return None
 
     def _route_voice_intent(
@@ -1271,6 +2062,9 @@ class MissionLogic:
         nav_ready: bool,
         now: float,
     ) -> list:
+        if self.dock_mode or self.dock_pending:
+            return []
+        self._note_user_present(now)
         self._forget_dest_prompt()
         if self._return_interrupted and self.state == State.IDLE:
             self._return_resume_deadline = now + self.return_resume_sec
@@ -1279,6 +2073,8 @@ class MissionLogic:
                 and self.state in (State.WAITING, State.WAITING_RELEASE)):
             return self._wait_finish(now)
         if intent.intent != "navigate":
+            if intent.intent == "unknown" and self.reask_ladder:
+                return self._idle_reask(now)
             return []
         if self._grip_wait_since is not None:
             self._grip_wait_since = None
@@ -1296,7 +2092,7 @@ class MissionLogic:
                 intent, dest, bounds, nav_ready, now)
 
         if self.state in _APPROACH_STATES:
-            if intent.need_confirm:
+            if intent.need_confirm and self.state not in (State.APPROACHING, State.SEEKING):
                 return []
             return [Say(MSG_APPROACH_BUSY, priority="response")]
 
@@ -1304,16 +2100,24 @@ class MissionLogic:
             if (self.state == State.CONFIRMING
                     and self._confirming_dest_id
                     and intent.matched_destination_id == self._confirming_dest_id):
+                if self.answer_field:
+                    self._arm_confirm(now)
+                    return self._resay_confirm() if self._confirm_prompt else []
                 return self.on_confirm_answer(True, dest, bounds, nav_ready, now)
             else:
                 if self.state in _WAIT_STATES and self._wait_hold is None:
                     self._wait_hold = self.state
+                if self.state == State.PAUSED:
+                    self._pause_hold = True
                 self.state = State.CONFIRMING
                 self._confirm_from_approach = False
                 self._confirming_dest_id = intent.matched_destination_id or None
                 self._arm_confirm(now)
                 self._confirm_prompt = self._confirm_prompt_for(dest)
-                return []
+                self._confirm_options = self._options_for(dest)
+                if not self._confirm_prompt:
+                    return []
+                return [self._ask(self._confirm_prompt, "confirm", self._confirm_options)]
 
         if (
             self.state == State.CONFIRMING
@@ -1328,7 +2132,8 @@ class MissionLogic:
             self._confirming_dest_id = dest.id
             self._arm_confirm(now)
             self._confirm_prompt = self._confirm_prompt_for(dest)
-            return [self._ask(MSG_CONFIRM_SWITCH.format(prompt=self._confirm_prompt))]
+            self._confirm_options = self._options_for(dest)
+            return [self._ask(MSG_CONFIRM_SWITCH.format(prompt=self._confirm_prompt), "confirm", self._confirm_options)]
 
         reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
         if reason != GateReason.OK:
@@ -1337,7 +2142,7 @@ class MissionLogic:
                 self._hold_change_as_pause()
             elif self.state == State.CONFIRMING:
                 folded = self._fold_confirming(now)
-            elif self.state not in _WAIT_STATES:
+            elif self.state not in _WAIT_STATES and self.state != State.PAUSED:
                 self._to_idle()
             msg = _REJECT_MESSAGES.get(reason)
             return ([Say(msg, priority="response")] if msg else []) + folded
@@ -1346,6 +2151,7 @@ class MissionLogic:
         if self.state in _WAIT_STATES or self._wait_hold is not None:
             self._reset_arrival_dialog()
         self._change_from = None
+        self._pause_hold = False
         self._nav_retry_count = 0
         self._retry_at = None
         self._nav_from_app = False
@@ -1370,6 +2176,20 @@ class MissionLogic:
             Navigate(dest, tree=NAV_TREE_GUIDED),
         ]
 
+    def _idle_reask(self, now: float) -> list:
+        """질문이 없는 상태의 못 알아들은 말 — 세 단계 되묻기(원칙 8 · 31, reask_ladder 켜짐에서만 부른다)."""
+        if self.estop_active or self.state == State.ESTOPPED or self.state in _WAKE_IGNORE_STATES:
+            return []
+        if self._reask_held:
+            return []
+        rung = self._ladder_next(self._idle_ladder)
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            line = MSG_REASK_RETRY if rung == REASK_RETRY else MSG_REASK_LOUDER
+            return [Say(line, priority="response", expects_reply=True, kind="open", step=self._idle_ladder.step)]
+        if rung == REASK_HELP:
+            return self._on_help_intent(now)
+        return []
+
     def _navigating_destination_request(
         self,
         intent: IntentData,
@@ -1381,22 +2201,19 @@ class MissionLogic:
         """안내 주행 중 들어온 목적지 요청 — 멈추고 바꿀지 묻는다(2026-10-07 사용자 결정)."""
         current = self.active_destination
         if self._nav_from_app or current is None:
-            return [] if intent.need_confirm else [Say(MSG_BUSY, priority="response")]
+            return [Say(MSG_BUSY, priority="response")]
         new_id = intent.matched_destination_id or ""
         if new_id and new_id == current.id:
             return []
-        ask: list = []
         if not intent.need_confirm:
             reason = check_gate(intent, dest, bounds, self.estop_active, nav_ready)
             if reason != GateReason.OK:
                 msg = _REJECT_MESSAGES.get(reason)
                 return [Say(msg, priority="response")] if msg else []
             assert dest is not None
-            prompt = (dest.confirm_prompt
-                      or say_destination(MSG_CONFIRM_PROMPT_FALLBACK, dest.name))
-            ask = [Say(prompt, priority="response", expects_reply=True)]
         elif dest is None or not new_id:
             return []
+        ask = [self._ask(self._confirm_prompt_for(dest), "confirm", self._options_for(dest))]
         actions: list = [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
             CancelNav(current, event="goal_paused"),
@@ -1408,6 +2225,7 @@ class MissionLogic:
         self._confirming_dest_id = new_id
         self._arm_confirm(now)
         self._confirm_prompt = self._confirm_prompt_for(dest)
+        self._confirm_options = self._options_for(dest)
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
         self._announced_milestones = set()
@@ -1422,9 +2240,9 @@ class MissionLogic:
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
         self._wait_finish_asked_at = now
-        self._wait_finish_reasked = False
+        self._wait_ladder.reset()
         self._wait_need_asked_at = None
-        return [Say(MSG_WAIT_FINISH_ASK, priority="response", expects_reply=True)]
+        return [Say(MSG_WAIT_FINISH_ASK, priority="response", expects_reply=True, kind="open")]
 
     def _changing_destination(self) -> bool:
         """주행 중 바꾸기 질문(CONFIRMING + _change_from)으로 멈춰 있는가."""
@@ -1439,6 +2257,7 @@ class MissionLogic:
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()
         self.state = State.PAUSED
 
     @property
@@ -1495,6 +2314,13 @@ class MissionLogic:
                                    priority="response"))
             actions.append(Navigate(change_from, tree=self._nav_tree))
             return actions
+        if self._pause_hold:
+            self._pause_hold = False
+            self._confirming_dest_id = None
+            self._confirm_deadline = None
+            self._close_resume_question()
+            self.state = State.PAUSED
+            return []
         held = self._wait_hold
         if held is None:
             self._to_idle()
@@ -1510,7 +2336,7 @@ class MissionLogic:
         self._confirm_from_approach = False
         self._fold_confirming(now)
         self._arm_dest_prompt(now)
-        return [Say(MSG_APPROACH_ONBOARDING, priority="response", expects_reply=True)]
+        return [Say(MSG_APPROACH_ONBOARDING, priority="response", expects_reply=True, kind="open")]
 
     @property
     def return_interrupted(self) -> bool:
@@ -1533,6 +2359,9 @@ class MissionLogic:
                 return self._fold_confirming(now)
             if self._confirm_from_approach:
                 return self._fold_approach_confirm(now)
+            if self._pause_hold:
+                self._fold_confirming(now)
+                return [Say(MSG_PAUSE_KEPT, priority="response")]
             self._fold_confirming(now)
             return [Say(MSG_CONFIRM_TIMEOUT, priority="response")]
         if dest is None or dest.id != (self._confirming_dest_id or ""):
@@ -1557,6 +2386,7 @@ class MissionLogic:
                 actions.append(GoalEvent("goal_canceled", held))
         self._reset_arrival_dialog()
         self._to_idle()
+        self._wake_folded = None
         self._handle_engaged = False
         self._forget_interrupted_return()
         return actions
@@ -1568,6 +2398,8 @@ class MissionLogic:
         """앱(관리자) 새 목적지 — ESTOPPED 만 빼고 어느 상태든 선점한다."""
         if self.estop_active or self.state == State.ESTOPPED:
             return [], GateReason.ESTOP_ACTIVE
+        if self.state in _PATROL_STATES:
+            return [], GateReason.BUSY_NAVIGATING
         if dest is None:
             return [], GateReason.UNKNOWN_DESTINATION
         if dest.authorization != "public" and not allow_private:
@@ -1630,20 +2462,27 @@ class MissionLogic:
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
 
-    def on_app_cancel(self, now: float) -> tuple:
+    def on_app_cancel(self, now: float, nav_ready: bool = True) -> tuple:
         """앱(관리자) 취소 — ESTOPPED 만 빼고 어느 상태든 전부 정리하고"""
         ended = self._end_help()
         if self.estop_active or self.state == State.ESTOPPED:
             return ended, GateReason.ESTOP_ACTIVE
+        if self.state in _PATROL_STATES:
+            actions, reason = self.on_patrol_stop(now, nav_ready)
+            return [*ended, *actions], reason
         if self.state == State.IDLE:
             self._forget_interrupted_return()
             return ended, GateReason.OK
+        if self.state in (State.APPROACHING, State.AWAITING_USER):
+            self._suppress_track(self.approach_track_id, now, self.approach_person)
         actions = [*ended, *self._force_clear_all(now)]
         actions.append(Say(MSG_CANCELED, priority="response"))
         return actions, GateReason.OK
 
     def on_pause_request(self, now: float) -> tuple:
         """일시정지("잠깐"·앱). goal 을 취소하되 목적지는 보관해 재개할 수 있게 둔다."""
+        if self.state in _PATROL_STATES:
+            return self._patrol_pause(now)
         if self.state == State.PAUSED and self._handle_pause:
             self._clear_handle_pause()
             return [Say(MSG_PAUSED, priority="response")], GateReason.OK
@@ -1679,6 +2518,7 @@ class MissionLogic:
         self.active_destination = None
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()
         self._announced_milestones = set()
         self._distance_baseline = None
         self._approach.reset()
@@ -1686,6 +2526,8 @@ class MissionLogic:
 
     def on_resume_request(self, nav_ready: bool, now: float) -> tuple:
         """다시 출발. 성공하면 걸린 도움 요청을 끝낸다(설계 5.6절) — 음성 "다시 가자"는 관리자 확인"""
+        if self.state in _PATROL_STATES:
+            return self._patrol_resume(nav_ready, now)
         actions, reason = self._resume_request(nav_ready, now)
         if reason == GateReason.OK and self.help_phase != "none":
             actions = [*actions, *self._end_help()]
@@ -1704,6 +2546,7 @@ class MissionLogic:
             return [], reason
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()
         if self._handle_pause:
             if not self._holding(now, self.grip_resume_window_sec,
                                  since=self._handle_lost_since):
@@ -1739,20 +2582,41 @@ class MissionLogic:
         self.cancel_confirm_pending = True
         self._cancel_confirm_deadline = now + self.confirm_timeout_sec
         self._cancel_reask_at = now + QUESTION_REASK_SEC
-        self._cancel_reasked = False
+        self._cancel_ladder.reset()
         return [
-            Say(MSG_CANCEL_CONFIRM, priority="response", expects_reply=True)
+            Say(MSG_CANCEL_CONFIRM, priority="response", expects_reply=True, kind="yesno")
         ], GateReason.OK
 
     def _cancel_confirm_tick(self, now: float) -> list:
         """"안내를 취소할까요?" 시계. 15초 조용하면 한 번 다시 묻고(2026-10-08 다시 묻기), 시간이"""
-        if (not self._cancel_reasked and self._cancel_reask_at is not None
+        if (self._cancel_ladder.quiet_count == 0 and self._cancel_reask_at is not None
                 and now >= self._cancel_reask_at and not self._ear_holds(now)):
-            self._cancel_reasked = True
+            self._quiet_next(self._cancel_ladder)
             self._cancel_confirm_deadline = max(self._cancel_confirm_deadline or now,
                                                 now + QUESTION_REASK_SEC)
-            return [self._ask(MSG_CANCEL_CONFIRM)]
+            return self._resay_cancel()
         if self._cancel_confirm_deadline is not None and now >= self._cancel_confirm_deadline:
+            self.cancel_confirm_pending = False
+            self._cancel_confirm_deadline = None
+        return []
+
+    def _resay_cancel(self) -> list:
+        """"안내를 취소할까요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_CANCEL_CONFIRM, "yesno")]
+
+    def _cancel_reask(self, now: float) -> list:
+        """취소 확인의 못 알아들은 답 한 단(원칙 8 · 21). 옛 방식(대답 없음과 한 표시): 같은 질문 한 번 → 그 뒤는"""
+        if self._reask_held:
+            return []
+        rung = self._ladder_next(self._cancel_ladder)
+        if rung == REASK_SAME:
+            return self._resay_cancel()
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._rearm_question_clock("cancel", now)
+            return self._reask_line(rung, self._cancel_ladder, self._resay_cancel())
+        if rung == REASK_HELP:
+            return self._on_help_intent(now)
+        if self.reask_ladder:
             self.cancel_confirm_pending = False
             self._cancel_confirm_deadline = None
         return []
@@ -1786,10 +2650,7 @@ class MissionLogic:
                 self._close_help_cancel()
                 return []
             if kind == "unknown":
-                if not self._help_cancel_reasked:
-                    self._help_cancel_reasked = True
-                    return [self._ask(MSG_HELP_CANCEL_CONFIRM)]
-                return []
+                return self._help_cancel_reask(now)
         if self.help_phase == "asking":
             if kind == "affirm":
                 return self._send_help(now)
@@ -1800,10 +2661,7 @@ class MissionLogic:
                 self._drop_help_question()
                 return None
             if kind == "unknown":
-                if not self._help_confirm_reasked:
-                    self._help_confirm_reasked = True
-                    return [self._ask(MSG_HELP_CONFIRM)]
-                return []
+                return self._help_confirm_reask(now)
         if kind == "help":
             return self._on_help_intent(now)
         if not self.help_active:
@@ -1812,10 +2670,14 @@ class MissionLogic:
             self.help_cancel_pending = True
             self._help_cancel_deadline = now + self.confirm_timeout_sec
             self._help_cancel_reask_at = now + QUESTION_REASK_SEC
-            self._help_cancel_reasked = False
-            return [self._ask(MSG_HELP_CANCEL_CONFIRM)]
+            self._help_ladder.reset()
+            return [self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno")]
         if kind == "navigate" and intent.need_confirm:
-            return []
+            if self.help_phase == "acknowledged":
+                return [Say(MSG_HELP_COMING, priority="response")]
+            proposed = lookup(intent.matched_destination_id or "")
+            prompt = self._confirm_prompt_for(proposed)
+            return [self._ask(prompt, "confirm", self._options_for(proposed))] if prompt else []
         if kind in ("resume", "navigate") and self.help_phase == "acknowledged":
             return [Say(MSG_HELP_COMING, priority="response")]
         if kind == "navigate":
@@ -1845,8 +2707,9 @@ class MissionLogic:
         self.help_phase = "asking"
         self._help_confirm_deadline = now + self.confirm_timeout_sec
         self._help_confirm_reask_at = now + QUESTION_REASK_SEC
-        self._help_confirm_reasked = False
-        return [self._ask(MSG_HELP_CONFIRM)]
+        self._help_ladder.reset()
+        self._idle_ladder.reset()
+        return [self._ask(MSG_HELP_CONFIRM, "yesno")]
 
     def _send_help(self, now: float) -> list:
         """확인 질문에 "네"(R4) — 일시정지(목적지 보관, goal_paused) → "보냈습니다" → 첫 알림."""
@@ -1872,6 +2735,7 @@ class MissionLogic:
             return [], False
         self.help_phase = "acknowledged"
         self._help_last_sent_at = None
+        self._close_resume_question()
         return [Say(MSG_HELP_COMING, priority="response"),
                 HelpEvent("help_acknowledged", self.help_id)], True
 
@@ -1881,12 +2745,12 @@ class MissionLogic:
         if self.help_phase == "asking":
             if self.state != State.NAVIGATING:
                 self._drop_help_question()
-            elif (not self._help_confirm_reasked and self._help_confirm_reask_at is not None
+            elif (self._help_ladder.quiet_count == 0 and self._help_confirm_reask_at is not None
                     and now >= self._help_confirm_reask_at and not self._ear_holds(now)):
-                self._help_confirm_reasked = True
+                self._quiet_next(self._help_ladder)
                 self._help_confirm_deadline = max(self._help_confirm_deadline or now,
                                                   now + QUESTION_REASK_SEC)
-                actions.append(self._ask(MSG_HELP_CONFIRM))
+                actions.extend(self._resay_help_confirm())
             elif self._help_confirm_deadline is not None and now >= self._help_confirm_deadline:
                 self._drop_help_question()
         elif self.help_phase == "requested" and self.help_id is not None:
@@ -1894,12 +2758,12 @@ class MissionLogic:
                 self._help_last_sent_at = now
                 actions.append(HelpEvent("help_requested", self.help_id))
         if self.help_cancel_pending:
-            if (not self._help_cancel_reasked and self._help_cancel_reask_at is not None
+            if (self._help_ladder.quiet_count == 0 and self._help_cancel_reask_at is not None
                     and now >= self._help_cancel_reask_at and not self._ear_holds(now)):
-                self._help_cancel_reasked = True
+                self._quiet_next(self._help_ladder)
                 self._help_cancel_deadline = max(self._help_cancel_deadline or now,
                                                  now + QUESTION_REASK_SEC)
-                actions.append(self._ask(MSG_HELP_CANCEL_CONFIRM))
+                actions.extend(self._resay_help_cancel())
             elif self._help_cancel_deadline is not None and now >= self._help_cancel_deadline:
                 self._close_help_cancel()
         return actions
@@ -1909,13 +2773,49 @@ class MissionLogic:
         self.help_phase = "none"
         self._help_confirm_reask_at = None
         self._help_confirm_deadline = None
-        self._help_confirm_reasked = False
+        self._help_ladder.reset()
+
+    def _resay_help_confirm(self) -> list:
+        """"직원의 도움이 필요하신가요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_HELP_CONFIRM, "yesno")]
+
+    def _resay_help_cancel(self) -> list:
+        """"도움 요청을 취소할까요?"를 다시(원칙 8)."""
+        return [self._ask(MSG_HELP_CANCEL_CONFIRM, "yesno")]
+
+    def _help_confirm_reask(self, now: float) -> list:
+        """도움 확인 질문의 못 알아들은 답 한 단(원칙 8). 도움 질문 자체라 ③ 은 없다(can_help=False)."""
+        if self._reask_held:
+            return []
+        rung = self._ladder_next(self._help_ladder, can_help=False)
+        if rung == REASK_SAME:
+            return self._resay_help_confirm()
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._rearm_question_clock("help_confirm", now)
+            return self._reask_line(rung, self._help_ladder, self._resay_help_confirm())
+        if self.reask_ladder:
+            self._drop_help_question()
+        return []
+
+    def _help_cancel_reask(self, now: float) -> list:
+        """도움 요청 취소 확인의 못 알아들은 답 한 단(원칙 8). ③ 은 없다(can_help=False)."""
+        if self._reask_held:
+            return []
+        rung = self._ladder_next(self._help_ladder, can_help=False)
+        if rung == REASK_SAME:
+            return self._resay_help_cancel()
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._rearm_question_clock("help_cancel", now)
+            return self._reask_line(rung, self._help_ladder, self._resay_help_cancel())
+        if self.reask_ladder:
+            self._close_help_cancel()
+        return []
 
     def _close_help_cancel(self) -> None:
         self.help_cancel_pending = False
         self._help_cancel_reask_at = None
         self._help_cancel_deadline = None
-        self._help_cancel_reasked = False
+        self._help_ladder.reset()
 
     def _end_help(self, notify_after_ack: bool = False) -> list:
         """도움 요청을 끝낸다(5.6절). 관리자 확인 전이면 앱 팝업이 닫히게 help_canceled 를 낸다."""
@@ -1927,6 +2827,311 @@ class MissionLogic:
         self._close_help_cancel()
         self.help_id = None
         self._help_last_sent_at = None
+        return actions
+
+    @property
+    def patrol_active(self) -> bool:
+        """순찰 상태(5개 중 하나)인가."""
+        return self.state in _PATROL_STATES
+
+    def on_patrol_start(
+        self,
+        route: Optional[Sequence[Destination]],
+        bounds: Optional[MapBounds],
+        nav_ready: bool,
+        pose_known: bool,
+        now: float,
+        watch_off: Sequence[str] = (),
+    ) -> tuple:
+        """경비 시작(`/vica/mission/patrol_start`). (actions, GateReason)."""
+        if self.estop_active or self.state == State.ESTOPPED:
+            return [], GateReason.ESTOP_ACTIVE
+        if self.state in _PATROL_STATES:
+            return [], GateReason.ALREADY_PATROLLING
+        if self.state != State.IDLE or self._idle_substage_active():
+            return [], GateReason.BUSY_NAVIGATING
+        if not route or len(route) < 2:
+            return [], GateReason.NO_PATROL_ROUTE
+        if any(not d.is_approachable or not pose_valid(d, bounds) for d in route):
+            return [], GateReason.POSE_INVALID
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        if not pose_known:
+            return [], GateReason.POSE_UNKNOWN
+        self._forget_interrupted_return()
+        self._to_idle()
+        self._last_guided = None
+        self._late_answer_finish = None
+        self._handle_engaged = False
+        self._approach_lock = False
+        self._approach_lock_quiet_since = None
+        self._patrol = PatrolRun(
+            route=tuple(route), watch_off=frozenset(watch_off).intersection(PATROL_WATCH_KINDS),
+            arming_deadline=now + self.patrol_arming_timeout_sec)
+        self.state = State.PATROL_DWELL
+        return [PatrolEvent("patrol_started", route=tuple(d.name for d in route)),
+                Say(MSG_PATROL_STARTED, priority="response")], GateReason.OK
+
+    def on_patrol_stop(self, now: float, nav_ready: bool = True) -> tuple:
+        """관리자의 경비 종료(`/vica/mission/patrol_stop`, 순찰 중 앱 취소) → 홈으로 복귀."""
+        if self.state not in _PATROL_STATES:
+            return [], GateReason.NOT_PATROLLING
+        actions = self._patrol_silence(self._patrol) + self._patrol_halt()
+        was_running = self._patrol is not None
+        self._patrol = None
+        self._to_idle()
+        went_home, self.patrol_stop_home_reason, home_actions = self.on_return_home_request(
+            nav_ready, now)
+        if any(isinstance(a, Navigate) for a in home_actions):
+            actions = [a for a in actions if not isinstance(a, CancelNav)]
+        if was_running:
+            actions.append(PatrolEvent("patrol_stopped", reason="admin", return_home=went_home))
+            actions.append(Say(MSG_PATROL_ENDED, priority="response"))
+        actions.extend(home_actions)
+        return actions, GateReason.OK
+
+    def on_patrol_ack(self, alarm_id: str, now: float) -> tuple:
+        """경보 확인(`/vica/mission/patrol_ack`) — 음성 반복·이벤트 재전송만 멈춘다. 정지·상태는 그대로다."""
+        p = self._patrol
+        alarm = p.alarm if p is not None else None
+        if alarm is None or self.state not in (State.PATROL_ALARM, State.PATROL_LIGHT):
+            return [], GateReason.NO_PATROL_ALARM
+        if alarm_id and alarm_id != alarm.alarm_id:
+            return [], GateReason.PATROL_ALARM_MISMATCH
+        if alarm.acked:
+            return [], GateReason.OK
+        actions = self._patrol_silence(p)
+        alarm.acked = True
+        actions.append(PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id))
+        return actions, GateReason.OK
+
+    def on_patrol_event(self, data: dict, now: float) -> list:
+        """`/vica/patrol/event` 한 건(JSON 을 푼 dict). 순찰 문맥이 없으면 아무것도 하지 않는다."""
+        p = self._patrol
+        if p is None or not isinstance(data, dict):
+            return []
+        kind = data.get("kind")
+        if kind == "status":
+            if (data.get("src") == "detector" and bool(data.get("ready"))
+                    and bool(data.get("camera_ok"))):
+                p.detector_ok_at = now
+            return []
+        if kind == "clip":
+            return self._patrol_attach_clip(p, data)
+        if self.state not in (State.PATROLLING, State.PATROL_DWELL):
+            return []
+        if isinstance(kind, str) and kind in p.watch_off:
+            return []
+        if not p.armed:
+            if data.get("src") != "detector" or kind not in ("intruder", "light"):
+                return []
+            p.armed = True
+            p.arming_deadline = None
+            p.detector_ok_at = now
+        if kind == "intruder":
+            return self._patrol_raise(p, "intruder", now, clip_id=_patrol_text(data.get("clip_id")))
+        if kind == "light":
+            return self._patrol_raise(p, "light", now, photo=_patrol_text(data.get("photo")))
+        if kind == "sound":
+            return self._patrol_raise(p, "sound", now, level_db=_patrol_number(data.get("db")))
+        return []
+
+    def _patrol_detector_ok(self, p: PatrolRun, now: float) -> bool:
+        """감지 노드 정상 신호(ready && camera_ok)를 patrol_detector_timeout_sec 안에 받았나."""
+        return (p.detector_ok_at is not None
+                and now - p.detector_ok_at <= self.patrol_detector_timeout_sec)
+
+    def _patrol_silence(self, p: Optional[PatrolRun]) -> list:
+        """확인 전인 경보의 음성을 그 자리에서 끊는다. 말하지 않는 경보(카메라 끊김)·확인된 경보면 빈 목록."""
+        alarm = p.alarm if p is not None else None
+        if alarm is None or alarm.acked or not self._patrol_voice(alarm.kind)[0]:
+            return []
+        return [StopSpeech()]
+
+    def _patrol_voice(self, kind: str) -> tuple:
+        """경보 종류 → (문장, 반복 간격 초). 카메라 끊김은 말하지 않는다."""
+        if kind in ("intruder", "sound"):
+            return MSG_PATROL_INTRUDER, self.patrol_intruder_repeat_sec
+        if kind == "light":
+            return MSG_PATROL_LIGHT, self.patrol_light_repeat_sec
+        return "", 0.0
+
+    @staticmethod
+    def _patrol_alarm_event(alarm: PatrolAlarm, resend: bool) -> PatrolEvent:
+        return PatrolEvent(
+            "patrol_" + alarm.kind, alarm_id=alarm.alarm_id, kind=alarm.kind, time=alarm.time,
+            clip_id=alarm.clip_id, photo=alarm.photo, level_db=alarm.level_db, resend=resend)
+
+    def _patrol_halt(self) -> list:
+        """이동 중이면 구간 goal 을 거둔다. 목적지를 싣지 않아 goal_canceled 는 나가지 않는다."""
+        if self.state != State.PATROLLING:
+            return []
+        return [SetNavSpeedLimit(NO_SPEED_LIMIT), CancelNav(None)]
+
+    def _patrol_drop(self, reason: str) -> list:
+        """순찰 문맥을 버리고 patrol_stopped 를 낸다. 상태는 부르는 쪽이 옮긴다. 순찰이 아니면 빈 목록."""
+        if self._patrol is None:
+            return []
+        self._patrol = None
+        return [PatrolEvent("patrol_stopped", reason=reason)]
+
+    def _patrol_depart(self, p: PatrolRun, now: float, advance: bool) -> list:
+        """지점으로 출발한다. advance 면 다음 지점으로(끝 다음은 처음, lap +1), 아니면 지금 지점으로 다시."""
+        if self._patrol is not p:
+            return []
+        count = len(p.route)
+        if advance:
+            p.index += 1
+            if p.index >= count:
+                p.index = 0
+                p.lap += 1
+        target = p.route[p.index]
+        leg = patrol_leg_destination(target, p.route[(p.index + 1) % count])
+        p.arrived = False
+        p.dwell_until = None
+        self.state = State.PATROLLING
+        actions: list = [PatrolEvent(
+            "patrol_waypoint", destination=target, index=p.index, lap=p.lap, count=count)]
+        if self.patrol_speed_mps > 0.0:
+            actions.append(SetNavSpeedCap(self.patrol_speed_mps))
+        actions.append(Navigate(leg))
+        return actions
+
+    def _patrol_raise(self, p: PatrolRun, kind: str, now: float, clip_id: str = "",
+                      photo: str = "", level_db: Optional[float] = None) -> list:
+        """경보를 건다: 주행 취소 → 상태 전환 → 이벤트·음성. 기록은 노드가 이벤트 첫 전송 때 쓴다."""
+        if self._patrol is not p:
+            return []
+        actions = self._patrol_halt()
+        stamp = self.patrol_wall_clock()
+        alarm = PatrolAlarm(
+            alarm_id=f"{stamp:%Y%m%d_%H%M%S}_{kind}", kind=kind,
+            time=stamp.isoformat(timespec="seconds"), said_at=now, sent_at=now,
+            clip_id=clip_id, photo=photo, level_db=level_db)
+        p.alarm = alarm
+        p.dwell_until = None
+        self.state = State.PATROL_LIGHT if kind == "light" else State.PATROL_ALARM
+        actions.append(self._patrol_alarm_event(alarm, resend=False))
+        text, _ = self._patrol_voice(kind)
+        if text:
+            actions.append(Say(text, priority="emergency"))
+        return actions
+
+    @staticmethod
+    def _patrol_attach_clip(p: PatrolRun, data: dict) -> list:
+        """clip 이벤트의 영상 id 를 경보 기록에 붙인다 — clip 의 alarm(intruder·sound)이 경보 종류와"""
+        clip_id = _patrol_text(data.get("clip_id"))
+        clip_kind = _patrol_text(data.get("alarm"))
+        if not clip_id or clip_kind not in ("intruder", "sound"):
+            return []
+        for alarm in (p.alarm, p.last_alarm):
+            if alarm is None or alarm.kind != clip_kind:
+                continue
+            if alarm.clip_id:
+                return []
+            alarm.clip_id = clip_id
+            return [PatrolRecordClip(alarm.alarm_id, clip_id)]
+        return []
+
+    def _patrol_pause(self, now: float) -> tuple:
+        """관리자 일시정지(`pause_navigation`). 이동 중·지점 정지 중에만 — 경보로 선 것은 재개만 받는다."""
+        p = self._patrol
+        if p is None or self.state not in (State.PATROLLING, State.PATROL_DWELL):
+            return [], GateReason.NOT_NAVIGATING
+        actions = self._patrol_halt()
+        p.dwell_until = None
+        p.arming_deadline = None
+        self.state = State.PATROL_PAUSED
+        actions.append(PatrolEvent("patrol_paused"))
+        return actions, GateReason.OK
+
+    def _patrol_resume(self, nav_ready: bool, now: float) -> tuple:
+        """순찰 재개(`resume_navigation`) — 일시정지·경보에서 다시 출발한다."""
+        p = self._patrol
+        if self.estop_active:
+            return [], GateReason.ESTOP_ACTIVE
+        if p is None or self.state not in (
+                State.PATROL_PAUSED, State.PATROL_ALARM, State.PATROL_LIGHT):
+            return [], GateReason.NOT_PAUSED
+        if not nav_ready:
+            return [], GateReason.NAV_NOT_READY
+        if not self._patrol_detector_ok(p, now):
+            return [], GateReason.DETECTOR_NOT_READY
+        actions: list = []
+        alarm = p.alarm
+        if alarm is not None:
+            if not alarm.acked:
+                actions.extend(self._patrol_silence(p))
+                alarm.acked = True
+                actions.append(PatrolEvent("patrol_acked", alarm_id=alarm.alarm_id))
+            p.last_alarm = alarm
+            p.alarm = None
+        p.armed = True
+        actions.append(PatrolEvent("patrol_resumed"))
+        actions.extend(self._patrol_depart(p, now, advance=p.arrived))
+        return actions, GateReason.OK
+
+    def _patrol_tick(self, now: float, nav_status: NavStatus) -> list:
+        """순찰 주기 처리(on_tick 안). 구간 결과·지점 정지·준비 대기·카메라 감시·경보 반복."""
+        p = self._patrol
+        if p is None:
+            actions = self._patrol_halt()
+            if self.estop_active:
+                self._enter_estopped(now)
+            else:
+                self._to_idle()
+            return actions
+        if self.state == State.PATROLLING:
+            if nav_status == NavStatus.SUCCEEDED:
+                p.arrived = True
+                p.leg_failures = 0
+                p.dwell_until = now + self.patrol_dwell_sec
+                self.state = State.PATROL_DWELL
+                return [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+            if nav_status in (NavStatus.FAILED, NavStatus.CANCELED):
+                p.leg_failures += 1
+                actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT)]
+                if p.leg_failures >= self.patrol_max_leg_failures:
+                    actions.extend(self._patrol_drop("nav_failed"))
+                    self._to_idle()
+                else:
+                    actions.extend(self._patrol_depart(p, now, advance=True))
+                return actions
+            if not self._patrol_detector_ok(p, now):
+                return self._patrol_raise(p, "camera_lost", now)
+            return []
+        if self.state == State.PATROL_DWELL:
+            if not p.armed:
+                if self._patrol_detector_ok(p, now):
+                    p.armed = True
+                    return self._patrol_depart(p, now, advance=False)
+                if p.arming_deadline is not None and now >= p.arming_deadline:
+                    actions = self._patrol_drop("detector_not_ready")
+                    self._to_idle()
+                    return actions
+                return []
+            if not self._patrol_detector_ok(p, now):
+                return self._patrol_raise(p, "camera_lost", now)
+            if p.dwell_until is None or now >= p.dwell_until:
+                return self._patrol_depart(p, now, advance=True)
+            return []
+        if self.state in (State.PATROL_ALARM, State.PATROL_LIGHT):
+            return self._patrol_alarm_tick(p, now)
+        return []
+
+    def _patrol_alarm_tick(self, p: PatrolRun, now: float) -> list:
+        """확인 전까지 문장을 되풀이하고(넘어짐 멘트와 같은 방식) 경보 이벤트를 다시 보낸다."""
+        alarm = p.alarm
+        if alarm is None or alarm.acked:
+            return []
+        actions: list = []
+        text, every = self._patrol_voice(alarm.kind)
+        if text and every > 0.0 and now - alarm.said_at >= every:
+            alarm.said_at = now
+            actions.append(Say(text, priority="emergency"))
+        if self.patrol_alarm_resend_sec > 0.0 and now - alarm.sent_at >= self.patrol_alarm_resend_sec:
+            alarm.sent_at = now
+            actions.append(self._patrol_alarm_event(alarm, resend=True))
         return actions
 
     def on_approach_request(
@@ -1952,6 +3157,7 @@ class MissionLogic:
             self._is_suppressed(request.track_id, now)
             or self._place_suppressed(request.person, now),
             same_person=same,
+            user_engaged=self._approach_lock_active(now),
         )
         if reason != GateReason.OK:
             return [], reason
@@ -2054,6 +3260,10 @@ class MissionLogic:
     @property
     def dialog_state(self) -> str:
         """LLM 상황판에 내는 대화 단계(RobotState.dialog_state)."""
+        if self.dock_mode == "undocking":
+            return self.dock_mode
+        if self.state == State.IDLE and self.dock_mode:
+            return self.dock_mode
         if self.state == State.IDLE and self._grip_wait_since is not None:
             return DIALOG_GRIP_WAIT
         if self.state == State.PAUSED and self._handle_pause:
@@ -2066,7 +3276,7 @@ class MissionLogic:
 
     def _decide_handle_mode(self, now: float) -> bool:
         """음성으로 시작한 안내의 출발 순간 — 활성 모드인가(설계 4.3 (나))."""
-        if self.grip_assume_held:
+        if self.grip_assume_held or not self.grip_release_stop:
             return False
         if not self._grip.fresh(now):
             return False
@@ -2092,9 +3302,7 @@ class MissionLogic:
         self._grip_wait_since = None
         self._grip_pulse_at = None
         self._handle_engaged = engaged
-        actions: list = []
-        if engaged:
-            actions.append(Haptic(HAPTIC_PATTERN_GRIP_ACK))
+        actions: list = [Say(MSG_HANDLE_HEIGHT, priority="response")]
         approach_dest = self._approach_dest
         self._approach_dest = None
         if approach_dest is not None:
@@ -2103,11 +3311,12 @@ class MissionLogic:
             self._confirming_dest_id = approach_dest.id
             self._arm_confirm(now)
             self._confirm_prompt = self._confirm_prompt_for(approach_dest)
-            actions.append(self._ask(self._confirm_prompt))
+            self._confirm_options = self._options_for(approach_dest)
+            actions.append(self._ask(self._confirm_prompt, "confirm", self._confirm_options))
             return actions
         self._arm_dest_prompt(now)
         actions.append(Say(MSG_APPROACH_ONBOARDING, priority="response",
-                           expects_reply=True))
+                           expects_reply=True, kind="open"))
         return actions
 
     def _grip_wait_tick(self, now: float) -> list:
@@ -2189,9 +3398,10 @@ class MissionLogic:
         self._approach.reset()
         self._approach_reasks = 0
         self._approach_after_reply = None
+        self._idle_ladder.reset()
         return [
             SetNavSpeedLimit(NO_SPEED_LIMIT),
-            Say(MSG_APPROACH_QUESTION, priority="response", expects_reply=True),
+            Say(MSG_APPROACH_QUESTION, priority="response", expects_reply=True, kind="yesno"),
         ]
 
     def _approach_not_answered(self, reply: str, now: float) -> list:
@@ -2208,9 +3418,13 @@ class MissionLogic:
         self._approach_after_reply = None
         if self._approach_reasks < APPROACH_REASK_MAX:
             self._approach_reasks += 1
-            self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
-            return [self._ask(MSG_APPROACH_REASK)]
+            return self._resay_approach(now)
         return self._approach_leave(MSG_APPROACH_UNANSWERED, now)
+
+    def _resay_approach(self, now: float) -> list:
+        """접근 질문을 "안내를 받으시겠어요?"로 다시(원칙 8). 횟수(_approach_reasks)는 부르는 쪽이 센다."""
+        self._response_deadline = now + APPROACH_QUESTION_STUCK_SEC
+        return [self._ask(MSG_APPROACH_REASK, "yesno")]
 
     def on_approach_reply_spoken(self, text: str, now: float) -> list:
         """접근 질문 중 질문에 LLM 이 답한 말이 재생을 마쳤다(/vica/tts_done) — 이제 다시 묻거나 물러난다."""
@@ -2230,7 +3444,8 @@ class MissionLogic:
         person: Optional[Pose2D] = None,
     ) -> list:
         """/vica/person_detection 원본 결과 (근접 호출, 2026-09-10 확장)."""
-        if self.state != State.IDLE or self._seek_deadline is None:
+        if (self.state != State.IDLE or self._seek_deadline is None or self.dock_mode
+                or self.dock_pending or self.dock_near):
             return []
         if approachable or not stable:
             return []
@@ -2259,6 +3474,8 @@ class MissionLogic:
         if affirmative:
             track_id = self.approach_track_id
             self._suppress_track(track_id, now, self.approach_person)
+            self._approach_lock = True
+            self._approach_lock_quiet_since = now
             if self.approach_turn_yaw_rad == 0.0 or self._near_call_no_spin:
                 self._to_idle()
                 self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
@@ -2405,14 +3622,15 @@ class MissionLogic:
         self._asking_is_finish = is_finish
         self._asking_time_after_yes = ask_time
         self._asking_entered_at = now
-        self._arrival_retried = False
+        self._arrival_ladder.reset()
+        self._idle_ladder.reset()
         self._asking_question = question
         self._deny_reconfirmed = False
         self._asking_where = False
         self._leaving_deadline = None
         self._response_deadline = None
         text = f"{arrival_text} {question}".strip() if arrival_text else question
-        return [Say(text, priority="response", expects_reply=True)]
+        return [Say(text, priority="response", expects_reply=True, kind="yesno")]
 
     def on_arrival_question_spoken(self, now: float) -> list:
         """도착 후 질문 재생이 끝났다. 응답 대기 8초는 여기서부터 센다"""
@@ -2422,6 +3640,7 @@ class MissionLogic:
 
     def on_wake_call(self, now: float) -> list:
         """"비카야" 한 번 — 호출 반응표대로 대답할지 정한다(2026-10-07 사용자 결정)."""
+        self._idle_ladder.reset()
         if self.estop_active or self.state == State.ESTOPPED:
             notice_at = self._tip_notice_at
             if (self.tipped and notice_at is not None
@@ -2429,41 +3648,96 @@ class MissionLogic:
                 return [WakeReply(listen=False)]
             self._note_tip_notice(now)
             return [Say(MSG_ESTOP_WAKE, priority="response"), WakeReply(listen=False)]
+        if self.dock_mode in ("docking", "docked"):
+            return [Say(MSG_DOCK_WAKE, priority="response"), WakeReply(listen=False)]
+        if self.dock_mode:
+            return [WakeReply(listen=False)]
+        if self.dock_pending:
+            return [Say(MSG_DOCK_WAIT, priority="response"), WakeReply(listen=False)]
         if self.state in _WAKE_IGNORE_STATES:
             return [WakeReply(listen=False)]
         if self.state == State.AWAITING_USER:
             return [WakeReply(listen=True)]
-        actions: list = [StopSpeech(), Say(MSG_WAKE_GREETING, priority="response"),
+        if self.state == State.WAITING and not self._wait_located:
+            locate = MSG_WAIT_IN_USE if self.speaker_gate else MSG_WAIT_LOCATE
+            actions = [StopSpeech(), Say(locate, priority="response"), WakeReply(listen=False),
+                       *self.on_wake(now)]
+            self._wait_located = True
+            if self._beacon_next_at is not None:
+                self._beacon_next_at = now + WAIT_BEACON_INTERVAL_SEC
+            return actions
+        actions: list = [StopSpeech(), Say(MSG_WAKE_GREETING, priority="response", kind="open"),
                          WakeReply(listen=True)]
         actions.extend(self.on_wake(now))
         return actions
 
     def on_wake(self, now: float) -> list:
         """"비카야" — 새 대화의 시작 신호. 상태 정리만 한다("네?"·판정은 on_wake_call)."""
+        if self.state in _PATROL_STATES:
+            return []
+        if self.dock_mode or self.dock_pending:
+            return []
+        self._note_user_present(now)
         self._forget_dest_prompt()
+        self._idle_ladder.reset()
         if self.state in (State.WAITING, State.WAITING_RELEASE):
             self._wake_consumed_at = now
-            if self.state == State.WAITING:
+            if self.state == State.WAITING and not self._wait_located:
                 return [Haptic(HAPTIC_PATTERN_WAKE_LOCATE)]
             return []
         if self.state in _WAIT_MOVING_STATES:
             return []
         if self.state == State.CONFIRMING:
-            actions = self._fold_confirming(now, announce=False)
-            self._wake_consumed_at = now
-            return actions
+            return self._wake_fold(now)
         if self.state in (State.ASKING_NEXT, State.ASKING_WAIT_TIME):
             self._leaving_deadline = None
-            self._arrival_retried = False
+            self._arrival_ladder.reset()
             self._response_deadline = None
             self._asking_entered_at = now
             self._wake_consumed_at = now
             return []
         if self.state == State.AWAITING_USER:
             return []
+        self._wake_fold(now)
         if self.user_attached_guard_active(now):
             self._user_attached_until = now + USER_ATTACHED_SUPPRESS_SEC
         return []
+
+    def _wake_fold(self, now: float) -> list:
+        """호출의 질문 접기 — on_wake 와 창 안의 "비카야"(_react_inwindow_wake, wake_revive 켜짐)가 같이 부른다(원칙 13 · 3)."""
+        if self.state == State.CONFIRMING:
+            confirm_id = self._confirming_dest_id if self._confirming_dest_id and self._confirm_prompt else None
+            actions = self._fold_confirming(now, announce=False)
+            self._wake_consumed_at = now
+            if self.wake_revive:
+                self._wake_fold_questions(now, confirm_id)
+            return actions
+        if self.wake_revive:
+            self._wake_fold_questions(now, None)
+        return []
+
+    def _wake_folds_here(self) -> bool:
+        """on_wake 가 지금 상태에서 질문 접기(_wake_fold)까지 가는가 — 창 안의 "비카야"가 on_wake 와 같은 곳에서만 접거나 다시"""
+        if self.dock_mode or self.dock_pending:
+            return False
+        return self.state not in (*_PATROL_STATES, State.WAITING, State.WAITING_RELEASE, *_WAIT_MOVING_STATES,
+                                  State.ASKING_NEXT, State.ASKING_WAIT_TIME, State.AWAITING_USER)
+
+    def _wake_fold_questions(self, now: float, confirm_id: Optional[str]) -> None:
+        """호출이 되돌리기 어려운 질문을 조용히 접고 하나를 적어 둔다(원칙 13 · 3, wake_revive 켜짐에서만 부른다)."""
+        folded = ("confirm", confirm_id, now) if confirm_id is not None else None
+        if self.cancel_confirm_pending:
+            self.cancel_confirm_pending = False
+            self._cancel_confirm_deadline = None
+            folded = folded or ("cancel", "", now)
+        if self.help_phase == "asking":
+            self._drop_help_question()
+            folded = folded or ("help", "", now)
+        if self._resume_question_open():
+            self._close_resume_question()
+            folded = folded or ("resume", "", now)
+        if folded is not None:
+            self._wake_folded = folded
 
     def wake_guard_active(self, now: float) -> bool:
         """`_wake_consumed_at` 직후 가드가 지금 유효한가."""
@@ -2479,6 +3753,8 @@ class MissionLogic:
     def on_wake_doa(self, doa_deg: float, nav_ready: bool, now: float) -> list:
         """"비카야"가 온 방향으로 고개를 돌린다 (호출 접근 설계 §4)."""
         if self.state != State.IDLE or self.estop_active or not nav_ready:
+            return []
+        if self.dock_mode or self.dock_pending or self.dock_near:
             return []
         if self._return_interrupted:
             return []
@@ -2537,7 +3813,7 @@ class MissionLogic:
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
 
         if self.state == State.ASKING_WAIT_TIME and kind in ("affirm", "deny"):
-            return self._arrival_no_answer(now)
+            return self._arrival_no_answer(now, misheard=False)
 
         if kind == "wait" or (kind == "affirm" and not self._asking_is_finish):
             minutes = intent.wait_minutes if kind == "wait" else -1
@@ -2551,7 +3827,7 @@ class MissionLogic:
                 self._asking_question = MSG_ASK_WAIT_TIME
                 self._response_deadline = None
                 return [Say(MSG_ASK_WAIT_TIME, priority="response",
-                            expects_reply=True)]
+                            expects_reply=True, kind="minutes")]
             return self._enter_waiting(min(minutes, WAIT_MINUTES_CAP), now)
 
         if kind == "deny":
@@ -2567,7 +3843,7 @@ class MissionLogic:
                 self._asking_question = MSG_ASK_ENTRANCE
                 self._asking_entered_at = now
                 self._response_deadline = None
-                return [Say(MSG_ASK_ENTRANCE, priority="response", expects_reply=True)]
+                return [Say(MSG_ASK_ENTRANCE, priority="response", expects_reply=True, kind="yesno")]
             self._reset_arrival_dialog()
             return [Say(MSG_FINISH, priority="response"), *self._go_home(now)]
 
@@ -2576,13 +3852,14 @@ class MissionLogic:
             self._asking_entered_at = now
             return []
 
-        return self._arrival_no_answer(now)
+        return self._arrival_no_answer(now, misheard=kind == "unknown")
 
     def _enter_waiting(self, minutes: int, now: float,
                        default_msg: bool = False, away: bool = False) -> list:
         """대기 확정 + 멘트. 사람접근은 대기 상태값으로 자연히 꺼진다."""
         self._wait_until = now + minutes * 60.0
         self._wait_minutes_requested = int(minutes)
+        self._wait_located = False
         self._response_deadline = None
         self._leaving_deadline = None
         dest = self._arrived_destination
@@ -2634,14 +3911,11 @@ class MissionLogic:
         return []
 
     def _wait_release_tick(self, now: float) -> list:
-        """WAITING_RELEASE: M2 가 끝나고 손을 놓았으면 대기 장소로 떠난다."""
-        spoken = self._release_spoken_at is not None or (
-            self._release_entered_at is not None
-            and now - self._release_entered_at >= WAIT_RELEASE_SPEECH_FALLBACK_SEC)
-        if not spoken:
-            return []
-        sensor = (not self.grip_assume_held) and self._grip.fresh(now)
-        if sensor and self._grip.released_for(now) < WAIT_RELEASE_SEC:
+        """WAITING_RELEASE: M2 가 끝나고 WAIT_DEPART_AFTER_SPEECH_SEC 뒤 대기 장소로 떠난다(터치 안 봄)."""
+        spoken_at = self._release_spoken_at
+        if spoken_at is None and self._release_entered_at is not None:
+            spoken_at = self._release_entered_at + WAIT_RELEASE_SPEECH_FALLBACK_SEC
+        if spoken_at is None or now - spoken_at < WAIT_DEPART_AFTER_SPEECH_SEC:
             return []
         if self._ear_holds(now):
             return []
@@ -2721,7 +3995,8 @@ class MissionLogic:
 
     def _home_beacon_tick(self, now: float) -> list:
         """홈 알림 — 홈에서 쉬는 동안 1분마다 M3. 첫 마디는 홈에 선 지 1분 뒤."""
-        if self.home_beacon_interval_sec <= 0 or not self._at_home():
+        if (self.home_beacon_interval_sec <= 0 or self.dock_mode or self.dock_pending
+                or not self._at_home()):
             self._home_beacon_next_at = None
             return []
         if self._home_beacon_next_at is None:
@@ -2751,23 +4026,42 @@ class MissionLogic:
         actions.extend(self._go_home(now))
         return actions
 
-    def _arrival_no_answer(self, now: float) -> list:
+    def _arrival_no_answer(self, now: float, misheard: bool = True) -> list:
         """무응답 사다리: 못 알아들으면 같은 질문을 1회 다시 묻고, 그 뒤엔 떠나기 예고."""
-        if not self._arrival_retried:
-            self._arrival_retried = True
-            self._response_deadline = None
-            self._asking_entered_at = now
-            return [self._ask(self._asking_question or MSG_ARRIVAL_RETRY)]
-        return self._leaving_notice(now)
+        return self._arrival_reask(now, misheard)
 
     def _arrival_silence(self, now: float) -> list:
         """침묵 사다리 (2026-09-20 사용자 결정): 8초 침묵이면 같은 질문을 한 번 더"""
-        if not self._arrival_retried and self._asking_question:
-            self._arrival_retried = True
-            self._response_deadline = None
-            self._asking_entered_at = now
-            return [Say(self._asking_question, priority="response", expects_reply=True)]
+        if not self._asking_question:
+            return self._leaving_notice(now)
+        if self._quiet_next(self._arrival_ladder) == REASK_SAME:
+            return self._resay_arrival(now)
         return self._leaving_notice(now)
+
+    def _arrival_reask(self, now: float, misheard: bool = True) -> list:
+        """도착 질문의 못 알아들은 답 한 단(원칙 8). 시계는 지금 그대로(질문 재생이 끝난 때부터 8초). 옛 방식(8초 침묵과 한"""
+        if self._reask_held:
+            return []
+        if self._quiet_reasked(self._arrival_ladder, misheard):
+            return self._leaving_notice(now)
+        rung = self._ladder_next(self._arrival_ladder)
+        if rung == REASK_SAME:
+            return self._resay_arrival(now)
+        if rung in (REASK_RETRY, REASK_LOUDER):
+            self._rearm_question_clock("arrival", now)
+            return self._reask_line(rung, self._arrival_ladder, self._resay_arrival(now))
+        return self._leaving_notice(now)
+
+    def _resay_arrival(self, now: float) -> list:
+        """도착 질문을 같은 문장으로 다시(원칙 8). 대답 시계는 재생이 끝난 때부터 다시 돈다 — 재질문도 새 시계"""
+        self._response_deadline = None
+        self._asking_entered_at = now
+        return [self._ask(self._asking_question or MSG_ARRIVAL_RETRY, self._asking_kind())]
+
+    @property
+    def _arrival_retried(self) -> bool:
+        """옛 표시 이름(읽기 전용) — 도착 질문 사다리를 이미 올렸나. test_arrival_dialog 가 읽는다."""
+        return self._arrival_ladder.step > 0
 
     def _leaving_notice(self, now: float) -> list:
         """떠나기 예고 + 유예. 유예 안에 답이 오면 산다(on_arrival_answer)."""
@@ -2784,6 +4078,7 @@ class MissionLogic:
         self._dest_prompt_stage = "asked"
         self._dest_prompt_deadline = now + DEST_PROMPT_FALLBACK_SEC
         self._forget_interrupted_return()
+        self._idle_ladder.reset()
 
     def _forget_dest_prompt(self) -> None:
         """온보딩 되묻기 사다리를 청산한다 — 대화가 다른 경로로 넘어가거나"""
@@ -2795,7 +4090,7 @@ class MissionLogic:
         if self._dest_prompt_stage == "asked":
             self._dest_prompt_stage = "retried"
             self._dest_prompt_deadline = now + DEST_PROMPT_FALLBACK_SEC
-            return [Say(MSG_DEST_RETRY, priority="response", expects_reply=True)]
+            return [Say(MSG_DEST_RETRY, priority="response", expects_reply=True, kind="open")]
         if self._dest_prompt_stage == "retried":
             self._dest_prompt_stage = "leaving"
             self._dest_prompt_deadline = now + self.dest_retry_return_sec
@@ -2823,7 +4118,7 @@ class MissionLogic:
         if quiet:
             self.state = State.ASKING_NEXT
             self._asking_is_finish = False
-            self._arrival_retried = False
+            self._arrival_ladder.reset()
             self._response_deadline = None
             self._asking_entered_at = now
         else:
@@ -2838,7 +4133,7 @@ class MissionLogic:
         self._asking_is_finish = False
         self._asking_time_after_yes = False
         self._asking_entered_at = None
-        self._arrival_retried = False
+        self._arrival_ladder.reset()
         self._asking_question = ""
         self._deny_reconfirmed = False
         self._asking_where = False
@@ -2854,8 +4149,7 @@ class MissionLogic:
         self._release_entered_at = None
         self._wait_finish_asked_at = None
         self._wait_need_asked_at = None
-        self._wait_finish_reasked = False
-        self._wait_need_reasked = False
+        self._wait_ladder.reset()
         self._wait_hold = None
 
     def _forget_interrupted_return(self) -> None:
@@ -2863,6 +4157,14 @@ class MissionLogic:
         self._return_interrupted = False
         self._return_resume_deadline = None
         self._return_notice_given = False
+
+    def on_dock_held_dropped(self, now: float) -> list:
+        """도크에서 나온 뒤 보내려고 잡아 둔 주행을 보내지 못했다(나오기 중지·실패·비상정지, 도킹 중이라 버림)."""
+        if self.state in _PATROL_STATES:
+            actions: list = [SetNavSpeedLimit(NO_SPEED_LIMIT), *self._patrol_drop("nav_failed")]
+            self._to_idle()
+            return actions
+        return self.on_tick(now, NavStatus.CANCELED)
 
     def on_emergency(self, keyword: str, now: float) -> list:
         """/vica/emergency (긴급어). 하드 키워드만 처리 — LLM 을 거치지 않은 경로."""
@@ -2875,6 +4177,7 @@ class MissionLogic:
             actions.append(CancelNav(self.active_destination))
         already_estopped = self.state == State.ESTOPPED
         moving = self.state in _GOAL_ACTIVE_STATES
+        actions.extend(self._patrol_drop("estop"))
         self._enter_estopped(now)
         if moving and not already_estopped:
             self._estop_announced = True
@@ -2900,6 +4203,7 @@ class MissionLogic:
         if self.state in _GOAL_ACTIVE_STATES:
             actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
             actions.append(CancelNav(self.active_destination))
+        actions.extend(self._patrol_drop("estop"))
         if self.state != State.ESTOPPED:
             self._enter_estopped(now)
         self._tip_notice_at = now
@@ -2924,6 +4228,7 @@ class MissionLogic:
                     actions.append(SetNavSpeedLimit(NO_SPEED_LIMIT))
                     actions.append(CancelNav(self.active_destination))
                 moving = self.state in _GOAL_ACTIVE_STATES and not self.tipped
+                actions.extend(self._patrol_drop("estop"))
                 self._enter_estopped(now)
                 self._estop_announced = moving or self.tipped
                 if moving:
@@ -2944,7 +4249,10 @@ class MissionLogic:
     ) -> list:
         """주기 처리. distance_remaining 은 Nav2 feedback 의 남은 거리(m)다."""
         actions: list = []
+        self._spk_gate.tick(now)
         self._prune_suppressed(now)
+        if self._approach_lock and (self.state != State.IDLE or self._idle_substage_active()):
+            self._approach_lock_quiet_since = now
 
         notice_at = self._tip_notice_at
         if (self.tipped and notice_at is not None
@@ -2964,23 +4272,19 @@ class MissionLogic:
 
         if self.cancel_confirm_pending:
             actions.extend(self._cancel_confirm_tick(now))
+        if self._resume_question_open():
+            actions.extend(self._resume_confirm_tick(now))
 
         if self.state == State.CONFIRMING:
-            if (not self._confirm_reasked and self._confirm_prompt
+            if (self._confirm_ladder.quiet_count == 0 and self._confirm_prompt
                     and self._confirm_reask_at is not None and now >= self._confirm_reask_at
                     and not self._ear_holds(now)):
-                self._confirm_reasked = True
+                self._quiet_next(self._confirm_ladder)
                 self._confirm_deadline = max(self._confirm_deadline or now,
                                              now + QUESTION_REASK_SEC)
-                actions.append(self._ask(self._confirm_prompt))
+                actions.extend(self._resay_confirm())
             elif self._confirm_deadline is not None and now >= self._confirm_deadline:
-                if self._change_from is not None:
-                    actions.extend(self._fold_confirming(now))
-                elif self._confirm_from_approach:
-                    actions.extend(self._fold_approach_confirm(now))
-                else:
-                    self._fold_confirming(now)
-                    actions.append(Say(MSG_CONFIRM_TIMEOUT))
+                actions.extend(self._confirm_unanswered(now))
 
         elif self.state == State.NAVIGATING:
             if nav_status == NavStatus.SUCCEEDED:
@@ -3065,6 +4369,13 @@ class MissionLogic:
         elif self.state == State.IDLE:
             if self._grip_wait_since is not None:
                 actions.extend(self._grip_wait_tick(now))
+            if self.dock_mode or self.dock_pending or self.dock_near:
+                self._seek_deadline = None
+                self._seek_return_yaw = None
+                if self._return_interrupted:
+                    self._forget_interrupted_return()
+                if self.dock_mode or self.dock_pending:
+                    self._forget_dest_prompt()
             if self._seek_deadline is not None and now >= self._seek_deadline:
                 back = self._seek_return_yaw
                 self._seek_deadline = None
@@ -3201,6 +4512,9 @@ class MissionLogic:
             elif self._dwell_until is None or now >= self._dwell_until:
                 self._to_idle()
 
+        elif self.state in _PATROL_STATES:
+            actions.extend(self._patrol_tick(now, nav_status))
+
         elif self.state == State.ESTOPPED:
             if not self.estop_active and not self.tipped:
                 t0 = (
@@ -3266,6 +4580,7 @@ class MissionLogic:
         self, now: float, is_home: bool = False, dialog_finish: bool = False
     ) -> list:
         """대기 위치(= 홈)로 돌아간다."""
+        self._spk_gate.reset()
         self._arrived_destination = None
         if not dialog_finish:
             self._last_guided = None
@@ -3300,8 +4615,31 @@ class MissionLogic:
         self._last_guided = None
         self._late_answer_finish = None
         self._to_idle()
+        self._approach_lock = False
+        self._approach_lock_quiet_since = None
         if not was_home:
             self._suppress_track(track_id, now, person)
+
+    def _idle_substage_active(self) -> bool:
+        """IDLE 안의 하위 단계(손잡이 잡기 대기·온보딩 되묻기)인가 — 사용자가 로봇 곁에서 답하는 중이다."""
+        return self._grip_wait_since is not None or self._dest_prompt_stage is not None
+
+    def _note_user_present(self, now: float) -> None:
+        """사용자가 말을 걸었다("비카야"·발화) — 접근 잠금의 조용한 시간을 처음부터 다시 잰다."""
+        if self._approach_lock:
+            self._approach_lock_quiet_since = now
+
+    def _approach_lock_active(self, now: float) -> bool:
+        """감지기의 새 접근을 막는가(C + ②, APPROACH_LOCK_QUIET_SEC)."""
+        if not self._approach_lock:
+            return False
+        since = self._approach_lock_quiet_since
+        if (self.state == State.IDLE and not self._idle_substage_active()
+                and since is not None and now - since >= self.approach_lock_quiet_sec):
+            self._approach_lock = False
+            self._approach_lock_quiet_since = None
+            return False
+        return True
 
     def _suppress_track(
         self, track_id: Optional[int], now: float, person: Optional[Pose2D] = None
@@ -3336,13 +4674,17 @@ class MissionLogic:
 
     def _enter_estopped(self, now: float) -> None:
         self.state = State.ESTOPPED
+        self._spk_gate.reset()
+        self._patrol = None
         self.active_destination = None
         self.paused_destination = None
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()
         self._confirming_dest_id = None
         self._confirm_deadline = None
+        self._wake_folded = None
         self._last_guided = None
         self._late_answer_finish = None
         self._approach_dest = None
@@ -3370,12 +4712,14 @@ class MissionLogic:
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
+        self._spk_gate.reset()
         self.active_destination = None
         self._arrived_destination = None
         self.paused_destination = None
         self._paused_returning_home = False
         self.cancel_confirm_pending = False
         self._cancel_confirm_deadline = None
+        self._close_resume_question()
         self._confirming_dest_id = None
         self._confirm_deadline = None
         self._dwell_until = None
@@ -3404,6 +4748,7 @@ class MissionLogic:
         self._nav_tree = NAV_TREE_DEFAULT
         self._wait_hold = None
         self._change_from = None
+        self._pause_hold = False
         self._wait_place = ""
         self._beacon_next_at = None
         self._release_text = ""

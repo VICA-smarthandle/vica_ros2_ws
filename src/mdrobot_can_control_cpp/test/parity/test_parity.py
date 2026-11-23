@@ -84,6 +84,7 @@ PARAM_CASES = [
     'can_reconnect_interval_sec=0', 'can_reconnect_interval_sec=-1',
     'can_reconnect_interval_sec=1e10', 'driver_id=0x7FF', 'driver_id=0x123', 'driver_id=-1',
     'driver_id=0x100000000', 'driver_id=0xFFFFFFFF',
+    'ignore_knob=1', 'ignore_knob=1 knob_timeout_sec=0 deadzone_pct=100',
 ]
 
 

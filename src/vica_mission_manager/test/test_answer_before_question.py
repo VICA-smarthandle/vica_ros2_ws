@@ -79,7 +79,7 @@ def test_node_reports_every_question_it_sends():
         encoding="utf-8")
     body = src[src.index("    def _run_actions"):]
     body = body[:body.index("\n    def ", 10)]
-    assert "self.logic.note_question_asked(action.text, self._now())" in body
+    assert "self.logic.note_question_asked(action.question_text or action.text, self._now())" in body
 
 
 def test_run90_1843_answer_whose_speech_began_before_the_question_is_dropped():

@@ -59,6 +59,7 @@ void VccCore::reset(const Twist2D & measured)
   stopped_since_ = -1.0;
   resync_count_ = 0;
   resync_primed_ = false;
+  resync_new_path_ = false;
   align_failed_since_ = -1.0;
   need_since_ = -1.0;
   turn_rot_ = 0.0;
@@ -106,9 +107,14 @@ CoreOutput VccCore::step(const CoreInputs & in)
     const double e = lateralError(in.path);
     if (std::abs(e - lanes_.offset()) <= p_.resync_offset) {
       resync_count_ = 0;
-    } else if (!resync_primed_ || ++resync_count_ >= 2) {
-      lanes_.syncOffset(e);
-      resync_count_ = 0;
+    } else {
+      if (resync_count_ == 0) {resync_new_path_ = path_fresh_;}
+      if (!resync_primed_ || ++resync_count_ >= 2) {
+        const double before = lanes_.offset();
+        lanes_.syncOffset(e);
+        if (resync_primed_ && resync_new_path_) {lanes_.shiftTarget(lanes_.offset() - before);}
+        resync_count_ = 0;
+      }
     }
     resync_primed_ = true;
   }
@@ -245,7 +251,7 @@ CoreOutput VccCore::step(const CoreInputs & in)
         const bool position_stop = position_only && dist_end < in.xy_tol;
         if (position_stop) {vdes = 0.0;}
         if (need) {vdes = 0.0;}
-        end_straight = p_.end_straight_lateral > 0.0 && !position_only &&
+        end_straight = p_.end_straight_lateral > 0.0 &&
           pathLength(lane_path) < p_.end_extend_min_length &&
           in.goal.x > 0.0 && std::abs(in.goal.y) <= p_.end_straight_lateral;
         d.cmd = {vdes, 0.0};

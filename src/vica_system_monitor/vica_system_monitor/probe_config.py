@@ -23,6 +23,8 @@ class TopicProbeSpec(NamedTuple):
     max_hz: float
     fault_code: str
     optional: bool
+    require_true: Tuple[str, ...] = ()
+    require_true_messages: Tuple[str, ...] = ()
 
 
 class ProcessProbeSpec(NamedTuple):
@@ -124,6 +126,8 @@ def parse_topic_probe(
     min_hz = _as_float(values.get('min_hz'))
     max_hz = _as_float(values.get('max_hz'))
     optional = bool(values.get('optional', False))
+    require_true = tuple(f for f in (values.get('require_true') or []) if f)
+    require_true_messages = tuple(m for m in (values.get('require_true_messages') or []) if m)
 
     problem = validate_component(component)
     if problem:
@@ -163,6 +167,16 @@ def parse_topic_probe(
             '범위가 뒤집혀 있으면 항상 실패합니다.'
         )
 
+    for field in require_true:
+        if not field.isidentifier():
+            problems.append(f"'{name}': require_true 의 '{field}'는 메시지 칸 이름이 아닙니다.")
+    if len(require_true_messages) != len(require_true):
+        problems.append(
+            f"'{name}': require_true({len(require_true)}개)와 "
+            f'require_true_messages({len(require_true_messages)}개)의 개수가 다릅니다. '
+            '칸마다 문구가 하나씩 있어야 화면에 원인이 보입니다.'
+        )
+
     if problems:
         return None, problems
 
@@ -177,6 +191,8 @@ def parse_topic_probe(
             max_hz=max_hz,
             fault_code=fault_code,
             optional=optional,
+            require_true=require_true,
+            require_true_messages=require_true_messages,
         ),
         [],
     )

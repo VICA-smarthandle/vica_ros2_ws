@@ -32,6 +32,17 @@ SOURCE_MAP_PICK = "map_pick"
 _SOURCES = {SOURCE_ROBOT_STANDING, SOURCE_MAP_PICK}
 
 
+HOME_VISIT_RADIUS_M = 0.30
+
+HOME_UNREACHABLE_MESSAGE = "홈에 접근할 수 없습니다."
+
+
+def near_home(home_x: float, home_y: float, x: float, y: float,
+              radius: float = HOME_VISIT_RADIUS_M) -> bool:
+    """(x, y) 가 홈 반경 안인가."""
+    return math.hypot(x - home_x, y - home_y) <= radius
+
+
 @dataclass(frozen=True)
 class HomePosition:
     """저장된 홈 위치 한 건."""
@@ -45,6 +56,7 @@ class HomePosition:
     label: str
     visited_ok: bool
     saved_at: str
+    reach_failed: bool = False
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -61,6 +73,7 @@ class HomePosition:
             "label": self.label,
             "visited_ok": self.visited_ok,
             "saved_at": self.saved_at,
+            "reach_failed": self.reach_failed,
         }
 
 
@@ -172,6 +185,7 @@ class HomeStorage:
             label=str(data.get("label", "") or ""),
             visited_ok=bool(data.get("visited_ok", False)),
             saved_at=str(data.get("saved_at", "") or ""),
+            reach_failed=bool(data.get("reach_failed", False)),
         )
 
     def write(self, home: HomePosition) -> HomePosition:
@@ -180,8 +194,21 @@ class HomeStorage:
         return home
 
     def mark_visited(self, map_id: str, visited_ok: bool) -> Optional[HomePosition]:
-        """'가보기' 결과를 반영한다. 홈이 없으면 None 을 돌려준다."""
+        """'가 봄' 표시를 그대로 정한다(접근 실패 표시는 지운다). 홈이 없으면 None."""
+        return self._update(map_id, visited_ok=bool(visited_ok), reach_failed=False)
+
+    def record_reach(self, map_id: str, reached: bool) -> Optional[HomePosition]:
+        """주행 결과를 반영한다. 홈이 없으면 None 을 돌려준다."""
         home = self.read(map_id)
+        if home is None:
+            return None
+        if reached:
+            return self._update(map_id, visited_ok=True, reach_failed=False, home=home)
+        return self._update(map_id, visited_ok=home.visited_ok, reach_failed=True, home=home)
+
+    def _update(self, map_id: str, *, visited_ok: bool, reach_failed: bool,
+                home: Optional[HomePosition] = None) -> Optional[HomePosition]:
+        home = home if home is not None else self.read(map_id)
         if home is None:
             return None
         updated = HomePosition(
@@ -192,8 +219,9 @@ class HomeStorage:
             source=home.source,
             score=home.score,
             label=home.label,
-            visited_ok=bool(visited_ok),
+            visited_ok=visited_ok,
             saved_at=home.saved_at,
+            reach_failed=reach_failed,
         )
         self._write_document(updated.map_id, updated.to_document())
         return updated

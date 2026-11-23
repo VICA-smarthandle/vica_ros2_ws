@@ -63,7 +63,9 @@ DriverCore::DriverCore(const DriverParams & params, DriverIo & io, SerialFactory
   }
   if (us_enabled_ || touch_enabled_) {uplink_period_ns_ = timer_period_ns(p_.uplink_rate_hz);}
 
-  io_.log(LogLevel::Info, "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event");
+  io_.log(
+    LogLevel::Info,
+    "Subscribed: /vica/turn_guide, /estop_state, /vica_goal_event, /vica/robot_state");
   io_.log(LogLevel::Info, "Publishing: /vica/smart_handle_state + serial");
   io_.log(LogLevel::Info, "This node never publishes /cmd_vel* nor resets the E-stop latch.");
   if (!p_.enable_serial) {
@@ -169,6 +171,12 @@ void DriverCore::on_goal(const std::string & payload)
   }
 }
 
+void DriverCore::on_robot_state(const std::string & dialog_state)
+{
+  patrol_code_ = patrol_state_code(dialog_state);
+  if (patrol_code_ != PATROL_NONE) {patrol_last_ns_ = io_.steady_now_ns();}
+}
+
 void DriverCore::on_haptic(const std::string & data)
 {
   const std::string name = py_lower_for_lookup(py_strip(data));
@@ -188,7 +196,12 @@ void DriverCore::on_haptic(const std::string & data)
       "' — ['locate', 'long', 'short', 'tick'] 중 하나여야 합니다. 무시합니다.");
     return;
   }
-  const bool ok = link_->send_raw(code, io_.steady_now_ns());
+  const int64_t now = io_.steady_now_ns();
+  if (active_patrol_code(patrol_code_, patrol_last_ns_, now) != PATROL_NONE) {
+    io_.log(LogLevel::Info, "[HAPTIC] 순찰 중 — " + name + " 무시");
+    return;
+  }
+  const bool ok = link_->send_raw(code, now);
   if (ok) {
     char hex[8];
     std::snprintf(hex, sizeof(hex), "%02X", code);
@@ -210,6 +223,8 @@ void DriverCore::send_loop()
   in.turn_direction = turn_direction_;
   in.turn_last_ns = turn_last_ns_;
   in.arrival_started_ns = arrival_started_ns_;
+  in.patrol_code = patrol_code_;
+  in.patrol_last_ns = patrol_last_ns_;
   const GuidanceOutcome outcome = resolve_state_code(
     in, now, estop_timeout_ns_, cue_timeout_ns_, arrival_hold_ns_, estop_required_);
   link_->send(outcome.state_code, now);
@@ -311,7 +326,10 @@ void DriverCore::publish_ranges(const UltrasonicFrame & frame)
   const int64_t stamp_base = io_.ros_now_ns();
   for (int ch = 0; ch < protocol::US_CHANNELS; ++ch) {
     if (!us_on_[ch]) {continue;}
-    const int mm = frame.distances_mm[ch];
+    const auto action = us_switch_.action(ch);
+    if (action == RuntimeChannelSwitch::Action::Skip) {continue;}
+    const bool clearing = action == RuntimeChannelSwitch::Action::Clear;
+    const int mm = clearing ? protocol::US_CLEAR_MM : frame.distances_mm[ch];
     if (mm == protocol::US_DIST_INVALID) {continue;}
     const int64_t stamp = stamp_minus_delay(stamp_base, us_delay_ns_[ch]);
     const bool allowed = us_gate_.allow(ch, range_tf_ok(ch, stamp));
@@ -330,7 +348,43 @@ void DriverCore::publish_ranges(const UltrasonicFrame & frame)
       max_range : mm / 1000.0;
     r.range = f32_field("range", value);
     io_.publish_range(r);
+    if (clearing) {us_switch_.cleared(ch);}
   }
+}
+
+std::vector<int> DriverCore::front_channels() const
+{
+  std::vector<int> chs;
+  if (!us_enabled_ || us_on_.size() != us_stat_names_.size()) {return chs;}
+  for (std::size_t ch = 0; ch < us_on_.size(); ++ch) {
+    if (us_on_[ch] && us_stat_names_[ch].rfind("front_", 0) == 0) {chs.push_back(static_cast<int>(ch));}
+  }
+  return chs;
+}
+
+bool DriverCore::set_front_ultrasonic(bool on, std::string & message)
+{
+  const auto chs = front_channels();
+  if (chs.empty()) {
+    message = "전방 초음파 채널이 설정에서 꺼져 있습니다(ultrasonic_channel_enabled)";
+    return false;
+  }
+  const bool changed = us_switch_.set(chs, on);
+  message = on ? "전방 초음파 켬" :
+    "전방 초음파 끔 — '없음'을 " + std::to_string(RuntimeChannelSwitch::kClearFrames) + "번 보낸 뒤 멈춤";
+  if (!changed) {message += "(이미 그 상태)";}
+  io_.log(LogLevel::Info, "[초음파] " + message);
+  return true;
+}
+
+bool DriverCore::front_ultrasonic_on() const
+{
+  const auto chs = front_channels();
+  if (chs.empty()) {return false;}
+  for (int ch : chs) {
+    if (!us_switch_.on(ch)) {return false;}
+  }
+  return true;
 }
 
 void DriverCore::warn_if_ultrasonic_stale(int64_t now_ns)

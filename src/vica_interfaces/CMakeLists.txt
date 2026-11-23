@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotEvent.msg"
   "msg/RobotHealth.msg"
   "msg/PersonDetection.msg"
+  "msg/VicaQuestion.msg"
   "srv/RequestDestination.srv"
   "srv/MissionCommand.srv"
   "srv/DeleteMap.srv"
@@ -35,6 +36,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DraftRoute.srv"
   "srv/SaveRoute.srv"
   "srv/GetRoute.srv"
+  "srv/SavePatrolRoute.srv"
+  "srv/GetPatrolRoute.srv"
+  "srv/MapFix.srv"
   DEPENDENCIES std_msgs builtin_interfaces geometry_msgs
 )
 

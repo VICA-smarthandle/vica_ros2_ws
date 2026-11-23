@@ -6,3 +6,12 @@ bool need_confirm
 string reply
 string safety_flag
 int32 wait_minutes
+string speaker_verdict
+float32 speaker_score
+float32 speaker_score_joined
+string ask_text
+string ask_kind
+string[] ask_option_ids
+string question_id
+string answer
+string answer_value

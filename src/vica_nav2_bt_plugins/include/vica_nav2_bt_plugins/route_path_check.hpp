@@ -18,6 +18,9 @@ struct RoutePathVerdict
   double dist_to_points{0.0};
   double dist_to_goal{0.0};
   std::string reason;
+  bool kept_for_corner{false};
+  double goal_to_path{std::numeric_limits<double>::infinity()};
+  double remaining_turn_deg{0.0};
 };
 
 constexpr double kPrunedEdgeExtend = 1.2;
@@ -27,7 +30,7 @@ RoutePathVerdict checkRoutePath(
   std::size_t min_poses, double max_dist,
   double goal_x = std::numeric_limits<double>::quiet_NaN(),
   double goal_y = std::numeric_limits<double>::quiet_NaN(),
-  double handoff = 0.0);
+  double handoff = 0.0, double keep_goal_dist = 0.0, double keep_min_turn_deg = 15.0);
 
 class RailDistanceGate
 {

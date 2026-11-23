@@ -64,6 +64,14 @@ def test_driver_subscribes_estop_state_without_publishing():
     assert 'create_publisher(Bool, "/estop_state"' not in text
 
 
+def test_driver_subscribes_robot_state_without_publishing():
+    """/vica/robot_state 는 순찰 표시용으로 구독만 한다(2026-11-14). 발행은 미션 몫이다."""
+    text = read(NODE_DIR / "user_guidance_driver_node.py")
+    assert 'RobotState, "/vica/robot_state", self.cb_robot_state, 10' in text
+    assert "create_publisher(RobotState" not in text
+    assert "create_publisher(\n            RobotState" not in text
+
+
 def test_no_publisher_or_service_on_forbidden_paths():
     """금지 경로에 publisher/service client를 만들지 않는다."""
     import re

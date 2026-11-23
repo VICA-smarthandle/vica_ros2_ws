@@ -11,7 +11,7 @@
                   <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
                                 path="{rail_path}" server_name="compute_route"/>
                   <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
-                                     max_dist_from_path="1.5" handoff_dist_to_goal="2.0"
+                                     max_dist_from_path="1.5" handoff_dist_to_goal="2.0" keep_rail_goal_dist="0.10" keep_rail_min_turn_deg="15"
                                      global_frame="map" robot_base_frame="base_footprint"
                                      transform_tolerance="0.2"/>
                   <TruncatePathLocal input_path="{rail_path}" output_path="{rail_ahead}"
@@ -20,7 +20,7 @@
                   <Fallback name="RailIfClearElseCarrot">
                     <Sequence name="RailDirect">
                       <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
-                                         max_dist_from_path="0.8" rejoin_dist_from_path="0.5" handoff_dist_to_goal="2.0"
+                                         max_dist_from_path="0.8" rejoin_dist_from_path="0.5" handoff_dist_to_goal="2.0" keep_rail_goal_dist="0.10" keep_rail_min_turn_deg="15"
                                          global_frame="map" robot_base_frame="base_footprint"
                                          transform_tolerance="0.2" name="NearRailGate"/>
                       <IsRailAheadClear path="{rail_ahead}" skip_distance="0.5" confirm_ticks="2"
@@ -55,10 +55,19 @@
                 </Sequence>
                 <Fallback name="NearGoalKeepPath">
                   <GoalReached goal="{goal}" global_frame="map" robot_base_frame="base_footprint"/>
+                  <Sequence name="GoalStraightPath">
+                    <StraightPathToGoal goal="{goal}" path="{straight_path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="StraightToGoal"/>
+                    <IsRailAheadClear path="{straight_path}" skip_distance="0.5" confirm_ticks="2"
+                                      body_footprint="[[0.151, 0.225], [0.151, -0.225], [-0.459, -0.225], [-0.459, 0.225]]"
+                                      footprint_padding="0.15" name="StraightClear"/>
+                    <StraightPathToGoal goal="{goal}" path="{path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="StraightToGoalPath"/>
+                  </Sequence>
                   <Sequence name="GoalPathAlignedEnd">
                     <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-                    <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
-                                        output_path="{path}"/>
                   </Sequence>
                 </Fallback>
               </Fallback>
@@ -78,11 +87,22 @@
           <PipelineSequence name="LastMileWithReplanning">
             <RateController hz="1.0">
               <RecoveryNode number_of_retries="1" name="ComputeLastMilePath">
-                <Sequence name="LastMilePathAlignedEnd">
-                  <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-                  <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
-                                      output_path="{path}"/>
-                </Sequence>
+                <Fallback name="LastMileStraightOrPlanner">
+                  <Sequence name="LastMileStraightPath">
+                    <StraightPathToGoal goal="{goal}" path="{straight_path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="LastMileStraightToGoal"/>
+                    <IsRailAheadClear path="{straight_path}" skip_distance="0.5" confirm_ticks="2"
+                                      body_footprint="[[0.151, 0.225], [0.151, -0.225], [-0.459, -0.225], [-0.459, 0.225]]"
+                                      footprint_padding="0.15" name="LastMileStraightClear"/>
+                    <StraightPathToGoal goal="{goal}" path="{path}" max_dist="2.0"
+                                        global_frame="map" robot_base_frame="base_footprint"
+                                        transform_tolerance="0.2" name="LastMileStraightToGoalPath"/>
+                  </Sequence>
+                  <Sequence name="LastMilePathAlignedEnd">
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                  </Sequence>
+                </Fallback>
                 <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"
                                     service_name="global_costmap/clear_entirely_global_costmap"/>
               </RecoveryNode>

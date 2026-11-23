@@ -2,8 +2,8 @@ amcl:
   ros__parameters:
     use_sim_time: false
     alpha1: 0.2
-    alpha2: 0.2
-    alpha3: 0.2
+    alpha2: 0.05
+    alpha3: 0.05
     alpha4: 0.2
     alpha5: 0.2
     base_frame_id: "base_footprint"
@@ -70,6 +70,7 @@ bt_navigator:
       - vica_is_rail_ahead_clear_condition_bt_node
       - vica_is_route_path_usable_condition_bt_node
       - vica_align_path_end_to_goal_action_bt_node
+      - vica_straight_path_to_goal_action_bt_node
       - nav2_initial_pose_received_condition_bt_node
       - nav2_reinitialize_global_localization_service_bt_node
       - nav2_rate_controller_bt_node
@@ -146,7 +147,7 @@ controller_server:
       plugin: "vica_vcc_controller::VccController"
       max_robot_pose_search_dist: 3.0
       reject_unit_path: false
-      desired_linear_vel: 0.5
+      desired_linear_vel: 0.7
       lookahead_time: 2.5
       min_lookahead_dist: 0.6
       max_lookahead_dist: 1.2
@@ -154,14 +155,14 @@ controller_server:
       max_angular_vel: 0.5
       max_angular_accel: 1.2
       max_linear_decel: 1.25
-      planned_linear_decel: 0.5
+      planned_linear_decel: 0.7
       start_ramp_speed: 0.25
       start_ramp_accel: 0.5
-      linear_accel: 0.143
+      linear_accel: 0.2
       resync_margin: 0.15
       min_speed: 0.12
       curve_min_radius: 0.8
-      curve_decel: 0.3
+      curve_decel: 0.42
       preview_dist: 1.5
       slow_clearance: 0.35
       approach_velocity_scaling_dist: 0.6
@@ -196,7 +197,7 @@ controller_server:
       pass_arrival: true
       new_path_collision_confirm: true
       position_only_yaw_tol: 3.0
-      end_straight_lateral: 0.08
+      end_straight_lateral: 0.10
       pivot_angular_vel: 0.35
       align_angular_vel: 0.35
       motor_lag: 0.35
@@ -463,7 +464,7 @@ local_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95
       range_sensor_front_right:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True
@@ -471,7 +472,7 @@ local_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95
       range_sensor_left_wheel:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: False
@@ -528,7 +529,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5
-        inflation_radius: 0.55
+        inflation_radius: 0.50
 
 global_costmap:
   global_costmap:
@@ -552,7 +553,7 @@ global_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95
       range_sensor_front_right:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True
@@ -560,7 +561,7 @@ global_costmap:
         clear_on_max_reading: True
         no_readings_timeout: 0.0
         clear_threshold: 0.2
-        mark_threshold: 0.8
+        mark_threshold: 0.95
 
       obstacle_inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -604,7 +605,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.5
-        inflation_radius: 0.55
+        inflation_radius: 0.50
       always_send_full_costmap: True
 
 map_server:
@@ -755,7 +756,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.5, 0.0, 0.5]
+    max_velocity: [0.7, 0.0, 0.5]
     min_velocity: [-0.5, 0.0, -0.5]
     max_accel: [2.5, 0.0, 2.0]
     max_decel: [-1.25, 0.0, -2.0]
@@ -782,7 +783,7 @@ collision_monitor:
 
     PolygonStop:
       type: "polygon"
-      points: [0.446, 0.28, 0.446, -0.28, 0.206, -0.28, 0.206, 0.28]
+      points: [0.482, 0.28, 0.482, -0.28, 0.206, -0.28, 0.206, 0.28]
       action_type: "stop"
       max_points: 2
       visualize: True
@@ -791,7 +792,7 @@ collision_monitor:
 
     PolygonSlow:
       type: "polygon"
-      points: [0.946, 0.32, 0.946, -0.32, 0.206, -0.32, 0.206, 0.32]
+      points: [0.982, 0.32, 0.982, -0.32, 0.206, -0.32, 0.206, 0.32]
       action_type: "slowdown"
       slowdown_ratio: 0.4
       max_points: 2

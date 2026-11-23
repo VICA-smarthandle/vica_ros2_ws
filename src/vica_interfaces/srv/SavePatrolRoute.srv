@@ -1,0 +1,7 @@
+string map_id
+string[] destination_ids
+string[] watch_off
+---
+bool accepted
+string reason
+string message

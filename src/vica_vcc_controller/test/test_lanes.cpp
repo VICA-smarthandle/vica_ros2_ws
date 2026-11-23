@@ -118,6 +118,46 @@ TEST(Lanes, ReturnsToRailOnlyAfterOneSecondClear)
   EXPECT_NEAR(ls.target(), 0.0, 1e-9);
 }
 
+TEST(Lanes, InwardCandidatesKeepTheReturnWait)
+{
+  World w;
+  w.box(1.5, 1.6, -0.05, 0.05);
+  LaneSelector ls;
+  double now = 0.0;
+  run(ls, w, 3, now);
+  const double avoided = ls.target();
+  ASSERT_GE(std::abs(avoided), 0.3);
+  for (int i = 0; i < 11; ++i) {
+    const bool rail_tight = (i % 2 == 0);
+    ClearanceFn fn = [rail_tight](const Pose2D & p) {
+        return (rail_tight && p.x > 0.5 && std::abs(p.y) < 0.05) ? 0.10 : 5.0;
+      };
+    now += 0.1;
+    ls.update(rail(), 0.4, 0.5, now, 0.1, fn);
+    if (i < 10) {EXPECT_NEAR(ls.target(), avoided, 1e-9) << "1 s 전에는 그대로, i=" << i;}
+  }
+  EXPECT_LT(std::abs(ls.target()), std::abs(avoided));
+  EXPECT_GE(ls.target() * avoided, 0.0);
+}
+
+TEST(Lanes, ObstacleBackRestartsTheReturnWait)
+{
+  World w;
+  w.box(1.5, 1.6, -0.05, 0.05);
+  LaneSelector ls;
+  double now = 0.0;
+  run(ls, w, 3, now);
+  const double avoided = ls.target();
+  World empty;
+  run(ls, empty, 5, now);
+  EXPECT_NEAR(ls.target(), avoided, 1e-9);
+  run(ls, w, 1, now);
+  run(ls, empty, 9, now);
+  EXPECT_NEAR(ls.target(), avoided, 1e-9);
+  run(ls, empty, 2, now);
+  EXPECT_NEAR(ls.target(), 0.0, 1e-9);
+}
+
 TEST(Lanes, NearlyEqualLanesDoNotFlipFlop)
 {
   LaneSelector ls;

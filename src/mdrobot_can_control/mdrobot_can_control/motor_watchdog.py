@@ -14,6 +14,17 @@ def normalize_knob_pct(raw_pct: int, min_pct: int, max_pct: int) -> int:
     return max(0, min(100, int(scaled)))
 
 
+def motor_speed_ratio_ignoring_knob(
+    cmd_last_ns: Optional[int],
+    now_ns: int,
+    cmd_timeout_ns: int,
+) -> float:
+    """시험용 ignore_knob(2026-11-02 사용자 요청 — 바퀴 점검)."""
+    if is_fresh_ns(cmd_last_ns, now_ns=now_ns, timeout_ns=cmd_timeout_ns):
+        return 1.0
+    return 0.0
+
+
 def motor_speed_ratio(
     cmd_last_ns: Optional[int],
     knob_last_ns: Optional[int],

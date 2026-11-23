@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+import zlib
 
 import numpy as np
 
@@ -102,6 +103,15 @@ class MatchResult:
     moved_m: float
     moved_deg: float
     at_yaw_edge: bool
+
+
+def map_fingerprint(width, height, resolution, origin_x, origin_y, data) -> tuple:
+    """같은 지도인지 가르는 열쇠. 크기·원점이 같아도 칸 내용이 다르면 달라진다."""
+    cells = np.asarray(data, dtype=np.int8)
+    return (
+        int(width), int(height), float(resolution), float(origin_x), float(origin_y),
+        int(cells.size), zlib.crc32(cells.tobytes()),
+    )
 
 
 def filter_beams(

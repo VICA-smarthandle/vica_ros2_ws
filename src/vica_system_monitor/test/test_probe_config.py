@@ -217,3 +217,49 @@ def test_zero_message_with_publisher_suspects_qos():
 def test_zero_message_handles_negative_count():
     """이상 입력에 예외를 던지지 않는다."""
     assert classify_zero_message(-1) == ZERO_NO_PUBLISHER
+
+
+def _handle_values(**extra):
+    values = {
+        'component': 'guidance',
+        'topic': '/vica/smart_handle_state',
+        'msg_type': 'vica_interfaces/msg/SmartHandleState',
+        'qos': 'default',
+        'min_hz': 1.0,
+        'max_hz': 4.0,
+        'fault_code': 'GUIDANCE_NODE_SILENT',
+        'optional': True,
+    }
+    values.update(extra)
+    return values
+
+
+def test_require_true_is_parsed_with_its_messages():
+    spec, problems = parse_topic_probe('handle_state', _handle_values(
+        require_true=['uplink_fresh', 'connected'],
+        require_true_messages=['아두이노 끊김', '포트 실패'],
+    ))
+    assert problems == []
+    assert spec.require_true == ('uplink_fresh', 'connected')
+    assert spec.require_true_messages == ('아두이노 끊김', '포트 실패')
+
+
+def test_require_true_defaults_to_nothing():
+    """ROS 파라미터 기본값 [''] 는 빈 목록이다 — 칸 검사를 하지 않는다."""
+    spec, problems = parse_topic_probe('handle_state', _handle_values(
+        require_true=[''], require_true_messages=['']))
+    assert problems == [] and spec.require_true == () and spec.require_true_messages == ()
+    spec, problems = parse_topic_probe('handle_state', _handle_values())
+    assert problems == [] and spec.require_true == ()
+
+
+def test_require_true_needs_one_message_per_field():
+    spec, problems = parse_topic_probe('handle_state', _handle_values(
+        require_true=['uplink_fresh', 'connected'], require_true_messages=['하나만']))
+    assert spec is None and any('개수가 다릅니다' in p for p in problems)
+
+
+def test_require_true_rejects_a_non_field_name():
+    spec, problems = parse_topic_probe('handle_state', _handle_values(
+        require_true=['uplink fresh'], require_true_messages=['문구']))
+    assert spec is None and any('메시지 칸 이름이 아닙니다' in p for p in problems)

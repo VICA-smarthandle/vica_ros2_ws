@@ -209,3 +209,57 @@ TEST(KnobCycleStamp, drain_without_knob_frame_keeps_previous_stamp)
   h.core->drain_can_rx(T0 + sec_to_ns(1.0));
   EXPECT_EQ(h.core->last_knob_ns, T0);
 }
+
+namespace
+{
+int16_t last_rpm_mot1(const std::vector<Frame> & sent)
+{
+  for (auto it = sent.rbegin(); it != sent.rend(); ++it) {
+    if (it->data[0] == 0xCF) {
+      return static_cast<int16_t>(it->data[2] | (it->data[3] << 8));
+    }
+  }
+  return 0;
+}
+}
+
+TEST(IgnoreKnob, knob_zero_stops_by_default)
+{
+  Harness h( false);
+  h.rx.push_back(knob_frame(0, 0));
+  h.core->on_cmd(0.3, 0.0);
+  h.core->control_loop();
+  EXPECT_EQ(last_rpm_mot1(h.sent), 0);
+}
+
+TEST(IgnoreKnob, knob_zero_or_missing_is_ignored)
+{
+  for (const bool send_knob : {true, false}) {
+    Harness h( false);
+    h.core->p.ignore_knob = true;
+    if (send_knob) {
+      h.rx.push_back(knob_frame(0, 0));
+    }
+    h.core->on_cmd(0.3, 0.0);
+    h.core->control_loop();
+    EXPECT_EQ(last_rpm_mot1(h.sent), 44) << "send_knob=" << send_knob;
+  }
+}
+
+TEST(IgnoreKnob, stale_cmd_still_stops)
+{
+  Harness h( false);
+  h.core->p.ignore_knob = true;
+  h.core->on_cmd(0.3, 0.0);
+  const int64_t later = T0 + RETRY_NS + sec_to_ns(1.0);
+  h.core->now_fn = [later]() {return later;};
+  h.core->control_loop();
+  EXPECT_EQ(last_rpm_mot1(h.sent), 0);
+}
+
+TEST(IgnoreKnob, ratio_function)
+{
+  EXPECT_EQ(mdrobot::motor_speed_ratio_ignoring_knob(T0, T0, CMD_TIMEOUT_NS), 1.0);
+  EXPECT_EQ(mdrobot::motor_speed_ratio_ignoring_knob(std::nullopt, T0, CMD_TIMEOUT_NS), 0.0);
+  EXPECT_EQ(mdrobot::motor_speed_ratio_ignoring_knob(T0, T0 + CMD_TIMEOUT_NS + 1, CMD_TIMEOUT_NS), 0.0);
+}

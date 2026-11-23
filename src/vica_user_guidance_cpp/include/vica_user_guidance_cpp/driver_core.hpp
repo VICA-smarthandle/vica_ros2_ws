@@ -49,6 +49,46 @@ struct DriverParams
   std::string ultrasonic_tf_target_frame = "odom";
 };
 
+class RuntimeChannelSwitch
+{
+public:
+  enum class Action { Normal, Clear, Skip };
+  static constexpr int kClearFrames = 3;
+
+  explicit RuntimeChannelSwitch(int channels)
+  : off_(static_cast<std::size_t>(channels), false), clears_(static_cast<std::size_t>(channels), 0) {}
+
+  bool set(const std::vector<int> & channels, bool on)
+  {
+    bool changed = false;
+    for (int ch : channels) {
+      if (ch < 0 || static_cast<std::size_t>(ch) >= off_.size()) {continue;}
+      const auto i = static_cast<std::size_t>(ch);
+      if (off_[i] == !on) {continue;}
+      off_[i] = !on;
+      clears_[i] = on ? 0 : kClearFrames;
+      changed = true;
+    }
+    return changed;
+  }
+  bool on(int ch) const {return !off_.at(static_cast<std::size_t>(ch));}
+  Action action(int ch) const
+  {
+    const auto i = static_cast<std::size_t>(ch);
+    if (!off_.at(i)) {return Action::Normal;}
+    return clears_[i] > 0 ? Action::Clear : Action::Skip;
+  }
+  void cleared(int ch)
+  {
+    auto & c = clears_.at(static_cast<std::size_t>(ch));
+    if (c > 0) {--c;}
+  }
+
+private:
+  std::vector<bool> off_;
+  std::vector<int> clears_;
+};
+
 struct RangeOut
 {
   int channel = 0;
@@ -99,6 +139,7 @@ public:
   void on_turn(int direction);
   void on_estop(bool data);
   void on_goal(const std::string & payload);
+  void on_robot_state(const std::string & dialog_state);
   void on_haptic(const std::string & data);
 
   void send_loop();
@@ -116,7 +157,11 @@ public:
   const std::vector<std::string> & ultrasonic_topics() const {return us_topics_;}
   const std::vector<bool> & ultrasonic_channel_on() const {return us_on_;}
 
+  bool set_front_ultrasonic(bool on, std::string & message);
+  bool front_ultrasonic_on() const;
+
 private:
+  std::vector<int> front_channels() const;
   void warn_if_arrival_hold_too_short();
   void setup_ultrasonic();
   void log_on_change(const GuidanceOutcome & outcome);
@@ -141,6 +186,8 @@ private:
   int turn_direction_ = DIRECTION_NONE;
   std::optional<int64_t> turn_last_ns_;
   std::optional<int64_t> arrival_started_ns_;
+  int patrol_code_ = PATROL_NONE;
+  std::optional<int64_t> patrol_last_ns_;
   std::optional<std::string> last_reason_;
 
   int64_t send_period_ns_ = 0;
@@ -173,6 +220,7 @@ private:
   bool us_tf_gate_enabled_ = true;
   std::string us_tf_target_;
   RangeTfGate us_gate_{protocol::US_CHANNELS};
+  RuntimeChannelSwitch us_switch_{protocol::US_CHANNELS};
 };
 
 }

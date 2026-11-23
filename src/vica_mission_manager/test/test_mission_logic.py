@@ -17,6 +17,8 @@ from vica_mission_manager.mission_logic import (
     MSG_APPROACH_DECLINED,
     MSG_APPROACH_ONBOARDING,
     MSG_APPROACH_UNANSWERED,
+    MSG_HANDLE_HEIGHT,
+    APPROACH_LOCK_QUIET_SEC,
     MSG_HANDLE_HINT,
     PERSON_APPROACH_SPEED_PERCENT,
     ApproachRequest,
@@ -209,7 +211,8 @@ class TestTransitions:
 
     def test_confirm_then_same_dest_navigates(self):
         logic = MissionLogic()
-        assert logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0) == []
+        asked = logic.on_intent(make_intent(need_confirm=True), make_dest(), BOUNDS, True, 0.0)
+        assert [(a.expects_reply, a.kind) for a in asked] == [(True, "confirm")]
         assert logic.state == State.CONFIRMING
         actions = logic.on_intent(make_intent(), make_dest(), BOUNDS, True, 5.0)
         assert logic.state == State.NAVIGATING
@@ -1124,6 +1127,101 @@ class TestReapproachSuppression:
         assert reason == GateReason.TRACK_SUPPRESSED
 
 
+class TestAppCancelDuringApproach:
+    """앱의 '접근 취소'(2026-10-29): 그 자리에 서고, 이 사람에게는 60 s 다시 다가가지 않는다(목업 45)."""
+
+    def test_cancel_while_approaching_suppresses_the_same_person(self):
+        logic = MissionLogic(return_destination=make_home(), reapproach_suppress_sec=60.0)
+        start_approach(logic, 0.0)
+        actions, reason = logic.on_app_cancel(3.0)
+        assert reason == GateReason.OK
+        assert logic.state == State.IDLE
+        assert any(isinstance(a, CancelNav) for a in actions)
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 4.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 63.1)
+        assert reason == GateReason.OK
+
+    def test_cancel_while_asking_suppresses_the_same_person(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic, 0.0)
+        arrive_and_ask(logic, 5.0)
+        _, reason = logic.on_app_cancel(6.0)
+        assert reason == GateReason.OK and logic.state == State.IDLE
+        _, reason = logic.on_approach_request(make_approach(), BOUNDS, True, 7.0)
+        assert reason == GateReason.TRACK_SUPPRESSED
+
+    def test_other_person_is_free_after_cancel(self):
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic, 0.0)
+        logic.on_app_cancel(3.0)
+        _, reason = logic.on_approach_request(
+            make_approach(track_id=8, person=Pose2D(x=-3.0, y=3.0, yaw_deg=0.0, frame_id="map")),
+            BOUNDS, True, 4.0)
+        assert reason == GateReason.OK
+
+
+class TestApproachLockAfterAccept:
+    """수락한 사용자가 곁에 있는 동안 감지기의 새 접근을 막는다(2026-10-21 사용자 결정 C + ②)."""
+
+    def _accepted(self, logic):
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(True, 6.0)
+        logic.on_tick(8.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+
+    def test_other_person_is_refused_during_onboarding(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 10.0)
+        assert reason == GateReason.USER_ENGAGED
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 60.0)
+        assert reason == GateReason.USER_ENGAGED
+
+    def test_quiet_idle_in_place_releases_after_40s(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        logic.on_intent(make_intent(intent="question", matched_destination_id=None), None, BOUNDS, True, 12.0)
+        assert APPROACH_LOCK_QUIET_SEC == 40.0
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 12.0 + 39.9)
+        assert reason == GateReason.USER_ENGAGED
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 12.0 + 40.1)
+        assert reason == GateReason.OK
+
+    def test_wake_call_restarts_the_quiet_clock(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        logic.on_intent(make_intent(intent="question", matched_destination_id=None), None, BOUNDS, True, 12.0)
+        logic.on_wake(40.0)
+        logic._forget_dest_prompt()
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 70.0)
+        assert reason == GateReason.USER_ENGAGED
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 80.1)
+        assert reason == GateReason.OK
+
+    def test_home_arrival_releases(self):
+        logic = MissionLogic(return_destination=make_home())
+        self._accepted(logic)
+        accepted, reason, _ = logic.on_return_home_request(True, 15.0)
+        assert accepted and reason == GateReason.OK
+        logic.on_tick(25.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 26.0)
+        assert reason == GateReason.OK
+
+    def test_declined_person_does_not_lock(self):
+        """'아니요'면 잠그지 않는다 — 물러나 홈에 오면 다른 사람에게 갈 수 있다."""
+        logic = MissionLogic(return_destination=make_home())
+        start_approach(logic)
+        arrive_and_ask(logic, 5.0)
+        logic.on_approach_answer(False, 6.0)
+        logic.on_tick(10.0, NavStatus.SUCCEEDED)
+        assert logic.state == State.IDLE
+        _, reason = logic.on_approach_request(make_approach(track_id=8), BOUNDS, True, 11.0)
+        assert reason == GateReason.OK
+
+
 class TestApproachCancel:
     """이탈·포기 판정은 detector 가 하고 /vica/mission/cancel_approach 로 알린다."""
 
@@ -1290,7 +1388,7 @@ class TestApproachVoiceHooks:
         self._accept_with_turn(logic)
         actions = logic.on_tick(7.0, NavStatus.SUCCEEDED)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert says[-1].expects_reply is True
         assert logic.state == State.IDLE
 
@@ -1300,7 +1398,7 @@ class TestApproachVoiceHooks:
         self._accept_with_turn(logic)
         actions = logic.on_tick(7.0, NavStatus.FAILED)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert says[-1].expects_reply is True
         assert logic.state == State.IDLE
 
@@ -2138,7 +2236,7 @@ class TestNearCallApproach:
         onboarding_actions = logic.on_tick(6.0, NavStatus.SUCCEEDED)
         assert logic.state == State.IDLE
         says = [a for a in onboarding_actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         haptics = [a for a in onboarding_actions if isinstance(a, Haptic)]
         assert len(haptics) == 1 and haptics[0].pattern == "long"
 
@@ -2152,7 +2250,7 @@ class TestNearCallApproach:
         assert logic.state == State.IDLE
         assert not any(isinstance(a, SpinInPlace) for a in actions)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         haptics = [a for a in actions if isinstance(a, Haptic)]
         assert len(haptics) == 1 and haptics[0].pattern == "long"
 
@@ -2353,7 +2451,7 @@ class TestHandleSideCall:
         logic.on_wake_doa(175.0, True, 1.0)
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert actions.index(says[0]) < actions.index(says[-1])
         haptics = [a for a in actions if isinstance(a, Haptic)]
         assert len(haptics) == 1
@@ -2444,7 +2542,7 @@ class TestHandleSideCallWakeSiblingGuard:
         logic.on_wake(1.001)
         actions = logic.on_approach_answer(True, 2.0)
         says = [a for a in actions if isinstance(a, Say)]
-        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_APPROACH_ONBOARDING]
+        assert [s.text for s in says] == [MSG_HANDLE_HINT, MSG_HANDLE_HEIGHT, MSG_APPROACH_ONBOARDING]
         assert any(isinstance(a, Haptic) for a in actions)
 
     def test_wake_more_than_guard_sec_later_also_keeps_question(self):
@@ -2748,3 +2846,9 @@ class TestApproachGreeting:
     def test_greeting_text_is_the_decided_wording(self):
         from vica_mission_manager.mission_logic import MSG_APPROACH_COMING
         assert MSG_APPROACH_COMING == "동행로봇 비카가 다가가고 있어요."
+
+
+def test_intent_data_speaker_fields_default_to_empty():
+    """화자 판정 필드(2026-11-11 설계 speaker-follow) — 옛 의도에는 없으니 비었다(−1)가 기본."""
+    intent = IntentData(intent="cancel", matched_destination_id="", need_confirm=False, safety_flag="normal")
+    assert (intent.speaker_verdict, intent.speaker_score, intent.speaker_joined) == ("", -1.0, -1.0)

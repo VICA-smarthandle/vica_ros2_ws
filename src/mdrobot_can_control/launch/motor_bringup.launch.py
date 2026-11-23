@@ -28,6 +28,8 @@ def _motor_node(context):
                 LaunchConfiguration('knob_min_pct'), value_type=int),
             'knob_max_pct': ParameterValue(
                 LaunchConfiguration('knob_max_pct'), value_type=int),
+            'ignore_knob': ParameterValue(
+                LaunchConfiguration('ignore_knob'), value_type=bool),
         }],
     )]
 
@@ -40,5 +42,6 @@ def generate_launch_description():
             description="모터 노드 판: 'cpp'(기본) 또는 'python'(옛 판으로 되돌릴 때)"),
         DeclareLaunchArgument('knob_min_pct', default_value='55'),
         DeclareLaunchArgument('knob_max_pct', default_value='98'),
+        DeclareLaunchArgument('ignore_knob', default_value='false'),
         OpaqueFunction(function=_motor_node),
     ])

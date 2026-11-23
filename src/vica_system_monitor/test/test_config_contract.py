@@ -453,15 +453,17 @@ def _probe(name):
 
 
 def test_guidance_is_observable_with_two_rungs():
-    """드라이버 생존과 아두이노 응답을 따로 본다 — 한 칸이면 구분이 안 된다."""
+    """드라이버 생존(주기)과 아두이노 응답·포트(같은 메시지의 칸)를 따로 본다(2026-11-17)."""
     comp = load_monitor_params()['guidance']
     assert comp['observable'] is True
 
     state = _probe('handle_state')
-    uplink = _probe('handle_uplink')
     assert state['component'] == 'guidance'
-    assert uplink['component'] == 'guidance'
-    assert state['topic'] != uplink['topic']
+    assert state['require_true'] == ['uplink_fresh', 'connected']
+    assert len(state['require_true_messages']) == 2
+    params = load_probe_params()
+    names = params.get('topic_probe_names', [])
+    assert [n for n in names if params[n]['component'] == 'guidance'] == ['handle_state']
 
 
 def test_guidance_does_not_block_driving():
@@ -483,7 +485,7 @@ def test_app_bridge_is_observable_and_warn_only():
 def test_new_probe_fault_codes_exist_in_catalog():
     """문구 없는 결함 코드는 화면에 코드만 뜬다."""
     from vica_system_monitor.fault_catalog import CATALOG
-    for name in ('handle_state', 'handle_uplink', 'app_bridge'):
+    for name in ('handle_state', 'app_bridge'):
         code = _probe(name)['fault_code']
         assert code in CATALOG, f'{code} 문구가 카탈로그에 없습니다'
 

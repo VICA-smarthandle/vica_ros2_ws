@@ -12,7 +12,6 @@ external_diagnostics_node:
       - odom
       - wheel_odom
       - handle_state
-      - handle_uplink
       - app_bridge
 
     lidar_scan:
@@ -93,16 +92,10 @@ external_diagnostics_node:
       max_hz: 4.0
       fault_code: GUIDANCE_NODE_SILENT
       optional: true
-
-    handle_uplink:
-      component: guidance
-      topic: /ultrasonic/front_right
-      msg_type: sensor_msgs/msg/Range
-      qos: sensor_data
-      min_hz: 2.0
-      max_hz: 8.0
-      fault_code: GUIDANCE_UPLINK_STALE
-      optional: true
+      require_true: [uplink_fresh, connected]
+      require_true_messages:
+        - 핸들 아두이노에서 오는 신호가 끊겼습니다. 주행은 계속할 수 있습니다.
+        - 핸들 USB 포트가 열려 있지 않거나 보내기에 실패했습니다. 주행은 계속할 수 있습니다.
 
     app_bridge:
       component: app

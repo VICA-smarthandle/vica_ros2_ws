@@ -15,13 +15,18 @@ constexpr int STATE_RIGHT = 2;
 constexpr int STATE_ESTOP = 3;
 constexpr int STATE_LINK_LOST = 4;
 constexpr int STATE_ARRIVED = 5;
-constexpr int STATE_CHARGING = 6;
+constexpr int STATE_DOCKED = 6;
 constexpr int STATE_CHARGED = 7;
+constexpr int STATE_PATROL = 8;
+constexpr int STATE_PATROL_LIGHT = 9;
+constexpr int STATE_PATROL_ALARM = 10;
+constexpr int STATE_CODE_MAX = STATE_PATROL_ALARM;
 
 constexpr bool is_sendable(int code)
 {
   return code == STATE_NORMAL || code == STATE_LEFT || code == STATE_RIGHT ||
-         code == STATE_ESTOP || code == STATE_ARRIVED;
+         code == STATE_ESTOP || code == STATE_ARRIVED || code == STATE_DOCKED || code == STATE_PATROL ||
+         code == STATE_PATROL_LIGHT || code == STATE_PATROL_ALARM;
 }
 
 constexpr const char * state_name(int code)
@@ -33,8 +38,11 @@ constexpr const char * state_name(int code)
     case STATE_ESTOP: return "ESTOP";
     case STATE_LINK_LOST: return "LINK_LOST";
     case STATE_ARRIVED: return "ARRIVED";
-    case STATE_CHARGING: return "CHARGING";
+    case STATE_DOCKED: return "DOCKED";
     case STATE_CHARGED: return "CHARGED";
+    case STATE_PATROL: return "PATROL";
+    case STATE_PATROL_LIGHT: return "PATROL_LIGHT";
+    case STATE_PATROL_ALARM: return "PATROL_ALARM";
     default: return "?";
   }
 }
