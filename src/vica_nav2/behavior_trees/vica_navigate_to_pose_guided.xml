@@ -1,3 +1,16 @@
+
+<!--
+  2026-10-29 사용자 결정(대강당 R 2.0 코너): 코너 목적지는 레일을 끝까지 따라가 곡선 방향으로 선다.
+  두 IsRoutePathUsable 에 keep_rail_goal_dist 0.10 · keep_rail_min_turn_deg 15 — 목적지가 레일 선 0.10 m 안이고
+  남은 레일이 15° 넘게 꺾이면 인계 2 m 안이어도 레일을 놓지 않는다. 직선 구간·레일 밖 목적지는 종전대로 곧은 경로.
+  레일 트리(홈·앱)에는 넣지 않았다 — 안내 트리만.
+-->
+
+<!--
+  2026-10-28 사용자 결정(대구 반도체마이스터고, 같은 날 곧은 경로 갈래 26ae0ba 뒤): 도착 방향을 완전히 무시한다.
+  planner 갈래의 AlignPathEndToGoal(경로 끝 방향을 목적지 방향으로 바꾸던 노드) 2곳을 뺐다. 레일 트리도 같이 뺐고
+  판정기를 position_goal_checker 로 바꿔, 두 트리는 곧은 경로 갈래만 다르다.
+-->
 <!--
   사용자 안내 트리 — 레일 트리(vica_navigate_to_pose_route.xml)와 같고, FollowPath 의 도착 판정기만
   position_goal_checker(위치만, yaw 허용 3.141)다. 2026-10-07 대기 장소 작업(인수인계 문서 '작업 계획' 탭).
@@ -98,7 +111,7 @@
                   <ComputeRoute goal="{goal}" use_poses="true" use_start="false"
                                 path="{rail_path}" server_name="compute_route"/>
                   <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
-                                     max_dist_from_path="1.5" handoff_dist_to_goal="2.0"
+                                     max_dist_from_path="1.5" handoff_dist_to_goal="2.0" keep_rail_goal_dist="0.10" keep_rail_min_turn_deg="15"
                                      global_frame="map" robot_base_frame="base_footprint"
                                      transform_tolerance="0.2"/>
                   <!-- 로봇에서 가장 가까운 레일 점부터 앞으로 3 m. 뒤(사람이 선 곳) 0. -->
@@ -131,7 +144,7 @@
                            뛰었다(2.9~6.9회/분, 짧은 정지·코너 급정지 1회). 0.5 는 8판-1 의 단일 문턱 값이다 — 그때는 정상 주행의
                            13 % 를 막았지만, 이제는 한 번 0.8 밖으로 나간 뒤에만 쓰인다. 끄려면 rejoin_dist_from_path 를 지운다. -->
                       <IsRoutePathUsable path="{rail_path}" goal="{goal}" min_poses="2"
-                                         max_dist_from_path="0.8" rejoin_dist_from_path="0.5" handoff_dist_to_goal="2.0"
+                                         max_dist_from_path="0.8" rejoin_dist_from_path="0.5" handoff_dist_to_goal="2.0" keep_rail_goal_dist="0.10" keep_rail_min_turn_deg="15"
                                          global_frame="map" robot_base_frame="base_footprint"
                                          transform_tolerance="0.2" name="NearRailGate"/>
                       <!-- 11판 (2026-10-05, 해결안 B): IsPathValid -> IsRailAheadClear. IsPathValid 는 조각 첫 점부터 손잡이
@@ -221,8 +234,6 @@
                   </Sequence>
                   <Sequence name="GoalPathAlignedEnd">
                     <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-                    <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
-                                        output_path="{path}"/>
                   </Sequence>
                 </Fallback>
               </Fallback>
@@ -260,8 +271,6 @@
                   <!-- 9판: 1단계 NearGoalKeepPath 와 같은 끝점 방향 맞춤. -->
                   <Sequence name="LastMilePathAlignedEnd">
                     <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-                    <AlignPathEndToGoal input_path="{path}" goal="{goal}" max_dist="0.5"
-                                        output_path="{path}"/>
                   </Sequence>
                 </Fallback>
                 <ClearEntireCostmap name="ClearGlobalCostmap-LastMile"

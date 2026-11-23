@@ -68,11 +68,13 @@ def test_every_follow_path_names_a_registered_checker(name):
             f'{name} 의 FollowPath 판정기 이름이 비었거나 등록되지 않았다')
 
 
-def test_only_the_guided_tree_skips_heading_alignment():
+def test_only_the_guided_trees_skip_heading_alignment():
+    # 도착 방향 무시는 음성 안내 트리만(2026-10-29 사용자: 10-28 에 기본 트리까지 바꿨던 것을 되돌림).
+    # 원격 주행·배송·홈(기본 트리)·사람 접근·대기 장소·측정용 clearing_only 는 방향까지 맞춘다.
+    position_only = (GUIDED_BT, GUIDED_NO_RAIL_BT)
     for name in ALL_BTS:
         ids = {f.get('goal_checker_id') for f in _follows(name)}
-        guided = name in (GUIDED_BT, GUIDED_NO_RAIL_BT)
-        expected = 'position_goal_checker' if guided else 'general_goal_checker'
+        expected = 'position_goal_checker' if name in position_only else 'general_goal_checker'
         assert ids == {expected}, f'{name}: {ids}'
 
 
@@ -91,7 +93,7 @@ def _canon(elem):
 
 
 def _guided_without_straight():
-    """안내 트리에서 곧은 경로 갈래 두 곳을 걷어내고 판정기 이름을 기본으로 바꾼 것."""
+    """안내 트리에서 곧은 경로 갈래 두 곳과 코너 유지 값(10-29)을 걷어낸 것."""
     root = ET.parse(BT_DIR / GUIDED_BT).getroot()
     for parent in list(root.iter()):
         for i, child in enumerate(list(parent)):
@@ -101,9 +103,9 @@ def _guided_without_straight():
                 planner = list(child)[-1]
                 parent.remove(child)
                 parent.insert(i, planner)
-    for follow in root.iter('FollowPath'):
-        if follow.get('goal_checker_id') == 'position_goal_checker':
-            follow.set('goal_checker_id', 'general_goal_checker')
+    for gate in root.iter('IsRoutePathUsable'):
+        for key in CORNER_KEEP:
+            gate.attrib.pop(key, None)
     return root
 
 
@@ -114,10 +116,53 @@ def _straight_seqs():
     return root, near, wraps
 
 
-def test_guided_tree_equals_route_tree_except_checker_and_straight_branches():
-    route = ET.parse(BT_DIR / ROUTE_BT).getroot()
-    assert _canon(_guided_without_straight()) == _canon(route), (
-        '안내 트리가 레일 트리와 판정기·곧은 경로 갈래 말고도 다르다')
+def _route_as_guided_heading():
+    """레일 트리에서 방향 맞춤 두 가지를 안내 트리처럼 뺀 것 — 판정기는 위치만, AlignPathEndToGoal 은 없음
+    (안내 트리는 10-28 에 끝점 방향 맞춤을 뺐다. 레일 트리는 원격 주행·홈이라 그대로 둔다)."""
+    root = ET.parse(BT_DIR / ROUTE_BT).getroot()
+    for parent in list(root.iter()):
+        for child in list(parent):
+            if child.tag == 'AlignPathEndToGoal':
+                parent.remove(child)
+    for follow in root.iter('FollowPath'):
+        follow.set('goal_checker_id', 'position_goal_checker')
+    return root
+
+
+def test_guided_tree_equals_route_tree_except_heading_and_straight_branches():
+    assert _canon(_guided_without_straight()) == _canon(_route_as_guided_heading()), (
+        '안내 트리가 레일 트리와 방향 맞춤·곧은 경로 갈래·코너 유지 값 말고도 다르다')
+
+
+def test_route_tree_still_aligns_heading():
+    # 원격 주행·배송·홈: 끝점 방향 맞춤 두 곳 + 방향까지 보는 판정기(10-29 되돌림).
+    root = ET.parse(BT_DIR / ROUTE_BT).getroot()
+    assert len(list(root.iter('AlignPathEndToGoal'))) == 2
+    assert {f.get('goal_checker_id') for f in root.iter('FollowPath')} == {'general_goal_checker'}
+
+
+# ── 코너 목적지는 레일 끝까지 (2026-10-29, 안내 트리만) ─────────────────────────────
+# 목적지가 레일 선 0.10 m 안이고 남은 레일이 15° 넘게 꺾이면 인계 2 m 안이어도 레일을 놓지 않는다.
+CORNER_KEEP = {'keep_rail_goal_dist': '0.10', 'keep_rail_min_turn_deg': '15'}
+
+
+def test_corner_keep_is_on_both_guided_rail_gates_with_the_same_values():
+    gates = list(ET.parse(BT_DIR / GUIDED_BT).getroot().iter('IsRoutePathUsable'))
+    assert len(gates) == 2, '바깥 거름망과 NearRailGate 두 곳'
+    for gate in gates:
+        assert {k: gate.get(k) for k in CORNER_KEEP} == CORNER_KEEP, gate.attrib
+    # 0.10 + 멈춤 반경(xy 0.15 − arrive_margin 0.03) 이 GoalReached 기본 0.25 안이어야 끝에서 옆으로 다시 안 간다.
+    fp = _controller()
+    stop = fp['position_goal_checker']['xy_goal_tolerance'] - fp['FollowPath']['arrive_margin']
+    assert float(CORNER_KEEP['keep_rail_goal_dist']) + stop < 0.25
+    # VCC 는 끝점이 옆 end_straight_lateral 안이면 조준하지 않는다 — 레일 위로 칠 거리가 그보다 크면 끝에서 튼다.
+    assert float(CORNER_KEEP['keep_rail_goal_dist']) <= fp['FollowPath']['end_straight_lateral']
+
+
+@pytest.mark.parametrize('name', [n for n in ALL_BTS if n != GUIDED_BT])
+def test_only_the_guided_tree_keeps_the_rail_at_corners(name):
+    for gate in ET.parse(BT_DIR / name).getroot().iter('IsRoutePathUsable'):
+        assert not any(k in gate.attrib for k in CORNER_KEEP), f'{name} 에 코너 유지 값이 있다'
 
 
 def test_straight_branch_sits_only_at_the_two_goal_doors():

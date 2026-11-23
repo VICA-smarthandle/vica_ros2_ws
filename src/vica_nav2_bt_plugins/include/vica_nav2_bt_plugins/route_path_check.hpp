@@ -21,6 +21,10 @@ struct RoutePathVerdict
   double dist_to_points{0.0}; // 예전 방식(가장 가까운 점까지). 로그 비교용
   double dist_to_goal{0.0};   // 로봇에서 목적지까지(m). 목적지를 안 주면 inf
   std::string reason;         // 사람이 읽는 이유 (usable 이면 비어 있다)
+  // 인계 거리 안인데 코너 목적지라 레일을 끝까지 유지했으면 true(2026-10-28 keep_goal_dist). 아래 둘은 그 판정 값
+  bool kept_for_corner{false};
+  double goal_to_path{std::numeric_limits<double>::infinity()};  // 목적지에서 레일 선까지(m)
+  double remaining_turn_deg{0.0};  // 로봇 가까운 점 -> 레일 끝, 시작 방향과 끝 방향 차이(도)
 };
 
 // route_server 가 지운 출발 노드 자리까지 덮는 길이(m). 레일 노드 간격은 1.0 m 이하다
@@ -42,12 +46,18 @@ constexpr double kPrunedEdgeExtend = 1.2;
 //            레일 경로는 노드에서 끝나고 끝 방향이 마지막 엣지 방향이라, 목적지
 //            방향이 반대면 도착 뒤 제자리 180도 회전이 남는다(2026-09-16 run6 입구:
 //            40초·방향 바꿈 8회). planner 는 마지막 몇 m 를 도착 방향에 맞춰 그린다.
+// keep_goal_dist / keep_min_turn_deg  (2026-10-28 사용자, 음성 안내 트리만 켠다)
+//            인계 거리 안이어도 ① 목적지가 레일 선에서 keep_goal_dist 안이고 ② 로봇 가까운 점부터
+//            레일 끝까지 시작·끝 방향이 keep_min_turn_deg 넘게 다르면(=남은 레일이 코너) 레일을 끝까지 쓴다.
+//            곧은 경로로 넘기면 코너 호를 줄로 잘라 가 그 줄 방향으로 섰다(10-29 대강당 R 2.0 코너,
+//            진행 방향과 17~25° 어긋남). 직선 구간(꺾임 < 기준)은 종전대로 넘긴다. keep_goal_dist <= 0 이면 끔.
+//            0.10 = VCC end_straight_lateral(끝점이 옆 이 안이면 조준 안 함), 0.10 + 멈춤 반경 0.12 < GoalReached 0.25.
 RoutePathVerdict checkRoutePath(
   const nav_msgs::msg::Path & path, double robot_x, double robot_y,
   std::size_t min_poses, double max_dist,
   double goal_x = std::numeric_limits<double>::quiet_NaN(),
   double goal_y = std::numeric_limits<double>::quiet_NaN(),
-  double handoff = 0.0);
+  double handoff = 0.0, double keep_goal_dist = 0.0, double keep_min_turn_deg = 15.0);
 
 // 레일 거리 문턱 두 개(히스테리시스). 2026-10-01 run52~54: 로봇이 레일에서 0.75~0.9 m 에 있으면
 // 안쪽 문(0.8 m)이 1 Hz 로 열렸다 닫혔다 해 레일 경로와 자유주행 경로가 번갈아 controller 에 갔다
