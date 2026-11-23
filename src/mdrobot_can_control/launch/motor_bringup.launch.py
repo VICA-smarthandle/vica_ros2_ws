@@ -35,6 +35,8 @@ def _motor_node(context):
                 LaunchConfiguration('knob_min_pct'), value_type=int),
             'knob_max_pct': ParameterValue(
                 LaunchConfiguration('knob_max_pct'), value_type=int),
+            'ignore_knob': ParameterValue(
+                LaunchConfiguration('ignore_knob'), value_type=bool),
         }],
     )]
 
@@ -57,5 +59,8 @@ def generate_launch_description():
         # 되돌린다. 다른 장비에 올릴 때도 그 장비에서 실측한 값으로 준다.
         DeclareLaunchArgument('knob_min_pct', default_value='55'),
         DeclareLaunchArgument('knob_max_pct', default_value='98'),
+        # 시험용(2026-11-02 바퀴 점검): true 면 가변저항을 속도 상한에 쓰지 않는다(값·신선도 무시,
+        # 줄로 세우는 정지 없음). 평소 운행은 false 그대로.
+        DeclareLaunchArgument('ignore_knob', default_value='false'),
         OpaqueFunction(function=_motor_node),
     ])

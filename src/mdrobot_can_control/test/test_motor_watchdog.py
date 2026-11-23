@@ -105,3 +105,22 @@ def test_knob_below_deadzone_stops():
         deadzone_pct=5,
     )
     assert scale == 0.0
+
+
+# ── 시험용 ignore_knob(2026-11-02 바퀴 점검) ──────────────────────────
+from mdrobot_can_control.motor_watchdog import motor_speed_ratio_ignoring_knob  # noqa: E402
+
+
+def test_ignore_knob_passes_command_without_any_knob():
+    """가변저항을 한 번도 못 받아도(None) cmd 가 fresh 면 1.0 이다."""
+    assert motor_speed_ratio_ignoring_knob(T0, now_ns=T0, cmd_timeout_ns=CMD_TIMEOUT_NS) == 1.0
+
+
+def test_ignore_knob_still_stops_on_stale_cmd():
+    """가변저항을 무시해도 cmd 가 끊기면 정지한다(fail-safe 유지)."""
+    assert motor_speed_ratio_ignoring_knob(
+        None, now_ns=T0, cmd_timeout_ns=CMD_TIMEOUT_NS) == 0.0
+    assert motor_speed_ratio_ignoring_knob(
+        T0, now_ns=T0 + CMD_TIMEOUT_NS + 1, cmd_timeout_ns=CMD_TIMEOUT_NS) == 0.0
+    assert motor_speed_ratio_ignoring_knob(
+        T0, now_ns=T0 - 1, cmd_timeout_ns=CMD_TIMEOUT_NS) == 0.0

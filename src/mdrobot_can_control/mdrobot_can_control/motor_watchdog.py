@@ -32,6 +32,21 @@ def normalize_knob_pct(raw_pct: int, min_pct: int, max_pct: int) -> int:
     return max(0, min(100, int(scaled)))
 
 
+def motor_speed_ratio_ignoring_knob(
+    cmd_last_ns: Optional[int],
+    now_ns: int,
+    cmd_timeout_ns: int,
+) -> float:
+    """시험용 ignore_knob(2026-11-02 사용자 요청 — 바퀴 점검).
+
+    가변저항(knob) 값·신선도를 보지 않고 cmd 신선도만으로 1.0(그대로)·0.0(정지).
+    기본은 꺼져 있다.
+    """
+    if is_fresh_ns(cmd_last_ns, now_ns=now_ns, timeout_ns=cmd_timeout_ns):
+        return 1.0
+    return 0.0
+
+
 def motor_speed_ratio(
     cmd_last_ns: Optional[int],
     knob_last_ns: Optional[int],

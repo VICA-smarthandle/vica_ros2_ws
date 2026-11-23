@@ -95,6 +95,8 @@ PARAM_CASES = [
     'can_reconnect_interval_sec=0', 'can_reconnect_interval_sec=-1',
     'can_reconnect_interval_sec=1e10', 'driver_id=0x7FF', 'driver_id=0x123', 'driver_id=-1',
     'driver_id=0x100000000', 'driver_id=0xFFFFFFFF',
+    # 시험용 ignore_knob(2026-11-02 바퀴 점검): 가변저항 값·신선도 무시, cmd 신선도만
+    'ignore_knob=1', 'ignore_knob=1 knob_timeout_sec=0 deadzone_pct=100',
 ]
 
 

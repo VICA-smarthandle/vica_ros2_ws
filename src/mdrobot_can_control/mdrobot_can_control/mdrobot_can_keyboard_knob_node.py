@@ -14,7 +14,11 @@ from std_msgs.msg import Bool
 from .can_link import CanLink
 from .can_preflight import require_can_interface_up
 from .freshness import is_fresh_ns, sec_to_ns
-from .motor_watchdog import motor_speed_ratio, normalize_knob_pct
+from .motor_watchdog import (
+    motor_speed_ratio,
+    motor_speed_ratio_ignoring_knob,
+    normalize_knob_pct,
+)
 
 
 # ============================================================
@@ -124,6 +128,10 @@ class MdrobotCanKeyboardKnobNode(Node):
         # 처음에는 0 추천
         self.declare_parameter('min_rpm_when_moving', 0)
 
+        # 시험용(2026-11-02 바퀴 점검): true 면 가변저항(knob)을 속도 상한에 쓰지 않는다.
+        # 값·신선도 모두 무시하고, 줄로 세우는 정지도 꺼진다. 기본 false.
+        self.declare_parameter('ignore_knob', False)
+
         # CAN 실패 후 재연결을 시도하는 최소 간격(초)
         self.declare_parameter('can_reconnect_interval_sec', 1.0)
 
@@ -160,6 +168,7 @@ class MdrobotCanKeyboardKnobNode(Node):
         self.min_rpm_when_moving = int(
             self.get_parameter('min_rpm_when_moving').value
         )
+        self.ignore_knob = bool(self.get_parameter('ignore_knob').value)
 
         self.can_reconnect_interval_sec = float(
             self.get_parameter('can_reconnect_interval_sec').value
@@ -238,7 +247,12 @@ class MdrobotCanKeyboardKnobNode(Node):
         )
 
         self.get_logger().info('Subscribed: /cmd_vel_safe')
-        self.get_logger().info('knob1 = 최고속도 제한기')
+        if self.ignore_knob:
+            self.get_logger().warn(
+                'ignore_knob=true — 가변저항(knob)을 무시한다(시험용). '
+                '속도 상한 = max_linear_mps, 줄로 세우는 정지 없음')
+        else:
+            self.get_logger().info('knob1 = 최고속도 제한기')
         self.get_logger().info('Ready.')
 
     def now_ns(self) -> int:
@@ -461,15 +475,22 @@ class MdrobotCanKeyboardKnobNode(Node):
         # 줄이 실제로 움직이는 구간을 0~100 으로 편 값. 로그에도 같은 값을 쓴다.
         knob_norm = normalize_knob_pct(
             int(self.knob1), self.knob_min_pct, self.knob_max_pct)
-        speed_ratio = motor_speed_ratio(
-            cmd_last_ns=self.last_cmd_ns,
-            knob_last_ns=self.last_knob_ns,
-            knob_pct=knob_norm,
-            now_ns=now,
-            cmd_timeout_ns=self.cmd_timeout_ns,
-            knob_timeout_ns=self.knob_timeout_ns,
-            deadzone_pct=self.deadzone_pct,
-        )
+        if self.ignore_knob:
+            speed_ratio = motor_speed_ratio_ignoring_knob(
+                cmd_last_ns=self.last_cmd_ns,
+                now_ns=now,
+                cmd_timeout_ns=self.cmd_timeout_ns,
+            )
+        else:
+            speed_ratio = motor_speed_ratio(
+                cmd_last_ns=self.last_cmd_ns,
+                knob_last_ns=self.last_knob_ns,
+                knob_pct=knob_norm,
+                now_ns=now,
+                cmd_timeout_ns=self.cmd_timeout_ns,
+                knob_timeout_ns=self.knob_timeout_ns,
+                deadzone_pct=self.deadzone_pct,
+            )
 
         # CAN 링크가 비정상이면 cmd·knob 판정과 무관하게 0으로 막는다.
         # 정지는 여기서 즉시 이루어지며 /diagnostics를 기다리지 않는다.
